@@ -396,6 +396,20 @@
                                 <time class="ambient-text-time">{{ formatClock(item.step.timestamp) }}</time>
                             </article>
 
+                            <!-- 1.5 人工干预应答行：紧随对应提问步骤之后 -->
+                            <button
+                                v-else-if="item.type === 'intervention'"
+                                type="button"
+                                class="ambient-intervention-row"
+                                :title="item.question ? `问: ${item.question} → 答: ${item.text}` : item.text"
+                                @click="$emit('select-human', item.id)"
+                            >
+                                <span class="intervention-marker-icon">👤</span>
+                                <span class="intervention-marker-label">人工干预</span>
+                                <span class="ambient-intervention-text">{{ item.question ? `问: ${item.question} → 答: ${item.text}` : item.text }}</span>
+                                <time class="ambient-text-time mini">{{ formatClock(item.timestamp) }}</time>
+                            </button>
+
                             <!-- 2. 连续检索智能微折叠卡片 (大量 ripgrep 静默汇聚) -->
                             <div
                                 v-else-if="item.type === 'search-group'"
@@ -798,6 +812,24 @@
                                 +{{ getPlanDigest(entry.steps).capsules.length - 4 }} 个动作
                             </span>
                         </template>
+                    </div>
+
+                    <!-- 👤 人工干预应答：挂在所属阶段卡尾部（收起态可见；展开态由步骤内行呈现），
+                         不再是同级时间轴条目——后续步骤/思考永远不会把它顶离原位 -->
+                    <div v-if="!isPlanExpanded(entry) && entry.interventions?.length" class="plan-interventions">
+                        <button
+                            v-for="iv in entry.interventions"
+                            :key="iv.entryId"
+                            type="button"
+                            class="plan-intervention-row"
+                            :title="iv.question ? `问: ${iv.question} → 答: ${iv.summary}` : iv.summary"
+                            @click.stop="$emit('select-human', iv.entryId)"
+                        >
+                            <span class="intervention-marker-icon">👤</span>
+                            <span class="intervention-marker-label">人工干预</span>
+                            <span class="intervention-marker-text">{{ iv.question ? `问: ${iv.question} → 答: ${iv.summary}` : iv.summary }}</span>
+                            <time class="msg-clock">{{ formatClock(iv.timestamp) }}</time>
+                        </button>
                     </div>
 
                     <div class="plan-children-wrapper" :class="{ expanded: isPlanExpanded(entry) }">
@@ -1287,29 +1319,10 @@ function interventionSummary(content: string): string {
         .trim();
 }
 
-/// 干预 marker 归位：有归属步骤的应答必须紧贴其所在 plan 条目之后
-/// （同秒时间戳打平时按 id 排序会让"答"漂到"问"上面）。
-/// 无归属的退化为"紧邻上一条非干预条目"锚定。
+/// 干预锚点：有归属步骤的应答不再作为时间轴同级条目（已挂进阶段卡内部渲染，
+/// 不参与排序也就不会被后续条目顶走）；此处只为"找不到归属步骤"的孤儿 marker
+/// 指定跳转锚点——指向紧邻的上一条非干预条目。
 function assignInterventionAnchors(entries: TimelineEntry[]) {
-    const stepToPlan = new Map<string, string>();
-    for (const e of entries) {
-        if (e.type === "plan") {
-            for (const s of e.steps) stepToPlan.set(s.id, e.id);
-        }
-    }
-    const linked: TimelineEntry[] = [];
-    for (let i = entries.length - 1; i >= 0; i--) {
-        const e = entries[i];
-        if (e.type === "message" && e.isHuman && e.stepId && stepToPlan.has(e.stepId)) {
-            linked.unshift(entries.splice(i, 1)[0]);
-        }
-    }
-    for (const m of linked) {
-        const planId = stepToPlan.get((m as { stepId?: string }).stepId!);
-        const idx = entries.findIndex(e => e.id === planId);
-        entries.splice(idx + 1, 0, m);
-        (m as { anchorId?: string }).anchorId = planId;
-    }
     let lastAnchor: string | null = null;
     for (const e of entries) {
         if (e.type === "message" && e.isHuman) {
@@ -1368,6 +1381,7 @@ interface StepInterventionRow {
     entryId: string;
     summary: string;
     timestamp: number;
+    question?: string;
 }
 
 /**
@@ -1384,19 +1398,27 @@ const stepInterventions = computed<Map<string, StepInterventionRow[]>>(() => {
             entryId: `live-human-${item.timestamp}-${index}`,
             summary: interventionSummary(item.message),
             timestamp: item.timestamp,
+            question: item.question || undefined,
         });
         map.set(item.stepId, list);
     });
     for (const turn of props.historyTurns) {
+        // 与 historyTimelineEntries 同口径：运行中的回合由 live 视图接管，
+        // 否则同一应答会经 live 快照与历史消息两条路径挂两遍
+        if (props.isRunning && turn.status === "running") continue;
         for (const message of turn.messages) {
             if (message.role !== "user") continue;
             const anchorStep = nearestHumanStepBefore(turn.steps, message.timestamp);
             if (!anchorStep) continue;
             const list = map.get(anchorStep.id) || [];
+            const summary = interventionSummary(message.content);
+            // 刚结算的瞬间 live 与历史可能同时持有同一回答——同步骤同摘要视为重复
+            if (list.some((r) => r.summary === summary)) continue;
             list.push({
                 entryId: `history-message-${turn.id}-${message.id}`,
-                summary: interventionSummary(message.content),
+                summary,
                 timestamp: message.timestamp,
+                question: humanQuestionFromStep(anchorStep) || undefined,
             });
             map.set(anchorStep.id, list);
         }
@@ -1487,7 +1509,7 @@ async function openDocPreview(att: ParsedAttachment) {
 
 type HistoryMessage = { id: string; role: string; content: string; created_at: string; timestamp: number };
 type HistoryTurn = { id: string; goal: string; status: string; steps: AgentStepItem[]; messages: HistoryMessage[]; summary: string; artifacts: AgentArtifactInput[]; startedAt: number; completedAt: number };
-type PlanEntry = { id: string; type: "plan"; timestamp: number; title: string; status: AgentToolStatus; steps: AgentStepItem[]; isThinking: boolean; thinkingTimestamp?: number };
+type PlanEntry = { id: string; type: "plan"; timestamp: number; title: string; status: AgentToolStatus; steps: AgentStepItem[]; isThinking: boolean; thinkingTimestamp?: number; interventions?: StepInterventionRow[] };
 type TimelineEntry =
     | PlanEntry
     | { id: string; type: "user"; timestamp: number; content: string }
@@ -1933,7 +1955,15 @@ export interface AmbientNarrativeDisplay {
     timestamp?: number;
 }
 
-export type AmbientDisplayItem = AmbientStepItemDisplay | AmbientSearchGroupDisplay | AmbientMcpGroupDisplay | AmbientNarrativeDisplay;
+export interface AmbientInterventionDisplay {
+    type: 'intervention';
+    id: string;
+    text: string;
+    question?: string;
+    timestamp: number;
+}
+
+export type AmbientDisplayItem = AmbientStepItemDisplay | AmbientSearchGroupDisplay | AmbientMcpGroupDisplay | AmbientNarrativeDisplay | AmbientInterventionDisplay;
 
 const expandedSearchGroupIds = reactive(new Set<string>());
 
@@ -1978,7 +2008,7 @@ function toggleAmbientStreamExpand(entryId: string) {
 
 function getAmbientStepCount(entry: PlanEntry): number {
     const items = getAmbientDisplayItems(entry);
-    return items.filter(item => item.type !== 'narrative').length;
+    return items.filter(item => item.type !== 'narrative' && item.type !== 'intervention').length;
 }
 
 function shouldCollapseAmbientStream(entry: PlanEntry): boolean {
@@ -2165,6 +2195,8 @@ function getAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
         }
 
         if (!isAmbientKeyStep(step)) {
+            // 非关键步骤（如 ask_human 提问本身可能无独立行）仍可能有应答——原位补出行
+            pushAmbientInterventions(step, items);
             i++;
             continue;
         }
@@ -2210,6 +2242,7 @@ function getAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
                     durationBadge: totalDurationMs > 0 ? formatDurationSeconds(totalDurationMs) : undefined,
                     timestamp: searchSteps[searchSteps.length - 1].timestamp || step.timestamp,
                 });
+                for (const s of searchSteps) pushAmbientInterventions(s, items);
                 i = j;
                 continue;
             }
@@ -2252,6 +2285,7 @@ function getAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
                     durationBadge: totalDurationMs > 0 ? formatDurationSeconds(totalDurationMs) : undefined,
                     timestamp: mcpSteps[mcpSteps.length - 1].timestamp || step.timestamp,
                 });
+                for (const s of mcpSteps) pushAmbientInterventions(s, items);
                 i = j;
                 continue;
             }
@@ -2264,10 +2298,21 @@ function getAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
             step,
             action,
         });
+        // 人工应答紧随提问步骤行之后——位置由结构决定，不受时间戳排序影响
+        pushAmbientInterventions(step, items);
         i++;
     }
 
     return items;
+}
+
+/// 简报流内联人工应答：取挂在该步骤上的应答行，转为 intervention 展示项原位插入
+function pushAmbientInterventions(step: AgentStepItem, items: AmbientDisplayItem[]) {
+    const rows = stepInterventions.value.get(step.id);
+    if (!rows) return;
+    for (const r of rows) {
+        items.push({ type: 'intervention', id: r.entryId, text: r.summary, question: r.question, timestamp: r.timestamp });
+    }
 }
 
 const ambientActionMemo = new WeakMap<object, AmbientActionDisplay>();
@@ -3168,23 +3213,30 @@ const historyTimelineEntries = computed<TimelineEntry[]>(() => {
         timeline.push({ id: `history-user-${turn.id}`, type: "user", timestamp: turn.startedAt, content: turn.goal });
         // 过滤掉最终已由 completion 展示的助手消息，只保留人工干预记录
         const humanMessages = turn.messages.filter((m) => m.role === "user");
-        const middle: TimelineEntry[] = [
-            ...planEntries(turn.steps, `history-${turn.id}`),
-            ...humanMessages.map((message) => {
-                // 历史无 pausedStepId 快照：从"消息之前最近的 ask_human 步骤"回放提问原文与归属
-                const anchorStep = nearestHumanStepBefore(turn.steps, message.timestamp);
-                return {
-                    id: `history-message-${turn.id}-${message.id}`,
-                    type: "message" as const,
-                    timestamp: message.timestamp,
-                    role: message.role,
-                    content: message.content,
-                    isHuman: true,
-                    question: humanQuestionFromStep(anchorStep) || undefined,
-                    stepId: anchorStep?.id,
-                };
-            }),
-        ].sort((a, b) => a.timestamp - b.timestamp || Number(a.type === "message" && a.isHuman) - Number(b.type === "message" && b.isHuman) || a.id.localeCompare(b.id));
+        const plans = planEntries(turn.steps, `history-${turn.id}`);
+        const stepToPlan = new Map<string, PlanEntry>();
+        for (const p of plans) for (const s of p.steps) stepToPlan.set(s.id, p);
+        const middle: TimelineEntry[] = [...plans];
+        for (const message of humanMessages) {
+            // 历史无 pausedStepId 快照：从"消息之前最近的 ask_human 步骤"回放提问原文与归属
+            const anchorStep = nearestHumanStepBefore(turn.steps, message.timestamp);
+            const row: StepInterventionRow = {
+                entryId: `history-message-${turn.id}-${message.id}`,
+                summary: interventionSummary(message.content),
+                timestamp: message.timestamp,
+                question: humanQuestionFromStep(anchorStep) || undefined,
+            };
+            const plan = anchorStep ? stepToPlan.get(anchorStep.id) : undefined;
+            if (plan) {
+                // 有归属：挂进阶段卡内部渲染（收起态卡尾/展开态步骤内行/简报态步骤行后）
+                (plan.interventions ||= []).push(row);
+            } else {
+                // 无归属兜底：维持独立 marker 行，按时间戳落位
+                middle.push({ id: row.entryId, type: "message", timestamp: message.timestamp, role: message.role, content: message.content, isHuman: true, question: row.question });
+            }
+        }
+        for (const p of plans) p.interventions?.sort((a, b) => a.timestamp - b.timestamp);
+        middle.sort((a, b) => a.timestamp - b.timestamp || Number(a.type === "message" && a.isHuman) - Number(b.type === "message" && b.isHuman) || a.id.localeCompare(b.id));
         assignInterventionAnchors(middle);
         timeline.push(...middle);
         if (turn.summary || turn.artifacts.length || ["succeeded", "failed", "cancelled"].includes(turn.status)) {
@@ -3223,10 +3275,26 @@ function currentTimeline(): TimelineEntry[] {
     const plans = planEntries(props.steps, "live", props.isThinking);
     const firstTimestamp = plans[0]?.timestamp || Date.now();
     if (props.currentGoal) timeline.push({ id: "live-user-goal", type: "user", timestamp: firstTimestamp - 1, content: props.currentGoal });
-    const middle: TimelineEntry[] = [
-        ...plans,
-        ...props.humanInterventions.map((item, index) => ({ id: `live-human-${item.timestamp}-${index}`, type: "message" as const, timestamp: item.timestamp, role: "user", content: item.message, isHuman: true, question: item.question, stepId: item.stepId })),
-    ].sort((a, b) => a.timestamp - b.timestamp || Number(a.type === "message" && a.isHuman) - Number(b.type === "message" && b.isHuman) || a.id.localeCompare(b.id));
+    const stepToPlan = new Map<string, PlanEntry>();
+    for (const p of plans) for (const s of p.steps) stepToPlan.set(s.id, p);
+    const middle: TimelineEntry[] = [...plans];
+    props.humanInterventions.forEach((item, index) => {
+        const row: StepInterventionRow = {
+            entryId: `live-human-${item.timestamp}-${index}`,
+            summary: interventionSummary(item.message),
+            timestamp: item.timestamp,
+            question: item.question || undefined,
+        };
+        // 有归属：挂进阶段卡内部渲染；无归属兜底：独立 marker 行按时间戳落位
+        const plan = item.stepId ? stepToPlan.get(item.stepId) : undefined;
+        if (plan) {
+            (plan.interventions ||= []).push(row);
+        } else {
+            middle.push({ id: row.entryId, type: "message", timestamp: item.timestamp, role: "user", content: item.message, isHuman: true, question: item.question });
+        }
+    });
+    for (const p of plans) p.interventions?.sort((a, b) => a.timestamp - b.timestamp);
+    middle.sort((a, b) => a.timestamp - b.timestamp || Number(a.type === "message" && a.isHuman) - Number(b.type === "message" && b.isHuman) || a.id.localeCompare(b.id));
     assignInterventionAnchors(middle);
     timeline.push(...middle);
     if ((props.isThinking || Boolean(props.thought) || props.isRunning) && !plans.length) {

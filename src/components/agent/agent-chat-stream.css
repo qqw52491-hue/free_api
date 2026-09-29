@@ -1122,7 +1122,7 @@
     position: sticky;
     top: 8px;
     z-index: 20;
-    align-self: flex-end;
+    align-self: flex-start;
     display: flex;
     align-items: center;
     gap: 8px;
@@ -2202,6 +2202,84 @@ button.root-row {
     color: var(--orange, #fbbf24);
     background: rgba(251, 191, 36, 0.1);
     border-color: rgba(251, 191, 36, 0.22);
+}
+
+/* 👤 收起态阶段卡尾部的人工应答行：结构与 intervention-marker 一致，
+   区别是嵌入卡片内部（左侧缩进对齐胶囊条），位置永远跟着卡片走 */
+.plan-interventions {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 0 8px 4px 22px;
+}
+
+.plan-intervention-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 2px 8px;
+    min-height: 20px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.12s ease;
+    user-select: none;
+    overflow: hidden;
+    white-space: nowrap;
+    box-sizing: border-box;
+}
+
+.plan-intervention-row:hover {
+    background: rgba(255, 255, 255, 0.035);
+}
+
+.plan-intervention-row .msg-clock {
+    flex-shrink: 0;
+    margin-left: auto;
+}
+
+/* 👤 简报流内联人工应答行：紧随提问步骤之后，单行紧凑 */
+.ambient-intervention-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 2px 8px 2px 22px;
+    min-height: 20px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.12s ease;
+    user-select: none;
+    overflow: hidden;
+    white-space: nowrap;
+    box-sizing: border-box;
+}
+
+.ambient-intervention-row:hover {
+    background: rgba(255, 255, 255, 0.035);
+}
+
+.ambient-intervention-text {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: #cbd5e1;
+}
+
+.ambient-intervention-row .ambient-text-time {
+    flex-shrink: 0;
+    margin-left: auto;
 }
 
 .child-row span:not(.child-mark):not(.tool-tag) {
