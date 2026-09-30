@@ -85,12 +85,32 @@ fn collect_entries(
     // 3. 文件系统 Skill（工作区 skills/ + 应用资源目录，与 tool_manual
     //    的加载候选路径共用同一解析口径：索引覆盖即加载覆盖）。
     //    同名 Skill 按加载优先级去重——工作区优先于应用内置。
+    //    DB 自定义 Skill（agent_custom_instructions kind='skill'）最先入列：
+    //    用户/自助沉淀条目同名覆盖内置与文件通道，与
+    //    load_skill_doc_with_db 的 DB 优先口径一致。
+    let mut seen_skills = std::collections::HashSet::new();
+    for entry in crate::agent::skill_context::db_skill_index_entries(db) {
+        if !seen_skills.insert(entry.name.clone()) {
+            continue;
+        }
+        entries.push(CapabilityEntry {
+            kind: "skill",
+            namespace: "custom".to_string(),
+            id: entry.name.clone(),
+            description: if entry.when_to_use.is_empty() {
+                entry.summary.clone()
+            } else {
+                entry.when_to_use.clone()
+            },
+            extra_text: String::new(),
+            load_hint: format!("next_tool_hint: \"{}/{}\"", "skill", entry.name),
+        });
+    }
     let mut skill_dirs: Vec<std::path::PathBuf> = Vec::new();
     if let Some(root) = workspace_root {
         skill_dirs.push(root.join("skills"));
     }
     skill_dirs.extend(crate::agent::skill_context::known_app_skills_dirs());
-    let mut seen_skills = std::collections::HashSet::new();
     for dir in skill_dirs {
         for entry in crate::agent::skill_context::skill_index_entries(&dir) {
             if !seen_skills.insert(entry.name.clone()) {
@@ -107,10 +127,11 @@ fn collect_entries(
         }
     }
 
-    // 4. 数据库自定义指令/Skill（能力管理页维护的条目）
+    // 4. 数据库自定义提示词（kind='prompt' 常驻注入项；kind='skill' 已并入
+    //    上方第 3 段 Skill 通道走懒加载路由，不在此重复列出）
     if let Ok(conn) = db.0.lock() {
         if let Ok(mut stmt) = conn.prepare(
-            "SELECT name, description, kind FROM agent_custom_instructions WHERE enabled != 0",
+            "SELECT name, description, kind FROM agent_custom_instructions WHERE enabled != 0 AND kind != 'skill'",
         ) {
             if let Ok(rows) = stmt.query_map([], |row| {
                 Ok((

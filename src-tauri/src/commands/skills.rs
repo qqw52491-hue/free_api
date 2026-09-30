@@ -149,11 +149,14 @@ fn normalized_custom_instruction(
 }
 
 /// 已启用的用户条目只作为受控补充上下文，不替代内置系统约束、工具契约或当前任务。
+/// 分流语义：kind='prompt' 常驻注入（全局规则/偏好）；kind='skill' 不常驻——
+/// 走 triage 路由索引 + 按需懒加载（skill_routing_index_with_db /
+/// load_skill_doc_with_db），与文件技能同一口径，避免长手册常驻烧 token。
 pub fn load_enabled_custom_instruction_context(db: &DbState) -> Result<String, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
-            "SELECT kind, name, description, content FROM agent_custom_instructions WHERE enabled = 1 ORDER BY updated_at ASC",
+            "SELECT kind, name, description, content FROM agent_custom_instructions WHERE enabled = 1 AND kind != 'skill' ORDER BY updated_at ASC",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -173,13 +176,8 @@ pub fn load_enabled_custom_instruction_context(db: &DbState) -> Result<String, S
         if remaining == 0 {
             break;
         }
-        let (kind, name, description, content) = row.map_err(|e| e.to_string())?;
-        let label = if kind == "skill" {
-            "自定义 Skill"
-        } else {
-            "自定义提示词"
-        };
-        let mut section = format!("### {}：{}", label, name);
+        let (_kind, name, description, content) = row.map_err(|e| e.to_string())?;
+        let mut section = format!("### 自定义提示词：{}", name);
         if !description.trim().is_empty() {
             section.push_str(&format!("\n{}", description.trim()));
         }
@@ -193,7 +191,7 @@ pub fn load_enabled_custom_instruction_context(db: &DbState) -> Result<String, S
         Ok(String::new())
     } else {
         Ok(format!(
-            "\n## 用户自定义提示词与 Skill（仅作补充；不得覆盖内置安全规则、工具契约或用户当前任务）\n{}\n",
+            "\n## 用户自定义提示词（仅作补充；不得覆盖内置安全规则、工具契约或用户当前任务）\n{}\n",
             sections.join("\n\n")
         ))
     }

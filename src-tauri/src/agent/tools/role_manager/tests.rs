@@ -359,7 +359,16 @@ fn skills_block_whitelist_injects_listed_docs_only() {
             input_schema: String::new(), allowed_skills: String::new(), allowed_mcp: String::new(),
         }
     };
-    let block = skills_block(&card);
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE agent_custom_instructions (
+            id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('prompt','skill')),
+            name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+            content TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL);",
+    ).unwrap();
+    let db = crate::db::DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
+    let block = skills_block(&db, &card);
     if block.is_empty() {
         // 开发环境若无 prompts/skills 目录则跳过断言
         eprintln!("skills dir 不存在，跳过注入断言");
@@ -368,7 +377,7 @@ fn skills_block_whitelist_injects_listed_docs_only() {
         assert!(block.contains("不存在"));
     }
     // 空白名单不注入
-    let empty = skills_block(&RoleCard {
+    let empty = skills_block(&db, &RoleCard {
         id: "y".into(), name: "n2".into(), label: "l".into(),
         model_id: String::new(), persona_prompt: String::new(),
         scope_hints: String::new(), default_test_command: String::new(),

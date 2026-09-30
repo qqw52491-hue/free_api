@@ -607,8 +607,11 @@ async fn run_agent_main_loop_in_workspace_inner(
             .unwrap_or_default();
         // Skill 路由输入 1：紧凑触发清单（name + when_to_use/摘要），
         // 不含手册正文——triage 只负责"选哪个"，加载由宿主执行。
-        let skill_index_text =
-            crate::agent::skill_context::skill_routing_index(&crate::agent::skill_context::resolve_skills_dir());
+        // 文件目录 ∪ DB 自定义 Skill 统一入索引，同名 DB 优先。
+        let skill_index_text = crate::agent::skill_context::skill_routing_index_with_db(
+            state.inner(),
+            &crate::agent::skill_context::resolve_skills_dir(),
+        );
         // Skill 路由输入 2：有界的最近对话背景——"上一轮宣称修复 + 本轮用户
         // 反馈无效"这类证据只有带着历史才能看见，只传末尾几条并截断防膨胀。
         let recent_context = {
@@ -648,6 +651,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                 &mut context,
                 &mut verdict,
                 &skills_dir,
+                state.inner(),
             );
             if !verdict.loaded_skills.is_empty() || !verdict.skill_load_failures.is_empty() {
                 let _ = app.emit(

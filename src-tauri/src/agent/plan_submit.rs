@@ -334,7 +334,7 @@ pub async fn handle_submit_plan(
         reviewer_model = preferred;
     }
     let persona = crate::agent::tools::role_manager::persona_block(&card)
-        + &crate::agent::tools::role_manager::skills_block(&card);
+        + &crate::agent::tools::role_manager::skills_block(db, &card);
     let mut snapshot = crate::agent::child_reviewer::PlanReviewerDispatchSnapshot::new(
         &reviewer_model,
         routing.tier.to_string(),

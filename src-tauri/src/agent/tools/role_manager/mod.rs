@@ -694,7 +694,7 @@ const SKILL_DOC_MAX_CHARS: usize = 6000;
 /// 角色技能手册注入块：allowed_skills 白名单中的 skill 文档全文注入子任务
 /// system prompt（scout/reviewer/writer 通用，知识注入而非工具授权）。
 /// 空白名单返回空串保持现状；白名单中的无效 skill 名显式列出便于修正配置。
-pub fn skills_block(card: &RoleCard) -> String {
+pub fn skills_block(db: &crate::db::DbState, card: &RoleCard) -> String {
     let names = card.parse_allowed_skills();
     if names.is_empty() {
         return String::new();
@@ -703,7 +703,12 @@ pub fn skills_block(card: &RoleCard) -> String {
     let mut docs = Vec::new();
     let mut missing = Vec::new();
     for name in &names {
-        match crate::agent::skill_context::load_skill_doc(&dir, name, SKILL_DOC_MAX_CHARS) {
+        match crate::agent::skill_context::load_skill_doc_with_db(
+            db,
+            &dir,
+            name,
+            SKILL_DOC_MAX_CHARS,
+        ) {
             Some(doc) => docs.push(format!("### 📖 技能手册 `{}`\n{}", name, doc)),
             None => missing.push(name.clone()),
         }

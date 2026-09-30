@@ -198,6 +198,7 @@ pub fn apply_triage_skill_recommendations(
     context: &mut SandwichContext,
     verdict: &mut TriageVerdict,
     skills_dir: &std::path::Path,
+    db: &crate::db::DbState,
 ) {
     const SKILL_DOC_MAX_CHARS: usize = 20_000;
     for rec in &verdict.skill_recommendations {
@@ -205,7 +206,12 @@ pub fn apply_triage_skill_recommendations(
         if name.is_empty() || context.has_tool_manual(name) {
             continue;
         }
-        match crate::agent::skill_context::load_skill_doc(skills_dir, name, SKILL_DOC_MAX_CHARS) {
+        match crate::agent::skill_context::load_skill_doc_with_db(
+            db,
+            skills_dir,
+            name,
+            SKILL_DOC_MAX_CHARS,
+        ) {
             Some(doc) => {
                 context.turns_history.push(ChatMessage {
                     role: "user".to_string(),
@@ -249,7 +255,17 @@ mod tests {
             SkillRecommendation { name: "code_diagnosis".into(), reason: "重复".into() },
             SkillRecommendation { name: "ghost_skill".into(), reason: "不存在".into() },
         ];
-        apply_triage_skill_recommendations(&mut ctx, &mut verdict, &dir);
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE agent_custom_instructions (
+                id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('prompt','skill')),
+                name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+                content TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        let db = crate::db::DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
+        apply_triage_skill_recommendations(&mut ctx, &mut verdict, &dir, &db);
 
         assert_eq!(verdict.loaded_skills, vec!["code_diagnosis".to_string()], "存在的手册应加载且去重");
         assert_eq!(verdict.skill_load_failures, vec!["ghost_skill".to_string()], "不存在的名应记失败不静默");
@@ -262,7 +278,7 @@ mod tests {
         // 二次调用不重复注入（与 next_tool_hint 同一去重口径）
         let mut verdict2 = TriageVerdict::fallback("test2");
         verdict2.skill_recommendations = vec![SkillRecommendation { name: "code_diagnosis".into(), reason: "again".into() }];
-        apply_triage_skill_recommendations(&mut ctx, &mut verdict2, &dir);
+        apply_triage_skill_recommendations(&mut ctx, &mut verdict2, &dir, &db);
         assert!(verdict2.loaded_skills.is_empty(), "已加载的 Skill 不应重复注入");
         let _ = std::fs::remove_dir_all(&dir);
     }

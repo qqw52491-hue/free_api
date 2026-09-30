@@ -136,7 +136,7 @@ pub(super) async fn dispatch_child_reviewer(
                             continue;
                         }
                         reviewer_persona = crate::agent::tools::role_manager::persona_block(&card);
-                        reviewer_persona += &crate::agent::tools::role_manager::skills_block(&card);
+                        reviewer_persona += &crate::agent::tools::role_manager::skills_block(ctx.state.inner(), &card);
                         effective_params["role"] = json!(card.name);
                         effective_params["role_label"] = json!(card.label);
                         if let Some(schema) = card.parse_custom_schema() {
@@ -236,7 +236,7 @@ pub(super) async fn dispatch_child_reviewer(
 
                 if let Some(card) = auto_card {
                     reviewer_persona = crate::agent::tools::role_manager::persona_block(&card);
-                    reviewer_persona += &crate::agent::tools::role_manager::skills_block(&card);
+                    reviewer_persona += &crate::agent::tools::role_manager::skills_block(ctx.state.inner(), &card);
                     effective_params["role"] = json!(card.name);
                     effective_params["role_label"] = json!(card.label);
                     if let Some(schema) = card.parse_custom_schema() {

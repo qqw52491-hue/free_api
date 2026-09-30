@@ -128,7 +128,7 @@ pub(super) async fn dispatch_child_writer(
                             continue;
                         }
                         writer_persona = crate::agent::tools::role_manager::persona_block(&card);
-                        writer_persona += &crate::agent::tools::role_manager::skills_block(&card);
+                        writer_persona += &crate::agent::tools::role_manager::skills_block(ctx.state.inner(), &card);
                         if let Some(schema) = card.parse_custom_schema() {
                             writer_custom_schema = Some(schema);
                         }

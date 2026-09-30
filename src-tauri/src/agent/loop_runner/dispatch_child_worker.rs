@@ -76,7 +76,7 @@ pub(super) async fn dispatch_child_worker(
                             continue;
                         }
                         scout_persona = crate::agent::tools::role_manager::persona_block(&card);
-                        scout_persona += &crate::agent::tools::role_manager::skills_block(&card);
+                        scout_persona += &crate::agent::tools::role_manager::skills_block(ctx.state.inner(), &card);
                         effective_worker_params["role"] = json!(card.name);
                         effective_worker_params["role_label"] = json!(card.label);
                         if let Some(schema) = card.parse_custom_schema() {

@@ -459,6 +459,111 @@ pub fn skill_routing_index(skills_dir: &Path) -> String {
         .join("\n")
 }
 
+/// DB 侧 Skill 路由条目：`agent_custom_instructions` 中 kind='skill' 且 enabled 的
+/// 用户/自助沉淀条目。`description` 列即 skill_manager.add 时 LLM 提炼的触发卡，
+/// 直接充当 when_to_use；缺省回退规则摘要。
+///
+/// 语义对齐文件技能：同样只进路由索引、按需加载正文——DB skill 不再常驻注入
+/// （与 kind='prompt' 的自定义提示词分流：prompt 常驻、skill 懒加载）。
+pub fn db_skill_index_entries(db: &crate::db::DbState) -> Vec<SkillIndexEntry> {
+    let conn = match db.0.lock() {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let mut stmt = match conn.prepare(
+        "SELECT name, description, content FROM agent_custom_instructions \
+         WHERE kind = 'skill' AND enabled = 1 ORDER BY updated_at ASC",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        });
+    let Ok(rows) = rows else {
+        return Vec::new();
+    };
+    rows.flatten()
+        .filter(|(name, _, _)| !name.trim().is_empty())
+        .map(|(name, desc, content)| {
+            let name = name.trim().to_string();
+            let when_to_use = desc.trim().to_string();
+            let summary = if when_to_use.is_empty() {
+                rule_based_skill_summary(&name, &content).0
+            } else {
+                when_to_use.clone()
+            };
+            SkillIndexEntry {
+                name,
+                summary,
+                when_to_use,
+            }
+        })
+        .collect()
+}
+
+/// 文件 ∪ DB 的统一路由清单：同名条目 DB 优先（用户/自助沉淀覆盖内置默认）。
+/// 只列名称与触发面，正文仍按需加载。
+pub fn skill_routing_index_with_db(db: &crate::db::DbState, skills_dir: &Path) -> String {
+    let mut by_name: std::collections::BTreeMap<String, String> =
+        skill_index_entries(skills_dir)
+            .into_iter()
+            .map(|e| {
+                let trigger = if e.when_to_use.is_empty() {
+                    e.summary
+                } else {
+                    e.when_to_use
+                };
+                (e.name, trigger)
+            })
+            .collect();
+    for e in db_skill_index_entries(db) {
+        let trigger = if e.when_to_use.is_empty() {
+            e.summary
+        } else {
+            e.when_to_use
+        };
+        by_name.insert(e.name, trigger);
+    }
+    by_name
+        .into_iter()
+        .map(|(name, trigger)| format!("- {}: {}", name, trigger))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 统一手册加载：DB 优先（用户/自助沉淀优先于内置同名），文件兜底。
+/// DB 查询失败/未命中不阻断，静默回落文件通道。
+pub fn load_skill_doc_with_db(
+    db: &crate::db::DbState,
+    skills_dir: &Path,
+    name: &str,
+    max_chars: usize,
+) -> Option<String> {
+    if let Ok(conn) = db.0.lock() {
+        let content: Option<String> = conn
+            .query_row(
+                "SELECT content FROM agent_custom_instructions \
+                 WHERE kind = 'skill' AND enabled = 1 AND name = ?1",
+                rusqlite::params![name.trim()],
+                |row| row.get(0),
+            )
+            .ok();
+        if let Some(content) = content {
+            let clipped: String = content.trim().chars().take(max_chars).collect();
+            if !clipped.is_empty() {
+                return Some(clipped);
+            }
+        }
+    }
+    load_skill_doc(skills_dir, name, max_chars)
+}
+
 /// 定位 skill 手册目录：优先已登记目录（register_app_skills_dir），
 /// 其次相对候选（prompts/skills / src-tauri/prompts/skills 等），
 /// 与 capability_index 的索引覆盖范围一致——搜得到 ⇒ 能加载。
@@ -717,6 +822,76 @@ mod routing_tests {
         assert_eq!(entries[0].when_to_use, "需要生成专业图表时");
         let index = skill_routing_index(&dir);
         assert!(index.contains("- chart: 需要生成专业图表时"), "路由索引应优先用 when_to_use: {}", index);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 统一通道语义：DB 自定义 Skill（kind='skill'）与文件技能同进路由索引、
+    /// 同样按需懒加载；同名 DB 优先（用户/自助沉淀覆盖内置默认）。
+    /// 实测驱动：agent 发现可复用技能仓库（opus-video-skills）应能通过
+    /// skill_manager.add 自助入库后立即参与路由，而非只能写 repo 文件。
+    fn instructions_db() -> crate::db::DbState {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE agent_custom_instructions (
+                id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('prompt','skill')),
+                name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+                content TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        crate::db::DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)))
+    }
+
+    #[test]
+    fn db_skills_join_index_and_load_with_priority() {
+        let dir = temp_dir();
+        fs::write(dir.join("deploy_ops.md"), "---\nwhen_to_use: 部署运维\n---\n文件版手册正文").unwrap();
+        let db = instructions_db();
+        {
+            let conn = db.0.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agent_custom_instructions VALUES ('1','skill','deploy_ops','DB版触发卡','DB版手册正文',1,'t','t')",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO agent_custom_instructions VALUES ('2','skill','video_making','视频制作触发卡','视频手册正文',1,'t','t')",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO agent_custom_instructions VALUES ('3','prompt','always_on','','常驻提示词',1,'t','t')",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO agent_custom_instructions VALUES ('4','skill','disabled_skill','x','禁用项',0,'t','t')",
+                [],
+            ).unwrap();
+        }
+
+        // 索引：DB skill 入列、同名覆盖、prompt 不混进、disabled 不出现
+        let index = skill_routing_index_with_db(&db, &dir);
+        assert!(index.contains("- deploy_ops: DB版触发卡"), "同名应由 DB 触发卡覆盖: {}", index);
+        assert!(index.contains("- video_making: 视频制作触发卡"), "{}", index);
+        assert!(!index.contains("always_on"), "prompt 类不该混进 skill 索引: {}", index);
+        assert!(!index.contains("disabled_skill"), "禁用项不该入索引: {}", index);
+
+        // 加载：DB 优先取到 DB 正文；DB 未命中回落文件
+        assert_eq!(
+            load_skill_doc_with_db(&db, &dir, "deploy_ops", 100).as_deref(),
+            Some("DB版手册正文")
+        );
+        assert_eq!(
+            load_skill_doc_with_db(&db, &dir, "video_making", 100).as_deref(),
+            Some("视频手册正文")
+        );
+        fs::write(dir.join("file_only.md"), "---\nwhen_to_use: x\n---\n纯文件手册").unwrap();
+        assert!(
+            load_skill_doc_with_db(&db, &dir, "file_only", 500)
+                .map(|d| d.contains("纯文件手册"))
+                .unwrap_or(false),
+            "DB 未命中应回落文件通道"
+        );
+        assert!(load_skill_doc_with_db(&db, &dir, "ghost", 100).is_none());
+
         let _ = fs::remove_dir_all(&dir);
     }
 }
