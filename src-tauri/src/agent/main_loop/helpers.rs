@@ -232,6 +232,33 @@ pub(crate) fn normalize_tmp_declared(target: &str, session_tmp: &std::path::Path
     t.to_string()
 }
 
+/// 同名近失配检测：声明目标（已归一）与 touched 产物 basename 相同但路径不匹配 →
+/// 生成 "声明 ≠ 产物" 点名对。finish 零交集打回时用——实测病灶：声明
+/// `tmp/p5js-test/sketch.html` 而产物落在 `tmp/sketch.html`，文案若不点名
+/// 层级差异，模型永远归不到"写对了文件但放错了目录"（连拦 13 次空转）。
+pub(crate) fn tmp_target_near_misses(
+    targets_norm: &[String],
+    touched: &[String],
+) -> Vec<String> {
+    targets_norm
+        .iter()
+        .filter_map(|tf| {
+            let bn = tf.rsplit('/').next().unwrap_or(tf.as_str());
+            touched
+                .iter()
+                .find(|p| {
+                    !crate::agent::finish_guard::diff::file_paths_match(tf, p)
+                        && p
+                            .rsplit('/')
+                            .next()
+                            .map(|b| b.eq_ignore_ascii_case(bn))
+                            .unwrap_or(false)
+                })
+                .map(|hit| format!("{}（声明）≠ {}（产物）", tf, hit))
+        })
+        .collect()
+}
+
 /// 渲染每轮投射到 M_Tail 的可操作文件边界卡片。
 ///
 /// 文案与 path_guard 路由规则、artifact_manager 登记入口、finish 门禁的

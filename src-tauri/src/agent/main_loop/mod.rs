@@ -2250,6 +2250,18 @@ async fn run_agent_main_loop_in_workspace_inner(
                 // 如 /usr/bin、/opt、~/.config）时 Git diff 物理上不可能命中 →
                 // 本门证据域不存在 → NotApplicable 跳过移交终审，
                 // 绝不把"前提不成立"硬当"违规"（实测教训：pacman 卸载被此门死锁打回）。
+                // 判据域与打回文案共用同一份 touched：真实 diff ∪ 副作用台账路径 ∪
+                // 会话 tmp 产物实物（非 git 写入同样构成"目标被动过"的物理事实）。
+                let session_tmp =
+                    crate::agent::path_guard::get_session_tmp_dir(&final_session_id);
+                let mut touched: Vec<String> = diff_context
+                    .as_ref()
+                    .map(|d| build_touched_set(d, &session_tmp))
+                    .unwrap_or_default();
+                // tmp/ 产物实物对账（scope 卡片承诺的直认通道）：tmp/ 写入按设计
+                // 不入副作用台账、也不在工作区 diff 内——不把目录实物桥接进对账集，
+                // 则声明 tmp/x 的任务结构性零交集 → finish 死锁。
+                extend_touched_with_session_tmp(&mut touched, &session_tmp);
                 let declared_but_untouched = plan_targets
                     .map(|targets| {
                         let has_ws_target = targets.iter().any(|t| {
@@ -2279,18 +2291,6 @@ async fn run_agent_main_loop_in_workspace_inner(
                             );
                             return false;
                         }
-                        // 判据域：真实 diff ∪ 副作用台账路径 ∪ 会话 tmp 产物实物
-                        //（非 git 写入同样构成"目标被动过"的物理事实）
-                        let session_tmp =
-                            crate::agent::path_guard::get_session_tmp_dir(&final_session_id);
-                        let mut touched: Vec<String> = diff_context
-                            .as_ref()
-                            .map(|d| build_touched_set(d, &session_tmp))
-                            .unwrap_or_default();
-                        // tmp/ 产物实物对账（scope 卡片承诺的直认通道）：tmp/ 写入按设计
-                        // 不入副作用台账、也不在工作区 diff 内——不把目录实物桥接进对账集，
-                        // 则声明 tmp/x 的任务结构性零交集 → finish 死锁。
-                        extend_touched_with_session_tmp(&mut touched, &session_tmp);
                         !targets.iter().any(|tf| {
                             touched.iter().any(|p| {
                                 crate::agent::finish_guard::diff::file_paths_match(
@@ -2302,15 +2302,41 @@ async fn run_agent_main_loop_in_workspace_inner(
                     })
                     .unwrap_or(false);
                 if declared_but_untouched {
-                    let actual: Vec<String> = diff_context
-                        .as_ref()
-                        .map(|d| d.changed_files.keys().cloned().collect())
-                        .unwrap_or_default();
+                    let targets_norm: Vec<String> = plan_targets
+                        .unwrap_or(&[])
+                        .iter()
+                        .map(|t| normalize_tmp_declared(t, &session_tmp))
+                        .collect();
+                    // 同名近失配：产物 basename 命中声明但路径层级不符——直接点名，
+                    // 一轮可修；不点名模型永远归因不到"写对了文件但放错了目录"
+                    //（实测：声明 tmp/p5js-test/sketch.html vs 产物 tmp/sketch.html
+                    // 连拦 13 次空转，文案谎称"零改动"）。
+                    let near_misses = tmp_target_near_misses(&targets_norm, &touched);
+                    let mut actual_display: Vec<String> = touched.clone();
+                    actual_display.sort();
+                    actual_display.dedup();
+                    let truncated = actual_display.len() > 12;
+                    let actual_str = if actual_display.is_empty() {
+                        "（无：工作区 diff、副作用台账与会话 tmp 产物均为空）".to_string()
+                    } else if truncated {
+                        format!("{} …等共 {} 项", actual_display[..12].join(", "), actual_display.len())
+                    } else {
+                        actual_display.join(", ")
+                    };
+                    let near_hint = if near_misses.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            "\n【⚠️ 疑似路径层级不符——同名文件但目录不同】{}\n若产物就是目标交付物：把文件写入/移动到声明的路径层级，或以 revision_reason 重新 submit_plan 修正 target_files 后再 finish。",
+                            near_misses.join("；")
+                        )
+                    };
                     checkpoint.finish_reviewed = true;
                     let reject_msg = format!(
-                        "【⚠️ 交付门禁拦截打回：方案声明的目标文件与实际改动零交集，finish 未生效！】\n方案声明目标：{}\n实际改动文件：{}\n（0 Token 机械打回，终审无需介入）。\n【必须采取的行动】：①若尚未真正修改，请先完成对声明目标的实际改动并重跑验证；②若实现路径已变，请重新 submit_plan 更新 target_files（已批准方案须附 revision_reason 说明变更依据，将重开评审）后再 finish；③若本任务本就无需改这些文件，请用 ask_human 说明理由。",
+                        "【⚠️ 交付门禁拦截打回：方案声明的目标文件与实际改动零交集，finish 未生效！】\n方案声明目标：{}\n实际改动与产物：{}\n（0 Token 机械打回，终审无需介入）。{}\n【必须采取的行动】：①若尚未真正修改，请先完成对声明目标的实际改动并重跑验证；②若实现路径已变，请重新 submit_plan 更新 target_files（已批准方案须附 revision_reason 说明变更依据，将重开评审）后再 finish；③若本任务本就无需改这些文件，请用 ask_human 说明理由。",
                         plan_targets.unwrap_or(&[]).join(", "),
-                        if actual.is_empty() { "（无：当前工作区零改动）".to_string() } else { actual.join(", ") }
+                        actual_str,
+                        near_hint,
                     );
                     context.add_error_feedback(&reject_msg);
                     crate::agent::telemetry::record_gate_fire(

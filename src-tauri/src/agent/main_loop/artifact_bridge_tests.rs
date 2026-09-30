@@ -1,4 +1,4 @@
-    use super::{build_touched_set, extend_touched_with_session_tmp, normalize_tmp_declared};
+    use super::{build_touched_set, extend_touched_with_session_tmp, normalize_tmp_declared, tmp_target_near_misses};
     use crate::agent::finish_guard::{diff::file_paths_match, DiffContext};
     use std::path::PathBuf;
 
@@ -83,4 +83,43 @@
         assert!(hit, "声明 tmp/x 必须与会话 tmp 实物对账命中");
 
         let _ = std::fs::remove_dir_all(&session_tmp);
+    }
+
+    /// 实弹病灶（session 2a9ffcd2，13 连拦空转）：声明 tmp/p5js-test/sketch.html，
+    /// 产物落在会话 tmp 根 tmp/sketch.html——同名但层级不符，零交集门正确拦截，
+    /// 但旧文案只报工作区 diff（谎称"零改动"），模型永远归不到路径错位真因。
+    /// 近失配点名必须同时满足：① basename 命中 ② 全路径不匹配（不误报真命中）。
+    #[test]
+    fn tmp_target_near_misses_names_subdir_mismatch() {
+        let touched = vec![
+            "tmp/sketch.html".to_string(),
+            "tmp/preview.csv".to_string(),
+            "src/main.rs".to_string(),
+        ];
+        // 声明子目录、产物在根 → 点名
+        let misses = tmp_target_near_misses(
+            &["tmp/p5js-test/sketch.html".to_string()],
+            &touched,
+        );
+        assert_eq!(misses.len(), 1);
+        assert!(misses[0].contains("tmp/p5js-test/sketch.html"));
+        assert!(misses[0].contains("tmp/sketch.html"));
+
+        // 声明与产物精确对上 → 不产生近失配（真命中不该误报）
+        let exact = tmp_target_near_misses(&["tmp/sketch.html".to_string()], &touched);
+        assert!(exact.is_empty());
+
+        // 声明文件根本无同名产物 → 不点名（交给常规零交集文案）
+        let no_basename = tmp_target_near_misses(
+            &["tmp/p5js-test/other.html".to_string()],
+            &touched,
+        );
+        assert!(no_basename.is_empty());
+
+        // basename 大小写差异同样应点名
+        let case = tmp_target_near_misses(
+            &["tmp/out/SKETCH.HTML".to_string()],
+            &touched,
+        );
+        assert_eq!(case.len(), 1);
     }
