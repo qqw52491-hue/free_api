@@ -192,20 +192,46 @@ pub(crate) fn build_touched_set(d: &DiffContext, session_tmp: &std::path::Path) 
 
 /// 把会话 tmp 目录实物桥接为 `tmp/<rel>` 声明形态并入对账集。
 /// tmp/ 写入不入副作用台账、不进工作区 diff——目录实物是 finish 门唯一的对账判据。
+///
+/// 容量纪律（实测病灶）：渲染类任务一次就能产出数万实体（out/frames 数百帧 PNG +
+/// node_modules + Chrome 临时剖面），旧实现 1000 条全局上限按 readdir 顺序先到先
+/// 得——垃圾路径耗尽预算后，真声明目标（如 src/scenes/x.js）漏收 → 假零交集连拦
+/// finish。对策：洪泛目录不下钻（依赖/构建/剖面目录不可能是交付声明），
+/// 单目录限收防帧序列吃预算，全局上限放宽。
 pub(crate) fn extend_touched_with_session_tmp(touched: &mut Vec<String>, session_tmp: &std::path::Path) {
+    /// 不下钻的目录名：依赖/构建/隐藏配置/渲染剖面——交付声明永远指向源文件与产物，
+    /// 不会指向这些目录内部。
+    const SKIP_DESCEND: &[&str] = &[
+        "node_modules", ".git", "target", "dist", "build", ".cache", ".config",
+    ];
+    const MAX_ENTRIES: usize = 4000;
+    const MAX_PER_DIR: usize = 150;
     fn walk(dir: &std::path::Path, root: &std::path::Path, depth: usize, out: &mut Vec<String>) {
-        if depth > 6 || out.len() >= 1000 {
+        if depth > 6 || out.len() >= MAX_ENTRIES {
             return;
         }
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
+        let mut dir_count = 0usize;
         for e in entries.flatten() {
+            if dir_count >= MAX_PER_DIR || out.len() >= MAX_ENTRIES {
+                break;
+            }
+            dir_count += 1;
             let p = e.path();
+            let name = e.file_name();
+            let name = name.to_string_lossy();
             if let Ok(rel) = p.strip_prefix(root) {
                 out.push(format!("tmp/{}", rel.to_string_lossy()));
             }
-            if p.is_dir() {
+            // 目录本体入集合（声明可能指向目录），但已知洪泛目录不下钻
+            if p.is_dir()
+                && !SKIP_DESCEND.contains(&name.as_ref())
+                && !name.starts_with('.')
+                && !name.starts_with("com.google.")
+                && !name.starts_with("org.chromium")
+            {
                 walk(&p, root, depth + 1, out);
             }
         }

@@ -123,3 +123,61 @@
         );
         assert_eq!(case.len(), 1);
     }
+
+    /// 实弹病灶（session 2a9ffcd2 视频渲染 22 连拦）：会话 tmp 累积上万实体
+    /// （node_modules + Chrome 剖面 + 帧序列），旧 1000 条上限按 readdir 先到
+    /// 先得——垃圾路径耗尽预算后真目标 robot_editor.js 漏收 → 假零交集。
+    /// 修复契约：洪泛目录不下钻，真实交付文件必须始终入集合。
+    #[test]
+    fn flood_dirs_never_starve_real_target_entries() {
+        let session_tmp = std::env::temp_dir().join(format!("fac-flood-{}", std::process::id()));
+        // 洪泛源 1：node_modules（散布多子目录 × 每目录多文件）
+        for i in 0..30 {
+            let d = session_tmp.join(format!("node_modules/pkg-{}/dist", i));
+            std::fs::create_dir_all(&d).unwrap();
+            for j in 0..80 {
+                std::fs::write(d.join(format!("f{}.js", j)), "x").unwrap();
+            }
+        }
+        // 洪泛源 2：渲染帧序列（单目录数百文件）
+        let frames = session_tmp.join("anime_story/out/frames");
+        std::fs::create_dir_all(&frames).unwrap();
+        for i in 0..500 {
+            std::fs::write(frames.join(format!("frame_{:04}.png", i)), "x").unwrap();
+        }
+        // 洪泛源 3：Chrome 临时剖面
+        let chrome = session_tmp.join("com.google.Chrome.ab12CD/Sessions");
+        std::fs::create_dir_all(&chrome).unwrap();
+        for i in 0..50 {
+            std::fs::write(chrome.join(format!("Tabs_{}", i)), "x").unwrap();
+        }
+        // 真目标：被洪泛包围的声明文件
+        let scenes = session_tmp.join("anime_story/src/scenes");
+        std::fs::create_dir_all(&scenes).unwrap();
+        std::fs::write(scenes.join("robot_editor.js"), "scene").unwrap();
+        std::fs::write(session_tmp.join("anime_magic_sprout.mp4"), "mp4").unwrap();
+
+        let mut touched = Vec::new();
+        extend_touched_with_session_tmp(&mut touched, &session_tmp);
+
+        // 契约：声明目标永远在场——无论洪泛多凶
+        assert!(
+            touched
+                .iter()
+                .any(|p| file_paths_match("anime_story/src/scenes/robot_editor.js", p)),
+            "真声明目标必须入对账集，touched.len()={}",
+            touched.len()
+        );
+        assert!(touched.iter().any(|p| p == "tmp/anime_magic_sprout.mp4"));
+        // node_modules 内部不应出现在集合（目录本体在、内容不下钻）
+        assert!(
+            !touched
+                .iter()
+                .any(|p| p.contains("node_modules/pkg-0/dist/f0.js")),
+            "node_modules 内部文件不应污染对账集"
+        );
+        assert!(touched.iter().any(|p| p == "tmp/node_modules"));
+        assert!(touched.len() < 4000);
+
+        let _ = std::fs::remove_dir_all(&session_tmp);
+    }
