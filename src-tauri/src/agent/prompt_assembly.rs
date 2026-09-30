@@ -184,12 +184,11 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "skill_manager",
-        summary: "管理工作区自定义 Skill 与提示词",
+        summary: "管理自定义 Skill 与提示词；可从 Git 仓库/本地目录自助安装技能资产包",
         actions: &[
             "list()",
             "add(name: string, content: string, kind?|description?|model_id?)",
-            "batch_import(input_text: string, model_id?)",
-            "toggle(id|name: string, enabled: boolean)",
+            "install(url: string, name?: string) —— clone/复制技能仓库到技能目录并自动登记可路由卡片（探测 SKILL.md，无则回结构清单）",
             "delete(id|name: string, confirm: true)",
         ],
     },
