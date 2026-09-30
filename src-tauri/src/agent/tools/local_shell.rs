@@ -316,7 +316,7 @@ async fn join_drains(
 }
 
 pub fn dispatch(
-    _db: &DbState,
+    db: &DbState,
     session_id: &str,
     _action: &str,
     params: &serde_json::Value,
@@ -459,7 +459,208 @@ pub fn dispatch(
         };
     }
 
+    // 后台模式分流：长任务（视频渲染/大构建/批处理）脱离步骤超时继续跑——
+    // 输出实时落文件、进程独立于步骤存活，完成态进 job 引擎由 wait_jobs
+    // 挂起回收或信箱自动送达。实测驱动：6 分钟渲染被 300s 上限连产物一起
+    // 杀死（ffmpeg 中途 SIGKILL → moov 未写 → MP4 整段报废），同步模式
+    // 的天花板是产品级缺陷而非保守策略。
+    if params
+        .get("background")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return spawn_background_shell(db, session_id, &final_cmd, &execution_cwd, custom_env);
+    }
+
     execute_command_blocking(session_id, &final_cmd, &execution_cwd, timeout_secs, custom_env)
+}
+
+/// 后台命令执行：spawn 后立即返回，进程在独立进程组中长跑。
+/// stdout/stderr 追加写入 <session_tmp>/jobs/<job_id>.log——进程脱离
+/// 步骤存活期间日志持续可见；看守线程收尸后把退出码+日志尾写回
+/// job 行，wait_jobs 唤醒语义与子任务交付同一通道。
+fn spawn_background_shell(
+    db: &DbState,
+    session_id: &str,
+    cmd_str: &str,
+    cwd: &Path,
+    custom_env: Option<HashMap<String, String>>,
+) -> DispatchResult {
+    let session_tmp_dir = crate::agent::path_guard::get_session_tmp_dir(session_id);
+    let jobs_dir = session_tmp_dir.join("jobs");
+    if let Err(e) = std::fs::create_dir_all(&jobs_dir) {
+        return DispatchResult { view: None,
+            stdout: String::new(),
+            stderr: format!("❌ 后台任务目录创建失败: {}", e),
+            success: false,
+            route: "local_shell:bg_jobs_dir".to_string(),
+        };
+    }
+
+    // run_id 取当前 checkpoint（job 行归属 run 便于信箱/wait_jobs 按 run 过滤）
+    let run_id = crate::agent::checkpoint::load_checkpoint(db, session_id)
+        .ok()
+        .flatten()
+        .map(|c| c.run_id)
+        .unwrap_or_else(|| session_id.to_string());
+
+    let preview: String = cmd_str.chars().take(120).collect();
+    let params_json = json!({
+        "command": cmd_str,
+        "cwd": cwd.display().to_string(),
+    })
+    .to_string();
+
+    let job_id = match crate::agent::job_engine::begin_job(
+        db, &run_id, session_id, "shell", &preview, &params_json,
+    ) {
+        Ok(id) => id,
+        Err(e) => {
+            return DispatchResult { view: None,
+                stdout: String::new(),
+                stderr: format!("❌ 后台任务登记失败: {}", e),
+                success: false,
+                route: "local_shell:bg_register".to_string(),
+            };
+        }
+    };
+
+    let log_path = jobs_dir.join(format!("{}.log", job_id));
+    let log_out = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = crate::agent::job_engine::finish_job(
+                db, &job_id, "failed", 0, None, Some(&e.to_string()),
+            );
+            return DispatchResult { view: None,
+                stdout: String::new(),
+                stderr: format!("❌ 后台任务日志文件创建失败: {}", e),
+                success: false,
+                route: "local_shell:bg_log".to_string(),
+            };
+        }
+    };
+    let log_err = match log_out.try_clone() {
+        Ok(f) => f,
+        Err(e) => {
+            return DispatchResult { view: None,
+                stdout: String::new(),
+                stderr: format!("❌ 日志句柄复制失败: {}", e),
+                success: false,
+                route: "local_shell:bg_log".to_string(),
+            };
+        }
+    };
+
+    let enriched_path = get_enriched_path_env();
+    let session_tmp_str = session_tmp_dir.to_string_lossy().to_string();
+
+    #[cfg(target_os = "windows")]
+    let mut c = {
+        let mut c = std::process::Command::new("cmd.exe");
+        c.arg("/C").arg(cmd_str);
+        c
+    };
+    #[cfg(not(target_os = "windows"))]
+    let mut c = {
+        use std::os::unix::process::CommandExt;
+        let mut c = std::process::Command::new("sh");
+        c.arg("-c").arg(cmd_str);
+        c.process_group(0); // 独立进程组：宿主退出/步骤结束不拖垮它
+        c
+    };
+    c.current_dir(cwd);
+    c.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(log_out))
+        .stderr(std::process::Stdio::from(log_err));
+    c.env("PATH", &enriched_path)
+        .env("SESSION_TMP_DIR", &session_tmp_str)
+        .env("TMPDIR", &session_tmp_str);
+    // 与同步路径同一净化口径：IDE 调试器注入会让 node 子进程退出时挂死
+    if let Ok(no) = std::env::var("NODE_OPTIONS") {
+        if !no.contains("ms-vscode") && !no.contains("bootloader.js") {
+            c.env("NODE_OPTIONS", no);
+        }
+    }
+    for k in ["VSCODE_INSPECTOR_OPTIONS", "VSCODE_INJECTION"] {
+        c.env_remove(k);
+    }
+    if let Some(env_map) = custom_env {
+        for (k, v) in env_map {
+            c.env(&k, v);
+        }
+    }
+
+    let mut child = match c.spawn() {
+        Ok(ch) => ch,
+        Err(e) => {
+            let _ = crate::agent::job_engine::finish_job(
+                db, &job_id, "failed", 0, None, Some(&e.to_string()),
+            );
+            let (_, _, _, _, msg) = format_spawn_error(e, cmd_str, cwd, &enriched_path);
+            return DispatchResult { view: None,
+                stdout: String::new(),
+                stderr: msg,
+                success: false,
+                route: "local_shell:bg_spawn".to_string(),
+            };
+        }
+    };
+
+    // 看守线程：wait() 收尸 → 退出码+日志尾回填 job → 广播唤醒 wait_jobs
+    let db_state = DbState(db.0.clone());
+    let job_id_w = job_id.clone();
+    let log_path_w = log_path.clone();
+    std::thread::spawn(move || {
+        let status = child.wait();
+        let tail = tail_of_file(&log_path_w, 4096);
+        let (status_str, error_kind) = match &status {
+            Ok(s) if s.success() => ("succeeded", None),
+            Ok(s) => ("failed", Some(format!("exit_code:{}", s.code().unwrap_or(-1)))),
+            Err(e) => ("failed", Some(format!("wait_error:{}", e))),
+        };
+        let result = json!({
+            "exit_code": status.ok().and_then(|s| s.code()),
+            "log_path": log_path_w.display().to_string(),
+            "tail": tail,
+        });
+        let _ = crate::agent::job_engine::finish_job(
+            &db_state,
+            &job_id_w,
+            status_str,
+            0,
+            Some(&result.to_string()),
+            error_kind.as_deref(),
+        );
+    });
+
+    DispatchResult { view: None,
+        stdout: format!(
+            "✅ 已转入后台执行（不受步骤超时上限约束）\njob_id: {}\n日志（实时追加，可随时 read/tail 查进度）: {}\n回收方式: `wait_jobs` 传 job_ids:[\"{}\"] 挂起等待完成；也可继续推进其他操作，完成会进收件箱自动送达。\n注意：后台进程独立于本步骤存活，若任务本身是终态交付物请确保用 wait_jobs 等到结果再 finish。",
+            job_id,
+            log_path.display(),
+            job_id
+        ),
+        stderr: String::new(),
+        success: true,
+        route: "local_shell:background".to_string(),
+    }
+}
+
+/// 读日志文件末尾 ≤max_bytes（UTF-8 边界对齐），完成回执携带进度证据。
+fn tail_of_file(path: &Path, max_bytes: usize) -> String {
+    let Ok(data) = std::fs::read(path) else {
+        return String::new();
+    };
+    let start = data.len().saturating_sub(max_bytes);
+    let slice = &data[start..];
+    let s = String::from_utf8_lossy(slice);
+    // UTF-8 边界截断可能切出半个字符的乱码头——lossy 已转，去掉首字符更干净
+    s.to_string()
 }
 
 /// 评测密封检查：返回违规原因（None=未密封或命令合规）。
@@ -715,7 +916,7 @@ fn execute_command_blocking(
                 let (stdout_bytes, stderr_bytes) =
                     join_drains(drain_stdout, drain_stderr, Duration::from_secs(2)).await;
                 let mut err_msg = format!(
-                    "⚠️ [执行超时] 命令运行超过 {} 秒上限，已被系统强制终止杀死（已向进程树发送清理信号）。",
+                    "⚠️ [执行超时] 命令运行超过 {} 秒上限，已被系统强制终止杀死（已向进程树发送清理信号）。若这是预估本就超长的任务（视频渲染/大构建/批处理），请改用 `background: true` 转后台执行——不受此上限约束、日志落文件、wait_jobs 回收结果。",
                     timeout_secs
                 );
                 let partial =
@@ -1475,5 +1676,66 @@ mod tests {
         );
         assert!(res.success, "stdin=null 下 read 应立即 EOF: {}", res.stderr);
         assert!(res.stdout.contains("EOF_FAST"));
+    }
+
+    /// 后台模式：立即返回 job_id、不受 timeout_secs 约束、进程独立存活、
+    /// 看守线程收尸后写回 job 行终态（exit_code + 日志尾）。
+    /// 实证驱动：超长渲染任务被同步 300s 上限连产物杀死——必须有一条
+    /// 不随步骤超时死的执行通道。
+    #[test]
+    fn background_mode_survives_and_reports_via_job_row() {
+        let temp = TempDirGuard::new();
+        let ws = temp.path();
+        let db = test_db();
+        let marker = ws.join("bg_marker.txt");
+        let cmd = format!(
+            "sleep 1; echo done-content > {}",
+            marker.display()
+        );
+        let res = dispatch(
+            &db,
+            "test_sess_bg",
+            "exec",
+            &json!({"command": cmd, "timeout_secs": 60, "background": true}),
+            Some(ws),
+        );
+        assert!(res.success, "background 派发应立即返回成功: {}", res.stderr);
+        assert!(res.stdout.contains("job_id"), "应返回 job 句柄: {}", res.stdout);
+        let job_id = res
+            .stdout
+            .split("job_id: ")
+            .nth(1)
+            .and_then(|s| s.lines().next())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        assert!(job_id.starts_with("job-"), "job_id: {}", job_id);
+
+        // 等看守线程写终态（命令自身 1s，宽松窗口轮询）
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut status = String::new();
+        let mut result_json = String::new();
+        while std::time::Instant::now() < deadline {
+            let conn = db.0.lock().unwrap();
+            let row: Option<(String, String)> = conn
+                .query_row(
+                    "SELECT status, COALESCE(result_json,'') FROM agent_background_jobs WHERE id=?1",
+                    rusqlite::params![job_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .ok();
+            drop(conn);
+            if let Some((s, rj)) = row {
+                if s != "running" {
+                    status = s;
+                    result_json = rj;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        assert_eq!(status, "succeeded", "后台任务应以 succeeded 收官: {}", result_json);
+        assert!(result_json.contains("\"exit_code\":0"), "result_json: {}", result_json);
+        assert!(marker.exists(), "产物文件应由后台进程写出");
     }
 }
