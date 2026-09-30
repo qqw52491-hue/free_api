@@ -612,6 +612,7 @@ fn spawn_background_shell(
     };
 
     // 看守线程：wait() 收尸 → 退出码+日志尾回填 job → 广播唤醒 wait_jobs
+    let child_pid = child.id();
     let db_state = DbState(db.0.clone());
     let job_id_w = job_id.clone();
     let log_path_w = log_path.clone();
@@ -625,6 +626,7 @@ fn spawn_background_shell(
         };
         let result = json!({
             "exit_code": status.ok().and_then(|s| s.code()),
+            "pid": child_pid,
             "log_path": log_path_w.display().to_string(),
             "tail": tail,
         });
@@ -640,8 +642,11 @@ fn spawn_background_shell(
 
     DispatchResult { view: None,
         stdout: format!(
-            "✅ 已转入后台执行（不受步骤超时上限约束）\njob_id: {}\n日志（实时追加，可随时 read/tail 查进度）: {}\n回收方式: `wait_jobs` 传 job_ids:[\"{}\"] 挂起等待完成；也可继续推进其他操作，完成会进收件箱自动送达。\n注意：后台进程独立于本步骤存活，若任务本身是终态交付物请确保用 wait_jobs 等到结果再 finish。",
+            "✅ 已转入后台执行（不受步骤超时上限约束）\njob_id: {}\npid: {}（需要中止时可 local_shell `kill {}`，或对进程组 `kill -- -{}`）\n日志（实时追加，可随时 read/tail 查进度）: {}\n回收方式: `wait_jobs` 传 job_ids:[\"{}\"] 挂起等待完成；也可继续推进其他操作，完成会进收件箱自动送达。\n注意：后台进程独立于本步骤存活，若任务本身是终态交付物请确保用 wait_jobs 等到结果再 finish。",
             job_id,
+            child_pid,
+            child_pid,
+            child_pid,
             log_path.display(),
             job_id
         ),
