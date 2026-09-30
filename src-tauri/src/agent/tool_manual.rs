@@ -19,6 +19,7 @@ pub async fn load_tool_manual_for_next_step(
     context: &mut SandwichContext,
     instruction: &AgentInstruction,
     workspace_root: &std::path::Path,
+    db: &crate::db::DbState,
 ) {
     let targets = instruction.get_next_tool_hints();
     if targets.is_empty() {
@@ -54,6 +55,7 @@ pub async fn load_tool_manual_for_next_step(
             workspace_root,
             registry_state,
             context,
+            db,
         )
         .await;
     }
@@ -67,6 +69,7 @@ async fn load_single_tool_manual(
     workspace_root: &std::path::Path,
     registry_state: &Arc<Mutex<PluginRegistry>>,
     context: &mut SandwichContext,
+    db: &crate::db::DbState,
 ) {
     // 含 "/" 的目标是 "插件/工具" 精确粒度，必须直通 registry：
     // 若先做本地文件手册查找，恰好同名的 <插件>.md Skill 会返回
@@ -93,6 +96,16 @@ async fn load_single_tool_manual(
             if let Ok(content) = std::fs::read_to_string(cp) {
                 tool_detail = content;
                 break;
+            }
+        }
+        // 文件手册未命中 → 兜底查 DB 自定义 Skill（kind='skill'）：
+        // agent 经 skill_manager.add 自助沉淀的条目由此可被运行中
+        // next_tool_hint 取回，与 triage 索引/懒加载同一命名空间。
+        if tool_detail.is_empty() {
+            if let Some(doc) =
+                crate::agent::skill_context::db_skill_doc(db, tool_key, 20_000)
+            {
+                tool_detail = format!("【DB 自定义 Skill】\n{}", doc);
             }
         }
     }

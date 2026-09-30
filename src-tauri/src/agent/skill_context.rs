@@ -537,6 +537,27 @@ pub fn skill_routing_index_with_db(db: &crate::db::DbState, skills_dir: &Path) -
         .join("\n")
 }
 
+/// DB 侧手册正文直查（kind='skill' 且 enabled）。不含文件回落——供
+/// "DB 优先于文件"或"文件未命中时 DB 兜底"两类调用方各自拼装顺序。
+pub fn db_skill_doc(db: &crate::db::DbState, name: &str, max_chars: usize) -> Option<String> {
+    let conn = db.0.lock().ok()?;
+    let content: Option<String> = conn
+        .query_row(
+            "SELECT content FROM agent_custom_instructions \
+             WHERE kind = 'skill' AND enabled = 1 AND name = ?1",
+            rusqlite::params![name.trim()],
+            |row| row.get(0),
+        )
+        .ok();
+    let content = content?;
+    let clipped: String = content.trim().chars().take(max_chars).collect();
+    if clipped.is_empty() {
+        None
+    } else {
+        Some(clipped)
+    }
+}
+
 /// 统一手册加载：DB 优先（用户/自助沉淀优先于内置同名），文件兜底。
 /// DB 查询失败/未命中不阻断，静默回落文件通道。
 pub fn load_skill_doc_with_db(
@@ -545,23 +566,7 @@ pub fn load_skill_doc_with_db(
     name: &str,
     max_chars: usize,
 ) -> Option<String> {
-    if let Ok(conn) = db.0.lock() {
-        let content: Option<String> = conn
-            .query_row(
-                "SELECT content FROM agent_custom_instructions \
-                 WHERE kind = 'skill' AND enabled = 1 AND name = ?1",
-                rusqlite::params![name.trim()],
-                |row| row.get(0),
-            )
-            .ok();
-        if let Some(content) = content {
-            let clipped: String = content.trim().chars().take(max_chars).collect();
-            if !clipped.is_empty() {
-                return Some(clipped);
-            }
-        }
-    }
-    load_skill_doc(skills_dir, name, max_chars)
+    db_skill_doc(db, name, max_chars).or_else(|| load_skill_doc(skills_dir, name, max_chars))
 }
 
 /// 定位 skill 手册目录：优先已登记目录（register_app_skills_dir），

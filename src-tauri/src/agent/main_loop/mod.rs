@@ -1717,6 +1717,7 @@ async fn run_agent_main_loop_in_workspace_inner(
             &mut context,
             &instruction,
             &workspace_dir,
+            state.inner(),
         )
         .await;
 
