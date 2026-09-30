@@ -480,7 +480,7 @@ pub fn dispatch(
         return spawn_background_shell(db, session_id, &final_cmd, &execution_cwd, custom_env);
     }
 
-    execute_command_blocking(session_id, &final_cmd, &execution_cwd, timeout_secs, custom_env)
+    execute_command_blocking(db, session_id, &final_cmd, &execution_cwd, timeout_secs, custom_env)
 }
 
 /// 后台命令执行：spawn 后立即返回，进程在独立进程组中长跑。
@@ -506,11 +506,7 @@ fn spawn_background_shell(
     }
 
     // run_id 取当前 checkpoint（job 行归属 run 便于信箱/wait_jobs 按 run 过滤）
-    let run_id = crate::agent::checkpoint::load_checkpoint(db, session_id)
-        .ok()
-        .flatten()
-        .map(|c| c.run_id)
-        .unwrap_or_else(|| session_id.to_string());
+    let run_id = current_run_id(db, session_id);
 
     let preview: String = cmd_str.chars().take(120).collect();
     let params_json = json!({
@@ -823,7 +819,154 @@ fn lex_normalize(p: &Path) -> PathBuf {
     out
 }
 
+/// 同步等待窗口的终局：正常结束/启动失败，或到点进程仍存活——后者不杀，
+/// 连同排空任务与 Reactor 一并移交后台看守线程，注册成 job 交模型裁决
+/// （Codex yield_time_ms 同款语义：「时间到了」只意味着交还控制权，
+/// 不等于「该死」——实测教训：300s 上限 SIGKILL 恰好砍在 ffmpeg 收尾，
+/// moov 未写 → MP4 整段报废，杀掉的全是即将完成的好任务）。
+enum ExecWaitOutcome {
+    Finished(
+        Result<
+            (std::process::ExitStatus, Vec<u8>, Vec<u8>),
+            (String, bool, bool, String, String),
+        >,
+    ),
+    Promoted {
+        child: tokio::process::Child,
+        drain_stdout: tokio::task::JoinHandle<Vec<u8>>,
+        drain_stderr: tokio::task::JoinHandle<Vec<u8>>,
+        ticker: tokio::task::JoinHandle<()>,
+        live_tail: Arc<Mutex<String>>,
+        stream_started: Instant,
+        session_id_owned: String,
+        cmd_owned: String,
+        child_pid: Option<u32>,
+    },
+}
+
+fn current_run_id(db: &DbState, session_id: &str) -> String {
+    crate::agent::checkpoint::load_checkpoint(db, session_id)
+        .ok()
+        .flatten()
+        .map(|c| c.run_id)
+        .unwrap_or_else(|| session_id.to_string())
+}
+
+/// 到点仍存活的命令 → 后台 job：看守线程接管 rt+child+排空任务继续跑，
+/// 进程终态写回 job 行（走 wait_jobs/收件箱通道）。返回给模型的不是
+/// 「超时已杀」而是「仍活着 + 句柄 + 你的选择权」。
+#[allow(clippy::too_many_arguments)]
+fn promote_timed_out_shell(
+    db: &DbState,
+    rt: tokio::runtime::Runtime,
+    mut child: tokio::process::Child,
+    drain_stdout: tokio::task::JoinHandle<Vec<u8>>,
+    drain_stderr: tokio::task::JoinHandle<Vec<u8>>,
+    ticker: tokio::task::JoinHandle<()>,
+    live_tail: Arc<Mutex<String>>,
+    stream_started: Instant,
+    session_id_owned: String,
+    cmd_owned: String,
+    child_pid: Option<u32>,
+    cwd: &Path,
+    waited_secs: u64,
+) -> DispatchResult {
+    let session_tmp_dir = crate::agent::path_guard::get_session_tmp_dir(&session_id_owned);
+    let jobs_dir = session_tmp_dir.join("jobs");
+    let _ = std::fs::create_dir_all(&jobs_dir);
+
+    let preview: String = cmd_owned.chars().take(120).collect();
+    let params_json = json!({
+        "command": cmd_owned,
+        "cwd": cwd.display().to_string(),
+        "pid": child_pid,
+        "promoted_from": "sync_timeout",
+        "waited_secs": waited_secs,
+    })
+    .to_string();
+    let run_id = current_run_id(db, &session_id_owned);
+    let job_id = crate::agent::job_engine::begin_job(
+        db, &run_id, &session_id_owned, "shell", &preview, &params_json,
+    )
+    .unwrap_or_else(|_| format!("untracked-{}", child_pid.unwrap_or(0)));
+
+    let log_path = jobs_dir.join(format!("{}.log", job_id));
+
+    // 移交前先取部分输出快照给模型看进度——之后 live_tail 随任务移交线程
+    let partial = {
+        let tail = live_tail.lock().map(|g| g.clone()).unwrap_or_default();
+        truncate_output(&tail, 4096)
+    };
+
+    // 看守线程：rt 一并移交——排空任务/管道只在 Reactor 被驱动时才活着，
+    // 若在此丢弃 rt，管道写端满 64KB 后子进程会假死，等于换一种方式杀它。
+    let db_state = DbState(db.0.clone());
+    let job_id_w = job_id.clone();
+    let log_path_w = log_path.clone();
+    std::thread::spawn(move || {
+        rt.block_on(async move {
+            let status = child.wait().await;
+            let (o, e) = join_drains(drain_stdout, drain_stderr, Duration::from_secs(3)).await;
+            ticker.abort();
+            let tail_now = live_tail.lock().map(|g| g.clone()).unwrap_or_default();
+            if !tail_now.is_empty() {
+                emit_shell_stream(
+                    &session_id_owned,
+                    &cmd_owned,
+                    &tail_now,
+                    stream_started.elapsed().as_millis() as u64,
+                );
+            }
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&o),
+                String::from_utf8_lossy(&e)
+            );
+            let _ = std::fs::write(&log_path_w, &combined);
+            let (status_str, error_kind) = match &status {
+                Ok(s) if s.success() => ("succeeded", None),
+                Ok(s) => ("failed", Some(format!("exit_code:{}", s.code().unwrap_or(-1)))),
+                Err(e) => ("failed", Some(format!("wait_error:{}", e))),
+            };
+            if !job_id_w.starts_with("untracked-") {
+                let tail = tail_of_file(&log_path_w, 4096);
+                let result = json!({
+                    "exit_code": status.as_ref().ok().and_then(|s| s.code()),
+                    "pid": child_pid,
+                    "log_path": log_path_w.display().to_string(),
+                    "tail": tail,
+                    "promoted_from": "sync_timeout",
+                });
+                let _ = crate::agent::job_engine::finish_job(
+                    &db_state,
+                    &job_id_w,
+                    status_str,
+                    0,
+                    Some(&result.to_string()),
+                    error_kind.as_deref(),
+                );
+            }
+        });
+    });
+
+    let pid_txt = child_pid.map(|p| p.to_string()).unwrap_or_else(|| "?".into());
+    let mut stdout = format!(
+        "⏱ [同步等待到点] 命令已运行 {} 秒仍未结束——未杀死，已转后台任务，去留由你裁决\njob_id: {}\npid: {}\n命令仍在运行中，下一步任选其一：\n· 继续等它跑完 → wait_jobs(job_ids:[\"{}\"]) 挂起等待\n· 判断卡死/跑偏要中止 → job_cancel(job_id:\"{}\")（或 local_shell `kill {}`）\n· 先干别的 → 完成自动进收件箱；但 finish 前必须回收本任务\n日志文件（命令结束后写入）: {}",
+        waited_secs, job_id, pid_txt, job_id, job_id, pid_txt, log_path.display()
+    );
+    if !partial.is_empty() {
+        stdout.push_str(&format!("\n--- 已产生的输出尾部 ---\n{}", partial));
+    }
+    DispatchResult { view: None,
+        stdout,
+        stderr: String::new(),
+        success: true,
+        route: "local_shell:promoted".to_string(),
+    }
+}
+
 fn execute_command_blocking(
+    db: &DbState,
     session_id: &str,
     cmd_str: &str,
     cwd: &Path,
@@ -853,7 +996,14 @@ fn execute_command_blocking(
             c.arg("/C").arg(cmd_str);
             c.current_dir(cwd);
             apply_child_env(&mut c, &enriched_path, &session_tmp_str, custom_env.as_ref());
-            c.spawn().map_err(|e| format_spawn_error(e, cmd_str, cwd, &enriched_path))?
+            match c.spawn() {
+                Ok(ch) => ch,
+                Err(e) => {
+                    return ExecWaitOutcome::Finished(Err(format_spawn_error(
+                        e, cmd_str, cwd, &enriched_path,
+                    )))
+                }
+            }
         };
 
         #[cfg(not(target_os = "windows"))]
@@ -861,9 +1011,16 @@ fn execute_command_blocking(
             let mut c = tokio::process::Command::new("sh");
             c.arg("-c").arg(cmd_str);
             c.current_dir(cwd);
-            c.process_group(0); // 独立进程组：以子进程为主导组长，方便超时按组整棵树杀死
+            c.process_group(0); // 独立进程组：超时转后台按组发信号可整棵树中止
             apply_child_env(&mut c, &enriched_path, &session_tmp_str, custom_env.as_ref());
-            c.spawn().map_err(|e| format_spawn_error(e, cmd_str, cwd, &enriched_path))?
+            match c.spawn() {
+                Ok(ch) => ch,
+                Err(e) => {
+                    return ExecWaitOutcome::Finished(Err(format_spawn_error(
+                        e, cmd_str, cwd, &enriched_path,
+                    )))
+                }
+            }
         };
 
         let child_pid = child.id();
@@ -901,103 +1058,120 @@ fn execute_command_blocking(
 
         let timeout_dur = Duration::from_secs(timeout_secs);
 
-        let outcome = match tokio::time::timeout(timeout_dur, child.wait()).await {
+        // 终局流收尾（仅 Finished 路径）：停 ticker、把尾部最后一次推给 UI。
+        // Promoted 路径不经过这里——它们随任务移交给后台看守线程继续流。
+        macro_rules! finish_stream {
+            () => {{
+                ticker.abort();
+                let final_tail = live_tail.lock().map(|g| g.clone()).unwrap_or_default();
+                if !final_tail.is_empty() {
+                    emit_shell_stream(
+                        &session_id_owned,
+                        &cmd_owned,
+                        &final_tail,
+                        stream_started.elapsed().as_millis() as u64,
+                    );
+                }
+            }};
+        }
+
+        match tokio::time::timeout(timeout_dur, child.wait()).await {
             Ok(Ok(status)) => {
                 let (stdout_bytes, stderr_bytes) =
                     join_drains(drain_stdout, drain_stderr, Duration::from_secs(3)).await;
-                Ok((status, stdout_bytes, stderr_bytes))
+                finish_stream!();
+                ExecWaitOutcome::Finished(Ok((status, stdout_bytes, stderr_bytes)))
             }
             Ok(Err(e)) => {
                 let _ = join_drains(drain_stdout, drain_stderr, Duration::from_secs(2)).await;
-                Err((
+                finish_stream!();
+                ExecWaitOutcome::Finished(Err((
                     "spawn_error".to_string(),
                     false,
                     true,
                     "check_command_path_and_permissions".to_string(),
                     format!("命令等待执行结果失败: {e}"),
-                ))
+                )))
             }
-            Err(_) => {
-                // 1. 发送 SIGTERM 软杀整个进程组（向负 PID 发信号）
-                if let Some(pid) = child_pid {
-                    kill_process_group(pid, "TERM");
-                }
-                // 2. 给予最多 1.5 秒优雅清理缓冲期，若超时未退则硬杀 (SIGKILL)
-                let exited = tokio::time::timeout(Duration::from_millis(1500), child.wait()).await;
-                if exited.is_err() {
-                    if let Some(pid) = child_pid {
-                        kill_process_group(pid, "KILL");
-                    }
-                    let _ = child.kill().await;
-                }
-
-                // 3. 收集被终止前已产生的部分输出附进错误——诊断线索不能再随超时整体丢弃
-                //    （"Debugger attached." 这类挂死因证据就写在 stderr 里）
-                let (stdout_bytes, stderr_bytes) =
-                    join_drains(drain_stdout, drain_stderr, Duration::from_secs(2)).await;
-                let mut err_msg = format!(
-                    "⚠️ [执行超时] 命令运行超过 {} 秒上限，已被系统强制终止杀死（已向进程树发送清理信号）。若这是预估本就超长的任务（视频渲染/大构建/批处理），请改用 `background: true` 转后台执行——不受此上限约束、日志落文件、wait_jobs 回收结果。",
-                    timeout_secs
-                );
-                let partial =
-                    truncate_output(&format!("{}{}", String::from_utf8_lossy(&stdout_bytes), String::from_utf8_lossy(&stderr_bytes)), 4096);
-                if !partial.is_empty() {
-                    err_msg.push_str(&format!("\n--- 被终止前的部分输出 ---\n{}", partial));
-                }
-
-                Err((
-                    "process_timeout".to_string(),
-                    true,
-                    false,
-                    "check_state_before_retry_or_increase_timeout".to_string(),
-                    err_msg,
-                ))
-            }
-        };
-
-        ticker.abort();
-        let final_tail = live_tail.lock().map(|g| g.clone()).unwrap_or_default();
-        if !final_tail.is_empty() {
-            emit_shell_stream(
-                &session_id_owned,
-                &cmd_owned,
-                &final_tail,
-                stream_started.elapsed().as_millis() as u64,
-            );
+            // 到点不杀：进程仍在跑，交还模型裁决（续等/中止两可）。
+            // rt/child/排空任务整体移交后台看守线程——ticker 与 live_tail
+            // 随任务移交，让转后台的命令继续向 UI 流式输出直至收尾。
+            Err(_) => ExecWaitOutcome::Promoted {
+                child,
+                drain_stdout,
+                drain_stderr,
+                ticker,
+                live_tail,
+                stream_started,
+                session_id_owned,
+                cmd_owned,
+                child_pid,
+            },
         }
-        outcome
     };
 
-    let run_in_rt = || -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), (String, bool, bool, String, String)> {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| (
-                "runtime_error".to_string(),
-                false,
-                true,
-                "retry".to_string(),
-                format!("创建 Tokio 运行时失败: {e}"),
-            ))?;
-        rt.block_on(fut)
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            return DispatchResult { view: None,
+                stdout: String::new(),
+                stderr: format!("❌ [系统错误] 创建 Tokio 运行时失败: {}", e),
+                success: false,
+                route: "local_shell:runtime".to_string(),
+            };
+        }
     };
 
-    let result = if tokio::runtime::Handle::try_current().is_ok() {
+    let outcome: ExecWaitOutcome = if tokio::runtime::Handle::try_current().is_ok() {
         // 若当前已在 Tokio 运行时内（如主循环/异步任务线程），派生独立 OS 线程运行独立的单线程 Tokio Reactor，
         // 既保障有完整的进程 Reactor 信号监听，又彻底消除"在运行时内重入启动运行时"或死锁隐患。
         std::thread::scope(|s| {
-            s.spawn(|| run_in_rt())
+            s.spawn(|| rt.block_on(fut))
                 .join()
-                .unwrap_or_else(|_| Err((
+                .unwrap_or_else(|_| ExecWaitOutcome::Finished(Err((
                     "thread_crashed".to_string(),
                     false,
                     false,
                     "check_host_system".to_string(),
                     "命令执行线程意外退出".to_string(),
-                )))
+                ))))
         })
     } else {
-        run_in_rt()
+        rt.block_on(fut)
+    };
+
+    let result = match outcome {
+        ExecWaitOutcome::Finished(res) => res,
+        ExecWaitOutcome::Promoted {
+            child,
+            drain_stdout,
+            drain_stderr,
+            ticker,
+            live_tail,
+            stream_started,
+            session_id_owned,
+            cmd_owned,
+            child_pid,
+        } => {
+            return promote_timed_out_shell(
+                db,
+                rt,
+                child,
+                drain_stdout,
+                drain_stderr,
+                ticker,
+                live_tail,
+                stream_started,
+                session_id_owned,
+                cmd_owned,
+                child_pid,
+                cwd,
+                timeout_secs,
+            );
+        }
     };
 
     let duration_ms = start_time.elapsed().as_millis();
@@ -1757,6 +1931,38 @@ mod tests {
         assert_eq!(status, "succeeded", "后台任务应以 succeeded 收官: {}", result_json);
         assert!(result_json.contains("\"exit_code\":0"), "result_json: {}", result_json);
         assert!(marker.exists(), "产物文件应由后台进程写出");
+    }
+
+    /// 同步等待窗口到点不杀：进程转后台继续跑完（marker 落盘为证），
+    /// 模型拿到 job 句柄自行裁决续等/中止。回归点：旧实现在此 SIGKILL，
+    /// 「马上完成」的任务被腰斩丢产物（ffmpeg moov 未写实测事故）。
+    #[test]
+    fn sync_timeout_promotes_instead_of_killing() {
+        let temp = TempDirGuard::new();
+        let ws = temp.path();
+        let db = test_db();
+        let marker = ws.join("promoted_marker.txt");
+        let cmd = format!("sleep 2; echo survived > {}", marker.display());
+        let res = dispatch(
+            &db,
+            "test_sess_promote",
+            "exec",
+            &json!({"command": cmd, "timeout_secs": 1}),
+            Some(ws),
+        );
+        assert!(res.success, "转后台应返回成功句柄而非超时错误: {}", res.stderr);
+        assert!(res.stdout.contains("去留由你裁决"), "应告知裁决权移交: {}", res.stdout);
+        assert!(
+            !res.stderr.contains("已被系统强制终止") && !res.stdout.contains("已被系统强制终止"),
+            "到点不应再出现杀死措辞"
+        );
+
+        // 等后台看守线程收尾：若旧行为仍在（到点 SIGKILL），marker 永不出现
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !marker.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        assert!(marker.exists(), "到点转后台后进程应自然跑完并落产物");
     }
 
     /// 卡死中止链路：长睡后台任务 → job 行取 pid → kill_process_group →
