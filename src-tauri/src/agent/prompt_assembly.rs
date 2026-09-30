@@ -271,6 +271,11 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
             "⚠️【基线提示】读取文件建议用 local_file(action: \"read\")——shell 读文件不建立乐观并发哈希基线，后续 write/edit 该既有文件会因缺基线被硬拦截",
         ],
     },
+    BuiltinToolSpec {
+        name: "view_image",
+        summary: "把图片文件拉进你的下一次调用（视觉信道）：截图/渲染帧/图表/原型图生成后想看内容时用；是否查看、看哪张由你判断，非强制。图片仅当轮可见、不落历史——看到的关键信息写进步骤文本，需再看就重新调用。支持 png/jpg/jpeg/webp/gif/bmp，≤8MB；视频不能直看——自行 ffmpeg 抽帧（contact sheet 最省）后看图",
+        actions: &["view_image(path: string) — 图片仅注入下一次 LLM 调用；本地白名单（工作区 ∪ 会话 tmp）内路径"],
+    },
 ];
 
 /// 从稳定的内置契约渲染首轮工具目录。

@@ -255,6 +255,18 @@ impl SandwichContext {
             });
         }
 
+        // view_image 一次性视觉注入：暂存队列随本轮请求出现一次，不落
+        // turns_history（路由层 has_pending_vision 同样认此队列，本轮即切视觉档）。
+        for (note, data_url) in &self.pending_view_images {
+            messages.push(ChatMessage {
+                role: "user".to_string(),
+                content: json!([
+                    { "type": "text", "text": note },
+                    { "type": "image_url", "image_url": { "url": data_url } }
+                ]),
+            });
+        }
+
         // ════════════════════════════════════════════════════════════════
         // 出口保持原始消息序列：组装层不做角色归并。
         // 归并是 provider 适配层的职责（见 llm_client 的
@@ -463,6 +475,31 @@ pub(crate) fn measure_prompt_breakdown(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// view_image 一次性注入契约：暂存队列出现在组装尾部（image_url 形态），
+    /// 但不写进 turns_history、不参与序列化——视觉载荷只在一次请求里可见。
+    #[test]
+    fn test_pending_view_images_injected_once_not_persisted() {
+        let mut ctx = SandwichContext::new("SYS".to_string(), "Goal".to_string());
+        ctx.pending_view_images.push((
+            "【view_image】你请求查看的图片: tmp/sheet.jpg".to_string(),
+            "data:image/jpeg;base64,QUJD".to_string(),
+        ));
+
+        let msgs = ctx.assemble_messages();
+        let last = msgs.last().expect("至少应有 pending 图片消息");
+        assert_eq!(last.role, "user");
+        let arr = last.content.as_array().expect("图片消息须为数组形态");
+        assert!(
+            arr.iter().any(|i| i.get("type").and_then(|t| t.as_str()) == Some("image_url")),
+            "末条消息须含 image_url 项"
+        );
+        // 队列不入历史流：turns_history 仍为空
+        assert!(ctx.turns_history.is_empty());
+        // 序列化不带 base64：checkpoint/持久化不得出现该载荷
+        let ser = serde_json::to_string(&ctx).unwrap();
+        assert!(!ser.contains("QUJD"), "pending_view_images 不得序列化落盘");
+    }
 
     #[test]
     fn test_measure_card_sections_splits_named_blocks() {

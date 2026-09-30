@@ -74,6 +74,7 @@ mod dispatch_child_writer;
 mod dispatch_jobs;
 mod dispatch_local;
 mod dispatch_resume_child;
+mod dispatch_view_image;
 mod dispatch_watch;
 
 /// 派发臂共享上下文：run_tool_phase 的入参打包，供各 dispatch_* 子模块使用。
@@ -131,6 +132,10 @@ pub async fn run_tool_phase(
         }
         None => inst,
     };
+    // view_image 一次性注入核销：上一步派发推入的图片已随本次 LLM 调用出现
+    // 过一轮，进入本轮派发即视为已消费——清空，避免滞留后续调用白占视觉档。
+    context.pending_view_images.clear();
+
     let instruction_tool = inst.get_tool();
     let instruction_action = inst.get_action();
     crate::agent::control::mark_stage(
@@ -587,6 +592,13 @@ pub async fn run_tool_phase(
         || inst.get_action().eq_ignore_ascii_case("resume_child")
     {
         match dispatch_resume_child::dispatch_resume_child(&mut ctx, inst).await? {
+            ArmOutcome::Early(r) => return Ok(r),
+            ArmOutcome::Done(r) => r,
+        }
+    } else if inst.get_tool().eq_ignore_ascii_case("view_image")
+        || inst.get_action().eq_ignore_ascii_case("view_image")
+    {
+        match dispatch_view_image::dispatch_view_image(&mut ctx, inst).await? {
             ArmOutcome::Early(r) => return Ok(r),
             ArmOutcome::Done(r) => r,
         }

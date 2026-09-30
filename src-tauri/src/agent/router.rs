@@ -592,7 +592,11 @@ impl AgentRouter {
     }
 
     /// 检查历史记录中是否包含需要视觉模型处理的多模态图片
+    /// （含 view_image 一次性注入队列——不落历史但本轮调用必须走视觉档）
     fn has_pending_vision(context: &SandwichContext) -> bool {
+        if !context.pending_view_images.is_empty() {
+            return true;
+        }
         for msg in context.turns_history.iter().rev() {
             if let Some(arr) = msg.content.as_array() {
                 for item in arr {

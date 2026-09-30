@@ -274,6 +274,13 @@ pub struct SandwichContext {
     /// 本次运行从之前任务继承的副作用数量（用于区分本轮是否有新增副作用）
     #[serde(default)]
     pub inherited_side_effects_count: usize,
+    /// view_image 一次性视觉注入队列（text_note, data_url）：图片不落
+    /// turns_history——落历史会让其后的每一次调用都占视觉档位并重复烧图
+    /// token。队列仅在下一次消息组装时出现一次，下一轮工具派发开始即清空；
+    /// "从图里看到了什么"由模型写进步骤文本自行沉淀（文本才持久）。
+    /// serde skip：base64 载荷永不进 checkpoint。
+    #[serde(skip, default)]
+    pub pending_view_images: Vec<(String, String)>,
     /// 当前任务待办清单 (Todo items)
     pub todo_list: Vec<TodoItem>,
     /// 复杂审查、诊断或研究任务的可审计完成契约；普通任务保持 None。
@@ -426,6 +433,7 @@ impl SandwichContext {
             written_file_digests: std::collections::BTreeMap::new(),
             git_dirty_lost: Vec::new(),
             inherited_side_effects_count: 0,
+            pending_view_images: Vec::new(),
             todo_list: Vec::new(),
             review_contract: None,
             block_manager: crate::agent::target_block::BlockManager::new(),
