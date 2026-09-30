@@ -465,11 +465,18 @@ pub fn dispatch(
     // 挂起回收或信箱自动送达。实测驱动：6 分钟渲染被 300s 上限连产物一起
     // 杀死（ffmpeg 中途 SIGKILL → moov 未写 → MP4 整段报废），同步模式
     // 的天花板是产品级缺陷而非保守策略。
-    if params
+    // 两种进入方式：显式 background:true，或 timeout_secs 声明超同步上限
+    // （模型报 6 分钟即等于宣告长任务——静默钳到 300s 再杀是坑人）。
+    let wants_background = params
         .get("background")
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
-    {
+        || params
+            .get("timeout_secs")
+            .and_then(|v| v.as_u64())
+            .map(|t| t > MAX_TIMEOUT_SECS)
+            .unwrap_or(false);
+    if wants_background {
         return spawn_background_shell(db, session_id, &final_cmd, &execution_cwd, custom_env);
     }
 
