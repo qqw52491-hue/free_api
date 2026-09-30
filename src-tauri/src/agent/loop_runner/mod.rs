@@ -576,6 +576,13 @@ pub async fn run_tool_phase(
             ArmOutcome::Early(r) => return Ok(r),
             ArmOutcome::Done(r) => r,
         }
+    } else if inst.get_tool().eq_ignore_ascii_case("job_cancel")
+        || inst.get_action().eq_ignore_ascii_case("job_cancel")
+    {
+        match dispatch_jobs::dispatch_job_cancel(&mut ctx, inst).await? {
+            ArmOutcome::Early(r) => return Ok(r),
+            ArmOutcome::Done(r) => r,
+        }
     } else if inst.get_tool().eq_ignore_ascii_case("resume_child")
         || inst.get_action().eq_ignore_ascii_case("resume_child")
     {

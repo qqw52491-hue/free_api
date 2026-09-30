@@ -260,3 +260,130 @@ pub(super) async fn dispatch_wait_jobs(
 fn project_job_result_for_model(job: &crate::agent::job_engine::BackgroundJobResult) -> String {
     job.model_projection()
 }
+
+/// 后台任务主动中止（job_cancel）：模型判定后台任务卡死/跑偏/不再需要时
+/// 显式终止——只处理 job_type='shell'（有 pid 的进程组可杀）；watch 走
+/// watch_stop、子任务走对质/仲裁通道，不在此合并。
+/// 杀信号走 TERM→存活检测→KILL 双阶段；终态落库由 spawn 时的看守线程
+/// （wait() 返回后 finish_job）负责——本臂只发信号、不抢写状态，保持
+/// "信号来源可多方，状态写只有看守一处"的单写者纪律。
+pub(super) async fn dispatch_job_cancel(
+    ctx: &mut DispatchCtx<'_>,
+    inst: &AgentInstruction,
+) -> Result<ArmOutcome, String> {
+    Ok(ArmOutcome::Done({
+        let params = inst.get_params();
+        let job_id = params
+            .get("job_id")
+            .or_else(|| params.get("id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if job_id.is_empty() {
+            return Ok(ArmOutcome::Done(DispatchResult { view: None,
+                stdout: String::new(),
+                stderr: "❌ 缺少必填参数 job_id".to_string(),
+                success: false,
+                route: "job_cancel:missing".to_string(),
+            }));
+        }
+
+        let conn = match ctx.state.inner().0.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(ArmOutcome::Done(DispatchResult { view: None,
+                    stdout: String::new(),
+                    stderr: format!("❌ DB 锁获取失败: {}", e),
+                    success: false,
+                    route: "job_cancel:db".to_string(),
+                }));
+            }
+        };
+        let row: Option<(String, String, String)> = conn
+            .query_row(
+                "SELECT status, job_type, params_json FROM agent_background_jobs WHERE id=?1",
+                rusqlite::params![job_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .ok();
+        drop(conn);
+
+        let (status, job_type, params_json) = match row {
+            Some(r) => r,
+            None => {
+                return Ok(ArmOutcome::Done(DispatchResult { view: None,
+                    stdout: String::new(),
+                    stderr: format!("❌ 未找到后台任务 {}", job_id),
+                    success: false,
+                    route: "job_cancel:not_found".to_string(),
+                }));
+            }
+        };
+
+        if status != "running" {
+            return Ok(ArmOutcome::Done(DispatchResult { view: None,
+                stdout: format!("ℹ️ 任务 {} 已是终态（{}），无需中止。", job_id, status),
+                stderr: String::new(),
+                success: true,
+                route: "job_cancel:already_terminal".to_string(),
+            }));
+        }
+
+        if job_type != "shell" {
+            return Ok(ArmOutcome::Done(DispatchResult { view: None,
+                stdout: String::new(),
+                stderr: format!(
+                    "⚠️ 任务类型 [{}] 不支持 job_cancel 中止：watch 监听用 watch_stop，子任务用 resume_child 对质或人工仲裁。",
+                    job_type
+                ),
+                success: false,
+                route: "job_cancel:unsupported_type".to_string(),
+            }));
+        }
+
+        let pid = serde_json::from_str::<serde_json::Value>(&params_json)
+            .ok()
+            .and_then(|v| v.get("pid").and_then(|p| p.as_u64()))
+            .map(|p| p as u32);
+        let Some(pid) = pid else {
+            return Ok(ArmOutcome::Done(DispatchResult { view: None,
+                stdout: String::new(),
+                stderr: format!(
+                    "⚠️ 任务 {} 行内无 pid 记录（可能来自旧版本启动），无法精确中止；可用 local_shell 按日志路径名手查进程后 kill。",
+                    job_id
+                ),
+                success: false,
+                route: "job_cancel:no_pid".to_string(),
+            }));
+        };
+
+        // TERM 软杀 → 800ms 后存活则 KILL 补刀（卡死场景 TERM 可能无效）
+        crate::agent::tools::local_shell::kill_process_group(pid, "TERM");
+        let still_alive = {
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            #[cfg(unix)]
+            {
+                std::path::Path::new(&format!("/proc/{}", pid)).exists()
+            }
+            #[cfg(not(unix))]
+            {
+                false // windows taskkill /F 已足够；不做二次探测
+            }
+        };
+        if still_alive {
+            crate::agent::tools::local_shell::kill_process_group(pid, "KILL");
+        }
+
+        DispatchResult { view: None,
+            stdout: format!(
+                "🛑 已向后台任务 {} (pid {}, 进程组) 发送终止信号{}。终态与退出码由看守线程落库，稍后可用 wait_jobs 收取结论。",
+                job_id,
+                pid,
+                if still_alive { "（TERM 未响应已补 SIGKILL）" } else { "" }
+            ),
+            stderr: String::new(),
+            success: true,
+            route: "job_cancel:sent".to_string(),
+        }
+    }))
+}

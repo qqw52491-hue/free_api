@@ -107,7 +107,8 @@ pub fn build_full_command(command: &str, args: &[String]) -> String {
 }
 
 /// 杀灭子进程树 / 进程组（防止孤儿后台进程残留）
-fn kill_process_group(pid: u32, signal: &str) {
+/// pub(crate)：job_cancel 中止后台 shell 任务与同步超时的双阶段杀灭共用此口径。
+pub(crate) fn kill_process_group(pid: u32, signal: &str) {
     #[cfg(unix)]
     {
         // 负 PID (-pid) 表示向以 pid 为组长的整个子进程组发送信号，防止子进程树孤儿泄漏
@@ -613,6 +614,13 @@ fn spawn_background_shell(
 
     // 看守线程：wait() 收尸 → 退出码+日志尾回填 job → 广播唤醒 wait_jobs
     let child_pid = child.id();
+    // pid 持久化进 job 行：job_cancel 中止、会话恢复后审计都要能按 pid 找回进程
+    if let Ok(conn) = db.0.lock() {
+        let _ = conn.execute(
+            "UPDATE agent_background_jobs SET params_json = json_set(params_json, '$.pid', ?1) WHERE id = ?2",
+            rusqlite::params![child_pid, job_id],
+        );
+    }
     let db_state = DbState(db.0.clone());
     let job_id_w = job_id.clone();
     let log_path_w = log_path.clone();
@@ -1742,5 +1750,53 @@ mod tests {
         assert_eq!(status, "succeeded", "后台任务应以 succeeded 收官: {}", result_json);
         assert!(result_json.contains("\"exit_code\":0"), "result_json: {}", result_json);
         assert!(marker.exists(), "产物文件应由后台进程写出");
+    }
+
+    /// 卡死中止链路：长睡后台任务 → job 行取 pid → kill_process_group →
+    /// 看守线程 wait() 返回后写终态。覆盖"模型发现卡死可主动 kill"的诉求。
+    #[test]
+    fn background_job_is_killed_and_row_turns_terminal() {
+        let temp = TempDirGuard::new();
+        let ws = temp.path();
+        let db = test_db();
+        let res = dispatch(
+            &db,
+            "test_sess_bg_kill",
+            "exec",
+            &json!({"command": "sleep 300", "timeout_secs": 60, "background": true}),
+            Some(ws),
+        );
+        assert!(res.success);
+        let job_id = res.stdout.split("job_id: ").nth(1)
+            .and_then(|s| s.lines().next()).unwrap_or("").trim().to_string();
+
+        // pid 已持久化进 params_json
+        let pid: u32 = {
+            let conn = db.0.lock().unwrap();
+            let pj: String = conn
+                .query_row("SELECT params_json FROM agent_background_jobs WHERE id=?1",
+                    rusqlite::params![job_id], |r| r.get(0))
+                .unwrap();
+            serde_json::from_str::<serde_json::Value>(&pj).unwrap()
+                .get("pid").unwrap().as_u64().unwrap() as u32
+        };
+
+        kill_process_group(pid, "TERM");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        let mut status = String::new();
+        while std::time::Instant::now() < deadline {
+            let conn = db.0.lock().unwrap();
+            let s: Option<String> = conn
+                .query_row("SELECT status FROM agent_background_jobs WHERE id=?1",
+                    rusqlite::params![job_id], |r| r.get(0))
+                .ok();
+            drop(conn);
+            if let Some(s) = s {
+                if s != "running" { status = s; break; }
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        assert_eq!(status, "failed", "被 TERM 杀掉的后台任务应落 failed 终态");
     }
 }

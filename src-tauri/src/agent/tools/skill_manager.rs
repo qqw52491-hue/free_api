@@ -773,6 +773,10 @@ mod tests {
         p
     }
 
+    /// FREE_API_SKILLS_DIR 是进程级全局——并行测试互踩会让文件落到对方的
+    /// 根目录。install 测试一律持此锁串行化（实测真踩到：root vs root2 竞争）。
+    static SKILLS_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// install 全链路（本地源路径分支）：复制 → 探测 SKILL.md → 登记 DB 卡片。
     /// 实证驱动：opus-video-skills 这类多技能仓 install 后应逐技能登记，
     /// 且卡片正文带本地手册路径指路。
@@ -787,6 +791,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(skill_dir.join("template").join("reel.js"), "// template").unwrap();
+        let _env_guard = SKILLS_DIR_ENV_LOCK.lock().unwrap();
         let skills_root = tmp_dir("root");
         std::env::set_var("FREE_API_SKILLS_DIR", &skills_root);
 
@@ -835,6 +840,7 @@ mod tests {
     fn install_without_skill_md_returns_manifest_not_card() {
         let src = tmp_dir("noskill");
         std::fs::write(src.join("README.md"), "# just a lib").unwrap();
+        let _env_guard = SKILLS_DIR_ENV_LOCK.lock().unwrap();
         let skills_root = tmp_dir("root2");
         std::env::set_var("FREE_API_SKILLS_DIR", &skills_root);
 

@@ -118,6 +118,11 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         actions: &["wait_jobs(job_ids?: string[], timeout_secs?: number)"],
     },
     BuiltinToolSpec {
+        name: "job_cancel",
+        summary: "主动中止仍在运行的后台 shell 任务（local_shell background:true 派发的）：按 pid 发 TERM→KILL 双阶段杀进程组；判定任务卡死（日志长期无进展）、跑偏或不再需要时使用",
+        actions: &["job_cancel(job_id: string)"],
+    },
+    BuiltinToolSpec {
         name: "resume_child",
         summary: "追问/对质已完成的子任务：继承其脱水对话历史（writer 额外继承工作区副本），以半量步数预算继续攻坚；对 reviewer 的追问用于反驳指定 finding ID 并要求其 withdraw(撤回)/uphold(坚持)/revise(修正)；需提供 child_run_id 与追问 message",
         actions: &[
