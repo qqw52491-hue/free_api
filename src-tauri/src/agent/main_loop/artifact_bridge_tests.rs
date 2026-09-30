@@ -1,4 +1,4 @@
-    use super::{build_touched_set, extend_touched_with_session_tmp, normalize_tmp_declared, tmp_target_near_misses};
+    use super::{build_touched_set, declared_target_touched_on_fs, extend_touched_with_session_tmp, normalize_tmp_declared, tmp_target_near_misses};
     use crate::agent::finish_guard::{diff::file_paths_match, DiffContext};
     use std::path::PathBuf;
 
@@ -178,6 +178,46 @@
         );
         assert!(touched.iter().any(|p| p == "tmp/node_modules"));
         assert!(touched.len() < 4000);
+
+        // 直查通道（冗余验证）：声明相对路径 → session_tmp 落点 mtime 命中
+        let run_start_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            - 60_000; // run 起点宽松回退 1 分钟
+        assert!(declared_target_touched_on_fs(
+            "anime_story/src/scenes/robot_editor.js",
+            &session_tmp,
+            &session_tmp,
+            run_start_ms,
+        ));
+        // run 起点之后的"未来窗口"不算数（核验的是本轮改动而非存在性）
+        assert!(!declared_target_touched_on_fs(
+            "anime_story/src/scenes/robot_editor.js",
+            &session_tmp,
+            &session_tmp,
+            run_start_ms + 3_600_000,
+        ));
+        // 不存在的目标不命中
+        assert!(!declared_target_touched_on_fs(
+            "anime_story/src/scenes/nonexistent.js",
+            &session_tmp,
+            &session_tmp,
+            run_start_ms,
+        ));
+        // tmp/ 前缀与 session-tmp:// URI 形态同样解析
+        assert!(declared_target_touched_on_fs(
+            "tmp/anime_magic_sprout.mp4",
+            &session_tmp,
+            &session_tmp,
+            run_start_ms,
+        ));
+        assert!(declared_target_touched_on_fs(
+            "session-tmp://anime_magic_sprout.mp4",
+            &session_tmp,
+            &session_tmp,
+            run_start_ms,
+        ));
 
         let _ = std::fs::remove_dir_all(&session_tmp);
     }

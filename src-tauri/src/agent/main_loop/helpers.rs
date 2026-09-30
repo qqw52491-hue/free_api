@@ -285,6 +285,47 @@ pub(crate) fn tmp_target_near_misses(
         .collect()
 }
 
+/// 声明目标的直接物理核验：解析候选落点 → stat mtime ≥ 本轮 run 起点。
+/// 与对账集成员资格互为冗余通道——对账集是「扫目录建名单再查名」（有容量/
+/// 枚举顺序问题，12K 垃圾实体会饿死真目标）；本通道是「拿声明路径直接问
+/// 文件系统」，O(声明数) 次 stat，永不漏收。
+/// 候选落点：tmp/rel·session-tmp://rel·物理 session_tmp 前缀 → session_tmp 下；
+/// workspace://rel → 工作区下；裸相对路径两区都试（模型相对其工作根声明，
+/// 自由会话下工作根即 session_tmp）。
+pub(crate) fn declared_target_touched_on_fs(
+    target: &str,
+    session_tmp: &std::path::Path,
+    workspace_dir: &std::path::Path,
+    run_started_ms: i64,
+) -> bool {
+    let t = target.trim();
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(rest) = t.strip_prefix("session-tmp://") {
+        candidates.push(session_tmp.join(rest.trim_start_matches('/')));
+    } else if let Some(rest) = t.strip_prefix("workspace://") {
+        candidates.push(workspace_dir.join(rest.trim_start_matches('/')));
+    } else if let Some(rest) = t.strip_prefix("tmp/").or_else(|| t.strip_prefix("./tmp/")) {
+        candidates.push(session_tmp.join(rest));
+    } else if std::path::Path::new(t).is_absolute() {
+        candidates.push(std::path::PathBuf::from(t));
+    } else {
+        candidates.push(workspace_dir.join(t));
+        candidates.push(session_tmp.join(t));
+    }
+    candidates.iter().any(|p| {
+        std::fs::metadata(p)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|mt| {
+                mt.duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| d.as_millis() as i64)
+            })
+            .map(|ms| ms >= run_started_ms)
+            .unwrap_or(false)
+    })
+}
+
 /// 渲染每轮投射到 M_Tail 的可操作文件边界卡片。
 ///
 /// 文案与 path_guard 路由规则、artifact_manager 登记入口、finish 门禁的

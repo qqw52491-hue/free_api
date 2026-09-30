@@ -2302,7 +2302,12 @@ async fn run_agent_main_loop_in_workspace_inner(
                                     &normalize_tmp_declared(tf, &session_tmp),
                                     p,
                                 )
-                            })
+                            }) || declared_target_touched_on_fs(
+                                tf,
+                                &session_tmp,
+                                &workspace_dir,
+                                run_started_at.timestamp_millis(),
+                            )
                         })
                     })
                     .unwrap_or(false);
