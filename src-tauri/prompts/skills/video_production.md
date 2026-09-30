@@ -66,13 +66,19 @@ node render.mjs --encode --audio=<score.m4a> --out=out/reel.mp4 --fps=30
 ffprobe -v error -show_entries format=duration -i out/reel.mp4  # 核验
 ```
 
-**Linux 环境已验证的两个硬坑**（实测血泪，直接照做）：
+**Linux 环境已验证的硬坑**（实测血泪，直接照做）：
+- **Chrome 路径**：本机 Chrome 在 `/usr/bin/google-chrome-stable`——
+  new_project.sh/render.mjs 的自动探测名单不含这个名字，所有 render.mjs
+  调用必须带 `--chrome=/usr/bin/google-chrome-stable` 或先导
+  `export CHROME_PATH=/usr/bin/google-chrome-stable`
 - Chromium `--user-data-dir` 必须用**短路径**（如 `/tmp/p5chrome`），过深触发
   SingletonSocket 108 字符上限 → 启动静默失败/全黑帧
 - `renderer.domElement` 必须 `document.body.appendChild` 挂载——否则 canvas
   不存在，Puppeteer 截图必黑
 - 确定性渲染：禁用 `millis()`/`requestAnimationFrame` 实时循环，帧态只能是
   `frameIdx`/`t` 的纯函数
+- 本机已实测：`new_project.sh` 脚手架 + `render.mjs --sheet` 接触表渲染
+  全链路可跑通（node v26 + ffmpeg + google-chrome-stable）
 
 ## 4. 交付披露义务
 
