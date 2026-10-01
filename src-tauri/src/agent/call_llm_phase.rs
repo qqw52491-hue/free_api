@@ -343,6 +343,10 @@ pub async fn run_call_llm_and_run_tool_phases(
             last_thinking_text = r.2.clone();
             r
         });
+        // view_image 一次性视觉注入核销：pending_view_images 已随本次请求
+        // 组装发出（成败同义——载荷已消费），此处清空。派发臂本次推入的新图
+        // 在本行之后才进队列，不受影响，留给下一次调用。
+        context.pending_view_images.clear();
         let (mut inst, token_usage, thinking_text, history_estimate_at_request) = match llm_call_result
         {
             Err(e) if e == crate::llm::STREAM_INTERRUPTED_ERROR => {

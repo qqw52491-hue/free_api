@@ -336,6 +336,22 @@ impl AgentRouter {
         config: &ModelRoutingConfig,
         step_id: usize,
     ) -> RoutingDecision {
+        // 视觉最高优先级，不可覆盖：队列/历史里有图就必须走视觉档——
+        // 角色钉死（role_models）若先于本检查返回，图片会发给纯文本模型等于没看。
+        if Self::has_pending_vision(context) {
+            // vision 槽空时回退 pro→flash（与 schedule_manager 同惯例）：
+            // 空 model_id 会把调用直接打挂——宁可降级发图，不可丢图炸步。
+            let model_id = [&config.vision, &config.pro, &config.flash]
+                .into_iter()
+                .find(|m| !m.is_empty())
+                .cloned()
+                .unwrap_or_default();
+            return RoutingDecision {
+                model_id,
+                tier: RoutingTier::Vision,
+                reason: "当前上下文包含截图/图片，必须使用视觉模型处理".to_string(),
+            };
+        }
         if config.force_pro_on_first_step && step_id == 0 {
             return RoutingDecision {
                 model_id: config.pro.clone(),
@@ -723,6 +739,55 @@ mod tests {
             role: "user".to_string(),
             content: serde_json::json!(text),
         });
+    }
+
+    /// view_image 一次性注入：队列非空即必须切视觉档——该队列不落历史，
+    /// has_pending_vision 是唯一感知它的通道；漏判 = 图片发出去了却没人看。
+    #[test]
+    fn pending_view_image_forces_vision_tier() {
+        let config = mixed_config();
+        let mut context = SandwichContext::new("system".to_string(), "目标".to_string());
+        push_user_turn(&mut context, "上一步执行输出：render ok");
+        assert_eq!(AgentRouter::route(&context, &config).tier, RoutingTier::Flash);
+
+        context.pending_view_images.push((
+            "【view_image】sheet.jpg".to_string(),
+            "data:image/jpeg;base64,QUJD".to_string(),
+        ));
+        let d = AgentRouter::route(&context, &config);
+        assert_eq!(d.tier, RoutingTier::Vision, "pending 图片必须切视觉档");
+        assert_eq!(d.model_id, "model-vision");
+
+        // 消费后（请求返回核销）回落普通路由
+        context.pending_view_images.clear();
+        assert_eq!(AgentRouter::route(&context, &config).tier, RoutingTier::Flash);
+    }
+
+    /// 实测事故回归：角色卡钉死 executor→flash 时，view_image 注入的图曾被
+    /// 发给纯文本模型（role_override 短路在视觉检查之前）。视觉是不可覆盖
+    /// 的硬规则——钉死也不能抢在它前面。
+    #[test]
+    fn pending_view_image_beats_role_pin() {
+        let mut config = mixed_config();
+        config
+            .role_models
+            .insert(crate::agent::router::roles::EXECUTOR.to_string(), "model-flash".to_string());
+        let mut context = SandwichContext::new("system".to_string(), "目标".to_string());
+        push_user_turn(&mut context, "上一步执行输出：render ok");
+        context.pending_view_images.push((
+            "【view_image】sheet.jpg".to_string(),
+            "data:image/jpeg;base64,QUJD".to_string(),
+        ));
+        let d = AgentRouter::route_for_step(&context, &config, 7);
+        assert_eq!(d.tier, RoutingTier::Vision, "executor 钉死不得压过视觉硬规则");
+        assert_eq!(d.model_id, "model-vision");
+
+        // vision 槽空时回退（钉死的 flash 也比空 model_id 强——至少能发出去）
+        let mut config2 = ModelRoutingConfig { vision: String::new(), ..mixed_config() };
+        config2.role_models.clone_from(&config.role_models);
+        let d2 = AgentRouter::route_for_step(&context, &config2, 7);
+        assert_eq!(d2.tier, RoutingTier::Vision);
+        assert_eq!(d2.model_id, "model-pro", "vision 空槽应回退 pro");
     }
 
     fn mixed_config() -> ModelRoutingConfig {

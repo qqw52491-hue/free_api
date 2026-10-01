@@ -276,7 +276,8 @@ pub struct SandwichContext {
     pub inherited_side_effects_count: usize,
     /// view_image 一次性视觉注入队列（text_note, data_url）：图片不落
     /// turns_history——落历史会让其后的每一次调用都占视觉档位并重复烧图
-    /// token。队列仅在下一次消息组装时出现一次，下一轮工具派发开始即清空；
+    /// token。队列仅在下一次消息组装时随请求出现，该请求返回即清空
+    /// （核销点=载荷真实离手处，与派发顺序无关）；
     /// "从图里看到了什么"由模型写进步骤文本自行沉淀（文本才持久）。
     /// serde skip：base64 载荷永不进 checkpoint。
     #[serde(skip, default)]

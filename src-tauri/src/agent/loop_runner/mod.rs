@@ -132,10 +132,6 @@ pub async fn run_tool_phase(
         }
         None => inst,
     };
-    // view_image 一次性注入核销：上一步派发推入的图片已随本次 LLM 调用出现
-    // 过一轮，进入本轮派发即视为已消费——清空，避免滞留后续调用白占视觉档。
-    context.pending_view_images.clear();
-
     let instruction_tool = inst.get_tool();
     let instruction_action = inst.get_action();
     crate::agent::control::mark_stage(
