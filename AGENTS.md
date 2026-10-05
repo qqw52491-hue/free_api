@@ -52,10 +52,12 @@
 
 triage 判决、plan、假设清单都是**先验**，不是终判。后续证据必须能显式推翻：
 
-- 已有通道：submit_plan + revision_reason、scope_extension、human_waivers、
-  新文件写入触发升级审查、Reviewer 打回；
-- **已知缺口**：triage verdict 本身无修订通道。触发建设条件 =
-  首次出现"判决判错且造成实际损害"的实测 run，再建不迟。
+- 已有通道：request_retriage（模型主动复核，追加落 triage_revisions，
+  原判决不改写；每 run 限 1 次）、submit_plan + revision_reason、
+  scope_extension、human_waivers、新文件写入触发升级审查、Reviewer 打回；
+- **残余边界**：retriage 只能由执行模型主动发起——宿主侧无主动重判
+  （里程点兜底 FREE_API_RETRIAGE_MILESTONE_STEPS 为实验，默认关）；
+  原判决永不改写是刻意取舍（审计链完整 vs 旧判决残留在上下文）。
 - **建设时按不对称规则**：升维自治、降维上报——带证据申请加严
   门禁可自行重判（给自己加约束无利益冲突）；申请放宽审查强度
   一律拒绝或 ask_human 裁决（模型自批减少自身监管不可信）。
@@ -140,6 +142,7 @@ node scripts/eval_runner.mjs --case <case> --live --model <id>  # 实弹评测
 
 评测基建：`test/eval_cases/`（考题+机械判据），报告落 `agent_evaluations/`。
 改 agent 行为后先用评测说话，不靠"看起来更合理"。
+| 2026-10-05 | 会话级联清理改注册表时发现 `agent_stage_marks`/`agent_card_sections`/`agent_gate_fires` 三张 session 表从未进删除清单（手写 DELETE 注释自称「覆盖全部 16 张表」） | **注释式完备性保证无强制力**——手写清单必随表增长漂移，漏登记=孤儿行静默残留 | 已修：`SESSION_SCOPED_TABLES` 注册表驱动删会话+孤儿清扫两路径；反射测试按「每张表显式归属（注册表或豁免单）」强制兑现，漏登记=测试红 |
 | 2026-09-26 | demo_fullstack_split PASS（16 步直写）+ demo_fullstack_team FAIL（16 步，模型把后端改成 .cjs 违犯题面钉死文件名——判据拦规格偏离合法） | **分工主动性实测**：两道小到中等绿野题模型均判"太小不值派"自写——child_writer 机制通但主动性阈值比预想高；spec 钉死文件名被改=.cjs 时判据拦下是对的不是过窄 | 机制不动；领域卡已种（backend_writer→glm-5.2 / frontend_writer→flash-high）待大题验证主动分工 |
 | 2026-09-26 | 绿野分工观察连跑 5 场（split 3文件/team 6/big 9/xl 13/dual 双独立交付物）：**零次 writer 派发**，模型全自写——分工机制完备但主动性阈值高于预期 | **分工触发语义阈值**：中小绿野活模型判定"自写更快"；真正派工兵发生在 hd 排查题中段的"隔离机械修改"形态。判据脚本自身是第四类烂源（big 场 cwd 拼错/dual 场变量遮蔽，连续两场判据自伤判红） | 机制不动（阈值合理）；判据工程化教训：判据脚本需"已知良品回放"自验再上考场 |
 | 2026-09-27 | run b58a0d5d 实弹解剖：模型 cargo check/test 连挂 3 轮+乱读 5 个文件找错因——`local_shell` 非零退出时 `DispatchResult.stderr` 只写"命令退出码:N"，真实编译诊断全留在 stdout 而重试链路只回传 stderr | **失败反馈通道丢诊断=制造盲改**：模型看见 exit 101 却看不见 rustc 原话，只能把读文件当试错。归属"信息给够了吗"环——给的不够 | 已修（stderr 附 60 行诊断尾）；教训：凡"失败只报状态码不报证据"的工具回执都是同款病灶候选 |

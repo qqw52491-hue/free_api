@@ -12,6 +12,101 @@ pub type ReadPool = Pool<SqliteConnectionManager>;
 
 use super::*;
 
+/// 会话键形态：决定「按会话删除」与「孤儿清扫」两种谓词的写法。
+#[derive(Clone, Copy)]
+enum SessionKey {
+    /// `session_id` 直键（绝大多数会话级表）
+    SessionId,
+    /// `parent_session_id` 直键（子运行/后台任务）
+    ParentSessionId,
+    /// `run_id` 直键且取值即 session_id（agent_checkpoints）
+    RunIdIsSessionId,
+    /// 无会话键，经 agent_task_resources.resource_id 桥接
+    ViaTaskResources,
+    /// 无会话键，经 agent_run_traces.id 桥接
+    ViaRunTraces,
+}
+
+impl SessionKey {
+    /// 按会话删除谓词（?1 = session_id）。
+    /// 桥接型在桥表行上求值 → 桥接子表必须先于桥表出现在注册表里。
+    fn by_session(self) -> &'static str {
+        match self {
+            Self::SessionId => "session_id=?1",
+            Self::ParentSessionId => "parent_session_id=?1",
+            Self::RunIdIsSessionId => "run_id=?1",
+            Self::ViaTaskResources => {
+                "resource_id IN (SELECT resource_id FROM agent_task_resources WHERE session_id=?1)"
+            }
+            Self::ViaRunTraces => {
+                "run_id IN (SELECT id FROM agent_run_traces WHERE session_id=?1)"
+            }
+        }
+    }
+
+    /// 孤儿清扫谓词（所属会话已不存在的行）。桥接型写成顺序无关形式：
+    /// 「桥行已死」与「桥行属死会话」两态并查，不依赖注册表迭代顺序。
+    fn orphan(self) -> &'static str {
+        match self {
+            Self::SessionId => "session_id NOT IN (SELECT id FROM chat_sessions)",
+            Self::ParentSessionId => "parent_session_id NOT IN (SELECT id FROM chat_sessions)",
+            Self::RunIdIsSessionId => "run_id NOT IN (SELECT id FROM chat_sessions)",
+            Self::ViaTaskResources => {
+                "resource_id NOT IN (SELECT resource_id FROM agent_task_resources) \
+                 OR resource_id IN (SELECT resource_id FROM agent_task_resources \
+                 WHERE session_id NOT IN (SELECT id FROM chat_sessions))"
+            }
+            Self::ViaRunTraces => {
+                "run_id NOT IN (SELECT id FROM agent_run_traces) \
+                 OR run_id IN (SELECT id FROM agent_run_traces \
+                 WHERE session_id NOT IN (SELECT id FROM chat_sessions))"
+            }
+        }
+    }
+}
+
+/// 会话级数据表注册表：delete_session_completely 与孤儿清扫的唯一事实源。
+/// 历史教训：手写 DELETE 清单注释自称「覆盖全部 16 张表」，实测漏登
+/// agent_stage_marks / agent_card_sections / agent_gate_fires 三张会话表——
+/// 本表由 `session_scoped_registry_covers_schema` 反射测试兜底，漏登记 = 测试红。
+/// 顺序约束：桥接子表必须先于桥表（by_session 谓词在桥表行还在时求值）。
+const SESSION_SCOPED_TABLES: &[(&str, SessionKey)] = &[
+    ("agent_task_records", SessionKey::ViaTaskResources),
+    ("agent_task_resources", SessionKey::SessionId),
+    ("agent_checkpoints", SessionKey::RunIdIsSessionId),
+    ("agent_checkpoint_history", SessionKey::SessionId),
+    ("agent_run_steps", SessionKey::ViaRunTraces),
+    ("agent_run_traces", SessionKey::SessionId),
+    ("agent_child_runs", SessionKey::ParentSessionId),
+    ("agent_background_jobs", SessionKey::ParentSessionId),
+    ("agent_llm_calls", SessionKey::SessionId),
+    ("agent_artifacts", SessionKey::SessionId),
+    ("agent_step_logs_fts", SessionKey::SessionId),
+    ("agent_step_logs", SessionKey::SessionId),
+    ("agent_memory_nodes_fts", SessionKey::SessionId),
+    ("agent_memory_nodes", SessionKey::SessionId),
+    ("agent_lesson_recalls", SessionKey::SessionId),
+    ("agent_card_sections", SessionKey::SessionId),
+    ("agent_gate_fires", SessionKey::SessionId),
+    ("agent_stage_marks", SessionKey::SessionId),
+    ("chat_messages", SessionKey::SessionId),
+    ("agent_project_sessions", SessionKey::SessionId),
+];
+
+/// 非会话级表归属白名单：新增表必须在 SESSION_SCOPED_TABLES 与本表之间
+/// 二选一登记——反射测试按「每张表都有归属」强制兑现，杜绝「忘了想」型泄漏。
+const SESSION_CLEANUP_EXEMPT: &[(&str, &str)] = &[
+    ("chat_sessions", "会话根表：级联的终点而非对象"),
+    ("platforms", "全局渠道配置，跨会话共享"),
+    ("models", "全局模型配置，随平台级联"),
+    ("agent_projects", "项目级实体，生命周期归项目删除路径"),
+    ("agent_project_resources", "项目级资源，FK 随 agent_projects 级联"),
+    ("agent_role_cards", "全局角色卡配置"),
+    ("agent_custom_instructions", "全局自定义提示词/Skill"),
+    ("mcp_plugins", "全局 MCP 插件配置"),
+    ("model_specs", "全局模型规格词典"),
+];
+
 /// 启动清理：上次进程遗留的 running trace 标记为已中断。
 /// runs_store 不跨进程存活，应用重启后这些任务不可能再恢复执行；
 /// 不清理会让会话历史里永远挂着"运行中"的僵尸记录（微信复用会话尤其明显）。
@@ -99,32 +194,12 @@ pub fn delete_session_completely(
         }
     }
 
-    // 3. 严格级联清理所有关联表（覆盖全部 16 张表，包含子审查员历史、Telemetry 指标、产物账本等）
-    let _ = conn.execute(
-        "DELETE FROM agent_task_records WHERE resource_id IN (SELECT resource_id FROM agent_task_resources WHERE session_id=?1)",
-        rusqlite::params![id],
-    );
-    let _ = conn.execute("DELETE FROM agent_task_resources WHERE session_id=?1", rusqlite::params![id]);
-    let _ = conn.execute("DELETE FROM agent_checkpoints WHERE run_id=?1", rusqlite::params![id]);
-    let _ = conn.execute("DELETE FROM agent_checkpoint_history WHERE session_id=?1", rusqlite::params![id]);
-    // agent_run_steps 按 run_id 键（非 session_id）：必须先经 traces 表取回本 session
-    // 全部 run_id 级联删除，顺序不可与下一行对调。
-    let _ = conn.execute(
-        "DELETE FROM agent_run_steps WHERE run_id IN (SELECT id FROM agent_run_traces WHERE session_id=?1)",
-        rusqlite::params![id],
-    );
-    let _ = conn.execute("DELETE FROM agent_run_traces WHERE session_id=?1", rusqlite::params![id]);
-    let _ = conn.execute("DELETE FROM agent_child_runs WHERE parent_session_id=?1", rusqlite::params![id]);
-    let _ = conn.execute("DELETE FROM agent_background_jobs WHERE parent_session_id=?1", rusqlite::params![id]);
-    let _ = conn.execute("DELETE FROM agent_llm_calls WHERE session_id=?1", rusqlite::params![id]);
-    let _ = conn.execute("DELETE FROM agent_artifacts WHERE session_id=?1", rusqlite::params![id]);
-    let _ = conn.execute("DELETE FROM agent_step_logs_fts WHERE session_id=?1", rusqlite::params![id]);
-    let _ = conn.execute("DELETE FROM agent_step_logs WHERE session_id=?1", rusqlite::params![id]);
-    let _ = conn.execute("DELETE FROM agent_memory_nodes_fts WHERE session_id=?1", rusqlite::params![id]);
-    let _ = conn.execute("DELETE FROM agent_memory_nodes WHERE session_id=?1", rusqlite::params![id]);
-    let _ = conn.execute("DELETE FROM agent_lesson_recalls WHERE session_id=?1", rusqlite::params![id]);
-    let _ = conn.execute("DELETE FROM chat_messages WHERE session_id=?1", rusqlite::params![id]);
-    let _ = conn.execute("DELETE FROM agent_project_sessions WHERE session_id=?1", rusqlite::params![id]);
+    // 3. 严格级联清理：SESSION_SCOPED_TABLES 注册表驱动（唯一事实源；
+    //    桥接子表先于桥表——by_session 谓词在桥表行还在时求值）。
+    for (table, key) in SESSION_SCOPED_TABLES {
+        let sql = format!("DELETE FROM {table} WHERE {}", key.by_session());
+        let _ = conn.execute(&sql, rusqlite::params![id]);
+    }
     conn.execute("DELETE FROM chat_sessions WHERE id=?1", rusqlite::params![id])
         .map_err(|e| format!("删除会话主记录失败: {e}"))?;
 
@@ -184,29 +259,11 @@ pub(crate) fn cleanup_orphaned_session_data_at(
         }
     }
 
-    let cleanup_sqls = [
-        "DELETE FROM agent_task_records WHERE resource_id NOT IN (SELECT resource_id FROM agent_task_resources)",
-        "DELETE FROM agent_task_resources WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
-        "DELETE FROM agent_checkpoints WHERE run_id NOT IN (SELECT id FROM chat_sessions)",
-        "DELETE FROM agent_checkpoint_history WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
-        "DELETE FROM agent_run_traces WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
-        // 步骤行表按 run_id 键：清掉父 trace 已消失（含刚被上一行删除）的孤儿步
-        "DELETE FROM agent_run_steps WHERE run_id NOT IN (SELECT id FROM agent_run_traces)",
-        "DELETE FROM agent_child_runs WHERE parent_session_id NOT IN (SELECT id FROM chat_sessions)",
-        "DELETE FROM agent_background_jobs WHERE parent_session_id NOT IN (SELECT id FROM chat_sessions)",
-        "DELETE FROM agent_llm_calls WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
-        "DELETE FROM agent_artifacts WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
-        "DELETE FROM agent_step_logs_fts WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
-        "DELETE FROM agent_step_logs WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
-        "DELETE FROM agent_memory_nodes_fts WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
-        "DELETE FROM agent_memory_nodes WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
-        "DELETE FROM agent_lesson_recalls WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
-        "DELETE FROM chat_messages WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
-        "DELETE FROM agent_project_sessions WHERE session_id NOT IN (SELECT id FROM chat_sessions)",
-    ];
-
-    for sql in &cleanup_sqls {
-        if let Ok(affected) = conn.execute(sql, []) {
+    // 同注册表驱动；orphan 谓词为顺序无关形式（桥接型并查「桥已死」与
+    // 「桥属死会话」两态），迭代顺序不再承重。
+    for (table, key) in SESSION_SCOPED_TABLES {
+        let sql = format!("DELETE FROM {table} WHERE {}", key.orphan());
+        if let Ok(affected) = conn.execute(&sql, []) {
             total_cleaned += affected;
         }
     }
@@ -252,4 +309,146 @@ pub(crate) fn cleanup_orphaned_session_data_at(
 pub fn vacuum_database(conn: &Connection) -> Result<(), String> {
     conn.execute_batch("VACUUM;")
         .map_err(|e| format!("执行数据库 VACUUM 瘦身失败: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// 反射兜底：schema 中每张业务表必须有归属——会话级（SESSION_SCOPED_TABLES）
+    /// 或显式豁免（SESSION_CLEANUP_EXEMPT，注明保留理由）。漏登记 = 删会话留
+    /// 孤儿行；注册表/豁免表里的死项（表改名/删除后残留）同样拦。
+    /// FTS5 影子表（{vtable}_data/_idx/...）与 sqlite_* 内部表由引擎自管，跳过。
+    #[test]
+    fn session_scoped_registry_covers_schema() {
+        let conn = init_db(&PathBuf::from(":memory:")).expect("init_db :memory:");
+
+        let all_tables: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT name FROM sqlite_master WHERE type='table'")
+                .unwrap();
+            stmt.query_map([], |r| r.get(0)).unwrap().flatten().collect()
+        };
+        let vtables: HashSet<String> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT name FROM sqlite_master WHERE type='table' \
+                     AND sql LIKE 'CREATE VIRTUAL TABLE%'",
+                )
+                .unwrap();
+            stmt.query_map([], |r| r.get(0)).unwrap().flatten().collect()
+        };
+
+        let registered: HashSet<&str> =
+            SESSION_SCOPED_TABLES.iter().map(|(n, _)| *n).collect();
+        let exempt: HashSet<&str> = SESSION_CLEANUP_EXEMPT.iter().map(|(n, _)| *n).collect();
+
+        let unowned: Vec<&String> = all_tables
+            .iter()
+            .filter(|t| !t.starts_with("sqlite_"))
+            .filter(|t| {
+                !vtables
+                    .iter()
+                    .any(|v| t.len() > v.len() && t.starts_with(&format!("{v}_")))
+            })
+            .filter(|t| !registered.contains(t.as_str()) && !exempt.contains(t.as_str()))
+            .collect();
+        assert!(
+            unowned.is_empty(),
+            "以下表既未登记 SESSION_SCOPED_TABLES 也未豁免 SESSION_CLEANUP_EXEMPT——\
+             新增表必须显式归属，否则删会话留孤儿行: {unowned:?}"
+        );
+
+        for (name, _) in SESSION_SCOPED_TABLES {
+            assert!(
+                all_tables.iter().any(|t| t == name),
+                "SESSION_SCOPED_TABLES 登记了 schema 中不存在的表: {name}"
+            );
+        }
+        for (name, _) in SESSION_CLEANUP_EXEMPT {
+            assert!(
+                all_tables.iter().any(|t| t == name),
+                "SESSION_CLEANUP_EXEMPT 登记了 schema 中不存在的表: {name}"
+            );
+        }
+    }
+
+    /// 谓词列存在性兜底：SessionId/ParentSessionId/桥接键的谓词列若在 schema
+    /// 里不存在（列改名事故），DELETE 会静默删空或报错被 let _ 吞掉——测试先行拦下。
+    #[test]
+    fn session_scoped_preds_reference_real_columns() {
+        let conn = init_db(&PathBuf::from(":memory:")).expect("init_db :memory:");
+        for (name, key) in SESSION_SCOPED_TABLES {
+            let col = match key {
+                SessionKey::SessionId => "session_id",
+                SessionKey::ParentSessionId => "parent_session_id",
+                SessionKey::RunIdIsSessionId | SessionKey::ViaRunTraces => "run_id",
+                SessionKey::ViaTaskResources => "resource_id",
+            };
+            let cols: Vec<String> = {
+                let mut stmt = conn.prepare(&format!("PRAGMA table_info({name})")).unwrap();
+                stmt.query_map([], |r| r.get::<_, String>(1))
+                    .unwrap()
+                    .flatten()
+                    .collect()
+            };
+            assert!(
+                cols.iter().any(|c| c == col),
+                "{name} 缺谓词列 {col}（现有列: {cols:?}）"
+            );
+        }
+    }
+
+    /// 端到端：删会话后注册表内所有表行归零，豁免表与其它会话行不受影响。
+    #[test]
+    fn delete_session_clears_every_registered_table() {
+        let conn = init_db(&PathBuf::from(":memory:")).expect("init_db :memory:");
+        conn.execute_batch(
+            "INSERT INTO chat_sessions (id, title, model_id, created_at, updated_at)
+             VALUES ('s1', 'a', 'm', '2026-01-01', '2026-01-01'),
+                    ('s2', 'b', 'm', '2026-01-01', '2026-01-01');
+             INSERT INTO chat_messages (id, session_id, role, content, created_at)
+             VALUES ('m1', 's1', 'user', 'x', '2026-01-01'),
+                    ('m2', 's2', 'user', 'y', '2026-01-01');
+             INSERT INTO agent_stage_marks (session_id, stage, updated_at)
+             VALUES ('s1', 'done', '2026-01-01'), ('s2', 'done', '2026-01-01');
+             INSERT INTO agent_card_sections (session_id, step_id, card_level, sections_json, total_bytes, created_at)
+             VALUES ('s1', 1, 'full', '{}', 10, '2026-01-01');
+             INSERT INTO agent_gate_fires (run_id, session_id, step_id, gate, route, created_at)
+             VALUES ('r1', 's1', 1, 'g', 'r', '2026-01-01');
+             INSERT INTO agent_run_traces (id, session_id, goal, status, steps_json, started_at, updated_at)
+             VALUES ('rt1', 's1', 'g', 'done', '[]', '2026-01-01', '2026-01-01');
+             INSERT INTO agent_run_steps (run_id, seq, step_json) VALUES ('rt1', 1, '{}');
+             INSERT INTO agent_task_resources (resource_id, session_id, kind, label, created_at, updated_at)
+             VALUES ('res1', 's1', 'k', 'l', '2026-01-01', '2026-01-01');
+             INSERT INTO agent_task_records (resource_id, record_key, data_json, created_at, updated_at)
+             VALUES ('res1', 'k1', '{}', '2026-01-01', '2026-01-01');",
+        )
+        .unwrap();
+
+        delete_session_completely(&conn, "s1", None).unwrap();
+
+        for (name, key) in SESSION_SCOPED_TABLES {
+            // 只数带本 session 谓词的行：其它会话（s2）的行应保留，不计入
+            let n: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {name} WHERE {}", key.by_session()),
+                    rusqlite::params!["s1"],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 0, "{name} 仍残留 s1 的行");
+        }
+        assert_eq!(
+            conn.query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM chat_messages WHERE session_id='s2'",
+                [],
+                |r| r.get(0)
+            )
+            .unwrap(),
+            1,
+            "其它会话的行不应被误删"
+        );
+    }
 }
