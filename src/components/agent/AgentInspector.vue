@@ -348,26 +348,26 @@
                     </section>
 
                     <!-- 调用输入 -->
-                    <section class="data-section">
-                        <div class="section-title-row">
-                            <h4>调用输入 (Request Payload)</h4>
-                            <button type="button" class="btn-copy" @click="copyText(formattedInput, '调用输入')">
+                    <details class="data-section payload-accordion">
+                        <summary class="section-title-row" style="cursor: pointer; list-style: none; user-select: none;">
+                            <h4>▶ 调用输入 (Request Payload)</h4>
+                            <button type="button" class="btn-copy" @click.stop="copyText(formattedInput, '调用输入')">
                                 {{ copiedKey === '调用输入' ? '已复制 ✓' : '复制参数' }}
                             </button>
-                        </div>
+                        </summary>
                         <pre class="code-pre">{{ formattedInput }}</pre>
-                    </section>
+                    </details>
 
                     <!-- 执行输出 -->
-                    <section class="data-section">
-                        <div class="section-title-row">
-                            <h4>执行输出 (Execution Output)</h4>
-                            <button type="button" class="btn-copy" @click="copyText(formattedOutput, '执行输出')">
+                    <details class="data-section payload-accordion">
+                        <summary class="section-title-row" style="cursor: pointer; list-style: none; user-select: none;">
+                            <h4>▶ 执行输出 (Execution Output)</h4>
+                            <button type="button" class="btn-copy" @click.stop="copyText(formattedOutput, '执行输出')">
                                 {{ copiedKey === '执行输出' ? '已复制 ✓' : '复制结果' }}
                             </button>
-                        </div>
+                        </summary>
                         <pre class="code-pre">{{ formattedOutput }}</pre>
-                    </section>
+                    </details>
                 </template>
             </section>
 

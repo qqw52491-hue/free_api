@@ -2586,16 +2586,53 @@ function computeAmbientAction(step: AgentStepItem): AmbientActionDisplay {
         };
     }
 
-    // 7. 代码检索 / 全局搜索 (Search / Grep)
+    // 7. 全网搜索与网页抓取 (Web Search / Web Fetch) - 优先级必须高于通用 search 代码检索
+    if (toolLower.includes('web_search') || toolLower.includes('web_fetch') || toolLower.includes('duckduckgo') || toolLower.includes('bing') || op.badgeLabel?.includes('全网')) {
+        let query = '';
+        const p: any = step.params || step.rawParams;
+        if (p && typeof p === 'object') {
+            query = String(p.query || p.q || p.url || p.Url || '').trim();
+        } else if (typeof p === 'string') {
+            try {
+                const parsed = JSON.parse(p);
+                query = String(parsed.query || parsed.q || parsed.url || parsed.Url || '').trim();
+            } catch {
+                query = p.trim();
+            }
+        }
+        const isFetch = toolLower.includes('fetch');
+        const capsuleTitle = isFetch ? '网页抓取' : (query ? (query.length > 16 ? query.slice(0, 14) + '…' : query) : '全网检索');
+        let explanation = desc && desc !== '执行操作' ? desc : (query ? `查询 "${query.length > 35 ? query.slice(0, 32) + '…' : query}"` : '');
+        explanation = explanation.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
+
+        return {
+            actionKind: 'web',
+            capsuleTitle,
+            iconEmoji: isFetch ? '🌍' : '🌐',
+            explanation,
+            isWarning: false,
+            isMilestone: false,
+            tooltip: query || op.actionText,
+        };
+    }
+
+    // 8. 代码检索 / 全局搜索 (Search / Grep)
     if (toolLower.includes('search') || toolLower.includes('grep') || toolLower.includes('find') || toolLower.includes('ripgrep') || op.badgeLabel?.includes('检索')) {
         let pattern = '';
         const p: any = step.params || step.rawParams;
         if (p && typeof p === 'object') {
             pattern = String(p.query || p.pattern || p.Query || p.regex || '').trim();
+        } else if (typeof p === 'string') {
+            try {
+                const parsed = JSON.parse(p);
+                pattern = String(parsed.query || parsed.pattern || parsed.Query || parsed.regex || '').trim();
+            } catch {
+                pattern = p.trim();
+            }
         }
-        // 🌟 核心降噪：胶囊标题优先目标文件，若无文件则展示简短关键词或"代码定义"
+        // 🌟 核心降噪：胶囊标题优先目标文件，若无文件则展示简短关键词或检索主题
         const fileName = op.fileName;
-        const capsuleTitle = fileName || (pattern ? (pattern.length > 20 ? pattern.slice(0, 18) + '…' : pattern) : '代码定义');
+        const capsuleTitle = fileName || (pattern ? (pattern.length > 20 ? pattern.slice(0, 18) + '…' : pattern) : '代码检索');
         
         let explanation = desc && desc !== '执行操作' ? desc : (pattern ? `检索 "${pattern.length > 32 ? pattern.slice(0, 29) + '…' : pattern}"` : '检索相关代码');
         explanation = explanation.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
@@ -2612,29 +2649,6 @@ function computeAmbientAction(step: AgentStepItem): AmbientActionDisplay {
             isWarning: false,
             isMilestone: false,
             tooltip: pattern ? `检索: ${pattern}` : (op.actionText || '检索代码'),
-        };
-    }
-
-    // 8. 全网搜索与网页抓取 (Web Search / Web Fetch)
-    if (toolLower.includes('web_search') || toolLower.includes('web_fetch') || toolLower.includes('duckduckgo') || toolLower.includes('bing') || op.badgeLabel?.includes('全网')) {
-        let query = '';
-        const p: any = step.params || step.rawParams;
-        if (p && typeof p === 'object') {
-            query = String(p.query || p.q || p.url || p.Url || '').trim();
-        }
-        const isFetch = toolLower.includes('fetch');
-        const capsuleTitle = isFetch ? '网页抓取' : '全网检索';
-        let explanation = desc && desc !== '执行操作' ? desc : (query ? `查询 "${query.length > 35 ? query.slice(0, 32) + '…' : query}"` : '');
-        explanation = explanation.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
-
-        return {
-            actionKind: 'web',
-            capsuleTitle,
-            iconEmoji: isFetch ? '🌍' : '🌐',
-            explanation,
-            isWarning: false,
-            isMilestone: false,
-            tooltip: query || op.actionText,
         };
     }
 
