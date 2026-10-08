@@ -200,24 +200,55 @@ function initChart() {
   }
 }
 
-function downloadImage() {
+async function downloadImage() {
   if (!chartInstance) return;
   const url = chartInstance.getDataURL({
     type: "png",
     pixelRatio: 2,
     backgroundColor: "#18181b",
   });
-  const link = document.createElement("a");
-  link.download = `${chartTitle.value || "chart"}.png`;
-  link.href = url;
-  link.click();
+  try {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const targetPath = await save({
+      defaultPath: `${chartTitle.value || "chart"}.png`,
+      filters: [{ name: "PNG Image (*.png)", extensions: ["png"] }],
+    });
+    if (!targetPath) return;
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("export_artifact_to_file", {
+      artifactId: null,
+      sourcePath: null,
+      content: url,
+      targetPath,
+    });
+  } catch {
+    const link = document.createElement("a");
+    link.download = `${chartTitle.value || "chart"}.png`;
+    link.href = url;
+    link.click();
+  }
 }
 
-function copyCode() {
-  navigator.clipboard.writeText(props.code).then(() => {
-    copied.value = true;
-    setTimeout(() => (copied.value = false), 1800);
-  });
+async function copyCode() {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(props.code);
+    } else {
+      throw new Error("clipboard API unavailable");
+    }
+  } catch {
+    const textArea = document.createElement("textarea");
+    textArea.value = props.code;
+    textArea.style.position = "fixed";
+    textArea.style.opacity = "0";
+    document.body.appendChild(textArea);
+    textArea.focus();
+    textArea.select();
+    try { document.execCommand("copy"); } catch {} 
+    document.body.removeChild(textArea);
+  }
+  copied.value = true;
+  setTimeout(() => (copied.value = false), 1800);
 }
 
 onMounted(() => {

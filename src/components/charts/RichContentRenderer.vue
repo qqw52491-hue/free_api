@@ -1,5 +1,5 @@
 <template>
-  <div class="rich-content-stream" :class="{ 'is-live-streaming': streaming }">
+  <div class="rich-content-stream" :class="{ 'is-live-streaming': streaming }" @click="handleCopyClick">
     <template v-for="(block, idx) in parsedBlocks" :key="idx">
       <div
         v-if="block.type === 'markdown'"
@@ -72,6 +72,52 @@ const props = withDefaults(
     streaming: false,
   }
 );
+
+async function handleCopyClick(event: MouseEvent) {
+  const target = event.target as HTMLElement | null;
+  if (!target) return;
+  const btn = target.closest(".code-copy-btn") as HTMLElement | null;
+  if (!btn) return;
+
+  const rawCode = btn.getAttribute("data-code");
+  let codeText = "";
+  if (rawCode) {
+    try {
+      codeText = decodeURIComponent(rawCode);
+    } catch {
+      codeText = rawCode;
+    }
+  } else {
+    const wrapper = btn.closest(".code-block-wrapper");
+    const codeEl = wrapper?.querySelector("code");
+    codeText = codeEl?.textContent || "";
+  }
+
+  if (!codeText) return;
+
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(codeText);
+    } else {
+      const textArea = document.createElement("textarea");
+      textArea.value = codeText;
+      textArea.style.position = "fixed";
+      textArea.style.opacity = "0";
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      document.execCommand("copy");
+      document.body.removeChild(textArea);
+    }
+    const oldText = btn.innerText;
+    btn.innerText = "已复制";
+    setTimeout(() => {
+      btn.innerText = oldText || "复制";
+    }, 1800);
+  } catch (err) {
+    console.warn("复制代码失败:", err);
+  }
+}
 
 defineEmits<{
   "open-preview": [code: string];

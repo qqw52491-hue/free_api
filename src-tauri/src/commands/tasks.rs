@@ -154,6 +154,27 @@ pub async fn export_artifact_to_file(
 
     if let Some(text) = content {
         if !text.is_empty() {
+            // 检查是否为 base64 数据或 Data URL，若是则解码为二进制写入，防止破坏图片等文件
+            use base64::Engine;
+            if let Some((_, payload)) = text.split_once(";base64,") {
+                let clean_b64 = payload.trim();
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(clean_b64)
+                    .map_err(|e| format!("Base64数据解析失败: {}", e))?;
+                std::fs::write(&clean_target, &bytes)
+                    .map_err(|e| format!("写入二进制文件失败: {}", e))?;
+                return Ok(());
+            } else if text.starts_with("data:") && text.contains("base64,") {
+                if let Some(pos) = text.find("base64,") {
+                    let clean_b64 = text[pos + 7..].trim();
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(clean_b64)
+                        .map_err(|e| format!("Base64数据解析失败: {}", e))?;
+                    std::fs::write(&clean_target, &bytes)
+                        .map_err(|e| format!("写入二进制文件失败: {}", e))?;
+                    return Ok(());
+                }
+            }
             std::fs::write(&clean_target, text.as_bytes())
                 .map_err(|e| format!("写入文件失败: {}", e))?;
             return Ok(());

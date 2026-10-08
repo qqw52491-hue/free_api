@@ -303,7 +303,7 @@ export function renderMarkdown(content: string): string {
                             <span class="diff-stat-badge diff-stat-add">+${addCount}</span>
                             <span class="diff-stat-badge diff-stat-del">-${delCount}</span>
                         </div>
-                        <button class="code-copy-btn" onclick="navigator.clipboard.writeText(decodeURIComponent('${encodeURIComponent(text)}')).then(()=>{this.innerText='已复制';setTimeout(()=>this.innerText='复制',1800)})">复制补丁</button>
+                        <button class="code-copy-btn" data-code="${encodeURIComponent(text)}">复制补丁</button>
                     </div>
                     <div class="diff-code-body">${renderedLines}</div>
                 </div>`;
@@ -322,7 +322,7 @@ export function renderMarkdown(content: string): string {
             return `<div class="code-block-wrapper">
                 <div class="code-block-header">
                     <span class="code-lang-label">${langLabel}</span>
-                    <button class="code-copy-btn" onclick="navigator.clipboard.writeText(decodeURIComponent('${encodeURIComponent(text)}')).then(()=>{this.innerText='已复制';setTimeout(()=>this.innerText='复制',1800)})">复制</button>
+                    <button class="code-copy-btn" data-code="${encodeURIComponent(text)}">复制</button>
                 </div>
                 <pre><code class="hljs language-${langLabel}">${highlighted}</code></pre>
             </div>`;

@@ -87,22 +87,64 @@ async function renderDiagram() {
   }
 }
 
-function downloadSvg() {
+async function downloadSvg() {
   if (!svgContent.value) return;
-  const blob = new Blob([svgContent.value], { type: "image/svg+xml" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.download = `${diagramTitle.value}.svg`;
-  link.href = url;
-  link.click();
-  URL.revokeObjectURL(url);
+  try {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const targetPath = await save({
+      defaultPath: `${diagramTitle.value}.svg`,
+      filters: [{ name: "SVG Image (*.svg)", extensions: ["svg"] }],
+    });
+    if (!targetPath) return;
+
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("export_artifact_to_file", {
+      artifactId: null,
+      sourcePath: null,
+      content: svgContent.value,
+      targetPath,
+    });
+  } catch (err) {
+    console.warn("Tauri导出SVG失败，降级浏览器下载:", err);
+    const blob = new Blob([svgContent.value], { type: "image/svg+xml" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.download = `${diagramTitle.value}.svg`;
+    link.href = url;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
 }
 
-function copyCode() {
-  navigator.clipboard.writeText(props.code).then(() => {
+async function copyCode() {
+  let ok = false;
+  if (navigator?.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(props.code);
+      ok = true;
+    } catch (e) {
+      console.warn("navigator.clipboard.writeText 失败，尝试 fallback:", e);
+    }
+  }
+  if (!ok) {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = props.code;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      ok = true;
+    } catch (err) {
+      console.error("降级复制也失败:", err);
+    }
+  }
+  if (ok) {
     copied.value = true;
     setTimeout(() => (copied.value = false), 1800);
-  });
+  }
 }
 
 onMounted(() => {
