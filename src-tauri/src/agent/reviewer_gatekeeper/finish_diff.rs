@@ -76,6 +76,19 @@ pub async fn evaluate_finish_diff(
         );
     }
 
+    // 0.5 只读问答直通：本轮没有新增写入副作用、会话 tmp 也没有本轮产物时，
+    // 交付物只是一段回答——工作区里已有的未提交改动属于此前的任务（可能是用户已决定
+    // 不再继续的半成品），不应让终审拿它们去打回一次提问。
+    // 有机械嗅探异常时不直通（物理异常仍升级审查）。
+    if mechanical_anomalies.is_empty()
+        && context.side_effects.len() == context.inherited_side_effects_count
+        && collect_session_tmp_material(session_id, run_started_at).is_none()
+    {
+        return ReviewResult::mechanical_pass(
+            "本轮为只读问答（无新增写入、无本轮产物），已跳过终审；工作区已有的未提交改动属于此前任务，不在本次交付范围",
+        );
+    }
+
     // 1. 提取审查材料（Git Diff 或 非 Git 修改文件/产物清单）；
     //    无台账副作用时兜底扫描会话 tmp 实物——tmp/ 写入不入台账、不进工作区 diff，
     //    纯产物任务（PPT/HTML/报告）缺了这一步终审永远盲放行。
