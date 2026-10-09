@@ -488,6 +488,11 @@ pub async fn evaluate_finish_diff(
     let mut timeout_retried = false;
     let mut cur_timeout_secs = review_timeout_secs;
 
+    // 非超时的调用报错 / 输出非 JSON：各给一次重试机会再降级，
+    // 避免弱模型偶发格式错误让终审静默沦为橡皮图章。
+    let mut call_error_retried = false;
+    let mut format_retried = false;
+
     let mut ignore_stream = |_: llm::StreamEvent<'_>| true;
     let (response_text, duration_ms) = loop {
         llm_call_index += 1;
@@ -559,7 +564,11 @@ pub async fn evaluate_finish_diff(
                     "request_error",
                     Some(&e),
                 );
-                return ReviewResult::failed_open(&format!("Reviewer 调用失败: {}", e), &model_id, &review_fingerprint);
+                if !call_error_retried {
+                    call_error_retried = true;
+                    continue;
+                }
+                return ReviewResult::failed_open(&format!("Reviewer 调用失败（重试后仍失败）: {}", e), &model_id, &review_fingerprint);
             }
         };
 
@@ -650,6 +659,17 @@ pub async fn evaluate_finish_diff(
                 "content": "【系统】取证预算已用尽。请立即基于已有证据输出判决 JSON（含 verdict 键），不要再请求取证；未查完的疑点写入 missing_evidence 字段。"
             }));
             forced_final = true;
+            continue;
+        }
+
+        // b2. 输出根本不是 JSON：让审查者按格式重答一次，再失败才降级
+        if as_value.is_none() && !format_retried {
+            format_retried = true;
+            messages.push(json!({"role": "assistant", "content": raw}));
+            messages.push(json!({
+                "role": "user",
+                "content": "【系统】你上一条输出不是合法 JSON，系统无法解析。请只输出一个判决 JSON 对象（含 verdict 键），不要附加解释文字或 Markdown 以外的内容。"
+            }));
             continue;
         }
 

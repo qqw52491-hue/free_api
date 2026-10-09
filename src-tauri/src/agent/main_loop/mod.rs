@@ -2739,6 +2739,17 @@ async fn run_agent_main_loop_in_workspace_inner(
                     block.reset_review_retries();
                 }
                 context.block_manager.advance_to_next();
+                // 审查服务自身故障被降级放行时必须明说，不能让用户误以为审过了
+                if review_res.verdict == "failed_open" {
+                    output_text.push_str(&format!(
+                        "\n\n⚠️ 终审未完成，产物未经审查：{}\n请你自行抽查产物；回复用户时必须如实说明「终审未成功」。",
+                        review_res.summary
+                    ));
+                    let _ = app.emit(
+                        &format!("agent-log-{}", final_session_id),
+                        format!("⚠️ {}", review_res.summary),
+                    );
+                }
                 crate::agent::dispatcher::emit_tool_event(
                     &app,
                     &final_session_id,

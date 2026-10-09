@@ -61,7 +61,7 @@ impl ReviewResult {
             score: 85,
             blocking_issues: Vec::new(),
             nit_issues: Vec::new(),
-            summary: format!("审查服务异常，降级安全放行: {}", reason),
+            summary: format!("⚠️ 终审未完成，产物未经审查（审查服务异常）: {}", reason),
             duration_ms: 0,
             model_id: model_id.to_string(),
             diff_hash: diff_hash.to_string(),
