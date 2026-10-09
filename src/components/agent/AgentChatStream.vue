@@ -393,15 +393,26 @@
                                         {{ item.action.explanation }}
                                     </span>
                                 </span>
+                                <button
+                                    v-if="hasAmbientTerm(item.step, item.action)"
+                                    type="button"
+                                    class="ambient-term-chevron"
+                                    :class="{ open: isAmbientTermOpen(item.step) }"
+                                    title="展开/收起命令输出"
+                                    @click.stop="toggleAmbientTerm(item.step)"
+                                >
+                                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9" /></svg>
+                                </button>
                                 <time class="ambient-text-time">{{ formatClock(item.step.timestamp) }}</time>
                             </article>
-                            <!-- 简报模式终端卡：与全量同款，执行中展开、结束后收起（失败保持展开） -->
-                            <TerminalView
-                                v-if="getAmbientTerminalView(item.step, item.action)"
-                                :view="getAmbientTerminalView(item.step, item.action)!"
-                                :live="item.step.status === 'running'"
-                                @select="$emit('select-step', item.step.id)"
-                            />
+                            <!-- 命令输出：执行中自动展开实时输出，结束后自动收起；可用箭头手动展开/收起 -->
+                            <div
+                                v-if="hasAmbientTerm(item.step, item.action) && isAmbientTermOpen(item.step)"
+                                class="live-term-box ambient-term-box"
+                                @click.stop
+                            >
+                                <pre class="live-term-body soft-scrollbar ambient-term-body" :class="{ 'ambient-term-live': item.step.status === 'running' }">{{ ambientTermText(item.step) }}</pre>
+                            </div>
                             </template>
 
                             <!-- 1.5 人工干预应答行：紧随对应提问步骤之后 -->
@@ -1280,19 +1291,6 @@ import { formatClock, formatDurationSeconds, formatMilliseconds, getToolIcon, sh
 import RichContentRenderer from "../charts/RichContentRenderer.vue";
 import AgentHumanInterventionCard from "./AgentHumanInterventionCard.vue";
 import { toolViewComponents } from "./views";
-import TerminalView from "./views/TerminalView.vue";
-import type { TerminalToolView } from "./types";
-
-// 简报流：终端类步骤返回终端视图；运行中尚无后端 view 时用命令文本临时占位
-function getAmbientTerminalView(step: any, action: any): TerminalToolView | null {
-    if (action?.actionKind !== "shell") return null;
-    if (step?.view?.kind === "terminal") return step.view as TerminalToolView;
-    if (step?.status !== "running") return null;
-    const p = step?.params as any;
-    const command = (p && typeof p === "object" && typeof p.command === "string" ? p.command : action?.capsuleTitle) || "";
-    if (!command) return null;
-    return { kind: "terminal", command, exit_code: 0 };
-}
 import ArtifactList from "../artifacts/ArtifactList.vue";
 import FileIcon from "./FileIcon.vue";
 
@@ -1998,6 +1996,30 @@ function toggleSearchGroup(groupId: string) {
 
 function isSearchGroupExpanded(groupId: string): boolean {
     return expandedSearchGroupIds.has(groupId);
+}
+
+// 简报流终端步骤：命令行右侧箭头展开输出；执行中自动展开、结束后自动收起，手动切换优先
+const ambientTermOverride = reactive<Record<string, boolean>>({});
+
+function hasAmbientTerm(_step: AgentStepItem, action: { actionKind?: string } | undefined): boolean {
+    return action?.actionKind === "shell";
+}
+
+function isAmbientTermOpen(step: AgentStepItem): boolean {
+    const manual = ambientTermOverride[step.id];
+    return manual !== undefined ? manual : step.status === "running";
+}
+
+function toggleAmbientTerm(step: AgentStepItem) {
+    ambientTermOverride[step.id] = !isAmbientTermOpen(step);
+}
+
+function ambientTermText(step: AgentStepItem): string {
+    if (step.status === "running") return props.liveShellOutput?.tail || "执行中…";
+    const v = step.view as { kind?: string; output_tail?: string; spawn_error?: string } | undefined;
+    if (v?.kind === "terminal" && (v.spawn_error || v.output_tail)) return (v.spawn_error || v.output_tail) as string;
+    if (typeof step.result === "string" && step.result.trim()) return step.result.slice(-4000);
+    return "(无输出)";
 }
 
 const expandedMcpGroupIds = reactive(new Set<string>());
@@ -3066,6 +3088,18 @@ function followThoughtTail() {
 }
 const liveTermBodyRef = ref<HTMLElement | null>(null);
 // 小框位于阶段 v-for 内：字符串 ref 会被 Vue 收成数组，用函数 ref 取单元素
+// 简报流实时输出吸底
+watch(
+    () => props.liveShellOutput?.tail,
+    () => {
+        nextTick(() => {
+            document.querySelectorAll<HTMLElement>(".ambient-term-live").forEach((el) => {
+                el.scrollTop = el.scrollHeight;
+            });
+        });
+    },
+);
+
 function setLiveTermBodyRef(el: unknown) {
     liveTermBodyRef.value = el instanceof HTMLElement ? el : null;
 }
