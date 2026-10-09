@@ -56,7 +56,9 @@ pub(crate) fn submit_plan_rejection(
                 .to_string(),
         );
     }
-    if checkpoint.plan_reviewer_retry_count >= crate::agent::checkpoint::max_plan_reviewer_rounds()
+    // 修订轮（已批准后带 revision_reason 重提）每次重新给一套审查次数，不受上一轮用尽的限制
+    if !checkpoint.plan_phase.is_approved()
+        && checkpoint.plan_reviewer_retry_count >= crate::agent::checkpoint::max_plan_reviewer_rounds()
     {
         return Some(gate_messages::reviewer_retry_limit());
     }

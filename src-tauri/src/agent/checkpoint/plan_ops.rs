@@ -313,6 +313,10 @@ impl AgentCheckpoint {
         snapshot: &crate::agent::child_reviewer::PlanReviewerDispatchSnapshot,
         step_id: usize,
     ) {
+        // 批准后的修订提交：审查次数重新计算（上一轮状态经证据包带给审查员，不靠次数传递）
+        if self.plan_phase.is_approved() {
+            self.plan_reviewer_retry_count = 0;
+        }
         self.submitted_plan = Some(submission);
         self.submitted_plan_step = Some(step_id);
         // 新提交一律回到审查中：批准后修订（revision_reason 通道）同样须重审，

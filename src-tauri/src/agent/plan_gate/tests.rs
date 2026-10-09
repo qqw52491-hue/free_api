@@ -682,9 +682,18 @@
         cp.plan_reviewer_consumed = true;
         assert!(submit_plan_rejection(&cp, &rev).is_none());
 
-        // 修订轮照常受审查预算约束：轮次耗尽后即使有理由也拒绝（逃生口走 ask_human）
+        // 修订轮每次重新给一套审查次数：上一轮用尽也不拒绝带理由的修订提交
         cp.plan_reviewer_retry_count = crate::agent::checkpoint::max_plan_reviewer_rounds();
-        assert!(submit_plan_rejection(&cp, &rev).unwrap().contains("上限"));
+        assert!(submit_plan_rejection(&cp, &rev).is_none());
+
+        // 非修订轮（审查中、未批准）轮次耗尽仍拒绝（逃生口走 ask_human）
+        let mut reviewing =
+            exploration_checkpoint(PlanExecutionMode::CrossReview, PlanPhase::Reviewing, 1);
+        reviewing.plan_reviewer_consumed = true;
+        reviewing.plan_reviewer_retry_count = crate::agent::checkpoint::max_plan_reviewer_rounds();
+        assert!(submit_plan_rejection(&reviewing, &valid_submission())
+            .unwrap()
+            .contains("上限"));
     }
 
     #[test]
@@ -713,7 +722,8 @@
         assert_eq!(cp.plan_phase, PlanPhase::Reviewing);
         assert!(cp.approved_target_files.is_none());
         assert!(cp.approved_plan_summary.is_none());
-        assert_eq!(cp.plan_reviewer_retry_count, 2);
+        // 修订提交先清零再预扣一轮：每次修订重新一套次数
+        assert_eq!(cp.plan_reviewer_retry_count, 1);
         assert!(!cp.plan_reviewer_consumed);
         assert_eq!(cp.submitted_plan_step, Some(20));
     }

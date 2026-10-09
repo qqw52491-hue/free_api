@@ -148,7 +148,7 @@ pub async fn handle_submit_plan(
             .map(|c| if c.is_control() { ' ' } else { c })
             .collect::<String>()
     };
-    let discussion_round = checkpoint.plan_reviewer_retry_count + 1;
+    let discussion_round = if is_revision { 1 } else { checkpoint.plan_reviewer_retry_count + 1 };
     let summary_flat: String = flatten(submission.plan_summary.trim())
         .chars()
         .take(400)
