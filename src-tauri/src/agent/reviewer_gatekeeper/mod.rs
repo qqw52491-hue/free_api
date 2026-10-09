@@ -12,6 +12,14 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::watch;
 
+/// 用户在「模型请求重试」设置里配的总尝试次数（与主循环同一处来源；1=不重试）。
+/// 终审的超时/调用报错/非 JSON 重试都以它为准：调到 0（即 1 次尝试）就直接返回失败。
+pub(crate) static LLM_REQUEST_ATTEMPTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(3);
+
+pub(crate) fn review_retry_allowed() -> bool {
+    LLM_REQUEST_ATTEMPTS.load(std::sync::atomic::Ordering::Relaxed) > 1
+}
+
 mod baseline;
 mod evidence;
 mod review_types;

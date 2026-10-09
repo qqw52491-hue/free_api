@@ -519,7 +519,7 @@ pub async fn evaluate_finish_diff(
                         "request_error",
                         Some(if timeout_retried { "timeout_after_retry" } else { "timeout" }),
                     );
-                    if !timeout_retried {
+                    if !timeout_retried && review_retry_allowed() {
                         timeout_retried = true;
                         cur_timeout_secs = review_timeout_secs.saturating_mul(2).min(600);
                         continue;
@@ -564,7 +564,7 @@ pub async fn evaluate_finish_diff(
                     "request_error",
                     Some(&e),
                 );
-                if !call_error_retried {
+                if !call_error_retried && review_retry_allowed() {
                     call_error_retried = true;
                     continue;
                 }
@@ -663,7 +663,7 @@ pub async fn evaluate_finish_diff(
         }
 
         // b2. 输出根本不是 JSON：让审查者按格式重答一次，再失败才降级
-        if as_value.is_none() && !format_retried {
+        if as_value.is_none() && !format_retried && review_retry_allowed() {
             format_retried = true;
             messages.push(json!({"role": "assistant", "content": raw}));
             messages.push(json!({

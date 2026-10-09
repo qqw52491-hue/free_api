@@ -108,6 +108,8 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
     let retries = transient_llm_request_retries
         .unwrap_or(DEFAULT_TRANSIENT_LLM_REQUEST_RETRIES)
         .clamp(1, MAX_TRANSIENT_LLM_REQUEST_RETRIES);
+    crate::agent::reviewer_gatekeeper::LLM_REQUEST_ATTEMPTS
+        .store(retries, std::sync::atomic::Ordering::Relaxed);
 
     let run_guard = crate::agent::channel::SessionRunGuard::new(
         &app,
