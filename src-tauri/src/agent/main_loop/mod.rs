@@ -2112,7 +2112,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                 String::new()
             };
             context.add_error_feedback(&format!(
-                "【⚠️ 交付门禁拦截打回：任务尚未满足结项标准，finish 未生效！】\n【未闭合项/证据缺失】：\n{}\n任务仍在运行中。请勿在未闭合上述事项时草率结项！\n【必须采取的行动】：\n- 若为写入操作，请执行测试验证并在 change_verification_update 中以 verified + evidence_refs 闭合；\n- 若某项不再适用，请在 review_contract_update 或 todo_update 中显式标为 waived / failed 并说明理由；\n- 状态更新并完成验证后，方可再次提交 finish 交付；如需先评估就绪状态而不提交终态，可单独一步输出 prepare_finish 做预检。{}",
+                "【⚠️ 交付门禁拦截打回：任务尚未满足结项标准，finish 未生效！】\n【未闭合项/证据缺失】：\n{}\n任务仍在运行中。请勿在未闭合上述事项时草率结项！\n【必须采取的行动】：\n- 若为写入操作，请执行测试验证并在 change_verification_update 中以 verified + evidence_refs 闭合；\n- 若某项不再适用，请在 review_contract_update 或 todo_update 中显式标为 waived / failed 并说明理由；\n- 状态更新并完成验证后，方可再次提交 finish 交付；本次改动过文件的任务，请先单独一步输出 prepare_finish 做预检（不提交终态），就绪后再提交 finish。{}",
                 blocker_summary, escalation
             ));
             crate::agent::dispatcher::emit_tool_event(
