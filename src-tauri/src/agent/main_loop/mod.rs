@@ -239,7 +239,7 @@ async fn run_agent_main_loop_in_workspace_inner(
     // 自由会话（未选项目）的 workspace_dir 是会话产物目录而非真实工程——
     // 证据域缺失 → 降级为非 git 基线，审查改靠副作用台账/产物链。
     let git_baseline = if is_explicit_workspace || auto_pilot {
-        crate::agent::reviewer_gatekeeper::GitBaseline::capture(&workspace_dir)
+        crate::agent::reviewer_gatekeeper::GitBaseline::capture_at_run_start(&workspace_dir)
     } else {
         crate::agent::reviewer_gatekeeper::GitBaseline::non_git()
     };

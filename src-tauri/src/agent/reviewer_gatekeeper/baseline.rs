@@ -23,13 +23,53 @@ impl GitBaseline {
             return Self {
                 is_git: false,
                 base_head: None,
+                pre_dirty: Default::default(),
             };
         }
         let base_head = git_cmd(workspace, &["rev-parse", "HEAD"]);
         Self {
             is_git: true,
             base_head,
+            pre_dirty: Default::default(),
         }
+    }
+
+    /// 任务起点捕获：在 capture() 基础上记录当前已脐文件的内容哈希。
+    /// 阶段审查等「即时复算」场景仍用 capture()（不记录脐文件）。
+    pub fn capture_at_run_start(workspace: &Path) -> Self {
+        let mut b = Self::capture(workspace);
+        if b.is_git {
+            let mut names: Vec<String> = Vec::new();
+            if let Some(t) = git_cmd(workspace, &["diff", "--name-only", "--relative", "HEAD"]) {
+                names.extend(t.lines().map(|l| l.trim().to_string()));
+            }
+            if let Some(t) = git_cmd(workspace, &["ls-files", "--others", "--exclude-standard"]) {
+                names.extend(t.lines().map(|l| l.trim().to_string()));
+            }
+            for n in names.into_iter().filter(|n| !n.is_empty()) {
+                let h = Self::file_content_hash(workspace, &n);
+                b.pre_dirty.insert(n, h);
+            }
+        }
+        b
+    }
+
+    fn file_content_hash(workspace: &Path, rel: &str) -> String {
+        match std::fs::read(workspace.join(rel)) {
+            Ok(bytes) => {
+                let mut hasher = Sha256::new();
+                hasher.update(&bytes);
+                format!("{:x}", hasher.finalize())
+            }
+            Err(_) => "<missing>".to_string(),
+        }
+    }
+
+    /// 该文件在任务启动时就是脐的，且内容至今没有变化（即本次任务没碰过）
+    pub(crate) fn unchanged_since_baseline(&self, workspace: &Path, rel: &str) -> bool {
+        self.pre_dirty
+            .get(rel)
+            .is_some_and(|h| *h == Self::file_content_hash(workspace, rel))
     }
 
     /// 自由会话降级构造：无真实工作区锚点（workspace_dir 实为进程 cwd 的"事故目录"）
@@ -39,6 +79,7 @@ impl GitBaseline {
         Self {
             is_git: false,
             base_head: None,
+            pre_dirty: Default::default(),
         }
     }
 
@@ -113,6 +154,7 @@ impl GitBaseline {
                 }
             }
         }
+        paths.retain(|p| !self.unchanged_since_baseline(workspace, p));
         paths
     }
 
@@ -124,12 +166,25 @@ impl GitBaseline {
             return None;
         }
         // 1. 获取 Git Diff 文本
-        let diff_args = if let Some(ref base) = self.base_head {
-            vec!["diff", base.as_str()]
-        } else {
-            vec!["diff", "HEAD"]
-        };
-        let raw_diff = git_cmd(workspace, &diff_args).unwrap_or_default();
+        let mut diff_args: Vec<String> = vec![
+            "diff".to_string(),
+            self.base_head.clone().unwrap_or_else(|| "HEAD".to_string()),
+        ];
+        // 排除任务启动时就脐、且本次没碰过的文件（用户原有的未提交改动）
+        let skip: Vec<&String> = self
+            .pre_dirty
+            .keys()
+            .filter(|p| self.unchanged_since_baseline(workspace, p))
+            .collect();
+        if !skip.is_empty() {
+            diff_args.push("--".to_string());
+            diff_args.push(".".to_string());
+            for p in &skip {
+                diff_args.push(format!(":(exclude,literal){}", p));
+            }
+        }
+        let diff_refs: Vec<&str> = diff_args.iter().map(|s| s.as_str()).collect();
+        let raw_diff = git_cmd(workspace, &diff_refs).unwrap_or_default();
 
         // 2. 补足未暂存的 untracked 新文件摘要
         let untracked_files = git_cmd(workspace, &["ls-files", "--others", "--exclude-standard"])
@@ -147,7 +202,10 @@ impl GitBaseline {
             let mut untracked_chunks = Vec::new();
             for file_rel in untracked_files.lines() {
                 let file_rel = file_rel.trim();
-                if file_rel.is_empty() || is_noise_path(file_rel) {
+                if file_rel.is_empty()
+                    || is_noise_path(file_rel)
+                    || self.unchanged_since_baseline(workspace, file_rel)
+                {
                     continue;
                 }
                 let full_path = workspace.join(file_rel);

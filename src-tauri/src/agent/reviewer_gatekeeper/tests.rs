@@ -211,3 +211,41 @@ index 789..abc 100644
         let _ = std::fs::remove_dir_all(&tmp);
         let _ = std::fs::remove_dir_all(&tmp2);
     }
+
+    #[test]
+    fn baseline_excludes_files_dirty_before_run_and_untouched() {
+        fn git(dir: &std::path::Path, args: &[&str]) {
+            let ok = std::process::Command::new("git")
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            assert!(ok, "git {:?} failed", args);
+        }
+        let dir = std::env::temp_dir().join(format!("rgk_prestart_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        git(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("user_cfg.properties"), "pwd=ENC(x)\n").unwrap();
+        std::fs::write(dir.join("code.java"), "class A {}\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-q", "-m", "init"]);
+        // 用户在任务启动前已经改过配置文件
+        std::fs::write(dir.join("user_cfg.properties"), "pwd=plain\n").unwrap();
+        let baseline = GitBaseline::capture_at_run_start(&dir);
+        // 任务期间只改了 code.java
+        std::fs::write(dir.join("code.java"), "class A { int x; }\n").unwrap();
+        let (diff, _) = baseline.collect_git_diff(&dir).expect("should have diff");
+        assert!(diff.contains("code.java"));
+        assert!(!diff.contains("user_cfg.properties"), "pre-dirty file leaked: {}", diff);
+        let paths = baseline.collect_changed_file_paths(&dir, chrono::Utc::now());
+        assert!(paths.iter().any(|p| p == "code.java"));
+        assert!(!paths.iter().any(|p| p == "user_cfg.properties"));
+        // 任务自己再改了该文件就要算进来
+        std::fs::write(dir.join("user_cfg.properties"), "pwd=changed-by-task\n").unwrap();
+        let (diff2, _) = baseline.collect_git_diff(&dir).unwrap();
+        assert!(diff2.contains("user_cfg.properties"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }

@@ -40,6 +40,10 @@ const MAX_DIFF_CHARS: usize = 25_000;
 pub struct GitBaseline {
     pub is_git: bool,
     pub base_head: Option<String>,
+    /// 任务启动时工作区里已经是脐的文件（用户自己的未提交改动）→ 内容哈希。
+    /// 终审/变更清单排除「内容自启动以来没再变」的文件，避免把用户原有改动算到本次任务头上。
+    #[serde(default)]
+    pub pre_dirty: std::collections::HashMap<String, String>,
 }
 
 /// 终态代码审查结果
