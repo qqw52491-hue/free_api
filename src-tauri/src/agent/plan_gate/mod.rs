@@ -633,6 +633,29 @@ fn gate_interception(
                 checkpoint.policy_decision_summary = Some(decision.summary());
 
                 match decision {
+                    crate::agent::agent_policy::PolicyDecision::FastPass { .. }
+                        if checkpoint
+                            .triage_verdict
+                            .as_ref()
+                            .map(|v| v.requires_plan_gate())
+                            .unwrap_or(false)
+                            && checkpoint.submitted_plan.is_none() =>
+                    {
+                        // 分流要求走方案闸（technical_plan/expert_panel）且尚未 submit_plan：
+                        // 极速放行不得把规划阶段直接收尾为“已批准”——否则 Pro 跑一条良性试跑命令
+                        // 就会被踢出规划、无方案无审查地交给执行模型。
+                        if target_files.is_empty() {
+                            // 纯探测/良性命令：放行这一步，但保持规划阶段不变
+                            None
+                        } else {
+                            Some(DispatchResult { view: None,
+                                success: false,
+                                stdout: String::new(),
+                                stderr: crate::agent::gate_messages::plan_approval_requires_submission(),
+                                route: "plan_gatekeeper:no_submitted_plan".to_string(),
+                            })
+                        }
+                    }
                     crate::agent::agent_policy::PolicyDecision::FastPass { .. } => {
                         if !target_files.is_empty() && checkpoint.approved_target_files.is_none() {
                             checkpoint.approved_target_files = Some(target_files);
