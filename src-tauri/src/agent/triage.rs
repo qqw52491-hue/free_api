@@ -165,6 +165,21 @@ impl TriageVerdict {
         )
     }
 
+    /// 方案提交时按真实产物重新确定审查方式（空串/非法值不覆盖，保留原值）。
+    pub fn apply_plan_review_overrides(&mut self, final_mode: &str, stage_mode: &str) {
+        let f = final_mode.trim().to_ascii_lowercase();
+        if matches!(
+            f.as_str(),
+            "mechanical_only" | "artifact_quality" | "code_review" | "operational_verification" | "panel"
+        ) {
+            self.final_review_mode = f;
+        }
+        let s = stage_mode.trim().to_ascii_lowercase();
+        if matches!(s.as_str(), "none" | "milestone") {
+            self.stage_review_mode = s;
+        }
+    }
+
     /// 阶段审查开关：stage_review_mode != "none"（空串按 milestone → true）
     pub fn needs_stage_review(&self) -> bool {
         !self.stage_review_mode.trim().eq_ignore_ascii_case("none")
@@ -411,7 +426,7 @@ pub async fn run_triage<R: tauri::Runtime>(
   "confidence": 0.85,
   "reason": "一句话判决理由",
   "escalation_triggers": ["会把本任务升级回重路径的触发条件"],
-  "investigation_questions": ["仅 technical_plan/expert_panel 路由填写：执行方取证时必须回答的调查问题，1~6 条"],
+  "investigation_questions": ["仅 technical_plan/expert_panel 路由填写：取证时必须回答的调查问题，1~6 条；每条须是可独立查证、互不依赖的具体问题（便于并行派给只读探针）"],
   "required_evidence": ["仅 technical_plan/expert_panel 路由填写：方案成立前必须拿到的证据类型，1~6 条"],
   "skill_recommendations": [{"name": "目录中列出的 Skill 名", "reason": "基于任务/对话事实的推荐理由"}]
 }
@@ -424,13 +439,14 @@ pub async fn run_triage<R: tauri::Runtime>(
 - route（分流路由，决定前置讨论强度）：
   - direct：无需任何前置讨论直接执行（简单明确的小活、单文件产物）；
   - outline_review：需要先产出大纲/结构并经审查再动手（长文、多章节复杂产物）；
-  - technical_plan：需要 submit_plan 技术方案审查（修改已有代码、多文件改动、有风险操作）；
+  - technical_plan：需要先取证再出详细方案（含代码修改与创意/生成类产物如视频、PPT、报告、表格——需求有模糊但可返工时，由方案阶段写明假设，不要先问用户）；需要 submit_plan 技术方案审查（修改已有代码、多文件改动、有风险操作）；
   - expert_panel：跨域高风险，需多专家联合会审；
   - user_clarification：需求歧义必须先问用户，澄清前不得写入。
 - stage_review_mode：none=中段无需阶段审查；milestone=按里程碑/写入阈值做阶段审查。
-- final_review_mode：mechanical_only=机械校验即可交付（简单产物）；artifact_quality=非代码产物按产物质量标准终审（需求覆盖/结构完整/可用性）；code_review=代码级终审；operational_verification=须运行验证证据的终审；panel=多专家终审。
+- final_review_mode：mechanical_only=机械校验即可交付（简单产物）；artifact_quality=非代码产物按产物质量标准终审（需求覆盖/结构完整/可用性）；code_review=代码级终审；operational_verification=须运行验证证据的终审；panel=多专家终审。route 为 technical_plan/expert_panel 时，这两项只是临时默认，规划阶段提交方案时会由方案制定者按真实产物重新确定。
 - evidence_policy：none=方案不需证据引用；source_refs=资料/需求来源即可；code_refs=须引用已读代码证据；operational_probes=须命令输出/探针证据。
-- investigation_questions / required_evidence：仅当 route 为 technical_plan/expert_panel 时填写——你负责定调查方向，执行模型按你的任务单取证并提交方案，Tech Lead 据此核对覆盖度；其他路由一律留空数组。
+- investigation_questions / required_evidence：仅当 route 为 technical_plan/expert_panel 时填写，其他路由留空数组——你负责定调查方向，规划阶段的主 Agent 会先摸底，再把互相独立的问题派给只读探针并行取证，收齐后提交方案，Tech Lead 据此核对覆盖度。
+  问题须对任务类型通用，围绕“要做出什么、拿什么当素材/数据、环境里有什么能力、怎样算做对”：例如视频/PPT/表格类产物应覆盖产出规格（时长/页数/列含义/格式）、可用素材与数据来源、本机可用的工具与依赖、逐条可核对的验收标准；代码类则覆盖相关调用链与影响面。
 - skill_recommendations（Skill 路由，0~2 个）：
   - 只能从下方【可选 Skill 目录】中按名称选择；name 必须与目录条目完全一致；
   - 判定依据是任务事实与最近对话证据（例如：上一轮修复被用户明确否定、任务描述落在某个 Skill 的触发面上），不是固定关键词映射；
@@ -443,7 +459,7 @@ pub async fn run_triage<R: tauri::Runtime>(
 - 它读不到产物的内容语义：数据列含义、字段映射正确性、单位换算、页面渲染效果、文字质量。
 - 因此：产物正确性依赖内容语义时（数据报表、导出表格、渲染页面、文案类交付），
   需评估是否用语义级终审；产物"可解析即正确"时（纯结构配置、契约性 JSON），
-  mechanical_only 足够。以上由你按任务个案裁量，不是固定映射。
+  mechanical_only 足够。视频、动画、音频、PPT 的好坏也只能看内容；语义终审可对视频抽帧、对页面/PPT 截图核对。以上由你按任务个案裁量，不是固定映射。
 
 【判定纪律】
 - 宁可低估不要拔高：简单明确的任务判 direct，让门禁松手；
@@ -452,6 +468,7 @@ pub async fn run_triage<R: tauri::Runtime>(
   多文件扩散、实现路径有多种取舍、数据/协议格式变更、删除改名、生产配置 → technical_plan 起步；
 - coordination_scope 同理按"改动"计：理解过程横跨多文件不算 multi_component，
   只有改动本身落在多个组件上才算；
+- user_clarification 只用于必须由用户提供、无法自行取舍的信息（不可逆操作、付费/账号/密钥授权、用户私有素材缺失）；创意/风格/规格类的模糊需求属于可返工，一律走 technical_plan，把你的假设写进 reason；
 - 拿不准且做错代价高 → user_clarification；拿不准但方向可逆 → technical_plan。"#;
 
     let reviewer_list = if reviewer_names.is_empty() {
@@ -646,6 +663,17 @@ mod tests {
         assert_eq!(v.final_review_mode, "code_review");
         assert_eq!(v.evidence_policy, "code_refs");
         assert!((v.confidence - 1.0).abs() < 1e-9, "confidence 钳位到 [0,1]");
+    }
+
+    #[test]
+    fn plan_review_overrides_apply_valid_values_only() {
+        let mut v = parse(r#"{"route": "technical_plan", "stage_review_mode": "none", "final_review_mode": "mechanical_only"}"#);
+        v.apply_plan_review_overrides("Artifact_Quality", "milestone");
+        assert_eq!(v.final_review_mode, "artifact_quality");
+        assert_eq!(v.stage_review_mode, "milestone");
+        v.apply_plan_review_overrides("vibes", "");
+        assert_eq!(v.final_review_mode, "artifact_quality");
+        assert_eq!(v.stage_review_mode, "milestone");
     }
 
     #[test]

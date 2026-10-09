@@ -72,6 +72,12 @@ pub async fn handle_submit_plan(
         );
     }
 
+    // 审查方式随方案确定：方案制定者摸底后按真实产物声明终审/阶段审查方式，
+    // 覆盖入口分流的临时默认值（入口一次性判断时尚不知道最终会产出什么）。
+    if let Some(v) = checkpoint.triage_verdict.as_mut() {
+        v.apply_plan_review_overrides(&submission.final_review_mode, &submission.stage_review_mode);
+    }
+
     // ---- Auto 模式策略预检：submit_plan 兼任「报方案拿判定」通道 ----
     // 判定前置为正常工具结果：FastPass 直接落账放行（不派审查——白名单文件
     // 烧一轮 tech_lead 是纯浪费）；Escalate 切换为交叉审查模式并落入下方既有
@@ -318,7 +324,7 @@ pub async fn handle_submit_plan(
         .get(crate::agent::router::roles::REVIEWER)
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);
-    let mut reviewer_model = if card.model_id.is_empty() || has_explicit_reviewer_slot {
+    let mut reviewer_model = if card.model_id.is_empty() {
         routing.model_id.clone()
     } else {
         card.model_id.clone()

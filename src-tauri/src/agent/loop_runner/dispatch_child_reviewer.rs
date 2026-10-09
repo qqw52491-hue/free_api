@@ -86,8 +86,8 @@ pub(super) async fn dispatch_child_reviewer(
         );
         let model_tier = routing.tier.to_string();
         let reasoning_effort = ctx.model_routing.reasoning_effort_for(&routing.tier).to_string();
-        // 会话级 reviewer 钉死（role_models.reviewer）优先级高于角色卡默认模型：
-        // 用户显式指定审查模型时，角色卡的 model_id 默认值不得反杀。
+        // 优先级：角色卡自带 model_id > 会话级 reviewer 算力槽（role_models.reviewer）> 路由默认。
+        // 与探针/写入一致：角色卡明确选了模型就按卡走，槽只管没有角色卡模型的派发。
         let explicit_reviewer_slot = ctx.model_routing
             .role_models
             .get(crate::agent::router::roles::REVIEWER)
@@ -142,7 +142,7 @@ pub(super) async fn dispatch_child_reviewer(
                         if let Some(schema) = card.parse_custom_schema() {
                             reviewer_custom_schema = Some(schema);
                         }
-                        if !card.model_id.is_empty() && !explicit_reviewer_slot {
+                        if !card.model_id.is_empty() {
                             reviewer_model = card.model_id.clone();
                         }
                         if card.max_concurrency > 0 {
@@ -242,7 +242,7 @@ pub(super) async fn dispatch_child_reviewer(
                     if let Some(schema) = card.parse_custom_schema() {
                         reviewer_custom_schema = Some(schema);
                     }
-                    if !card.model_id.is_empty() && !explicit_reviewer_slot {
+                    if !card.model_id.is_empty() {
                         reviewer_model = card.model_id.clone();
                     }
                     if card.max_concurrency > 0 {

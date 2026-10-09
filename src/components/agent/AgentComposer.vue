@@ -225,7 +225,7 @@
                                         <div class="route-item pro-tier">
                                             <div class="route-item-head">
                                                 <div class="head-left">
-                                                    <span class="route-badge pro">🧠 🥇 模型 1：推理规划 (Pro)</span>
+                                                    <span class="route-badge pro">🧠 Pro：推理规划</span>
                                                     <small>长程规划与深层自愈救场</small>
                                                 </div>
                                                 <div class="effort-segmented-wrap" title="思考档位切换">
@@ -262,7 +262,7 @@
                                         <div class="route-item flash-tier">
                                             <div class="route-item-head">
                                                 <div class="head-left">
-                                                    <span class="route-badge flash">⚡ 🥈 模型 2：极速执行 (Flash)</span>
+                                                    <span class="route-badge flash">⚡ Flash：极速执行</span>
                                                     <small>高频工具调用与快速推进</small>
                                                 </div>
                                                 <div class="effort-segmented-wrap" title="思考档位切换">
@@ -395,21 +395,21 @@
                                                         type="button"
                                                         class="slot-choice-pill"
                                                         :class="{ active: getSlotChoice('writer') === 'pro' }"
-                                                        :title="`指定使用模型 1: ${getModelDisplayName(modelRouting.pro)}`"
+                                                        :title="`指定使用 Pro: ${getModelDisplayName(modelRouting.pro)}`"
                                                         :disabled="isRunning"
                                                         @click="setSlotChoice('writer', 'pro')"
                                                     >
-                                                        🥇 模型 1
+                                                        🧠 Pro
                                                     </button>
                                                     <button
                                                         type="button"
                                                         class="slot-choice-pill"
                                                         :class="{ active: getSlotChoice('writer') === 'flash' || !getSlotChoice('writer') }"
-                                                        :title="`指定使用模型 2: ${getModelDisplayName(modelRouting.flash)}`"
+                                                        :title="`指定使用 Flash: ${getModelDisplayName(modelRouting.flash)}`"
                                                         :disabled="isRunning"
                                                         @click="setSlotChoice('writer', 'flash')"
                                                     >
-                                                        🥈 模型 2
+                                                        ⚡ Flash
                                                     </button>
                                                     <select
                                                         class="slot-model-select"
@@ -682,21 +682,21 @@
                                                         type="button"
                                                         class="slot-choice-pill"
                                                         :class="{ active: getSlotChoice('reviewer') === 'pro' }"
-                                                        :title="`指定使用模型 1: ${getModelDisplayName(modelRouting.pro)}`"
+                                                        :title="`指定使用 Pro: ${getModelDisplayName(modelRouting.pro)}`"
                                                         :disabled="isRunning"
                                                         @click="setSlotChoice('reviewer', 'pro')"
                                                     >
-                                                        🥇 模型 1
+                                                        🧠 Pro
                                                     </button>
                                                     <button
                                                         type="button"
                                                         class="slot-choice-pill"
                                                         :class="{ active: getSlotChoice('reviewer') === 'flash' }"
-                                                        :title="`指定使用模型 2: ${getModelDisplayName(modelRouting.flash)}`"
+                                                        :title="`指定使用 Flash: ${getModelDisplayName(modelRouting.flash)}`"
                                                         :disabled="isRunning"
                                                         @click="setSlotChoice('reviewer', 'flash')"
                                                     >
-                                                        🥈 模型 2
+                                                        ⚡ Flash
                                                     </button>
                                                     <select
                                                         class="slot-model-select"
@@ -850,21 +850,21 @@
                                                         type="button"
                                                         class="slot-choice-pill"
                                                         :class="{ active: getSlotChoice('scout') === 'pro' }"
-                                                        :title="`指定使用模型 1: ${getModelDisplayName(modelRouting.pro)}`"
+                                                        :title="`指定使用 Pro: ${getModelDisplayName(modelRouting.pro)}`"
                                                         :disabled="isRunning"
                                                         @click="setSlotChoice('scout', 'pro')"
                                                     >
-                                                        🥇 模型 1
+                                                        🧠 Pro
                                                     </button>
                                                     <button
                                                         type="button"
                                                         class="slot-choice-pill"
                                                         :class="{ active: getSlotChoice('scout') === 'flash' || !getSlotChoice('scout') }"
-                                                        :title="`指定使用模型 2: ${getModelDisplayName(modelRouting.flash)}`"
+                                                        :title="`指定使用 Flash: ${getModelDisplayName(modelRouting.flash)}`"
                                                         :disabled="isRunning"
                                                         @click="setSlotChoice('scout', 'flash')"
                                                     >
-                                                        🥈 模型 2
+                                                        ⚡ Flash
                                                     </button>
                                                     <select
                                                         class="slot-model-select"

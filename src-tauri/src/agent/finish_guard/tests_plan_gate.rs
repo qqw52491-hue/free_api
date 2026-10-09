@@ -255,6 +255,7 @@ mod tests_inner {
             intended_verification: "cargo test mem".to_string(),
             risk_level: "medium".to_string(),
             revision_reason: String::new(),
+            ..Default::default()
         });
 
         // 均分达标但 risk < 60：即使平均分 90+ 也必须硬拦截

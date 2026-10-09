@@ -137,6 +137,13 @@ pub struct PlanSubmission {
     /// 照常校验证据并消耗审查预算；留空则按误重复提交拒绝。
     #[serde(default)]
     pub revision_reason: String,
+    /// 终审方式（可选）：mechanical_only|artifact_quality|code_review|operational_verification|panel。
+    /// 方案制定者摸底后按真实产物声明，覆盖入口分流的临时默认值。
+    #[serde(default)]
+    pub final_review_mode: String,
+    /// 阶段审查方式（可选）：none|milestone。
+    #[serde(default)]
+    pub stage_review_mode: String,
 }
 
 /// 终态预检（prepare_finish）：模型请求宿主按 finish 同一套门禁做交付就绪评估。

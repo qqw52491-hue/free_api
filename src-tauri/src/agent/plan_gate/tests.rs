@@ -518,6 +518,7 @@
             intended_verification: "cargo test --lib plan_gate".to_string(),
             risk_level: "medium".to_string(),
             revision_reason: String::new(),
+            ..Default::default()
         }
     }
 

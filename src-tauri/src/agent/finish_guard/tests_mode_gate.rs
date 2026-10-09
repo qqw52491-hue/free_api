@@ -107,6 +107,7 @@ mod tests_inner {
             intended_verification: "cargo test dnd".to_string(),
             risk_level: "low".to_string(),
             revision_reason: String::new(),
+            ..Default::default()
         });
 
         // 阶段 1: 尚未派发 reviewer，尝试写代码 -> 拦截 need_reviewer_dispatch

@@ -1132,6 +1132,7 @@
             intended_verification: "cargo test".to_string(),
             risk_level: "medium".to_string(),
             revision_reason: String::new(),
+            ..Default::default()
         });
 
         let mut extra = std::collections::HashMap::new();

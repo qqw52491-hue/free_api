@@ -375,6 +375,16 @@ impl AgentRouter {
         if let Some(decision) = config.role_override(role) {
             return decision;
         }
+        // 方案规划相位默认走推理档（Pro）：摸底、调度探针取证、出方案属于全局推理，
+        // 且相位内不中途切换模型。用户钉死 planner 角色（上方 role_override）优先；
+        // 推理档未配置时回退自动路由。
+        if planning_active && !config.pro.trim().is_empty() {
+            return RoutingDecision {
+                model_id: config.pro.clone(),
+                tier: RoutingTier::Pro,
+                reason: "方案规划相位默认使用推理档（Pro）：摸底、调度探针取证、出方案".to_string(),
+            };
+        }
         if config.routing_mode.eq_ignore_ascii_case("scored") {
             Self::route_scored(context, config)
         } else {
@@ -391,6 +401,16 @@ impl AgentRouter {
     ) -> RoutingDecision {
         if let Some(decision) = config.role_override(role) {
             return decision;
+        }
+        // 探针（只读侦察）未显式配置时默认 Flash 档，不再跟随主 Agent 当前步的模型：
+        // 规划相位主 Agent 是 Pro，探针若跟随就会让“Flash 取证”落空。
+        // 与探针页“探针算力”默认高亮模型 2 的显示一致；角色卡自带 model_id 优先级更高（派发处处理）。
+        if role == roles::SCOUT && !config.flash.trim().is_empty() {
+            return RoutingDecision {
+                model_id: config.flash.clone(),
+                tier: RoutingTier::Flash,
+                reason: "探针未配置算力，默认使用执行档（Flash）".to_string(),
+            };
         }
         Self::route_for_step(context, config, step_id)
     }
@@ -979,7 +999,7 @@ mod tests {
             "model-flash"
         );
 
-        // 未配置角色钉死时行为不变：plan_required 不影响既有规则路由
+        // 未配置角色钉死时：规划相位默认走推理档（Pro），方案批准/轻任务仍走既有规则路由
         let bare = ModelRoutingConfig {
             routing_mode: "rules".into(),
             ..mixed_config()
@@ -991,8 +1011,14 @@ mod tests {
         });
         assert_eq!(
             AgentRouter::route_for_step(&context, &bare, 6).model_id,
+            "model-pro",
+            "无角色配置时规划相位默认走推理档"
+        );
+        context.plan_gate.as_mut().unwrap().phase = "approved".to_string();
+        assert_eq!(
+            AgentRouter::route_for_step(&context, &bare, 7).model_id,
             "model-flash",
-            "无角色配置时相位不参与路由，默认行为不变"
+            "方案批准后回到既有规则路由"
         );
     }
 
@@ -1029,6 +1055,54 @@ mod tests {
         // 单步结束，逃生通道复位，回落 Flash
         context.active_target_block_mut().unwrap().on_step_finish();
         assert_eq!(AgentRouter::route(&context, &config).tier, RoutingTier::Flash);
+    }
+
+    fn planning_context(phase: &str) -> SandwichContext {
+        let mut context = SandwichContext::new("system".to_string(), "目标".to_string());
+        push_user_turn(&mut context, "上一步反馈：执行成功");
+        context.record_step_outcome(true);
+        context.plan_gate = Some(crate::agent::context::types::PlanGateProjection {
+            plan_required: true,
+            phase: phase.to_string(),
+            ..Default::default()
+        });
+        context
+    }
+
+    #[test]
+    fn planning_phase_defaults_to_pro_without_role_pin() {
+        for mode in ["rules", "scored"] {
+            let mut config = ModelRoutingConfig { routing_mode: mode.into(), ..mixed_config() };
+            // 规划相位（重方案门未批准）：未钉 planner 也走 Pro
+            let exploring = planning_context("exploring");
+            let d = AgentRouter::route_for_step(&exploring, &config, 3);
+            assert_eq!((d.tier, d.model_id.as_str()), (RoutingTier::Pro, "model-pro"), "mode={mode}");
+            // 方案批准后回到执行相位：非首步、一切顺利 → Flash
+            let approved = planning_context("approved");
+            assert_eq!(AgentRouter::route_for_step(&approved, &config, 3).tier, RoutingTier::Flash, "mode={mode}");
+            // 用户钉死 planner 优先于默认
+            config.role_models.insert(roles::PLANNER.to_string(), "flash".into());
+            assert_eq!(AgentRouter::route_for_step(&exploring, &config, 3).tier, RoutingTier::Flash, "mode={mode}");
+        }
+        // 推理档未配置时不滥用空 model_id：回退自动路由
+        let no_pro = ModelRoutingConfig { pro: String::new(), ..mixed_config() };
+        assert!(!AgentRouter::route_for_step(&planning_context("exploring"), &no_pro, 3).model_id.is_empty());
+    }
+
+    #[test]
+    fn scout_defaults_to_flash_even_in_pro_planning_phase() {
+        let mut config = ModelRoutingConfig { routing_mode: "rules".into(), ..mixed_config() };
+        let exploring = planning_context("exploring");
+        // 规划相位主 Agent 是 Pro，但未配置的探针仍是 Flash
+        assert_eq!(AgentRouter::route_for_step(&exploring, &config, 3).tier, RoutingTier::Pro);
+        let scout = AgentRouter::route_for_role(&exploring, &config, 3, roles::SCOUT);
+        assert_eq!((scout.tier, scout.model_id.as_str()), (RoutingTier::Flash, "model-flash"));
+        // 用户在探针页点“模型 1”后仍然生效
+        config.role_models.insert(roles::SCOUT.to_string(), "pro".into());
+        assert_eq!(AgentRouter::route_for_role(&exploring, &config, 3, roles::SCOUT).tier, RoutingTier::Pro);
+        // 其他角色（审查/写入）保持“跟随自动路由”不变
+        let plain = ModelRoutingConfig { routing_mode: "rules".into(), ..mixed_config() };
+        assert_eq!(AgentRouter::route_for_role(&exploring, &plain, 3, roles::REVIEWER).tier, RoutingTier::Pro);
     }
 }
 
