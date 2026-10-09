@@ -406,13 +406,15 @@
                                 <time class="ambient-text-time">{{ formatClock(item.step.timestamp) }}</time>
                             </article>
                             <!-- 命令输出：执行中自动展开实时输出，结束后自动收起；可用箭头手动展开/收起 -->
-                            <div
-                                v-if="hasAmbientTerm(item.step, item.action) && isAmbientTermOpen(item.step)"
-                                class="live-term-box ambient-term-box"
-                                @click.stop
-                            >
-                                <pre class="live-term-body soft-scrollbar ambient-term-body" :class="{ 'ambient-term-live': item.step.status === 'running' }">{{ ambientTermText(item.step) }}</pre>
-                            </div>
+                            <Transition name="live-term-collapse">
+                                <div
+                                    v-if="hasAmbientTerm(item.step, item.action) && isAmbientTermOpen(item.step)"
+                                    class="live-term-box ambient-term-box"
+                                    @click.stop
+                                >
+                                    <pre class="live-term-body soft-scrollbar ambient-term-body" :class="{ 'ambient-term-live': item.step.status === 'running' }">{{ ambientTermText(item.step) }}</pre>
+                                </div>
+                            </Transition>
                             </template>
 
                             <!-- 1.5 人工干预应答行：紧随对应提问步骤之后 -->
