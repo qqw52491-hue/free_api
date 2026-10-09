@@ -217,6 +217,17 @@ pub async fn handle_submit_plan(
             superseded_summary.as_deref().unwrap_or("（无）"),
             prev_verdict,
         ));
+
+        // 修订轮必须基于"现已落盘的状态"审：方案期本无 diff，但修订发生在已写了一部分之后，
+        // 把已产生的产物清单与最近执行轨迹一并交给审查者，避免审查按"从零开始"的方案评估。
+        let written = crate::agent::stage_review::stage_extra_sections(db, final_session_id).join("");
+        if !written.trim().is_empty() {
+            let clipped: String = written.chars().take(1800).collect();
+            evidence_excerpt.push_str(&format!(
+                "\n\n【已落盘的改动（修订必须在此基础上审：哪些保留、哪些需回退/重做）】{}",
+                clipped
+            ));
+        }
     }
     // ---- 证据范围对账（机械差集，非语义判断）----
     // 「引为证据 ≠ 列入修改目标」：被引用文件可能依赖被改对象的语义——

@@ -540,7 +540,7 @@ pub async fn dispatch(
 /// 产物清单起点取本会话创建后的第一次 LLM 调用时间：fork/新会话的 tmp 会带着源会话遗留的产物
 /// （实测混入 deep_space_beacon 等旧目录，导致审查员审错对象），这些文件的修改时间
 /// 都早于首次调用，只列其后产生/修改的文件；查不到则退回全量。
-fn stage_extra_sections(db: &DbState, session_id: &str) -> Vec<String> {
+pub(crate) fn stage_extra_sections(db: &DbState, session_id: &str) -> Vec<String> {
     let mut extras = Vec::new();
     // created_at 是 RFC3339 文本；只取"会话创建之后"的首次调用——fork 会把源会话的
     // 历史调用连同 tmp 一起复制过来，那些旧调用时间早于新会话创建时间，不能当起点。
