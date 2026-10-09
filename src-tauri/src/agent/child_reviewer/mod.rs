@@ -330,7 +330,25 @@ pub async fn spawn_child_reviewer(
         let stage_key = format!("child:{}", child_run_id_clone);
         crate::agent::control::mark_stage(&stage_key, "child_task:spawned");
         let app_handle = app;
+        // 思考失控止损：单次调用的思考内容超过上限仍未给结论（实测 gemini-3.1-pro high 思考 4 万字反复复述同一批结论），
+        // 切断流后追一句“立刻出结论”并降低推理强度重试一次，再失控才判超时交编排层。
+        let think_cap: usize = std::env::var("FREE_API_REVIEWER_THINK_CAP_CHARS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .map(|v| v.clamp(2_000, 200_000))
+            .unwrap_or(20_000);
+        let think_chars = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let think_chars_cb = think_chars.clone();
+        let mut cur_effort = reasoning_effort.clone();
+        let mut think_overflows: u32 = 0;
         let mut on_stream_event = |event: llm::StreamEvent<'_>| -> bool {
+            if let llm::StreamEvent::Thinking { chunk, .. } = &event {
+                let add = chunk.chars().count();
+                let total = think_chars_cb.fetch_add(add, std::sync::atomic::Ordering::Relaxed) + add;
+                if total > think_cap {
+                    return false;
+                }
+            }
             if let Some(ref handle) = app_handle {
                 match event {
                     llm::StreamEvent::Thinking { chunk, .. } => {
@@ -389,6 +407,7 @@ pub async fn spawn_child_reviewer(
 
         let (duration_ms, completion_tokens, prompt_tokens, final_parsed, final_raw) = loop {
             llm_call_index += 1;
+            think_chars.store(0, std::sync::atomic::Ordering::Relaxed);
             crate::agent::control::mark_stage(
                 &stage_key,
                 &format!("child_task:llm_call:{}", llm_call_index),
@@ -410,7 +429,7 @@ pub async fn spawn_child_reviewer(
             let call = llm::stream_with_retry(
                 &config,
                 &messages,
-                &reasoning_effort,
+                &cur_effort,
                 &mut interrupt_rx,
                 1,
                 &mut on_stream_event,
@@ -528,6 +547,39 @@ pub async fn spawn_child_reviewer(
                 .map(|usage| usage.prompt_tokens)
                 .unwrap_or_default();
             let raw = stream_result.full_response;
+
+            // 思考超限被切断且没有任何正文：第一次追加“立刻结论”指令并降强度重试，第二次判超时
+            if think_chars.load(std::sync::atomic::Ordering::Relaxed) > think_cap && raw.trim().is_empty() {
+                think_overflows += 1;
+                if think_overflows >= 2 {
+                    let duration_ms = started_at.elapsed().as_millis() as u64;
+                    finish_child_run(
+                        &db_clone,
+                        &child_run_id_clone,
+                        "timed_out",
+                        duration_ms,
+                        0,
+                        0,
+                        Some(ChildErrorKind::Timeout),
+                        Some(&child_error_result_json(
+                            &child_run_id_clone,
+                            "timed_out",
+                            &ChildErrorKind::Timeout,
+                            duration_ms,
+                            0,
+                            0,
+                            Some("思考内容两次超过上限仍未给出结论"),
+                        )),
+                    );
+                    return;
+                }
+                cur_effort = "auto".to_string();
+                messages.push(json!({
+                    "role": "user",
+                    "content": "【系统】你的思考已超过上限仍未给出结论，已被强制中止。不要再展开推理、不要复述已有分析：立刻基于已有证据输出最终审查 JSON；没查完的疑点写进 missing_evidence，不要再请求取证。"
+                }));
+                continue;
+            }
 
             // 1. 最终审查 JSON（含 findings 键）→ 收敛。
             //    收敛前先做覆盖型契约校验：缺项时把【具体缺哪些点】喂回模型
