@@ -537,11 +537,23 @@ pub async fn dispatch(
 /// 阶段审查补充材料：会话 tmp 产物清单 + 执行轨迹摘要（与终审同源复用）。
 /// 阶段审查不止看 diff——中途产物存在性、"声称跑过的验证"是否真跑过，
 /// 在阶段层就该进审查视野；拿不到则略过（非致命材料）。
-/// 产物清单列全量而非"本轮新增"：session tmp 按会话隔离，区内产物均属本会话，
-/// 阶段审查关心的是产物区当前状态而非增量。
+/// 产物清单起点取本会话第一次 LLM 调用时间：新会话的 tmp 会被预置上一会话遗留的产物
+/// （实测混入 deep_space_beacon 等旧目录，导致审查员审错对象），这些文件的修改时间
+/// 都早于首次调用，只列其后产生/修改的文件；查不到则退回全量。
 fn stage_extra_sections(db: &DbState, session_id: &str) -> Vec<String> {
     let mut extras = Vec::new();
-    let epoch = chrono::DateTime::<chrono::Utc>::from(std::time::UNIX_EPOCH);
+    let first_call_secs: Option<i64> = db.0.lock().ok().and_then(|conn| {
+        conn.query_row(
+            "SELECT MIN(created_at) FROM agent_llm_calls WHERE session_id = ?1",
+            rusqlite::params![session_id],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .ok()
+        .flatten()
+    });
+    let epoch = first_call_secs
+        .and_then(|s| chrono::DateTime::<chrono::Utc>::from_timestamp(s, 0))
+        .unwrap_or_else(|| chrono::DateTime::<chrono::Utc>::from(std::time::UNIX_EPOCH));
     if let Some(m) =
         crate::agent::reviewer_gatekeeper::collect_session_tmp_manifest(session_id, epoch)
     {

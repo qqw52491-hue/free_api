@@ -12,8 +12,8 @@ use tokio::sync::watch;
 
 /// L2 只读侦察 worker 预算：比 L1 审查者（单次调用、45s）宽一档，
 /// 但仍受步数/时长/观测量三重硬顶约束，防止探索失控。
-pub const MAX_WORKER_STEPS: usize = 10;
-pub const WORKER_TIMEOUT_SECS: u64 = 180;
+pub const MAX_WORKER_STEPS: usize = 40;
+pub const WORKER_TIMEOUT_SECS: u64 = 360;
 pub const WORKER_PER_CALL_TIMEOUT_SECS: u64 = 60;
 const WORKER_MAX_OUTPUT_TOKENS: i64 = 900;
 const MAX_TASK_CHARS: usize = 2_000;
