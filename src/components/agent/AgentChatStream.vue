@@ -328,8 +328,8 @@
                             >{{ item.text }}</p>
 
                             <!-- 1. 单项动作行 (修改/新建/读取/终端/单次检索/突破) -->
+                            <template v-else-if="item.type === 'step'">
                             <article
-                                v-else-if="item.type === 'step'"
                                 class="ambient-text-row"
                                 :class="[
                                     `status-${item.step.status}`,
@@ -395,6 +395,14 @@
                                 </span>
                                 <time class="ambient-text-time">{{ formatClock(item.step.timestamp) }}</time>
                             </article>
+                            <!-- 简报模式终端卡：与全量同款，执行中展开、结束后收起（失败保持展开） -->
+                            <TerminalView
+                                v-if="getAmbientTerminalView(item.step, item.action)"
+                                :view="getAmbientTerminalView(item.step, item.action)!"
+                                :live="item.step.status === 'running'"
+                                @select="$emit('select-step', item.step.id)"
+                            />
+                            </template>
 
                             <!-- 1.5 人工干预应答行：紧随对应提问步骤之后 -->
                             <button
@@ -1272,6 +1280,19 @@ import { formatClock, formatDurationSeconds, formatMilliseconds, getToolIcon, sh
 import RichContentRenderer from "../charts/RichContentRenderer.vue";
 import AgentHumanInterventionCard from "./AgentHumanInterventionCard.vue";
 import { toolViewComponents } from "./views";
+import TerminalView from "./views/TerminalView.vue";
+import type { TerminalToolView } from "./types";
+
+// 简报流：终端类步骤返回终端视图；运行中尚无后端 view 时用命令文本临时占位
+function getAmbientTerminalView(step: any, action: any): TerminalToolView | null {
+    if (action?.actionKind !== "shell") return null;
+    if (step?.view?.kind === "terminal") return step.view as TerminalToolView;
+    if (step?.status !== "running") return null;
+    const p = step?.params as any;
+    const command = (p && typeof p === "object" && typeof p.command === "string" ? p.command : action?.capsuleTitle) || "";
+    if (!command) return null;
+    return { kind: "terminal", command, exit_code: 0 };
+}
 import ArtifactList from "../artifacts/ArtifactList.vue";
 import FileIcon from "./FileIcon.vue";
 

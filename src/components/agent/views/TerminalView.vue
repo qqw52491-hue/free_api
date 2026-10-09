@@ -7,13 +7,14 @@
             </button>
             <span class="term-dots"><i class="dot r"></i><i class="dot y"></i><i class="dot g"></i></span>
             <span class="term-cmd" :title="view.cwd">$ {{ view.command }}</span>
-            <span class="term-exit" :class="view.spawn_error || view.exit_code !== 0 ? 'fail' : 'ok'">
-                {{ view.spawn_error ? 'SPAWN FAIL' : `exit ${view.exit_code}` }}
+            <span class="term-exit" :class="!live && (view.spawn_error || view.exit_code !== 0) ? 'fail' : 'ok'">
+                {{ live ? '运行中…' : view.spawn_error ? 'SPAWN FAIL' : `exit ${view.exit_code}` }}
             </span>
         </div>
         <!-- 输出区：详情态显示完整输出，卡片态支持滚动与自动吸底 -->
         <div v-show="effectiveExpanded" ref="bodyRef" class="term-body soft-scrollbar" @scroll="onScroll">
-            <pre v-if="view.spawn_error || displayOutput" :class="{ 'term-err': view.spawn_error }">{{ view.spawn_error || displayOutput }}</pre>
+            <pre v-if="live && !displayOutput" class="term-live-hint">执行中…</pre>
+            <pre v-else-if="view.spawn_error || displayOutput" :class="{ 'term-err': view.spawn_error }">{{ view.spawn_error || displayOutput }}</pre>
             <div v-if="view.truncated && !detail" class="term-more">…输出已截断，点开看全部</div>
         </div>
         <div v-show="effectiveExpanded" class="term-meta">
@@ -28,12 +29,20 @@ import { computed, ref, watch, onMounted, nextTick } from "vue";
 import type { TerminalToolView } from "../types";
 import { useExpandable } from "./useExpandable";
 
-const props = defineProps<{ view: TerminalToolView; detail?: boolean; output?: string; params?: unknown }>();
+const props = defineProps<{ view: TerminalToolView; detail?: boolean; output?: string; params?: unknown; live?: boolean }>();
 defineEmits<{ select: [] }>();
 
 // 约定：失败自动展开（错误要主动跳到眼前），成功默认收起
 const failed = computed(() => props.view.exit_code !== 0 || !!props.view.spawn_error);
-const { expanded, toggle } = useExpandable(failed.value);
+// live（简报流传入）：执行中默认展开，结束后自动收起（失败仍保持展开）
+const { expanded, toggle } = useExpandable(failed.value || !!props.live);
+watch(
+    () => props.live,
+    (now, prev) => {
+        if (now) expanded.value = true;
+        else if (prev) expanded.value = failed.value;
+    },
+);
 const effectiveExpanded = computed(() => props.detail || expanded.value);
 const displayOutput = computed(() => (props.detail && props.output ? props.output : props.view.output_tail));
 
