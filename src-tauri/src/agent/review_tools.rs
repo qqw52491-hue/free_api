@@ -341,7 +341,7 @@ pub fn git_dirty_file_count(workspace: &Path) -> Option<u32> {
 }
 
 fn git_args(workspace: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git").args(args).current_dir(workspace).output().ok()?;
+    let out = crate::agent::reviewer_gatekeeper::git_command(workspace).args(args).output().ok()?;
     if !out.status.success() {
         return None;
     }

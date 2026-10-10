@@ -37,6 +37,8 @@ impl GitBaseline {
     /// 任务起点捕获：在 capture() 基础上记录当前已脐文件的内容哈希。
     /// 阶段审查等「即时复算」场景仍用 capture()（不记录脐文件）。
     pub fn capture_at_run_start(workspace: &Path) -> Self {
+        // 非 git 目录：先在应用数据目录建「影子仓库」快照（失败则仍走 mtime 扫描），之后 capture() 就能走 git 路径。
+        let _ = ensure_shadow_snapshot(workspace);
         let mut b = Self::capture(workspace);
         if b.is_git {
             let mut names: Vec<String> = Vec::new();

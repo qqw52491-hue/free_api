@@ -251,6 +251,25 @@ index 789..abc 100644
     }
 
     #[test]
+    fn shadow_repo_gives_non_git_dir_a_run_start_baseline() {
+        let dir = std::env::temp_dir().join(format!("rgk_shadow_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "old_a\n").unwrap();
+        std::fs::write(dir.join("keep.txt"), "untouched_line\n").unwrap();
+        let baseline = GitBaseline::capture_at_run_start(&dir);
+        assert!(baseline.is_git && baseline.base_head.is_some(), "shadow baseline not created");
+        std::fs::write(dir.join("a.txt"), "new_a\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "brand_new_b\n").unwrap();
+        let (diff, _) = baseline.collect_git_diff(&dir).expect("should have diff");
+        assert!(diff.contains("new_a") && diff.contains("brand_new_b"), "{}", diff);
+        assert!(!diff.contains("untouched_line"), "{}", diff);
+        assert!(!dir.join(".git").exists(), "must not create .git in user dir");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(shadow_git_dir(&dir));
+    }
+
+    #[test]
     fn baseline_same_file_only_shows_lines_changed_during_run() {
         fn git(dir: &std::path::Path, args: &[&str]) {
             let ok = std::process::Command::new("git")
