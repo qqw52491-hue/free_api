@@ -6,7 +6,7 @@
 //! 3. 严格的 action 白名单校验：只支持 `read`、`write`、`edit`、`list`；
 //! 4. edit 唯一性保障：命中多处时精确返回所有匹配行号列表，引导模型一轮内补充上下文修正。
 
-use crate::agent::path_guard::ensure_allowed_path;
+use crate::agent::path_guard::{ensure_allowed_path, ensure_readable_path};
 use crate::agent::types::DispatchResult;
 use crate::db::DbState;
 use serde_json::json;
@@ -246,7 +246,7 @@ fn execute_read(
         }
     };
 
-    let resolved = match ensure_allowed_path(raw_path, workspace_root, Some(session_id), false) {
+    let resolved = match ensure_readable_path(raw_path, workspace_root, Some(session_id), false) {
         Ok(r) => r,
         Err(e) => {
             return DispatchResult { view: None,
@@ -747,7 +747,7 @@ fn execute_list(
         .and_then(|v| v.as_str())
         .unwrap_or(".");
 
-    let resolved = match ensure_allowed_path(raw_path, workspace_root, Some(session_id), false) {
+    let resolved = match ensure_readable_path(raw_path, workspace_root, Some(session_id), false) {
         Ok(r) => r,
         Err(e) => {
             return DispatchResult { view: None,

@@ -1831,6 +1831,24 @@ async fn run_agent_main_loop_in_workspace_inner(
                             verify_cmd, verify_outcome.exit_code
                         ),
                     );
+                } else if verify_outcome.tool_unavailable() {
+                    // 检查工具自身崩溃/不存在（环境问题，非代码缺陷）：按"检查不适用"自动豁免，不打回。
+                    let brief: String = verify_outcome.output_tail.chars().take(160).collect();
+                    context.change_verification = Some(ChangeVerification {
+                        status: "waived".to_string(),
+                        evidence_refs: vec![],
+                        waived_reason: Some(format!(
+                            "宿主验证命令 `{}` 自身无法运行（退出码 {}，环境问题，非代码错误）：{}",
+                            verify_cmd, verify_outcome.exit_code, brief
+                        )),
+                    });
+                    let _ = app.emit(
+                        &format!("agent-log-{}", final_session_id),
+                        format!(
+                            "⚠️ 宿主验证工具自身无法运行（`{}` → {}），判为检查不适用已豁免，不阻塞 finish",
+                            verify_cmd, verify_outcome.exit_code
+                        ),
+                    );
                 } else if is_finish {
                     let reject_msg = format!(
                         "【🛑 宿主权威验证未通过，finish 未生效！】\n宿主亲自执行: `{}`\n退出码: {}\n输出尾部:\n{}\n\n该判定为宿主实测结果，不接受文本声明覆盖，也不消耗质询熔断额度。\n【必须采取的行动】：请依据上方真实输出修复后重试；若确认该检查不适用于本改动，可用 change_verification_update 提交 waived + waived_reason 显式豁免（终审将核对豁免理由）。",

@@ -72,6 +72,21 @@ pub struct HostVerifyOutcome {
     pub output_tail: String,
 }
 
+impl HostVerifyOutcome {
+    /// 检查工具自身无法运行（环境问题，而非代码缺陷）：命令不存在（127/126）、子进程启动失败，
+    /// 或 Node 包导出崩溃（如 Node 26 下 vue-tsc 报 ERR_PACKAGE_PATH_NOT_EXPORTED）。
+    /// 这类失败不能证明改动有问题，不应打回 finish。有 `error TS` 等真实类型错误输出时不算。
+    pub fn tool_unavailable(&self) -> bool {
+        if self.passed {
+            return false;
+        }
+        if self.exit_code == "spawn-failed" || self.exit_code == "127" || self.exit_code == "126" {
+            return true;
+        }
+        self.output_tail.contains("ERR_PACKAGE_PATH_NOT_EXPORTED") && !self.output_tail.contains("error TS")
+    }
+}
+
 /// 宿主亲自执行一条验证命令。净化 IDE 调试器注入（NODE_OPTIONS 里的
 /// js-debug bootloader 会让 node 子进程退出时挂在 "Waiting for the debugger
 /// to disconnect"）、stdin 置空（.output() 默认即如此）、kill_on_drop 保证
@@ -308,5 +323,21 @@ mod tests {
         fs::write(ws.join("web/package.json"), "{}").unwrap();
         assert_eq!(resolve_verify_dir(&ws, "npm test"), ws.join("web"));
         fs::remove_dir_all(&ws).ok();
+    }
+}
+
+#[cfg(test)]
+mod tool_unavailable_tests {
+    use super::HostVerifyOutcome;
+    fn o(passed: bool, code: &str, tail: &str) -> HostVerifyOutcome {
+        HostVerifyOutcome { passed, exit_code: code.to_string(), output_tail: tail.to_string() }
+    }
+    #[test]
+    fn tool_crash_is_unavailable_but_real_failures_are_not() {
+        assert!(o(false, "127", "sh: vue-tsc: not found").tool_unavailable());
+        assert!(o(false, "1", "Error [ERR_PACKAGE_PATH_NOT_EXPORTED]: Package subpath './x' is not defined").tool_unavailable());
+        assert!(!o(false, "1", "src/a.ts(3,1): error TS2307: Cannot find module './b'").tool_unavailable());
+        assert!(!o(false, "2", "1 failing").tool_unavailable());
+        assert!(!o(true, "0", "").tool_unavailable());
     }
 }

@@ -156,7 +156,7 @@ pub(super) async fn dispatch_ask_human(
 
         // 若处于仲裁/审批上下文但模型未提供 form，自动补齐 plan_approval 结构化表单，
         // 使得前端直接渲染【批准方案】【打回修改】等可点击卡片，提升人机协作效率。
-        let final_form_val: Option<serde_json::Value> = if form_val.is_some() {
+        let mut final_form_val: Option<serde_json::Value> = if form_val.is_some() {
             form_val.cloned()
         } else if is_approval_context {
             Some(json!({
@@ -167,6 +167,23 @@ pub(super) async fn dispatch_ask_human(
         } else {
             None
         };
+
+        // 模型把方案正文写进 message、form.description 留空是高频格式摩擦（白烧一步）：
+        // message 足够长时直接搬进 description 展示，不必打回。
+        if is_approval_context {
+            if let Some(obj) = final_form_val.as_mut().and_then(|f| f.as_object_mut()) {
+                let cur = obj
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .chars()
+                    .count();
+                if cur < 30 && ask_msg.trim().chars().count() >= 30 {
+                    obj.insert("description".to_string(), json!(ask_msg.trim()));
+                }
+            }
+        }
 
         // 【审批内容必填】plan_approval 卡片的可审阅区域渲染的是 form.description；
         // 模型只给标题不带正文时，人类面对的就是一张"裸审批卡"——无法判断在批什么。

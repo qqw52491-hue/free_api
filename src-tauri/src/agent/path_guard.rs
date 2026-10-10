@@ -202,6 +202,48 @@ pub fn ensure_allowed_path(
     }
 }
 
+/// 应用技能目录（只读可达）：`<data_dir>/free-api-chat/skills`。
+/// 技能会要求模型去读其 SKILL.md/模板，此前 local_file 读它们被"工作区越界"拦下，模型只能绕道 cat。
+pub fn skills_root() -> Option<PathBuf> {
+    dirs_next::data_dir().map(|b| b.join("free-api-chat").join("skills"))
+}
+
+/// 目标路径（绝对路径）经 canonicalize 后落在 root 内则返回解析结果；禁止 `..`/符号链接逃逸。
+pub(crate) fn resolve_under_root(raw: &str, root: &Path) -> Option<AllowedPathResolution> {
+    let p = Path::new(raw.trim());
+    if !p.is_absolute() {
+        return None;
+    }
+    let canonical = p.canonicalize().ok()?;
+    let root_c = root.canonicalize().ok()?;
+    if !canonical.starts_with(&root_c) {
+        return None;
+    }
+    let display = canonical.to_string_lossy().to_string();
+    Some(AllowedPathResolution {
+        canonical_path: canonical,
+        display_path: display,
+        is_session_tmp: false,
+        newly_created_dir: None,
+    })
+}
+
+/// 只读场景的路径校验：在工作区/会话 tmp 白名单基础上，额外允许读应用技能目录。
+/// 写/编辑仍用 ensure_allowed_path，技能目录不可写。
+pub fn ensure_readable_path(
+    raw: &str,
+    workspace_root: &Path,
+    session_id: Option<&str>,
+    auto_create_if_tmp: bool,
+) -> Result<AllowedPathResolution, String> {
+    match ensure_allowed_path(raw, workspace_root, session_id, auto_create_if_tmp) {
+        Ok(r) => Ok(r),
+        Err(e) => skills_root()
+            .and_then(|root| resolve_under_root(raw, &root))
+            .ok_or(e),
+    }
+}
+
 /// 机械兜底豁免判定：仅当任务入口分流未产生判决（无 TriageVerdict 的旧 checkpoint
 /// 恢复）时，由写入门禁调用本函数判定本次写入是否属于"零爆炸半径"的小活。
 /// 有判决时一律按 TriageVerdict.route 分流，本函数不当主判官。
@@ -435,5 +477,21 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&get_session_tmp_dir(&session_id));
         let _ = std::fs::remove_dir_all(ws);
+    }
+
+    #[test]
+    fn resolve_under_root_allows_inside_and_blocks_escape() {
+        let base = std::env::temp_dir().join(format!("pg_skills_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("skills");
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::write(root.join("a/SKILL.md"), "x").unwrap();
+        std::fs::write(base.join("secret.txt"), "s").unwrap();
+        let ok = root.join("a/SKILL.md");
+        assert!(resolve_under_root(ok.to_str().unwrap(), &root).is_some());
+        let esc = root.join("a/../../secret.txt");
+        assert!(resolve_under_root(esc.to_str().unwrap(), &root).is_none());
+        assert!(resolve_under_root("a/SKILL.md", &root).is_none());
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
