@@ -335,3 +335,216 @@ pub(crate) fn extract_office_preview(path: &std::path::Path) -> Option<String> {
         text.to_string()
     })
 }
+
+/// 方案评审证据锚点：目标文件（全路径+文件名）、方案引用中的路径、方案文本里反引号包裹的标识符。
+/// 用于从执行者排查输出里挑出与方案直接相关的片段。
+pub(crate) fn plan_evidence_anchors(
+    target_files: &[String],
+    evidence_refs: &[String],
+    plan_text: &str,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |s: &str| {
+        let s = s.trim();
+        if s.len() >= 4 && !out.iter().any(|x| x == s) {
+            out.push(s.to_string());
+        }
+    };
+    for f in target_files {
+        push(f);
+        if let Some(name) = std::path::Path::new(f).file_name().and_then(|n| n.to_str()) {
+            push(name);
+        }
+    }
+    for r in evidence_refs {
+        if (r.contains('/') || r.contains('.'))
+            && r.chars().count() < 200
+            && !r.chars().any(char::is_whitespace)
+        {
+            push(r);
+        }
+    }
+    for (i, seg) in plan_text.split('`').enumerate() {
+        if i % 2 == 1 {
+            let n = seg.chars().count();
+            if (4..=48).contains(&n) && !seg.chars().any(char::is_whitespace) {
+                push(seg);
+            }
+        }
+    }
+    out.truncate(24);
+    out
+}
+
+/// 方案评审用：把执行者排查阶段已取得的工具输出（含溢出落盘的大输出）按锚点挑重点摘进证据包，
+/// 避免审查者把执行者已经查过的东西重新取证一遍。仅取本次任务（run）启动之后的输出。
+pub(crate) fn collect_investigation_digest(
+    db: &DbState,
+    session_id: &str,
+    run_id: &str,
+    anchors: &[String],
+    budget_chars: usize,
+) -> Option<String> {
+    let raws: Vec<String> = {
+        let conn = db.0.lock().ok()?;
+        let since: String = conn
+            .query_row(
+                "SELECT started_at FROM agent_run_traces WHERE id = ?1",
+                rusqlite::params![run_id],
+                |r| r.get(0),
+            )
+            .unwrap_or_default();
+        let mut stmt = conn
+            .prepare(
+                "SELECT raw_output FROM agent_step_logs WHERE session_id = ?1 AND created_at >= ?2 \
+                 ORDER BY rowid DESC LIMIT 40",
+            )
+            .ok()?;
+        let rows = stmt
+            .query_map(rusqlite::params![session_id, since], |r| r.get::<_, String>(0))
+            .ok()?;
+        let v: Vec<String> = rows.flatten().collect();
+        v
+    };
+    let texts: Vec<String> = raws
+        .iter()
+        .filter_map(|r| crate::agent::run_trace::resolve_raw_output(r))
+        .collect();
+    build_investigation_digest(&texts, anchors, budget_chars)
+}
+
+/// 纯函数：texts 为最新在前的步骤输出原文。命中锚点的优先，其次越新越优先；最多 6 步、总量不超 budget。
+pub(crate) fn build_investigation_digest(
+    texts_newest_first: &[String],
+    anchors: &[String],
+    budget_chars: usize,
+) -> Option<String> {
+    const MAX_STEPS: usize = 6;
+    const PER_STEP_CHARS: usize = 700;
+    const STDOUT_MARK: &str = "--- STDOUT ---";
+    let mut picked: Vec<(bool, usize, String)> = Vec::new();
+    let mut seen_cmd = std::collections::HashSet::new();
+    for (idx, text) in texts_newest_first.iter().enumerate() {
+        let t = text.trim();
+        if t.chars().count() < 60 || t.starts_with('❌') || t.contains("[失败") {
+            continue;
+        }
+        let cmd: Option<String> = t
+            .lines()
+            .find(|l| l.trim_start().starts_with("$ "))
+            .map(|l| l.trim().chars().take(160).collect());
+        if let Some(c) = &cmd {
+            if !seen_cmd.insert(c.clone()) {
+                continue;
+            }
+        }
+        let body = match t.find(STDOUT_MARK) {
+            Some(p) => &t[p + STDOUT_MARK.len()..],
+            None => t,
+        };
+        let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
+        if lines.is_empty() {
+            continue;
+        }
+        let hit_line = lines
+            .iter()
+            .position(|l| anchors.iter().any(|a| l.contains(a.as_str())));
+        let hit = hit_line.is_some()
+            || cmd
+                .as_deref()
+                .map_or(false, |c| anchors.iter().any(|a| c.contains(a.as_str())));
+        // 既无命令回显又未命中锚点：多半是回执/等待/方案提交等非排查输出
+        if cmd.is_none() && !hit {
+            continue;
+        }
+        let (start, end) = match hit_line {
+            Some(i) => (i.saturating_sub(3), (i + 12).min(lines.len())),
+            None => (0, 14.min(lines.len())),
+        };
+        let mut excerpt = String::new();
+        for l in &lines[start..end] {
+            let l: String = l.chars().take(200).collect();
+            if excerpt.chars().count() + l.chars().count() + 1 > PER_STEP_CHARS {
+                break;
+            }
+            excerpt.push_str(&l);
+            excerpt.push('\n');
+        }
+        if excerpt.trim().is_empty() {
+            continue;
+        }
+        picked.push((
+            hit,
+            idx,
+            format!("- {}\n```\n{}```", cmd.as_deref().unwrap_or("（工具输出）"), excerpt),
+        ));
+    }
+    if picked.is_empty() {
+        return None;
+    }
+    picked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    let mut chosen: Vec<(bool, usize, String)> = Vec::new();
+    let mut used = 0usize;
+    for p in picked {
+        if chosen.len() >= MAX_STEPS {
+            break;
+        }
+        let n = p.2.chars().count();
+        if used + n > budget_chars {
+            continue;
+        }
+        used += n;
+        chosen.push(p);
+    }
+    if chosen.is_empty() {
+        return None;
+    }
+    chosen.sort_by(|a, b| b.1.cmp(&a.1)); // idx 越大越旧 → 恢复时间升序
+    Some(format!(
+        "\n\n【🔎 执行者排查阶段已取得的工具输出（宿主原样摘录，非执行者转述；下列内容已有证据，无需重复取证）】\n{}",
+        chosen.into_iter().map(|c| c.2).collect::<Vec<_>>().join("\n")
+    ))
+}
+
+#[cfg(test)]
+mod investigation_digest_tests {
+    use super::*;
+
+    #[test]
+    fn anchors_cover_targets_refs_and_backticked_symbols() {
+        let a = plan_evidence_anchors(
+            &["lib/toolResult.js".to_string()],
+            &["b6c28fde-0711-4ef6-a40c-7805a0998733".to_string(), "mcp-hub.js".to_string()],
+            "修改 `attachNormalizedResult` 并保留 `x`",
+        );
+        assert!(a.contains(&"lib/toolResult.js".to_string()));
+        assert!(a.contains(&"toolResult.js".to_string()));
+        assert!(a.contains(&"mcp-hub.js".to_string()));
+        assert!(a.contains(&"attachNormalizedResult".to_string()));
+        assert!(!a.iter().any(|s| s.starts_with("b6c28fde")), "UUID 不应作为锚点");
+        assert!(!a.contains(&"x".to_string()));
+    }
+
+    #[test]
+    fn digest_prefers_anchor_hits_skips_failures_and_dedups() {
+        let noise = "✅ [成功] (exit_code: 0)\n$ ls -la\n--- STDOUT ---\nfile_a\nfile_b\nfile_c\nfile_d\nfile_e\nfile_f\n";
+        let hit = "✅ [成功] (exit_code: 0)\n$ cat lib/toolResult.js\n--- STDOUT ---\nline1\nline2\nexport function attachNormalizedResult(res) {\n  structuredContent.normalized_result = x;\n}\n";
+        let failed = "❌ [失败] (exit_code: 1)\n$ cat nope.js\n--- STDOUT ---\nlib/toolResult.js missing and so on and on and on\n";
+        let dup = hit;
+        let texts = vec![
+            noise.to_string(),   // 最新
+            failed.to_string(),
+            dup.to_string(),
+            "submit ok".to_string(),
+        ];
+        let anchors = vec!["attachNormalizedResult".to_string()];
+        let d = build_investigation_digest(&texts, &anchors, 3000).unwrap();
+        assert!(d.contains("attachNormalizedResult"));
+        assert!(!d.contains("nope.js"), "失败输出不应入包");
+        assert_eq!(d.matches("$ cat lib/toolResult.js").count(), 1);
+        // 命中锚点的排在前选中，但输出按时间升序（旧的在前）
+        assert!(d.find("cat lib/toolResult.js").unwrap() < d.find("ls -la").unwrap());
+        // 预算极小时不超限
+        assert!(build_investigation_digest(&texts, &anchors, 10).is_none());
+    }
+}

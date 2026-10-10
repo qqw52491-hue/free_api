@@ -349,6 +349,26 @@ pub(crate) fn step_output_matches_hash(
         .unwrap_or(false)
 }
 
+/// 把 step_logs 的 raw_output 还原为原文（支持 cas_blob / spilled_to_disk 溢出标记）；读取失败返回 None。
+pub(crate) fn resolve_raw_output(raw: &str) -> Option<String> {
+    if let Some(path_str) = raw
+        .strip_prefix("[[spilled_to_disk:")
+        .and_then(|value| value.strip_suffix("]]"))
+    {
+        return std::fs::read_to_string(path_str).ok();
+    }
+    if let Some(hash) = raw
+        .strip_prefix(CAS_BLOB_PREFIX)
+        .and_then(|value| value.strip_suffix(CAS_BLOB_SUFFIX))
+    {
+        if !is_valid_blob_hash(hash) {
+            return None;
+        }
+        return std::fs::read_to_string(cas_blob_path(&get_outputs_dir(), hash)).ok();
+    }
+    Some(raw.to_string())
+}
+
 pub fn get_step_output(db: &DbState, session_id: &str, output_id: &str) -> Result<String, String> {
     // 先通过 SQLite 校验 output_id 归属，再读取可能的溢出文件，避免跨 session 工件泄露。
     let raw: Option<String> = {

@@ -319,6 +319,32 @@ pub async fn handle_submit_plan(
         (None, false) => Some(impact.section),
         (None, true) => None,
     };
+    // ---- 排查阶段已取得的工具输出摘录：审查者无需重新取证执行者已查过的内容 ----
+    let specialized_context = {
+        let anchor_text = format!(
+            "{}\n{}\n{}",
+            submission.plan_summary,
+            submission.root_cause,
+            submission.assumptions.join("\n"),
+        );
+        let anchors = crate::agent::reviewer_gatekeeper::plan_evidence_anchors(
+            &target_files,
+            &evidence_refs,
+            &anchor_text,
+        );
+        let digest = crate::agent::reviewer_gatekeeper::collect_investigation_digest(
+            db,
+            final_session_id,
+            parent_run_id,
+            &anchors,
+            3600,
+        );
+        match (specialized_context, digest) {
+            (Some(s), Some(d)) => Some(format!("{}{}", s, d)),
+            (None, Some(d)) => Some(d.trim_start().to_string()),
+            (s, None) => s,
+        }
+    };
     if let Some(spec) = specialized_context {
         effective_params["specialized_context"] = json!(spec);
     }
