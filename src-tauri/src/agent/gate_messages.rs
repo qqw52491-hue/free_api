@@ -28,7 +28,7 @@ pub fn cross_review_need_reviewer_dispatch() -> String {
     "【⚠️ 门禁保护触发：已阻止未审查写入，目标文件未受任何修改！】\n\
      【原因】当前处于【方案审查模式】。在首次动笔修改代码前，必须先完成方案对齐推演。\n\
      【必须执行的固定流程】：\n\
-     1. 推荐方式：单独输出 {\"submit_plan\": {\"plan_summary\": \"...\", \"target_files\": [...], \"evidence_refs\": [...], \"root_cause\": \"...\", \"assumptions\": [...], \"open_questions\": [...], \"intended_verification\": \"...\"}} 提交结构化方案——宿主将原子完成方案登记与 Tech Lead 派发（target_files 为拟改动文件清单；纯分析/只读审查类任务可传空数组 []，交付物即结论文本）；\n\
+     1. 推荐方式：单独输出 {\"submit_plan\": {\"plan_summary\": \"...\", \"target_files\": [...], \"evidence_refs\": [...], \"root_cause\": \"...\", \"assumptions\": [...], \"open_questions\": [...], \"intended_verification\": \"...\"}} 提交结构化方案——宿主将原子完成方案登记与 Tech Lead 派发（target_files 为拟改动文件清单；纯分析/只读审查类任务可传空数组 []，交付物即结论文本；evidence_refs 建议写成 文件:起-止行（如 lib/a.js:30-80），宿主会按行号把原文取出附给审查员，审查员无需重读；非代码任务写脚本/文档/产物的路径）；\n\
         （兼容方式：调用 child_reviewer 并指定 role: \"tech_lead\"，传入 custom_inputs: {plan_summary, target_files, discussion_round} 做 1v1 方案对齐；⚠️ 仍需证据三选一：evidence_refs/evidence_excerpt/resource_ids 至少一项，通常是刚读过的 target_files 本身）；\n\
      2. 随后调用 wait_jobs 等待审查裁决；\n\
      3. 严格按其返回的结构化结论（decision）行动：\n\

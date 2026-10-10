@@ -548,3 +548,195 @@ mod investigation_digest_tests {
         assert!(build_investigation_digest(&texts, &anchors, 10).is_none());
     }
 }
+
+/// evidence_refs 引用形态 `路径` / `路径:行` / `路径:起-止`；返回 (路径, 行范围)。
+fn parse_ref_range(r: &str) -> (&str, Option<(usize, usize)>) {
+    if let Some((p, tail)) = r.rsplit_once(':') {
+        let t = tail.trim();
+        let parsed = match t.split_once('-') {
+            Some((a, b)) => a.trim().parse::<usize>().ok().zip(b.trim().parse::<usize>().ok()),
+            None => t.parse::<usize>().ok().map(|a| (a, a)),
+        };
+        if let Some((a, b)) = parsed {
+            if a >= 1 && b >= a {
+                return (p.trim(), Some((a, b)));
+            }
+        }
+    }
+    (r.trim(), None)
+}
+
+/// 去掉引用末尾的行号后缀，只保留路径。
+pub(crate) fn strip_ref_range(r: &str) -> &str {
+    parse_ref_range(r).0
+}
+
+/// 从文件正文摘出引用的片段：有行号用行号（≤120 行），否则用锚点命中行的前后文，都没有就取开头 40 行。
+pub(crate) fn render_ref_excerpt(
+    content: &str,
+    range: Option<(usize, usize)>,
+    anchors: &[String],
+) -> String {
+    const MAX_LINES: usize = 120;
+    const MAX_CHARS: usize = 2600;
+    let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len();
+    if total == 0 {
+        return String::new();
+    }
+    let (start, end) = match range {
+        Some((a, b)) => {
+            let s = a.saturating_sub(1);
+            if s >= total {
+                return format!("（所引行号超出文件范围，文件共 {} 行）\n", total);
+            }
+            (s, b.min(total).min(s + MAX_LINES))
+        }
+        None => match lines
+            .iter()
+            .position(|l| anchors.iter().any(|a| l.contains(a.as_str())))
+        {
+            Some(i) => (i.saturating_sub(5), (i + 40).min(total)),
+            None => (0, 40.min(total)),
+        },
+    };
+    let mut out = String::new();
+    let mut last = start;
+    for (i, l) in lines.iter().enumerate().take(end).skip(start) {
+        let l: String = l.chars().take(240).collect();
+        let piece = format!("{}: {}\n", i + 1, l);
+        if out.chars().count() + piece.chars().count() > MAX_CHARS {
+            break;
+        }
+        out.push_str(&piece);
+        last = i + 1;
+    }
+    if last < end || (range.is_none() && last < total) {
+        out.push_str(&format!(
+            "…（显示第 {}–{} 行，文件共 {} 行；需要更多请用 read_file 的 start_line 翻页）\n",
+            start + 1,
+            last,
+            total
+        ));
+    }
+    out
+}
+
+/// 把方案的 evidence_refs（文件路径，可带 `:起-止` 行号）由宿主展开为原文片段。
+/// 只读工作区与会话 tmp 内的文件；非文本/过大文件（图片、视频等）只给元信息。路径之外的引用（UUID、step_N 等）忽略。
+pub(crate) fn resolve_evidence_refs(
+    workspace: &Path,
+    session_id: &str,
+    refs: &[String],
+    anchors: &[String],
+    budget_chars: usize,
+) -> Option<String> {
+    let ws = workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf());
+    let tmp_root = crate::agent::path_guard::get_session_tmp_dir(session_id);
+    let tmp_canon = tmp_root.canonicalize().ok();
+    let mut blocks: Vec<String> = Vec::new();
+    let mut used = 0usize;
+    for r in refs {
+        let (path_str, range) = parse_ref_range(r);
+        if path_str.is_empty()
+            || !(path_str.contains('/') || path_str.contains('.'))
+            || path_str.chars().any(char::is_whitespace)
+        {
+            continue;
+        }
+        let joined = if let Some(rest) = path_str.strip_prefix("tmp/") {
+            tmp_root.join(rest)
+        } else {
+            let p = Path::new(path_str);
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                workspace.join(p)
+            }
+        };
+        let Ok(canon) = joined.canonicalize() else {
+            continue;
+        };
+        let inside = canon.starts_with(&ws)
+            || tmp_canon.as_ref().map_or(false, |t| canon.starts_with(t));
+        if !inside || !canon.is_file() {
+            continue;
+        }
+        let size = canon.metadata().map(|m| m.len()).unwrap_or(0);
+        let text = if is_binary_file(&canon.to_string_lossy()) || size > 2 * 1024 * 1024 {
+            None
+        } else {
+            std::fs::read_to_string(&canon).ok()
+        };
+        let block = match text {
+            Some(t) => {
+                let ex = render_ref_excerpt(&t, range, anchors);
+                if ex.trim().is_empty() {
+                    continue;
+                }
+                format!("- {}\n```\n{}```", r.trim(), ex)
+            }
+            None => format!(
+                "- {}（{} 字节，非文本或过大，未摘录；审查员可用工具按需查看）",
+                path_str, size
+            ),
+        };
+        let n = block.chars().count();
+        if used + n > budget_chars {
+            continue;
+        }
+        used += n;
+        blocks.push(block);
+    }
+    if blocks.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "\n\n【📎 方案引用的证据原文（宿主按引用的 文件:行号 取出，非执行者转述）】\n{}",
+        blocks.join("\n")
+    ))
+}
+
+#[cfg(test)]
+mod evidence_ref_tests {
+    use super::*;
+
+    #[test]
+    fn ref_range_parsing() {
+        assert_eq!(parse_ref_range("lib/a.js:30-80"), ("lib/a.js", Some((30, 80))));
+        assert_eq!(parse_ref_range("lib/a.js:7"), ("lib/a.js", Some((7, 7))));
+        assert_eq!(parse_ref_range("lib/a.js"), ("lib/a.js", None));
+        assert_eq!(parse_ref_range("lib/a.js:80-30"), ("lib/a.js:80-30", None));
+        assert_eq!(strip_ref_range("x/y.rs:1-2"), "x/y.rs");
+    }
+
+    #[test]
+    fn excerpt_uses_range_then_anchor_then_head() {
+        let body: String = (1..=200).map(|i| format!("line{}\n", i)).collect();
+        let r = render_ref_excerpt(&body, Some((10, 12)), &[]);
+        assert!(r.contains("10: line10") && r.contains("12: line12") && !r.contains("13: line13"));
+        assert!(!r.contains("显示第"), "范围完整展示不应有截断提示: {}", r);
+        let a = render_ref_excerpt(&body, None, &["line100".to_string()]);
+        assert!(a.contains("100: line100") && a.contains("95: line95"));
+        let h = render_ref_excerpt(&body, None, &[]);
+        assert!(h.contains("1: line1\n") && h.contains("文件共 200 行"));
+        assert!(render_ref_excerpt(&body, Some((500, 600)), &[]).contains("超出文件范围"));
+    }
+
+    #[test]
+    fn resolve_refs_reads_workspace_files_and_fences_outside() {
+        let dir = std::env::temp_dir().join(format!("evref_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("lib")).unwrap();
+        std::fs::write(dir.join("lib/a.js"), "one\ntwo\nthree\nfour\n").unwrap();
+        let refs = vec![
+            "lib/a.js:2-3".to_string(),
+            "/etc/hosts".to_string(),
+            "b6c28fde-0711-4ef6-a40c-7805a0998733".to_string(),
+            "../outside.txt".to_string(),
+        ];
+        let out = resolve_evidence_refs(&dir, "no-such-session", &refs, &[], 5000).unwrap();
+        assert!(out.contains("2: two") && out.contains("3: three") && !out.contains("4: four"));
+        assert!(!out.contains("localhost"), "工作区外文件不得读取");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

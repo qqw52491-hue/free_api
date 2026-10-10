@@ -236,7 +236,10 @@ pub async fn handle_submit_plan(
     // 逐项 HOLDS/BROKEN/NA 裁决义务由审查输出侧强制覆盖。
     let evidence_scope_refs = crate::agent::impact_pack::evidence_scope_refs(
         &target_files,
-        &evidence_refs,
+        &evidence_refs
+            .iter()
+            .map(|r| crate::agent::reviewer_gatekeeper::strip_ref_range(r).to_string())
+            .collect::<Vec<_>>(),
         Some(workspace_dir),
     );
     if !evidence_scope_refs.is_empty() {
@@ -339,10 +342,23 @@ pub async fn handle_submit_plan(
             &anchors,
             16_000,
         );
-        match (specialized_context, digest) {
-            (Some(s), Some(d)) => Some(format!("{}{}", s, d)),
-            (None, Some(d)) => Some(d.trim_start().to_string()),
-            (s, None) => s,
+        // 模型自选的引用（文件:行号）由宿主展开为原文，优先于猜测式的排查摘录
+        let refs_text = crate::agent::reviewer_gatekeeper::resolve_evidence_refs(
+            workspace_dir,
+            final_session_id,
+            &evidence_refs,
+            &anchors,
+            8_000,
+        );
+        let extra = format!(
+            "{}{}",
+            refs_text.unwrap_or_default(),
+            digest.unwrap_or_default()
+        );
+        match (specialized_context, extra.trim().is_empty()) {
+            (Some(s), false) => Some(format!("{}{}", s, extra)),
+            (None, false) => Some(extra.trim_start().to_string()),
+            (s, true) => s,
         }
     };
     if let Some(spec) = specialized_context {
