@@ -573,7 +573,7 @@ pub fn build_role_cards_menu_filtered(db: &DbState, disabled_names: &[String]) -
     if active_cards.is_empty() {
         return Ok(String::new());
     }
-    let mut out = String::from("\n### 专精角色池（派发 child_reviewer/child_worker/child_writer 时传 \"role\": \"角色标识\" 即可挂载人设与专属模型）\n【提示】reviewer 角色建议在角色选择器中钉一个与规划者不同家族的模型：异构模型盲区互补，交叉审查收益最大。\n");
+    let mut out = String::from("\n### 专精角色池（派发 child_reviewer/child_worker/child_writer 时传 \"role\": \"角色标识\" 即可挂载人设与专属模型；每张卡标注了「可挂载」类型，只能用于所列类型，否则派发会被拒）\n【提示】reviewer 角色建议在角色选择器中钉一个与规划者不同家族的模型：异构模型盲区互补，交叉审查收益最大。\n");
     for card in active_cards {
         let model_note = if card.model_id.is_empty() {
             "跟随档位路由".to_string()
@@ -615,8 +615,8 @@ pub fn build_role_cards_menu_filtered(db: &DbState, disabled_names: &[String]) -
             String::new()
         };
         out.push_str(&format!(
-            "- [{}] {}：{}（{}{}{}{}{}）\n",
-            card.name, card.label, card.persona_prompt.chars().take(80).collect::<String>(), model_note, scope_note, schema_note, focus_note, input_note
+            "- [{}] {}：{}（{}{}{}{}{}；可挂载: {}）\n",
+            card.name, card.label, card.persona_prompt.chars().take(80).collect::<String>(), model_note, scope_note, schema_note, focus_note, input_note, card.allowed_kinds
         ));
     }
     out.push_str("\n> 💡 **【派发纪律】** 派发给子 Agent 的 task 必须自包含：\n");

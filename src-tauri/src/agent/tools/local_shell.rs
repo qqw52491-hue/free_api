@@ -1345,7 +1345,18 @@ fn execute_command_blocking(
                     .copied()
                     .collect::<Vec<_>>()
                     .join("\n");
-                format!("命令退出码: {}\n{}", exit_code, tail_text)
+                let mut msg = format!("命令退出码: {}\n{}", exit_code, tail_text);
+                // shell 里的相对 tmp/ 不会被映射到会话产物区（只有文件工具/MCP 会）——文件找不到时点明
+                if (tail_text.contains("No such file") || tail_text.contains("没有那个文件"))
+                    && cmd_str.contains("tmp/")
+                    && !cwd_tmp_is_session_tmp(cwd, &session_tmp_dir)
+                {
+                    msg.push_str(&format!(
+                        "\n💡 [tmp 路径提醒] shell 命令里的相对 tmp/ 指向执行目录下的 tmp/，不是会话产物区（local_file 写入的 tmp/ 文件在会话产物区）。请在命令里改用 \"$SESSION_TMP_DIR/文件名\"（={}）。",
+                        session_tmp_dir.display()
+                    ));
+                }
+                msg
             };
             DispatchResult {
                 view: Some(view),

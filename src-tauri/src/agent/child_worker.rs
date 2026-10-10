@@ -79,12 +79,26 @@ pub fn worker_result_model_view(wr: &WorkerResult) -> String {
 }
 
 pub fn parse_worker_request(params: &Value) -> Result<WorkerRequest, String> {
-    let task = params
-        .get("task")
-        .and_then(|v| v.as_str())
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .ok_or_else(|| "child_worker 缺少 task（一段自包含的侦察任务描述）。".to_string())?;
+    // 模型常把 reviewer 的 question / 其他同义字段当 task 传，这里兼容常见别名
+    let task = ["task", "question", "goal", "description", "prompt"]
+        .iter()
+        .find_map(|k| {
+            params
+                .get(*k)
+                .and_then(|v| v.as_str())
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        })
+        .ok_or_else(|| {
+            let keys: Vec<&str> = params
+                .as_object()
+                .map(|o| o.keys().map(|k| k.as_str()).collect())
+                .unwrap_or_default();
+            format!(
+                "child_worker 缺少 task（一段自包含的侦察任务描述）。本次收到的字段: [{}]；请按 {{\"task\": \"...\"}} 传参。",
+                keys.join(", ")
+            )
+        })?;
     if task.chars().count() > MAX_TASK_CHARS {
         return Err(format!("child_worker.task 最多 {} 个字符。", MAX_TASK_CHARS));
     }
@@ -371,6 +385,24 @@ fn worker_result_json(result: &WorkerResult) -> String {
 
 /// L2 只读侦察 worker 主循环（异步，tokio::spawn 调用）：动作-观测循环直至 finish 或预算耗尽。
 #[allow(clippy::too_many_arguments)]
+/// 预算触顶时让 worker 立刻收尾：把指令并进最后一条 user 消息（避免连续两条 user），否则新增一条。
+fn push_force_finish(messages: &mut Vec<Value>, why: &str) {
+    let note = format!(
+        "【宿主】{}。不要再调用任何动作，现在就基于已有观测输出 finish（findings / evidence_refs / missing_evidence，写明哪些没来得及核实）。",
+        why
+    );
+    if let Some(last) = messages.last_mut() {
+        if last.get("role").and_then(|r| r.as_str()) == Some("user") {
+            if let Some(content) = last.get("content").and_then(|c| c.as_str()) {
+                let merged = format!("{}\n\n{}", content, note);
+                last["content"] = json!(merged);
+                return;
+            }
+        }
+    }
+    messages.push(json!({"role": "user", "content": note}));
+}
+
 pub async fn run_worker_loop(
     db: DbState,
     app: Option<AppHandle>,
@@ -396,7 +428,10 @@ pub async fn run_worker_loop(
     let mut confidence = "unverified".to_string();
     let mut interrupted: Option<String> = None;
 
-    let max_steps = max_steps_override.unwrap_or(MAX_WORKER_STEPS);
+    // 侦察 worker 不设步数上限（仅保留时长与观测字符预算两道保险，触顶时强制收尾出结论）
+    let max_steps = max_steps_override.unwrap_or(usize::MAX);
+    let mut forced_finish = false;
+    let mut exhaust_reason = String::new();
     let mut messages = if let Some(msgs) = initial_messages {
         msgs
     } else {
@@ -416,7 +451,16 @@ pub async fn run_worker_loop(
         if started_at.elapsed() >= Duration::from_secs(WORKER_TIMEOUT_SECS)
             || steps_used >= max_steps
         {
-            break "budget_exhausted";
+            if forced_finish {
+                break "budget_exhausted";
+            }
+            forced_finish = true;
+            exhaust_reason = if started_at.elapsed() >= Duration::from_secs(WORKER_TIMEOUT_SECS) {
+                format!("时长已达上限 {}s", WORKER_TIMEOUT_SECS)
+            } else {
+                format!("步数已达上限 {}", max_steps)
+            };
+            push_force_finish(&mut messages, &exhaust_reason);
         }
         steps_used += 1;
 
@@ -552,6 +596,12 @@ pub async fn run_worker_loop(
             break "succeeded";
         }
 
+        // 已被要求收尾却仍继续调动作：不再执行，按预算耗尽收场
+        if forced_finish {
+            missing_evidence = vec!["已被要求收尾，但仍继续调用动作".to_string()];
+            break "budget_exhausted";
+        }
+
         if let Some(ref handle) = app {
             let _ = handle.emit(
                 &format!("agent-progress-{}", parent_session_id),
@@ -584,25 +634,34 @@ pub async fn run_worker_loop(
                 .sum::<usize>(),
         );
         let observation = if budget_left == 0 {
-            missing_evidence = vec!["观测预算耗尽，未能完成全部侦察".to_string()];
-            break "budget_exhausted";
+            "（观测预算已用尽，本步输出被省略）".to_string()
         } else {
             truncate_chars(&observation, budget_left.min(MAX_ACTION_OUTPUT_CHARS))
         };
         messages.push(json!({"role": "assistant", "content": raw}));
         messages.push(json!({"role": "user", "content": format!("【宿主观测 #{}】\n{}", steps_used, observation)}));
+        if budget_left == 0 && !forced_finish {
+            forced_finish = true;
+            exhaust_reason = format!("观测字符预算（{}）已用尽", MAX_OBSERVATION_CHARS);
+            push_force_finish(&mut messages, &exhaust_reason);
+        }
     };
 
     // 收敛终态：中断类（cancelled/timed_out/failed）视为失败回收；正常路径即使预算耗尽也带部分结论交付
     let (status, error_kind) = match terminal {
-        "succeeded" => ("succeeded", None),
+        "succeeded" => {
+            if forced_finish && !exhaust_reason.is_empty() {
+                missing_evidence.push(format!("因{}被迫提前收尾，结论可能不完整", exhaust_reason));
+            }
+            ("succeeded", None)
+        }
         "budget_exhausted" => {
             if findings.is_empty() {
                 findings.push("worker 未产出有效结论".to_string());
             }
             missing_evidence.push(format!(
-                "以 budget_exhausted 终止（步数上限 {} / 时长上限 {}s）",
-                MAX_WORKER_STEPS, WORKER_TIMEOUT_SECS
+                "以 budget_exhausted 终止（{}）",
+                if exhaust_reason.is_empty() { "预算用尽".to_string() } else { exhaust_reason.clone() }
             ));
             ("succeeded", None)
         }
@@ -776,6 +835,26 @@ mod tests {
         std::fs::write(root.join("src/main.rs"), "fn main() { println!(\"hi\"); }").unwrap();
         std::fs::write(root.join("notes.log"), "line1\nline2\nerror happened\n").unwrap();
         (base, root)
+    }
+
+    #[test]
+    fn parse_worker_request_accepts_task_aliases_and_reports_keys() {
+        let r = parse_worker_request(&json!({"question": "查登录锁定逻辑"})).unwrap();
+        assert_eq!(r.task, "查登录锁定逻辑");
+        let err = parse_worker_request(&json!({"foo": 1})).unwrap_err();
+        assert!(err.contains("foo"), "{}", err);
+    }
+
+    #[test]
+    fn force_finish_merges_into_last_user_message() {
+        let mut msgs = vec![json!({"role": "user", "content": "观测 #1"})];
+        push_force_finish(&mut msgs, "预算用尽");
+        assert_eq!(msgs.len(), 1);
+        let c = msgs[0]["content"].as_str().unwrap();
+        assert!(c.contains("观测 #1") && c.contains("finish"), "{}", c);
+        let mut msgs2 = vec![json!({"role": "assistant", "content": "x"})];
+        push_force_finish(&mut msgs2, "预算用尽");
+        assert_eq!(msgs2.len(), 2);
     }
 
     #[test]
