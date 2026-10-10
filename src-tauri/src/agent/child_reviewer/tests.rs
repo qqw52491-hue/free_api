@@ -360,6 +360,10 @@
         assert_eq!(request.evidence_refs, vec!["out-1", "out-2"]);
         assert!(parse_child_review_request(&json!({"question": "x", "evidence_refs": ["a", "b", "c", "d", "e", "f", "g"]})).is_err());
         assert!(parse_child_review_request(&json!({"question": "没有证据包时不得调用"})).is_err());
+        // 模型把不用的字段显式传 null：视为未传，不应被误报为「必须是 JSON 对象」
+        let with_nulls = parse_child_review_request(&json!({"question": "q", "evidence_refs": ["a.rs"], "evidence_excerpt": null, "resource_ids": null, "dispatches": null})).unwrap();
+        assert_eq!(with_nulls.evidence_refs, vec!["a.rs".to_string()]);
+        assert!(parse_child_review_request(&json!({"question": "q", "evidence_refs": {"x": 1}})).is_err());
     }
 
     #[test]

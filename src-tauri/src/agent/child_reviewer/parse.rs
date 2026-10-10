@@ -15,8 +15,18 @@ use uuid::Uuid;
 
 
 pub fn parse_child_review_request(params: &Value) -> Result<ChildReviewRequest, String> {
-    let raw: RawChildReviewRequest = serde_json::from_value(params.clone())
-        .map_err(|_| "child_reviewer 参数必须是 JSON 对象。".to_string())?;
+    // 模型常把不用的字段显式传 null（如 evidence_excerpt: null），#[serde(default)] 不处理显式 null：
+    // 先把 null 字段当作未传；真有类型错误时把真实原因告诉模型，不再统一报「必须是 JSON 对象」。
+    let mut cleaned = params.clone();
+    if let Some(obj) = cleaned.as_object_mut() {
+        obj.retain(|_, v| !v.is_null());
+    }
+    let raw: RawChildReviewRequest = serde_json::from_value(cleaned).map_err(|e| {
+        format!(
+            "child_reviewer 参数格式不合法：{}。需要 JSON 对象；question/evidence_excerpt 是字符串，evidence_refs/resource_ids 是字符串数组；不用的字段请直接省略。",
+            e
+        )
+    })?;
     let question = normalize_question(&raw.question, MAX_QUESTION_CHARS, "question")?;
     if raw.evidence_excerpt.chars().count() > MAX_EVIDENCE_CHARS {
         return Err(format!(
