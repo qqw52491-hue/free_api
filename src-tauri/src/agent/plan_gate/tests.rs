@@ -604,34 +604,13 @@
     }
 
     #[test]
-    fn test_plan_risk_preflight_blocks_silent_sensitive_plans() {
-        // 命中敏感模块但摘要无防御陈述 → 预检拦截并指路
-        let mut s = valid_submission();
-        s.target_files = vec!["src/auth/token_store.rs".to_string()];
-        let err = validate_plan_submission(&s, true).unwrap_err();
-        assert!(err.contains("预检拦截"));
-        assert!(err.contains("敏感凭据"));
-
-        // 摘要显式陈述防御设计 → 放行
-        let mut s = valid_submission();
-        s.target_files = vec!["src/auth/token_store.rs".to_string()];
-        s.plan_summary.push_str("；日志对 token 做脱敏处理，不落盘明文");
-        assert!(validate_plan_submission(&s, true).is_ok());
-
-        // 缓存模块缺有界陈述 → 拦截
-        let mut s = valid_submission();
-        s.target_files = vec!["src/cache/memo_store.rs".to_string()];
-        let err = validate_plan_submission(&s, true).unwrap_err();
-        assert!(err.contains("缓存/内存结构"));
-
-        // 显式豁免陈述（逃生口：声明风险不适用即放行）→ 放行
-        let mut s = valid_submission();
-        s.target_files = vec!["src/cache/memo_store.rs".to_string()];
-        s.plan_summary.push_str("；本次为只读访问，不涉及容量变更");
-        assert!(validate_plan_submission(&s, true).is_ok());
-
-        // 普通文件不触发预检 → 放行
-        assert!(validate_plan_submission(&valid_submission(), true).is_ok());
+    fn test_sensitive_looking_paths_are_not_blocked() {
+        // 路径里含 login/auth/cache/sql 等字样不再触发预检拦截
+        for f in ["src/views/Login.vue", "src/auth/token_store.rs", "tmp/mock_audit.sql"] {
+            let mut s = valid_submission();
+            s.target_files = vec![f.to_string()];
+            assert!(validate_plan_submission(&s, true).is_ok(), "{f}");
+        }
     }
 
     #[test]
