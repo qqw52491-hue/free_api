@@ -337,7 +337,7 @@ pub async fn handle_submit_plan(
             final_session_id,
             parent_run_id,
             &anchors,
-            3600,
+            16_000,
         );
         match (specialized_context, digest) {
             (Some(s), Some(d)) => Some(format!("{}{}", s, d)),

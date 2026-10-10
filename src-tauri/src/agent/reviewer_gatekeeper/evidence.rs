@@ -419,8 +419,8 @@ pub(crate) fn build_investigation_digest(
     anchors: &[String],
     budget_chars: usize,
 ) -> Option<String> {
-    const MAX_STEPS: usize = 6;
-    const PER_STEP_CHARS: usize = 700;
+    const MAX_STEPS: usize = 10;
+    const PER_STEP_CHARS: usize = 2000;
     const STDOUT_MARK: &str = "--- STDOUT ---";
     let mut picked: Vec<(bool, usize, String)> = Vec::new();
     let mut seen_cmd = std::collections::HashSet::new();
@@ -458,8 +458,8 @@ pub(crate) fn build_investigation_digest(
             continue;
         }
         let (start, end) = match hit_line {
-            Some(i) => (i.saturating_sub(3), (i + 12).min(lines.len())),
-            None => (0, 14.min(lines.len())),
+            Some(i) => (i.saturating_sub(3), (i + 30).min(lines.len())),
+            None => (0, 40.min(lines.len())),
         };
         let mut excerpt = String::new();
         for l in &lines[start..end] {
