@@ -118,17 +118,18 @@ pub(crate) fn ensure_shadow_snapshot(workspace: &Path) -> bool {
         return false;
     }
     let canon = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
-    if canon == Path::new("/") {
+    // 没有上级目录 = 文件系统根（Unix 的 `/`、Windows 的 `C:\`），不建快照
+    if canon.parent().is_none() {
         return false;
     }
     if let Some(home) = dirs_next::home_dir() {
-        if canon == home {
+        if canon == std::fs::canonicalize(&home).unwrap_or(home) {
             return false;
         }
     }
     let gd = shadow_git_dir(workspace);
     if !gd.join("HEAD").exists() {
-        if !within_shadow_budget(&canon) {
+        if !within_shadow_budget(workspace) {
             return false;
         }
         if std::fs::create_dir_all(&gd).is_err() {
@@ -136,9 +137,9 @@ pub(crate) fn ensure_shadow_snapshot(workspace: &Path) -> bool {
         }
         let ok = Command::new("git")
             .args(["init", "-q"])
-            .current_dir(&canon)
+            .current_dir(workspace)
             .env("GIT_DIR", &gd)
-            .env("GIT_WORK_TREE", &canon)
+            .env("GIT_WORK_TREE", workspace)
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
@@ -156,9 +157,9 @@ pub(crate) fn ensure_shadow_snapshot(workspace: &Path) -> bool {
     let run = |args: &[&str]| -> bool {
         Command::new("git")
             .args(args)
-            .current_dir(&canon)
+            .current_dir(workspace)
             .env("GIT_DIR", &gd)
-            .env("GIT_WORK_TREE", &canon)
+            .env("GIT_WORK_TREE", workspace)
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
