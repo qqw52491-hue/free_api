@@ -77,6 +77,15 @@ pub(super) async fn dispatch_ask_human(
             .and_then(|v| v.as_str())
             .unwrap_or("AI 请求人类协助与指示")
             .to_string();
+        // 人工特赦带上「当时问了什么」：只记「确认执行」这类回复，审查员看不出批准的是什么。
+        let waiver_question: String = form_val
+            .and_then(|f| f.get("description"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(ask_msg.as_str())
+            .chars()
+            .take(500)
+            .collect();
 
         // 【防问个没完：信息类提问全局配额兜底 (默认 5 次，可由配置调节；私密凭据类提问豁免)】
         // 提问信息类在同一任务里只允许问有限次数，超出直接拦截并强制采用默认值推进；且同一问题只允许问一次。
@@ -303,7 +312,7 @@ pub(super) async fn dispatch_ask_human(
                     let clean_reply = strip_plan_decision_marker(&reply);
                     ctx.checkpoint.approved_plan_summary =
                         Some(clean_reply.chars().take(500).collect());
-                    ctx.checkpoint.record_human_waiver(&clean_reply);
+                    ctx.checkpoint.record_human_waiver(&format!("问: {} → 答: {}", waiver_question, clean_reply));
                     ctx.checkpoint.last_reviewed_diff_hash = None;
                     ctx.checkpoint.last_review_result = None;
                     ctx.checkpoint.reviewer_retry_count = 0;
@@ -343,7 +352,7 @@ pub(super) async fn dispatch_ask_human(
                         let clean_reply = strip_plan_decision_marker(&reply);
                         ctx.checkpoint.approved_plan_summary =
                             Some(clean_reply.chars().take(500).collect());
-                        ctx.checkpoint.record_human_waiver(&clean_reply);
+                        ctx.checkpoint.record_human_waiver(&format!("问: {} → 答: {}", waiver_question, clean_reply));
                         ctx.checkpoint.last_reviewed_diff_hash = None;
                         ctx.checkpoint.last_review_result = None;
                         ctx.checkpoint.reviewer_retry_count = 0;
@@ -371,9 +380,10 @@ pub(super) async fn dispatch_ask_human(
                 || reply_lower.contains("放行")
                 || reply_lower.contains("特赦")
                 || reply_lower.contains("豁免")
+                || reply_lower.contains("确认执行")
                 || (reply_lower.contains("保留") && reply_lower.contains("调试"));
             if has_explicit_waiver_intent {
-                ctx.checkpoint.record_human_waiver(&clean_reply);
+                ctx.checkpoint.record_human_waiver(&format!("问: {} → 答: {}", waiver_question, clean_reply));
                 ctx.checkpoint.last_reviewed_diff_hash = None;
                 ctx.checkpoint.last_review_result = None;
                 ctx.checkpoint.reviewer_retry_count = 0;
