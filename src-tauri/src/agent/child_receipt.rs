@@ -255,6 +255,10 @@ async fn reduce_reviewer_receipt(
             .max()
             .map_or(0, |m| m + 1);
         for (offset, f) in findings.iter().enumerate() {
+            // suggestion 级只展示、不登记为 finish 必须闭合的待办（建议级不硬拦交付）
+            if f.severity.eq_ignore_ascii_case("suggestion") {
+                continue;
+            }
             let desc = format!("[审查发现] {}", f.display_line());
             if context.todo_list.iter().any(|t| t.description == desc) {
                 continue;
@@ -342,6 +346,17 @@ async fn reduce_reviewer_receipt(
     };
 
     checkpoint.record_reviewer_delivery_for_run(env.db, Some(&receipt.child_run_id), &delivery);
+    // 审查者撤回的异议：同步关闭对应的 [审查发现] 待办，否则 finish 门禁仍会拿已撤回的意见打回。
+    for wid in &delivery.withdrawn_findings {
+        let prefix = format!("[审查发现] [{}]", wid);
+        for t in context.todo_list.iter_mut() {
+            if t.description.starts_with(&prefix)
+                && (t.status == "pending" || t.status == "in_progress")
+            {
+                t.status = "done".to_string();
+            }
+        }
+    }
     // Tech Lead 定稿通知：revised_* 已覆盖 submitted_plan 对应字段，
     // 执行方必须以审查者定稿版本为准。
     if let Some(rev) =
@@ -486,6 +501,59 @@ mod tests {
             context.todo_list.iter().any(|t| t.description.contains("F1")),
             "审查发现应闭环登记为待办"
         );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn suggestion_not_registered_and_withdrawn_finding_closes_todo() {
+        let (base, db) = test_db("withdrawn");
+        let ws = base.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let env = test_env(&db, &ws);
+        let mut context = SandwichContext::new("sys".into(), "goal".into());
+        let mut cp = AgentCheckpoint::new("run-1".into(), &context);
+        seed_run(&db, "rev-1", "run-1", "b1", "plan_review", "succeeded", true);
+        seed_run(&db, "rev-2", "run-1", "b1", "plan_review", "succeeded", true);
+        cp.set_plan_review_batch("b1", 2);
+
+        // 第一份：F1 blocking + F2 suggestion。只有 blocking 登记为必须闭合的待办。
+        let r1 = receipt(
+            "review",
+            "rev-1",
+            None,
+            json!({
+                "child_run_id": "rev-1",
+                "status": "succeeded",
+                "findings": [
+                    {"id":"F1","severity":"blocking","finality":"regardless","location":"a.rs:1","current":"c","why":"w1","suggestion":"s","evidence_strength":"confirmed"},
+                    {"id":"F2","severity":"suggestion","finality":"regardless","location":"b.rs:1","current":"c","why":"w2","suggestion":"s","evidence_strength":"confirmed"}
+                ],
+                "confidence": "confirmed"
+            }),
+        );
+        reduce_child_receipt(&env, &mut cp, &mut context, &r1).await;
+        assert!(context.todo_list.iter().any(|t| t.description.contains("[F1]")));
+        assert!(
+            !context.todo_list.iter().any(|t| t.description.contains("[F2]")),
+            "suggestion 级不登记为 finish 必须闭合的待办"
+        );
+
+        // 第二份：审查者撤回 F1 → 对应待办自动关闭
+        let r2 = receipt(
+            "review",
+            "rev-2",
+            None,
+            json!({
+                "child_run_id": "rev-2",
+                "status": "succeeded",
+                "findings": [],
+                "withdrawn_findings": ["F1"],
+                "confidence": "confirmed"
+            }),
+        );
+        reduce_child_receipt(&env, &mut cp, &mut context, &r2).await;
+        let f1 = context.todo_list.iter().find(|t| t.description.contains("[F1]")).unwrap();
+        assert_eq!(f1.status, "done", "被撤回的异议不应继续挡 finish");
         let _ = std::fs::remove_dir_all(base);
     }
 
