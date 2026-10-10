@@ -222,6 +222,12 @@ const BENIGN_COMMAND_EXECUTABLES: &[&str] = &[
     "python", "python3", "pytest", "gcc", "g++", "make", "cmake", "sed",
 ];
 
+/// 明确会改动/删除本地文件，或能执行任意脚本（sh/bash/sudo 管道注入）的执行器：命中即维持升级审查。
+const WORKSPACE_MUTATING_EXECUTABLES: &[&str] = &[
+    "rm", "rmdir", "mv", "cp", "chmod", "chown", "ln", "tee", "dd", "patch", "truncate", "unlink",
+    "shred", "install", "sh", "bash", "zsh", "dash", "eval", "sudo", "su",
+];
+
 /// 需要再看一眼子命令才能定性的执行器（git push / npm install 这类）
 const SUBCOMMAND_GATED_EXECUTABLES: &[&str] = &["git", "npm", "pnpm", "yarn", "go", "mvn", "gradle"];
 
@@ -321,9 +327,9 @@ fn command_is_mechanically_benign(cmd: &str) -> bool {
             continue;
         };
         let exec = first.rsplit('/').next().unwrap_or(first);
-        if !BENIGN_COMMAND_EXECUTABLES.contains(&exec)
-            && !SUBCOMMAND_GATED_EXECUTABLES.contains(&exec)
-        {
+        // 默认放行：docker/mysql/curl/ssh 这类操作外部系统的客户端不改本地源码，
+        // 不应为它们走整套方案审查。只对明确会改动/删除本地文件的执行器升级。
+        if WORKSPACE_MUTATING_EXECUTABLES.contains(&exec) {
             return false;
         }
         // 仅对三把"看子命令"的刀做最小检查；find -exec/xargs 内嵌命令这类
@@ -651,5 +657,12 @@ mod tests {
         assert!(!command_is_mechanically_benign("find . -exec rm {} \\;"));
         assert!(!command_is_mechanically_benign("sed -i 's/a/b/' src/x.ts"));
         assert!(!command_is_mechanically_benign("cat << EOF > /etc/passwd"));
+
+        // 操作外部系统的客户端（docker/mysql/curl/ssh）不改本地源码，默认不升级
+        assert!(command_is_mechanically_benign(
+            "docker exec -i mysql mysql -u root -p'x' db -e \"SELECT 1\""
+        ));
+        assert!(command_is_mechanically_benign("cat tmp/a.sql | docker exec -i mysql mysql db"));
+        assert!(command_is_mechanically_benign("curl -s https://example.com/health"));
     }
 }
