@@ -180,6 +180,12 @@ pub fn delete_session_completely(
         }
     }
 
+    // 2.4 影子仓库：非 git 工作区的任务起点快照按「工作区路径哈希」存放。
+    //     会话 tmp 目录是一次性的（自由会话 + auto_pilot 时会建），随会话一并清掉；必须在删 tmp 之前算哈希。
+    let _ = std::fs::remove_dir_all(crate::agent::reviewer_gatekeeper::shadow_git_dir(
+        &crate::agent::path_guard::get_session_tmp_dir(id),
+    ));
+
     // 2.5 清理会话专属临时目录 tmp/{session_id}——产物文件（pptx/xlsx/草稿）的真身落盘处；
     // agent_artifacts 表行已级联删除，磁盘文件不删就成了永久孤儿。
     // 优先用注入的 app_data_dir（生产=app.path().app_data_dir()，测试=临时目录）；
