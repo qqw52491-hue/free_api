@@ -14,6 +14,8 @@ use std::process::Command;
 pub const MAX_TOOL_OUTPUT_CHARS: usize = 6000;
 const MAX_GREP_MATCHES: usize = 30;
 const MAX_READ_LINES: usize = 220;
+/// read_file 单页字符预算：220 行代码约 12~16k 字符；6000 会把一页砍到百行内且不提示。
+const MAX_READ_CHARS: usize = 16_000;
 const MAX_WALK_DEPTH: usize = 6;
 const SKIP_DIRS: [&str; 6] = [".git", "target", "node_modules", "dist", ".writer-tmp", "build"];
 /// 取证预算默认值与硬上限：每一步都是一次带完整历史的 LLM 调用，
@@ -441,18 +443,30 @@ pub fn execute(
                 .map_err(|e| format!("读取失败: {}", e))?;
             let total_lines = content.lines().count();
             let mut out = String::new();
+            let mut last_shown = start_line - 1;
             for (idx, line) in content
                 .lines()
                 .enumerate()
                 .filter(|(idx, _)| *idx >= start_line - 1)
                 .take(MAX_READ_LINES)
             {
-                out.push_str(&format!("{}: {}\n", idx + 1, line));
+                let piece = format!("{}: {}\n", idx + 1, line);
+                if !out.is_empty() && out.chars().count() + piece.chars().count() > MAX_READ_CHARS {
+                    break;
+                }
+                out.push_str(&piece);
+                last_shown = idx + 1;
             }
             if out.is_empty() && start_line > 1 {
                 out = format!("（起始行 {} 超出文件总行数 {}）", start_line, total_lines);
+            } else if last_shown < total_lines {
+                // 明确告知"没读完"与续读位置，避免审查者把半个文件当全文下结论
+                out.push_str(&format!(
+                    "…（本页显示第 {}–{} 行，文件共 {} 行；未读完，用 start_line={} 继续）",
+                    start_line, last_shown, total_lines, last_shown + 1
+                ));
             }
-            Ok(cap(out))
+            Ok(out)
         }
         "run_command" => {
             let cmd = get_str("command");
@@ -710,6 +724,15 @@ mod tests {
 
         let ok = execute(&dir, None, "read_file", &json!({"path": "a.txt"})).unwrap();
         assert!(ok.contains("line2"));
+        assert!(!ok.contains("未读完"));
+
+        // 超过单页行数：必须提示续读位置
+        let big: String = (1..=300).map(|i| format!("row{}\n", i)).collect();
+        std::fs::write(dir.join("big.txt"), big).unwrap();
+        let page = execute(&dir, None, "read_file", &json!({"path": "big.txt"})).unwrap();
+        assert!(page.contains("220: row220") && page.contains("start_line=221"), "{}", page);
+        let page2 = execute(&dir, None, "read_file", &json!({"path": "big.txt", "start_line": 221})).unwrap();
+        assert!(page2.contains("300: row300") && !page2.contains("未读完"));
 
         // 路径围栏：越界拒绝
         let escaped = "/etc/hosts";
