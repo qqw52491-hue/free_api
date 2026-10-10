@@ -1399,17 +1399,44 @@ fn execute_command_blocking(
     }
 }
 
+/// 取命令里最后一段（按引号外的 `|` `;` `&&` 切分）。
+/// 引号内的 `|`（如 grep -E 'a|b'）不是管道，不能当分隔符。
+fn last_command_segment(cmd: &str) -> &str {
+    let mut start = 0usize;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (i, c) in cmd.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match quote {
+            Some(q) => {
+                if c == '\\' && q == '"' {
+                    escaped = true;
+                } else if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '\\' => escaped = true,
+                '\'' | '"' => quote = Some(c),
+                '|' | ';' => start = i + 1,
+                // 只认 &&；2>&1 / &> 里的 & 不是分隔符
+                '&' if cmd[i + 1..].starts_with('&') => start = i + 2,
+                _ => {}
+            },
+        }
+    }
+    &cmd[start..]
+}
+
 /// 快照目录内条目相对路径集合（浅递归、封顶防爆），用于 shell 前后 diff。
 /// 判定命令是否为「检索类」调用（其退出码 1 语义 = 无匹配，而非失败）。
 /// 管线的退出码取最后一个分段——只看 | && || ; 分隔后的末段命令。
 /// 集合：grep 家族/rg/ag/ack/ugrep/git grep/which/command -v（缺席语义相同）。
 fn is_search_invocation(cmd: &str) -> bool {
-    let last_seg = cmd
-        .rsplit(['|', ';'])
-        .next()
-        .and_then(|s| s.rsplit("&&").next())
-        .unwrap_or(cmd)
-        .trim();
+    let last_seg = last_command_segment(cmd).trim();
     // 剥掉 VAR=x 前缀赋值取首词
     let mut tokens = last_seg.split_whitespace();
     let mut first = "";
@@ -1544,6 +1571,12 @@ mod tests {
         assert!(is_search_invocation("cd dir && rg pattern"));
         assert!(is_search_invocation("git grep -n symbol"));
         assert!(is_search_invocation("command -v ffmpeg"));
+        // 引号内的 | 不是管道（回归：grep -rnE 'a|b' path 曾被误判为非检索命令）
+        assert!(is_search_invocation("grep -rnE 'changePassword|updatePassword' admin-web/src/api/"));
+        assert!(is_search_invocation("cd x && grep -E \"a|b\" f.txt"));
+        assert!(!is_search_invocation("grep foo f.txt | wc -l"));
+        assert!(is_search_invocation("grep foo f.txt 2>&1"));
+        assert!(!is_search_invocation("grep -rn 'a;b' . ; ls"));
         assert!(is_search_invocation("FOO=1 rg pattern src/"));
         // 非检索族：exit 1 是真错
         assert!(!is_search_invocation("cargo test"));
