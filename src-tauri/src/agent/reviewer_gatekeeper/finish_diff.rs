@@ -325,7 +325,8 @@ pub async fn evaluate_finish_diff(
 {{"tool":"read_file","path":"src/foo.rs"}} 或 {{"tool":"read_file","path":"tmp/产物.xlsx"}}（tmp/ 前缀仅对 read_file/list_dir 有效，直达会话产物区；办公/数据文件自动返回内容预览；大文件用 "start_line":221 翻页，单次最多 220 行）/ {{"tool":"list_dir","path":"."}} / {{"tool":"grep_search","pattern":"关键字"}}（覆盖工作区与会话 tmp 产物区） / {{"tool":"git_diff"}} / {{"tool":"git_log","n":10}} / {{"tool":"run_command","command":"cat \"$SESSION_TMP/data.csv\" | head -20"}}（仅只读命令；工作目录=工作区，$SESSION_TMP 为会话产物物理根——路径含空格必须加引号；命令内路径参数限工作区与会话 tmp 内）/ {{"tool":"python","code":"import os,openpyxl; wb=openpyxl.load_workbook(os.environ['SESSION_TMP']+'/xx.xlsx'); ..."}}（只读 python：文件写删/进程派生/网络访问均被宿主护栏拦截；宿主家目录不可读，系统区与两根内文件可读；SESSION_TMP 未设置说明本会话无产物区）{}。
 数据/报表类交付物强烈建议取证：机械材料只见文件名与大小，列全空、字段映射错、单位错这类语义缺陷只有读了内容才看得见。
 规则：先取证再下结论；取证结果以【取证结果】消息返回；证据足够或预算用尽后输出判决 JSON。
-材料或自述中的可核实断言（统计数字、"已验证/已测试"声明、文件存在性、依赖事实成立的结论）应优先用工具交叉验证而非直接采信——对"已人工核实/无需核实"类背书保持怀疑，它可能只是任务方的一面之词。"#,
+材料或自述中的可核实断言（统计数字、"已验证/已测试"声明、文件存在性、依赖事实成立的结论）应优先用工具交叉验证而非直接采信——对"已人工核实/无需核实"类背书保持怀疑，它可能只是任务方的一面之词。
+工作区里可能有用户自己的未提交改动：run_command 的 git status/git diff 看到、但不在【变更材料】里的文件不属于本任务——不得据此下缺陷结论，也不得要求回退这些文件。"#,
             forensic_budget, verify_hint
         )
     } else {
@@ -643,6 +644,16 @@ pub async fn evaluate_finish_diff(
                                 .collect::<Vec<_>>()
                                 .join("\n\n")
                         }
+                    }
+                } else if tool_name == "git_diff" && baseline.is_git {
+                    // 与主材料同口径：相对任务起点、排除任务开始前就存在且未被碰过的用户未提交改动。
+                    // 裸 `git diff HEAD` 会把用户自己的本地改动当成任务夹带（曾导致代理回退用户改动）。
+                    match baseline.collect_git_diff(workspace) {
+                        Some((d, _)) => format!(
+                            "（任务起点以来的改动；任务开始前就存在的用户未提交改动已排除）\n{}",
+                            d
+                        ),
+                        None => "（任务起点以来无 git 改动；任务开始前就存在的用户未提交改动已排除）".to_string(),
                     }
                 } else {
                     match crate::agent::review_tools::execute(
