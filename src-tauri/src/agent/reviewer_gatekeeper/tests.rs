@@ -249,3 +249,34 @@ index 789..abc 100644
         assert!(diff2.contains("user_cfg.properties"));
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn baseline_same_file_only_shows_lines_changed_during_run() {
+        fn git(dir: &std::path::Path, args: &[&str]) {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            assert!(ok, "git {:?} failed", args);
+        }
+        let dir = std::env::temp_dir().join(format!("rgk_samefile_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        git(&dir, &["init", "-q"]);
+        git(&dir, &["config", "user.email", "t@t"]);
+        git(&dir, &["config", "user.name", "t"]);
+        std::fs::write(dir.join("f.txt"), "a\nb\nc\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-q", "-m", "init"]);
+        // 用户启动前已改第 1 行
+        std::fs::write(dir.join("f.txt"), "USER_EDIT\nb\nc\n").unwrap();
+        let baseline = GitBaseline::capture_at_run_start(&dir);
+        // 任务期间只改第 3 行
+        std::fs::write(dir.join("f.txt"), "USER_EDIT\nb\nAGENT_EDIT\n").unwrap();
+        let (diff, _) = baseline.collect_git_diff(&dir).expect("should have diff");
+        assert!(diff.contains("AGENT_EDIT"), "{}", diff);
+        assert!(!diff.lines().any(|l| (l.starts_with('+') || l.starts_with('-')) && l.contains("USER_EDIT")), "user line leaked as change: {}", diff);
+        let _ = std::fs::remove_dir_all(&dir);
+    }

@@ -50,6 +50,16 @@ impl GitBaseline {
                 let h = Self::file_content_hash(workspace, &n);
                 b.pre_dirty.insert(n, h);
             }
+            // 用 git 自己存「启动时的工作区状态」：stash create 只生成一个 commit 对象并返回其 sha，
+            // 不动工作区、不写 stash 列表。之后 `git diff <sha>` 就是「启动以来的改动」，
+            // 同一文件里用户原有的几行也能分开（未跟踪文件仍走上面的指纹）。
+            // 工作区干净或命令失败（如未配置身份）时返回空，继续用 HEAD 作起点。
+            if let Some(snap) = git_cmd(workspace, &["stash", "create"]) {
+                let snap = snap.trim().to_string();
+                if !snap.is_empty() {
+                    b.base_head = Some(snap);
+                }
+            }
         }
         b
     }
