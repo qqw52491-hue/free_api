@@ -549,6 +549,37 @@
             git_cmd_fingerprint, git_destructive_review, GitDestructiveVerdict,
         };
 
+        // 不带 -- 的 checkout <文件路径> 同样是还原路径（实测事故 2026-10-10）；分支名/切分支不拦
+        assert_eq!(
+            git_destructive_review(
+                "git checkout src/main/java/LicenseUtils.java src/main/resources/a.txt"
+            ),
+            GitDestructiveVerdict::Targets {
+                paths: vec![
+                    "src/main/java/LicenseUtils.java".to_string(),
+                    "src/main/resources/a.txt".to_string()
+                ],
+                dirty_gated: true,
+            }
+        );
+        assert_eq!(
+            git_destructive_review("git checkout LicenseUtils.java"),
+            GitDestructiveVerdict::Targets {
+                paths: vec!["LicenseUtils.java".to_string()],
+                dirty_gated: true,
+            }
+        );
+        for ok in [
+            "git checkout main",
+            "git checkout feature/x",
+            "git checkout origin/main",
+            "git checkout release/1.0",
+            "git checkout v1.2",
+            "git checkout -b feat/x.y",
+        ] {
+            assert_eq!(git_destructive_review(ok), GitDestructiveVerdict::NotDestructive, "{ok}");
+        }
+
         // 显式路径 → Targets（可逐条对账；checkout/restore 类脏门槛）
         assert_eq!(
             git_destructive_review("git checkout -- scripts/eval_runner.mjs"),

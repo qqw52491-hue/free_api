@@ -348,6 +348,29 @@ fn shell_tokens(s: &str) -> Vec<String> {
     out
 }
 
+/// 参数是否像文件路径（区别于分支名）：最后一段带字母开头的扩展名，
+/// 且含 `/` 或扩展名在常见源码/配置后缀内。`release/1.0`、`origin/main`、`feature/x` 不算。
+fn looks_like_file_path(s: &str) -> bool {
+    const KNOWN_EXT: &[&str] = &[
+        "java", "rs", "vue", "js", "jsx", "ts", "tsx", "py", "txt", "json", "yaml", "yml", "xml",
+        "md", "css", "scss", "html", "sql", "sh", "toml", "properties", "cfg", "conf", "go",
+        "c", "cpp", "h", "mjs", "lock",
+    ];
+    let last = s.rsplit('/').next().unwrap_or(s);
+    let Some((stem, ext)) = last.rsplit_once('.') else {
+        return false;
+    };
+    if stem.is_empty() || ext.is_empty() || ext.len() > 10 {
+        return false;
+    }
+    if !ext.chars().next().map_or(false, |c| c.is_ascii_alphabetic())
+        || !ext.chars().all(|c| c.is_ascii_alphanumeric())
+    {
+        return false;
+    }
+    s.contains('/') || KNOWN_EXT.contains(&ext.to_ascii_lowercase().as_str())
+}
+
 /// 提取 git 破坏命令的判定结果。输入原始命令串（不 lowercase——
 /// branch -D 与 -d 语义相反；git 子命令按惯例小写，变体大小写保守不判）。
 pub fn git_destructive_review(cmd: &str) -> GitDestructiveVerdict {
@@ -405,6 +428,26 @@ pub fn git_destructive_review(cmd: &str) -> GitDestructiveVerdict {
                 }
                 if tokens.iter().skip(2).any(|t| t == "." || t == "*") {
                     return GitDestructiveVerdict::Pathless;
+                }
+                // 不带 -- 的 `git checkout src/A.java B.txt` 同样会覆盖工作区文件（实测 2026-10-10：
+                // 代理用它还原了用户本地未提交改动）。有切分支/新建分支旗标则放行；
+                // 否则参数里凡“像文件路径”的（带字母扩展名）按还原路径处理。
+                let switching = tokens.iter().skip(2).any(|t| {
+                    matches!(
+                        t.as_str(),
+                        "-b" | "-B" | "--orphan" | "--detach" | "-d" | "-t" | "--track"
+                    )
+                });
+                if !switching {
+                    let paths: Vec<String> = tokens
+                        .iter()
+                        .skip(2)
+                        .filter(|t| !t.starts_with('-') && looks_like_file_path(t))
+                        .cloned()
+                        .collect();
+                    if !paths.is_empty() {
+                        return GitDestructiveVerdict::Targets { paths, dirty_gated: true };
+                    }
                 }
             }
             "rm" | "mv" => {
