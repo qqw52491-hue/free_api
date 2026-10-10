@@ -78,6 +78,26 @@ fn test_local_file_edit_success_and_ambiguity_protection() {
 }
 
 #[test]
+fn test_local_file_edit_matches_crlf_file_with_lf_target() {
+    let ws = temp_dir();
+    let db = mock_db();
+    std::fs::write(ws.join("page.vue"), "<script setup>\r\nimport a from 'a'\r\n\r\nconst x = 1\r\n").unwrap();
+
+    // 模型给的 target 是 LF，文件是 CRLF：应自动适配并保持文件原有 CRLF
+    let p = json!({
+        "path": "page.vue",
+        "target_content": "import a from 'a'\n\nconst x = 1",
+        "replacement_content": "import a from 'a'\nimport b from 'b'\n\nconst x = 1"
+    });
+    let res = dispatch(&db, "test_session", "edit", &p, Some(&ws));
+    assert!(res.success, "CRLF 文件应能用 LF target 编辑: {}", res.stderr);
+    let content = std::fs::read_to_string(ws.join("page.vue")).unwrap();
+    assert_eq!(content, "<script setup>\r\nimport a from 'a'\r\nimport b from 'b'\r\n\r\nconst x = 1\r\n");
+
+    let _ = std::fs::remove_dir_all(ws);
+}
+
+#[test]
 fn test_local_file_mislabeled_write_action_demotes_to_read() {
     let ws = temp_dir();
     let db = mock_db();

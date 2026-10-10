@@ -144,6 +144,23 @@ pub async fn execute_writer_action(
             let current_content = std::fs::read_to_string(&canonical)
                 .map_err(|error| format!("读取待编辑文件失败: {}", error))?;
 
+            // CRLF 文件：模型给的 target_content 几乎总是 LF，原样匹配会“目标文本未找到”。
+            // 文件是 CRLF、目标不含 \r 且原样匹配不到时，把目标与替换内容都转成 CRLF 再匹配（保持文件原有换行风格）。
+            let crlf_pair = if current_content.contains("\r\n")
+                && !target_content.contains('\r')
+                && !current_content.contains(target_content)
+            {
+                Some((
+                    crate::agent::tools::local_file::to_crlf(target_content),
+                    crate::agent::tools::local_file::to_crlf(replacement_content),
+                ))
+            } else {
+                None
+            };
+            let (target_content, replacement_content): (&str, &str) = match &crlf_pair {
+                Some((t, r)) => (t.as_str(), r.as_str()),
+                None => (target_content, replacement_content),
+            };
             let matches: Vec<(usize, &str)> = current_content.match_indices(target_content).collect();
             if matches.is_empty() {
                 return Err(format!(
