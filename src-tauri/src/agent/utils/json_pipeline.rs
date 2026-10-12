@@ -416,6 +416,41 @@ pub fn normalize_raw_instruction_value(val: &mut serde_json::Value) {
             }
         }
 
+        // 3.5 模型（尤其 deepseek）常按模板把所有字段填成 ""：
+        // 对非字符串类型的顶层协议字段（数字/布尔/对象/数组），空串与省略同义，直接删除，
+        // 否则 serde 报 invalid type 导致整次回答作废（实测 775b167b step 17：`"id": ""`）。
+        // 仅处理白名单协议字段，绝不改写 command/params 等工具参数。
+        for field in [
+            "id",
+            "new_plan",
+            "request_escalation",
+            "require_memory",
+            "submit_plan",
+            "prepare_finish",
+            "review_contract_update",
+            "change_verification_update",
+            "self_report",
+            "scope_extension",
+            "request_retriage",
+            "target_blocks_update",
+            "commands",
+            "memories_update",
+            "dispatches",
+            "parallel",
+            "plan_tree",
+            "applied_lessons",
+        ] {
+            if matches!(map.get(field), Some(serde_json::Value::String(v)) if v.trim().is_empty()) {
+                map.remove(field);
+            }
+        }
+        // 数字型 id 被写成字符串数字（"12"）：解析为数字
+        if let Some(serde_json::Value::String(id_str)) = map.get("id") {
+            if let Ok(n) = id_str.trim().parse::<u64>() {
+                map.insert("id".to_string(), serde_json::json!(n));
+            }
+        }
+
         // 4. 如果 applied_lessons 是单个字符串，转为数组
         if let Some(serde_json::Value::String(lesson_str)) = map.get("applied_lessons") {
             map.insert(
@@ -546,6 +581,33 @@ pub fn extract_streaming_json_field(json_text: &str, field_names: &[&str]) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 回归：模型把所有字段填成 ""（含 id/applied_lessons/parallel）不再导致结构转换失败。
+    #[test]
+    fn empty_string_template_fields_are_treated_as_missing() {
+        let mut v = serde_json::json!({
+            "reflection": "r", "thought": "", "description": "d",
+            "finding": "", "finding_kind": "", "plan_id": "p", "plan_title": "t",
+            "session_title": "", "new_plan": "", "applied_lessons": "",
+            "tool": "local_shell", "action": "run", "command": {"cmd": "ls"},
+            "id": "", "submit_plan": "", "prepare_finish": "",
+            "commands": "", "parallel": "", "dispatches": "", "request_escalation": ""
+        });
+        normalize_raw_instruction_value(&mut v);
+        let inst: crate::agent::types::AgentInstruction = serde_json::from_value(v).unwrap();
+        assert_eq!(inst.id, None);
+        assert!(inst.applied_lessons.is_none());
+        assert!(inst.parallel.is_none());
+        assert!(inst.submit_plan.is_none());
+        assert_eq!(inst.tool.as_deref(), Some("local_shell"));
+
+        // 数字字符串 id 解析为数字；非空 applied_lessons 仍转数组
+        let mut v2 = serde_json::json!({"id": "12", "applied_lessons": "L1", "tool": "x"});
+        normalize_raw_instruction_value(&mut v2);
+        let i2: crate::agent::types::AgentInstruction = serde_json::from_value(v2).unwrap();
+        assert_eq!(i2.id, Some(12));
+        assert_eq!(i2.applied_lessons, Some(vec!["L1".to_string()]));
+    }
 
     #[test]
     fn test_normalize_raw_instruction_value_dispatches() {
