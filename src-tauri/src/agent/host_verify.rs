@@ -341,3 +341,34 @@ mod tool_unavailable_tests {
         assert!(!o(true, "0", "").tool_unavailable());
     }
 }
+
+
+/// 冻结验证命令失败原因是「引用的文件不存在」（多为产物实际文件名和契约里的路径不一致）时，
+/// 给模型的补充说明——默认文案只说「修复代码」，对改了产物名的情形会误导。
+/// 冻结机制本身不变（命令仍不可改），这里只点明合法出路。
+pub fn obligation_missing_file_hint(failure_lines: &[String]) -> Option<&'static str> {
+    let missing = failure_lines.iter().any(|l| {
+        l.contains("No such file or directory") || l.contains("没有那个文件或目录")
+    });
+    if missing {
+        Some(
+            "\n【若失败原因是验证命令引用的文件不存在】多半是产物实际文件名与契约里的路径不一致。命令已冻结不能改，两条正当出路：①让产物真实出现在该命令引用的路径（重命名、硬链接 `ln`，或直接输出到该路径，避免复制大文件）并保证 artifacts 登记的是最终交付路径；②若契约里的路径本身已不适用，把该义务标为 waived 并写明理由，再新增一条带正确路径命令的新义务。请如实说明，不要为通过验证而造假。",
+        )
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod missing_file_hint_tests {
+    use super::obligation_missing_file_hint as hint;
+
+    #[test]
+    fn hints_only_when_file_missing() {
+        let miss = vec!["- 义务 [v] 验证命令 `ffprobe a.mp4` 退出码 1:  | stderr: a.mp4: No such file or directory".to_string()];
+        assert!(hint(&miss).unwrap().contains("waived"));
+        let other = vec!["- 义务 [t] 验证命令 `cargo test` 退出码 101: tests failed".to_string()];
+        assert!(hint(&other).is_none());
+        assert!(hint(&[]).is_none());
+    }
+}

@@ -2446,6 +2446,10 @@ async fn run_agent_main_loop_in_workspace_inner(
                         "【⚠️ 交付门禁拦截打回：契约绑定的宿主验证命令未通过，finish 未生效！】\n{}\n（说明：命令退出码即为判定依据，冻结脚本不可修改）。\n【必须采取的行动】：请真实修复对应代码使验证通过后重试；严禁未验证直接提交交付。",
                         obligation_failures.join("\n")
                     );
+                    let reject_msg = match crate::agent::host_verify::obligation_missing_file_hint(&obligation_failures) {
+                        Some(h) => format!("{}{}", reject_msg, h),
+                        None => reject_msg,
+                    };
                     context.add_error_feedback(&reject_msg);
                     crate::agent::dispatcher::emit_tool_event(
                         &app,
