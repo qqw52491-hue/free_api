@@ -1272,7 +1272,7 @@
     border-radius: 4px;
     font-size: 11.5px;
     line-height: 1.4;
-    color: #94a3b8;
+    color: #8da0b8;
     cursor: pointer;
     background: transparent;
     transition: background 0.12s ease;
@@ -1282,11 +1282,11 @@
 }
 
 .ambient-text-row:hover {
-    background: rgba(255, 255, 255, 0.035);
+    background: rgba(255, 255, 255, 0.03);
 }
 
 .ambient-text-row.selected {
-    background: rgba(129, 140, 248, 0.08);
+    background: rgba(129, 140, 248, 0.06);
 }
 
 /* 真正的结论/关键突破：高度与行距完全对齐普通动作行，严禁上下产生多余间距 */
@@ -1379,55 +1379,55 @@
 }
 
 .action-tag.action-tag-edit {
-    color: #38bdf8;
-    background: rgba(56, 189, 248, 0.08);
+    color: #7dd3fc;
+    background: rgba(125, 211, 252, 0.06);
 }
 
 .action-tag.action-tag-write {
-    color: #34d399;
-    background: rgba(52, 211, 153, 0.08);
+    color: #86efac;
+    background: rgba(134, 239, 172, 0.06);
 }
 
 .action-tag.action-tag-read {
     color: #94a3b8;
-    background: rgba(255, 255, 255, 0.04);
+    background: rgba(255, 255, 255, 0.035);
 }
 
 .action-tag.action-tag-shell {
-    color: #e2b340;
-    background: rgba(234, 179, 8, 0.08);
+    color: #cbd5e1;
+    background: rgba(255, 255, 255, 0.05);
 }
 
 .action-tag.action-tag-search {
     color: #94a3b8;
-    background: rgba(255, 255, 255, 0.04);
+    background: rgba(255, 255, 255, 0.035);
 }
 
 .action-tag.action-tag-web {
-    color: #22d3ee;
-    background: rgba(6, 182, 212, 0.08);
+    color: #67e8f9;
+    background: rgba(103, 232, 249, 0.06);
 }
 
 .action-tag.action-tag-mcp {
-    color: #c084fc;
-    background: rgba(168, 85, 247, 0.08);
+    color: #c4b5fd;
+    background: rgba(196, 181, 253, 0.06);
 }
 
 .action-tag.action-tag-subagent {
-    color: #a78bfa;
-    background: rgba(167, 139, 250, 0.08);
-    border: 1px solid rgba(167, 139, 250, 0.16);
+    color: #a5b4fc;
+    background: rgba(165, 180, 252, 0.06);
+    border: 1px solid rgba(165, 180, 252, 0.12);
 }
 
 .action-tag.action-tag-general {
     color: #94a3b8;
-    background: rgba(255, 255, 255, 0.04);
+    background: rgba(255, 255, 255, 0.035);
 }
 
 .action-tag.action-tag-think {
-    color: #38bdf8;
-    background: rgba(56, 189, 248, 0.08);
-    border: 1px solid rgba(56, 189, 248, 0.2);
+    color: #7dd3fc;
+    background: rgba(125, 211, 252, 0.06);
+    border: 1px solid rgba(125, 211, 252, 0.15);
 }
 
 /* 🧠 极简矢量思维大脑 / 深度思考矢量图标 */
@@ -1438,7 +1438,8 @@
     vertical-align: -1.5px;
     flex-shrink: 0;
     color: currentColor;
-    transition: transform 0.2s ease;
+    opacity: 0.85;
+    transition: transform 0.2s ease, opacity 0.2s ease;
 }
 
 .thought-icon-svg.mini {
@@ -1448,35 +1449,44 @@
 }
 
 .action-tag-think .thought-icon-svg {
-    color: #38bdf8;
+    color: #7dd3fc;
 }
 
 @keyframes thought-icon-pulse {
     0%, 100% {
         transform: scale(1);
-        opacity: 0.88;
+        opacity: 0.82;
     }
     50% {
-        transform: scale(1.12);
-        opacity: 1;
-        filter: drop-shadow(0 0 6px rgba(56, 189, 248, 0.8));
+        transform: scale(1.08);
+        opacity: 0.95;
+        filter: drop-shadow(0 0 4px rgba(125, 211, 252, 0.45));
     }
 }
 
 
-/* 专属语言/文件矢量图标 */
+/* 专属语言/文件矢量图标 (对比度低沉柔和，悬停平滑恢复清晰) */
 .chip-file-icon {
     display: inline-flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
+    opacity: 0.72;
+    filter: saturate(0.85);
+    transition: opacity 0.15s ease, filter 0.15s ease;
 }
 
-/* 文件名 (等宽内敛，悬浮高亮) */
+.ambient-text-row:hover .chip-file-icon,
+.ambient-action-lead.clickable:hover .chip-file-icon {
+    opacity: 0.95;
+    filter: saturate(1);
+}
+
+/* 文件名 (等宽内敛，柔和灰白，悬浮高亮) */
 .chip-file-name {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 11.5px;
-    font-weight: 500;
+    font-weight: 450;
     color: #cbd5e1;
     letter-spacing: -0.2px;
     max-width: 280px;
@@ -1487,11 +1497,11 @@
 }
 
 .ambient-action-lead.clickable .chip-file-name:hover {
-    color: #38bdf8;
+    color: #93c5fd;
     text-decoration: underline;
 }
 
-/* 所在目录简写 (如 src/bin/，极度轻柔) */
+/* 所在目录简写 (如 src/bin/，极度轻柔低调) */
 .chip-file-dir {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 10.5px;
@@ -1500,13 +1510,14 @@
     letter-spacing: -0.2px;
 }
 
-/* 行号与耗时微标 (#L70-120, 0.5s) */
+/* 行号与耗时微标 (#L70-120, 0.5s，降低刺眼程度) */
 .chip-line-range {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 10px;
-    font-weight: 500;
+    font-weight: 450;
     color: #94a3b8;
-    background: rgba(255, 255, 255, 0.04);
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.04);
     padding: 0.5px 4px;
     border-radius: 3px;
     line-height: 1.25;
