@@ -24,6 +24,9 @@ pub(crate) use types::*;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentCheckpoint {
     pub schema_version: u32,
+    /// ⚠️ 命名历史遗留：这里存的实际是 **session_id**（检查点按会话一份，跨多次运行覆盖），
+    /// 不是 agent_run_traces.id / agent_gate_fires.run_id / agent_child_runs.parent_run_id 那种“每次运行一个”的 run id。
+    /// 查询对照：agent_checkpoints.run_id == agent_run_traces.session_id。一个会话可有多条 trace。
     pub run_id: String,
     pub phase: AgentPhase,
     pub data: DurableAgentContext,
