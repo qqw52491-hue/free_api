@@ -191,7 +191,7 @@ pub async fn spawn_child_reviewer(
 {}",
         persona,
         if reviewer_tool_steps > 0 {
-            format!("【只读取证工具（预算 {} 步，用尽后必须收敛）】当证据包不足以核实某个疑点时，输出且仅输出一个 JSON 对象请求取证：{{\"tool\":\"read_file\",\"path\":\"src/foo.rs\"}} / {{\"tool\":\"read_file\",\"path\":\"tmp/产物.xlsx\"}}（tmp/ 前缀仅对 read_file/list_dir 有效，直达会话产物区；办公/数据文件自动返回内容预览；read_file 大文件用 \"start_line\":221 翻页，单次最多 220 行）/ {{\"tool\":\"grep_search\",\"pattern\":\"函数名\"}}（覆盖工作区与会话产物区） / {{\"tool\":\"git_diff\"}} / {{\"tool\":\"git_log\",\"n\":10}} / {{\"tool\":\"list_dir\",\"path\":\"src/\"}} / {{\"tool\":\"run_command\",\"command\":\"cat \\\"$SESSION_TMP/data.csv\\\" | head -20\"}}（仅 ls/cat/grep/rg/jq/stat/diff 等只读命令；工作目录=工作区，$SESSION_TMP 为会话产物物理根——路径含空格必须加引号；命令内路径参数限工作区与会话 tmp 内）/ {{\"tool\":\"python\",\"code\":\"import os,openpyxl; wb=openpyxl.load_workbook(os.environ['SESSION_TMP']+'/xx.xlsx'); ...\"}}（只读 python：文件写删/进程派生/网络访问均被宿主护栏拦截；宿主家目录不可读，系统区与两根内文件可读；SESSION_TMP 未设置说明本会话无产物区）。宿主会返回取证结果供你继续研判。规则：先取证再下结论，finding 的 location 必须是可复核的真实路径:行号，禁止臆测；方案中关于代码现状的可核实断言（函数/字段存在性、路由覆盖、『已存在/已实现/已验证』类声明）应优先用工具交叉验证而非直接采信——断言与实测事实冲突本身即构成 finding；所有取证请求完成后输出最终审查 JSON（含 findings 键）。", reviewer_tool_steps)
+            format!("【只读取证工具（预算 {} 步，用尽后必须收敛）】当证据包不足以核实某个疑点时，输出且仅输出一个 JSON 对象请求取证：{{\"tool\":\"read_file\",\"path\":\"src/foo.rs\"}} / {{\"tool\":\"read_file\",\"path\":\"tmp/产物.xlsx\"}}（tmp/ 前缀仅对 read_file/list_dir 有效，直达会话产物区；办公/数据文件自动返回内容预览；read_file 大文件用 \"start_line\":221 翻页，单次最多 220 行）/ {{\"tool\":\"grep_search\",\"pattern\":\"函数名\"}}（覆盖工作区与会话产物区） / {{\"tool\":\"git_diff\"}}（仅任务起点以来的改动；不在变更材料里、却在 git status/diff 可见的文件属用户自己的改动，不得据此下缺陷） / {{\"tool\":\"git_log\",\"n\":10}} / {{\"tool\":\"list_dir\",\"path\":\"src/\"}} / {{\"tool\":\"run_command\",\"command\":\"cat \\\"$SESSION_TMP/data.csv\\\" | head -20\"}}（仅 ls/cat/grep/rg/jq/stat/diff 等只读命令；工作目录=工作区，$SESSION_TMP 为会话产物物理根——路径含空格必须加引号；命令内路径参数限工作区与会话 tmp 内）/ {{\"tool\":\"python\",\"code\":\"import os,openpyxl; wb=openpyxl.load_workbook(os.environ['SESSION_TMP']+'/xx.xlsx'); ...\"}}（只读 python：文件写删/进程派生/网络访问均被宿主护栏拦截；宿主家目录不可读，系统区与两根内文件可读；SESSION_TMP 未设置说明本会话无产物区）。宿主会返回取证结果供你继续研判。规则：先取证再下结论，finding 的 location 必须是可复核的真实路径:行号，禁止臆测；方案中关于代码现状的可核实断言（函数/字段存在性、路由覆盖、『已存在/已实现/已验证』类声明）应优先用工具交叉验证而非直接采信——断言与实测事实冲突本身即构成 finding；所有取证请求完成后输出最终审查 JSON（含 findings 键）。", reviewer_tool_steps)
         } else {
             "不得调用任何工具：只评估证据包内的事实，证据不足时在 missing_evidence 说明。".to_string()
         }
@@ -649,14 +649,32 @@ pub async fn spawn_child_reviewer(
                             }),
                         );
                     }
-                    let observation = match crate::agent::review_tools::execute(
-                        &workspace_root_owned,
-                        Some(&session_tmp_owned),
-                        &tool_name,
-                        &req,
-                    ) {
-                        Ok(out) => out,
-                        Err(e) => format!("取证请求被拒绝: {}", e),
+                    // git_diff：与终审同口径，相对任务起点、排除用户任务前就有的未提交改动
+                    // （裸 `git diff HEAD` 曾让阶段审查把用户自己的文件当成缺陷）。
+                    // 无 git 基线时回落到原实现。
+                    let baseline_diff = if tool_name == "git_diff" {
+                        crate::agent::reviewer_gatekeeper::GitBaseline::git_for_session(&session_id_clone)
+                            .map(|b| match b.collect_git_diff(&workspace_root_owned) {
+                                Some((d, _)) => format!(
+                                    "（任务起点以来的改动；任务开始前就存在的用户未提交改动已排除）\n{}",
+                                    d
+                                ),
+                                None => "（任务起点以来无 git 改动；任务开始前就存在的用户未提交改动已排除）".to_string(),
+                            })
+                    } else {
+                        None
+                    };
+                    let observation = match baseline_diff {
+                        Some(text) => text,
+                        None => match crate::agent::review_tools::execute(
+                            &workspace_root_owned,
+                            Some(&session_tmp_owned),
+                            &tool_name,
+                            &req,
+                        ) {
+                            Ok(out) => out,
+                            Err(e) => format!("取证请求被拒绝: {}", e),
+                        },
                     };
                     tool_steps_used += 1;
                     non_compliant_strikes = 0;

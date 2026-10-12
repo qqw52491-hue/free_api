@@ -370,3 +370,32 @@ impl GitBaseline {
         }
     }
 }
+
+
+/// 会话 -> 本次运行的任务起点基线。子审查员（child_reviewer）不持有主循环的 baseline，
+/// 其 git_diff 取证需要它来排除用户在任务开始前就有的未提交改动（同 finish_diff 口径）。
+/// 按 session_id 覆盖写入，每个会话仅保留最新一次运行的基线。
+fn run_baselines() -> &'static std::sync::Mutex<std::collections::HashMap<String, GitBaseline>> {
+    static CELL: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, GitBaseline>>,
+    > = std::sync::OnceLock::new();
+    CELL.get_or_init(Default::default)
+}
+
+impl GitBaseline {
+    /// 登记本次运行的起点基线，供子审查员按会话查询。
+    pub fn register_for_session(&self, session_id: &str) {
+        if let Ok(mut m) = run_baselines().lock() {
+            m.insert(session_id.to_string(), self.clone());
+        }
+    }
+
+    /// 取会话最新登记的起点基线；仅当它是 git 基线时返回。
+    pub fn git_for_session(session_id: &str) -> Option<Self> {
+        run_baselines()
+            .lock()
+            .ok()
+            .and_then(|m| m.get(session_id).cloned())
+            .filter(|b| b.is_git)
+    }
+}

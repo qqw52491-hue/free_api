@@ -243,6 +243,8 @@ async fn run_agent_main_loop_in_workspace_inner(
     } else {
         crate::agent::reviewer_gatekeeper::GitBaseline::non_git()
     };
+    // 登记给子审查员（child_reviewer 的 git_diff 取证按任务起点排除用户原有未提交改动）
+    git_baseline.register_for_session(&final_session_id);
     // 项目会话进入前先拿工作区软锁（独占该目录直到本次 run 结束）
     let _workspace_run_lock = if is_project_session {
         Some(acquire_workspace_lock(&workspace_dir, &final_session_id, &run_id, &goal).await?)
