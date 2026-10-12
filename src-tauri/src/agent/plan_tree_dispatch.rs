@@ -140,7 +140,7 @@ pub(crate) fn is_readonly_parallel_tool(tool: &str) -> bool {
 /// 并行分支的"有效工具名"：`local_file` 本身没有读/写语义（靠 action 区分），
 /// 只看工具名会把纯读取误判为可变而卡在上限 2。这里对 local_file 取 action 拼成
 /// `local_file/<action>`（action 取自显式字段或 params/args/command 里的 action），
-/// 交给 is_readonly_parallel_tool 判定；action 缺失时保持原工具名（按可变处理）。
+/// 交给 is_readonly_parallel_tool 判定；action 缺失按 `read` 计——与 local_file 执行端一致（缺省 action = read），实测模型常只写 path/行号。
 /// local_shell 仅当命令命中纯只读白名单时按只读计；其它工具不放宽。
 pub(crate) fn parallel_branch_label(
     tool: &str,
@@ -174,7 +174,7 @@ pub(crate) fn parallel_branch_label(
     };
     match action.or_else(from_payload) {
         Some(a) if !a.trim().is_empty() => format!("{}/{}", tool, a.trim()),
-        _ => tool.to_string(),
+        _ => format!("{}/read", tool),
     }
 }
 
@@ -285,7 +285,7 @@ pub(crate) fn validate_controlled_parallel_batch(
     let cap_note = if cap == MAX_CONTROLLED_PARALLEL_READ_BRANCHES {
         "，纯只读扇出上限"
     } else {
-        "；含写入/执行/未知工具（或未写明 action 的 local_file）的批次不放宽"
+        "；含写入/执行/未知工具的批次不放宽"
     };
     Err(format!(
         "parallel 单批最多允许 {} 个独立分支{}，当前为 {}。请先串行收缩范围与工具契约，再保留至多 {} 个互不依赖、参数已确定的分支。宿主不会改写子步骤参数。",
@@ -330,7 +330,7 @@ pub(crate) fn validate_plan_tree_parallel_fanout(node: &PlanNode) -> Result<(), 
                         let cap_note = if cap == MAX_CONTROLLED_PARALLEL_READ_BRANCHES {
                             "纯只读扇出上限"
                         } else {
-                            "含写入/执行/未知工具（或未写明 action 的 local_file），不放宽"
+                            "含写入/执行/未知工具，不放宽"
                         };
                         return Err(format!(
                             "plan_tree 并行组 [{}] 超过受控上限：本批最多允许 {} 个独立分支（{}），当前为 {}。请将每组并行收缩到至多 {} 个互不依赖、参数已确定的分支，或改为串行执行。宿主不会改写子步骤参数。",
@@ -474,12 +474,13 @@ mod tests {
         assert!(validate_controlled_parallel_batch(&with_write)
             .unwrap_err()
             .contains("最多允许 2"));
+        // 缺 action 的 local_file 执行端默认就是 read，按只读计
         let no_action = vec![
             serde_json::json!({"tool": "local_file", "params": {"path": "a"}}),
             lf("read", "b"),
             lf("read", "c"),
         ];
-        assert!(validate_controlled_parallel_batch(&no_action).is_err());
+        assert!(validate_controlled_parallel_batch(&no_action).is_ok());
         // local_shell 取不到命令串不放宽
         let shell: Vec<_> = (0..3)
             .map(|_| serde_json::json!({"tool": "local_shell", "action": "read"}))
