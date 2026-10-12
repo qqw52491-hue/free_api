@@ -83,6 +83,22 @@ pub(crate) async fn run_prepare_finish_precheck(
         }
         prepare_spin_hint(checkpoint.repeated_blocker_count)
     };
+    // 预检未就绪且契约里还有 open 义务：直接给出可照抄的闭合模板（按真实义务 id 生成）。
+    let contract_tpl = if receipt.is_ready() {
+        String::new()
+    } else {
+        context
+            .review_contract
+            .as_ref()
+            .and_then(|c| c.closure_template())
+            .map(|t| {
+                format!(
+                    "\n\n【怎么闭合审查义务】把下面这段 JSON 作为字段放进你下一条指令（与 tool/command 同级），只替换 <占位符>：\n{}\n说明：更新必须带齐全部义务，question 原文不要改；已有的验证命令由宿主保留，不用写；evidence_refs 填真实证据（`文件:起止行`，需在本次 diff 内；或 `step_N`）；确实不适用的改成 `\"status\":\"waived\"` 并写 `waived_reason`。跑 echo / git diff --stat 不会闭合任何义务。",
+                    t
+                )
+            })
+            .unwrap_or_default()
+    };
     let output_text = if receipt.is_ready() {
         format!(
             "✅ 终态预检就绪（receipt {}）：所有门禁已通过且证据已冻结。\n现在调用 finish 将直接复用本收据完成提交——diff/scope/契约未变时不再重复验证与终审。",
@@ -90,7 +106,7 @@ pub(crate) async fn run_prepare_finish_precheck(
         )
     } else {
         format!(
-            "⚠️ 终态预检未就绪（receipt {}）：\n{}\n请逐项闭合后重新 prepare_finish，或修复后直接调用 finish。{}",
+            "⚠️ 终态预检未就绪（receipt {}）：\n{}\n请逐项闭合后重新 prepare_finish，或修复后直接调用 finish。{}{}",
             receipt.receipt_id,
             receipt
                 .blockers
@@ -98,6 +114,7 @@ pub(crate) async fn run_prepare_finish_precheck(
                 .map(|b| format!("- {}", b))
                 .collect::<Vec<_>>()
                 .join("\n"),
+            contract_tpl,
             spin_hint
         )
     };

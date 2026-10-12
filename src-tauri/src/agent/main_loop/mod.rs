@@ -1528,8 +1528,30 @@ async fn run_agent_main_loop_in_workspace_inner(
 
         // --- 更新任务规划 + 核心记忆 ---
         // 两类责任账本独立更新，避免审查契约的拒绝路径吞掉写入验证更新。
+        // 契约更新被拒时，原因原本只回传给模型，界面/记录都看不到：先干跑一次拿到拒绝原因，再可见化。
+        let contract_update_rejection = instruction.review_contract_update.as_ref().and_then(|u| {
+            let mut probe = context.review_contract.clone();
+            apply_review_contract_update(&mut probe, u.clone()).err()
+        });
         let review_contract_started_this_turn =
             apply_instruction_state_updates(&mut context, &instruction, step_id);
+        if let Some(err) = contract_update_rejection {
+            let short: String = err.chars().take(100).collect();
+            let _ = app.emit(
+                &format!("agent-log-{}", final_session_id),
+                format!("⚠️ 审查契约更新未被采纳：{}", short),
+            );
+            crate::agent::telemetry::record_gate_fire(
+                state.inner(),
+                &crate::agent::telemetry::GateFireRecord {
+                    run_id: &run_id,
+                    session_id: &final_session_id,
+                    step_id: step_id as i64,
+                    gate: "contract",
+                    route: &format!("contract:update_rejected:{}", short),
+                },
+            );
+        }
 
         // --- 阶段级写入审查（双触发：todo 阶段推进 / 累计写入文件数兜底）---
         // 首次评估先建立覆盖基线（存量副作用不计入"未覆盖写入"）
