@@ -814,3 +814,22 @@ fn review_finding_kept_with_explicit_closure_is_accepted() {
         assert_eq!(blocked.len(), 1, "磁盘上不可定位的引用必须继续拦截");
     }
 }
+
+
+#[cfg(test)]
+mod embedded_ref_tests {
+    use super::super::diff::extract_embedded_file_line_refs;
+
+    #[test]
+    fn extracts_refs_embedded_in_descriptive_evidence() {
+        let r = extract_embedded_file_line_refs(
+            "输出 195b9f0f：proxy.js:562 严格 `!==` 全等比较；proxy.js:50 的 `|| TOKEN` 回落 → token 值必然被拒",
+        );
+        assert!(r.contains(&("proxy.js".to_string(), 562, 562)), "{:?}", r);
+        assert!(r.contains(&("proxy.js".to_string(), 50, 50)), "{:?}", r);
+        let r2 = extract_embedded_file_line_refs("see src/agent/a.rs:10-20 and `b/c.vue#L7`");
+        assert!(r2.contains(&("src/agent/a.rs".to_string(), 10, 20)), "{:?}", r2);
+        assert!(r2.contains(&("b/c.vue".to_string(), 7, 7)), "{:?}", r2);
+        assert!(extract_embedded_file_line_refs("进程持有 MCP_X head=de27 一致").is_empty());
+    }
+}

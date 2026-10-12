@@ -358,6 +358,10 @@ pub(crate) fn review_contract_evidence_blockers(
                     has_valid_evidence = true;
                     break;
                 }
+                if embedded_ref_locatable(ref_str, ctx, workspace_root) {
+                    has_valid_evidence = true;
+                    break;
+                }
                 failed_refs.push(ref_str.trim().to_string());
             } else if looks_like_file_ref(ref_str, workspace_root) {
                 // 行号缺失/损坏但文件客观存在 → 同样按"可定位"放行移交终审；
@@ -370,6 +374,10 @@ pub(crate) fn review_contract_evidence_blockers(
                     .unwrap_or("")
                     .trim();
                 if ref_resolves_on_disk(head, workspace_root) {
+                    has_valid_evidence = true;
+                    break;
+                }
+                if embedded_ref_locatable(ref_str, ctx, workspace_root) {
                     has_valid_evidence = true;
                     break;
                 }
@@ -479,6 +487,81 @@ pub(crate) fn undiffed_locatable_notices(
     notices
 }
 
+/// 从一整句描述性证据里扫出所有形如 `path.ext:行号[-行号]` 的嵌入引用。
+/// 模型常把证据写成一整句（"输出 abc：proxy.js:562 严格全等…→ 被拒"），
+/// parse_file_line_ref 取最后一个冒号之前的全部文字当路径，必然定位失败。
+/// 这里逐个冒号/#向前取路径 token（遇空白/全角标点/引号即停），仅作为「补救」——
+/// 原解析已通过的不受影响，原解析失败时其中任一嵌入引用真实可定位即视为证据成立。
+pub(crate) fn extract_embedded_file_line_refs(raw: &str) -> Vec<(String, u32, u32)> {
+    let chars: Vec<char> = raw.chars().collect();
+    let is_path_char = |c: char| c.is_alphanumeric() || matches!(c, '_' | '.' | '/' | '\\' | '-' | '~');
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == ':' || chars[i] == '#' {
+            let mut j = i + 1;
+            if j < chars.len() && (chars[j] == 'L' || chars[j] == 'l') {
+                j += 1;
+            }
+            let ds = j;
+            while j < chars.len() && chars[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > ds {
+                let start: Option<u32> = chars[ds..j].iter().collect::<String>().parse().ok();
+                let mut end = start;
+                // 可选范围 -N / ~N / ..N
+                let mut k = j;
+                if k < chars.len() && (chars[k] == '-' || chars[k] == '~') {
+                    k += 1;
+                } else if k + 1 < chars.len() && chars[k] == '.' && chars[k + 1] == '.' {
+                    k += 2;
+                } else {
+                    k = usize::MAX;
+                }
+                if k != usize::MAX {
+                    if k < chars.len() && (chars[k] == 'L' || chars[k] == 'l') {
+                        k += 1;
+                    }
+                    let es = k;
+                    while k < chars.len() && chars[k].is_ascii_digit() {
+                        k += 1;
+                    }
+                    if k > es {
+                        end = chars[es..k].iter().collect::<String>().parse().ok();
+                    }
+                }
+                // 向前取路径 token
+                let mut b = i;
+                while b > 0 && is_path_char(chars[b - 1]) {
+                    b -= 1;
+                }
+                let token: String = chars[b..i].iter().collect();
+                let token = token.trim_matches(|c| c == '.' || c == '-').to_string();
+                let path_shaped = token.contains('/') || token.rsplit_once('.').map_or(false, |(_, ext)| !ext.is_empty());
+                if !token.is_empty() && path_shaped {
+                    if let (Some(st), Some(en)) = (start, end) {
+                        out.push((token, st, en.max(st)));
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// 描述性证据中是否至少有一个嵌入的 file:line 真实可定位（落入 diff 或磁盘上存在且行号在范围内）。
+fn embedded_ref_locatable(
+    raw: &str,
+    ctx: &DiffContext,
+    workspace_root: Option<&std::path::Path>,
+) -> bool {
+    extract_embedded_file_line_refs(raw).into_iter().any(|(path, st, en)| {
+        ctx.matches_diff(&path, st, en) || ref_statically_locatable(&path, st, workspace_root)
+    })
+}
+
 /// 无真实 diff 时的诊断证据校验：引用能通过 affected_paths 回退，
 /// 或 file:line 在当前工作区源码中静态可定位（文件存在且行号在行数范围内）。
 fn diagnostic_static_evidence_blockers(
@@ -510,6 +593,11 @@ fn diagnostic_static_evidence_blockers(
                     break;
                 }
                 // file:line 解析成功但无法定位，或形似代码引用但行号非法 → 代码域判失败
+                // 整句描述里嵌着真实可定位的 file:line → 补救通过
+                Some(_) | None if embedded_ref_locatable(ref_str, ctx, workspace_root) => {
+                    has_valid_evidence = true;
+                    break;
+                }
                 Some(_) => failed_refs.push(ref_str.trim().to_string()),
                 None if looks_like_file_ref(ref_str, workspace_root) => {
                     failed_refs.push(ref_str.trim().to_string());
