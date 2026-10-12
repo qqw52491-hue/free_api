@@ -137,7 +137,11 @@ fn run_node_recursive<'a>(
                     // 上限按批分级：纯只读扇出放宽到 4，含写入/执行/未知工具维持 2。
                     let cap = crate::agent::plan_tree_dispatch::controlled_parallel_cap_for_tools(
                         parallel_children.iter().map(|child| match child {
-                            PlanNode::Obj(child_obj) => child_obj.get_tool(),
+                            PlanNode::Obj(child_obj) => {
+                                crate::agent::plan_tree_dispatch::parallel_branch_label_from_node(
+                                    child_obj,
+                                )
+                            }
                             PlanNode::Seq(_) => "seq_nested".to_string(),
                         }),
                     );

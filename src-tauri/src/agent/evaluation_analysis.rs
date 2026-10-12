@@ -273,12 +273,9 @@ pub(crate) fn parse_action(raw_response: &str) -> Option<ParsedAction> {
     let parallel_branches = parallel_steps.len();
     let parallel_cap = if parallel_branches > 0 {
         crate::agent::plan_tree_dispatch::controlled_parallel_cap_for_tools(
-            parallel_steps.iter().map(|step| {
-                step.get("tool")
-                    .and_then(Value::as_str)
-                    .or_else(|| step.get("action").and_then(Value::as_str))
-                    .unwrap_or("")
-            }),
+            parallel_steps
+                .iter()
+                .map(crate::agent::plan_tree_dispatch::parallel_branch_label_from_json),
         )
     } else {
         0
