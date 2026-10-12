@@ -252,7 +252,7 @@ pub fn run_agent_step(
                 ),
                 ..Default::default()
             });
-        return run_plan_tree_sync(db, session_id, &plan_node, registry);
+        return run_plan_tree_sync(db, session_id, &plan_node, registry, workspace_root);
     }
     if let Some(ref tree_val) = instruction.plan_tree {
         if let Ok(plan_node) =
@@ -262,7 +262,7 @@ pub fn run_agent_step(
                 "🌳 [PlanTree: {}] 检测到 plan_tree 复合树形计划，启动树形解释器...",
                 session_id
             );
-            return run_plan_tree_sync(db, session_id, &plan_node, registry);
+            return run_plan_tree_sync(db, session_id, &plan_node, registry, workspace_root);
         }
     }
 

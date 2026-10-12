@@ -25,6 +25,7 @@ pub fn run_plan_tree_sync(
     session_id: &str,
     plan_node: &crate::agent::plan_tree::PlanNode,
     registry: &PluginRegistry,
+    workspace_root: Option<&std::path::Path>,
 ) -> DispatchResult {
     // 硬拒绝第一道：任何深度出现超限/空并行组，整棵树拒绝执行，一个分支都不跑。
     if let Err(error) = validate_plan_tree_parallel_fanout(plan_node) {
@@ -40,6 +41,8 @@ pub fn run_plan_tree_sync(
     let db_clone = db.clone();
     let sid = session_id.to_string();
     let reg_clone = registry.clone();
+    // 并行分支必须继承当前活跃工作区，否则 local_file/local_shell 会因「未提供工作区」拒绝。
+    let ws_owned: Option<std::path::PathBuf> = workspace_root.map(|p| p.to_path_buf());
     let mcp_raw_items = Arc::new(Mutex::new(Vec::<Value>::new()));
     let mcp_raw_collector = mcp_raw_items.clone();
 
@@ -48,6 +51,7 @@ pub fn run_plan_tree_sync(
         let sid_c = sid.clone();
         let reg_c = reg_clone.clone();
         let items_c = mcp_raw_items.clone();
+        let ws_c = ws_owned.clone();
 
         Box::pin(async move {
             let action = args
@@ -59,7 +63,15 @@ pub fn run_plan_tree_sync(
             // 对 MCP 插件使用 handle.block_on，在 runtime 内嵌套 block_on 会直接 panic。
             // 用 spawn_blocking 把同步分发放到 blocking 线程执行，消除 runtime 嵌套。
             let res = tokio::task::spawn_blocking(move || {
-                execute_command_inner(&db_c, &sid_c, &tool, &action, &args, &reg_c, None)
+                execute_command_inner(
+                    &db_c,
+                    &sid_c,
+                    &tool,
+                    &action,
+                    &args,
+                    &reg_c,
+                    ws_c.as_deref(),
+                )
             })
             .await
             .map_err(|e| format!("工具执行任务崩溃: {}", e))?;
@@ -266,6 +278,30 @@ pub(crate) fn validate_plan_tree_parallel_fanout(node: &PlanNode) -> Result<(), 
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// 回归：parallel 分支曾写死 workspace_root=None，导致 local_file 报「未提供当前活跃的工作区」。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parallel_branches_inherit_workspace_root_for_local_file() {
+        let dir = std::env::temp_dir().join(format!("pt_ws_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "hello-parallel").unwrap();
+        let db = DbState(Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap())));
+        let registry = PluginRegistry::new();
+        let node: PlanNode = serde_json::from_value(json!({
+            "parallel": [
+                {"tool": "local_file", "args": {"action": "read", "path": "a.txt"}}
+            ]
+        }))
+        .unwrap();
+
+        let with_ws = run_plan_tree_sync(&db, "s1", &node, &registry, Some(dir.as_path()));
+        assert!(with_ws.success, "带工作区应成功: {}", with_ws.stderr);
+        assert!(with_ws.stdout.contains("hello-parallel"), "{}", with_ws.stdout);
+
+        let without_ws = run_plan_tree_sync(&db, "s1", &node, &registry, None);
+        assert!(!without_ws.success);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn controlled_parallel_allows_at_most_two_explicit_branches_without_parameter_rewrite() {
