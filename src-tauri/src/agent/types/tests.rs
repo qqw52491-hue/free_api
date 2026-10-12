@@ -286,3 +286,38 @@
         .unwrap();
         assert!(mixed.unwrap_standalone_tool_alias().is_none());
     }
+
+#[test]
+fn status_action_mixed_with_tool_drops_the_tool_entry() {
+    // submit_plan + 工具调用：保留 submit_plan，丢弃工具入口并记录
+    let mut mixed: AgentInstruction = serde_json::from_value(json!({
+        "submit_plan": {"plan_summary": "x"},
+        "tool": "local_shell",
+        "command": {"command": "ls"}
+    }))
+    .unwrap();
+    assert!(mixed.has_executable_entry());
+    assert!(mixed.strip_entry_when_status_action());
+    assert!(!mixed.has_executable_entry());
+    assert!(mixed.is_bare_plan_submission());
+    assert!(mixed.ignored_mixed_entry_notice().unwrap().contains("local_shell"));
+
+    // prepare_finish + parallel 同理
+    let mut pf: AgentInstruction = serde_json::from_value(json!({
+        "prepare_finish": {"summary": "done"},
+        "parallel": [{"tool": "local_file"}]
+    }))
+    .unwrap();
+    assert!(pf.strip_entry_when_status_action());
+    assert!(pf.is_bare_prepare_finish());
+
+    // 纯状态动作 / 纯工具调用 / request_retriage 混发不动
+    let mut bare: AgentInstruction =
+        serde_json::from_value(json!({"submit_plan": {"plan_summary": "x"}})).unwrap();
+    assert!(!bare.strip_entry_when_status_action());
+    assert!(bare.ignored_mixed_entry_notice().is_none());
+    let mut tool_only: AgentInstruction =
+        serde_json::from_value(json!({"tool": "local_shell", "command": {"command": "ls"}})).unwrap();
+    assert!(!tool_only.strip_entry_when_status_action());
+    assert!(tool_only.has_executable_entry());
+}

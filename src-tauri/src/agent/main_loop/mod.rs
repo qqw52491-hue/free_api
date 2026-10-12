@@ -2806,6 +2806,9 @@ async fn run_agent_main_loop_in_workspace_inner(
                 &instruction,
             )
             .await;
+            if let Some(notice) = instruction.ignored_mixed_entry_notice() {
+                output_text.push_str(&notice);
+            }
         } else if !is_finish {
             // 只有当常规步骤产生了新的真实副作用写入时，才视为进入了新的交付周期，重置质询标记与计数；
             // 纯只读或临时草稿写入（session_tmp）不重置 finish_reviewed / finish_challenge_count，防止草稿修改打乱交付周期。

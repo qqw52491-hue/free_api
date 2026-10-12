@@ -492,6 +492,10 @@ pub struct AgentInstruction {
     /// 【批量派发】针对子 Agent（如 child_worker / child_writer）的一步多任务派发
     #[serde(default)]
     pub dispatches: Option<Vec<serde_json::Value>>,
+    /// 宿主内部标记（不进 JSON）：submit_plan/prepare_finish 与工具调用混发时，
+    /// 夹带的工具调用被宿主丢弃未执行，这里记录被丢弃的入口描述，用于向模型说明。
+    #[serde(skip)]
+    pub ignored_mixed_entry: Option<String>,
     /// 【预加载优化】AI 预告下一轮想用的工具/Skill（支持逗号分隔或数组多选，系统提前加载对应详细说明书）
     #[serde(default, deserialize_with = "deserialize_optional_string_or_vec")]
     pub next_tool_hint: Option<String>,
@@ -596,6 +600,56 @@ impl AgentInstruction {
         next.tool = None;
         next.action = None;
         Some(next)
+    }
+
+    /// submit_plan / prepare_finish 与工具调用混发：保留状态动作、丢弃夹带的工具入口
+    /// （不执行——语义含糊时宁可不做，也不做错），并记录被丢弃的内容供回显。
+    /// 返回是否发生了丢弃。request_retriage 混发不在此列，仍按协议误用处理。
+    pub fn strip_entry_when_status_action(&mut self) -> bool {
+        if self.submit_plan.is_none() && self.prepare_finish.is_none() {
+            return false;
+        }
+        if !self.has_executable_entry() {
+            return false;
+        }
+        let mut parts: Vec<String> = Vec::new();
+        let tool = self.get_tool();
+        if !tool.trim().is_empty() {
+            parts.push(tool);
+        }
+        if self.parallel.is_some() {
+            parts.push("parallel".to_string());
+        }
+        if self.plan_tree.is_some() {
+            parts.push("plan_tree".to_string());
+        }
+        if !self.commands.is_empty() {
+            parts.push(format!("commands×{}", self.commands.len()));
+        }
+        if self.has_dispatches() {
+            parts.push("dispatches".to_string());
+        }
+        self.tool = None;
+        self.action = None;
+        self.command = None;
+        self.params = None;
+        self.commands.clear();
+        self.parallel = None;
+        self.plan_tree = None;
+        self.dispatches = None;
+        parts.dedup();
+        self.ignored_mixed_entry = Some(parts.join(" + "));
+        true
+    }
+
+    /// 回显给模型的说明：夹带的工具调用已被忽略。
+    pub fn ignored_mixed_entry_notice(&self) -> Option<String> {
+        self.ignored_mixed_entry.as_ref().map(|what| {
+            format!(
+                "\n【ℹ️ 你在同一条指令里还附带了工具调用（{}），宿主只处理了状态动作，附带的工具调用未执行。如仍需要，请在下一步单独发送。】",
+                what
+            )
+        })
     }
 
     /// 是否为「纯终态预检」：携带 prepare_finish 但没有任何工具入口。

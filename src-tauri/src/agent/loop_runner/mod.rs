@@ -222,6 +222,14 @@ pub async fn run_tool_phase(
             )
             .await
         };
+        let mut result = result;
+        if let Some(notice) = inst.ignored_mixed_entry_notice() {
+            if result.success {
+                result.stdout.push_str(&notice);
+            } else {
+                result.stderr.push_str(&notice);
+            }
+        }
         crate::agent::telemetry::record_gate_fire(
             state.inner(),
             &crate::agent::telemetry::GateFireRecord {

@@ -22,7 +22,7 @@
 | A3 | `loop_runner/mod.rs` B0 | 同工具+同路径第 3 次读取且内容没变 | 拒绝(`repeat_read`) | 硬拦 | |
 | A4 | `context.repeated_failure_blocker` | 同一调用反复失败 | 拒绝 | 硬拦 | |
 | A5 | `context.check_batch_dispatch_allowed` | 连续批发派发解析失败 | 熔断(`batch_circuit_breaker`) | 熔断 | |
-| A6 | `loop_runner/mod.rs` | `submit_plan`/`prepare_finish` 与工具调用混发 | 直接打回,要求单独重发 | 硬拦 | 语义含糊所以不自动纠正 |
+| A6 | `utils/llm_client.rs::parse_executable_instruction` + `types::strip_entry_when_status_action` | `submit_plan`/`prepare_finish` 与工具调用混发 | **已改为自动处理**:保留状态动作,丢弃夹带的工具调用(不执行),结果里提示模型"附带的工具调用未执行,需要请下一步单独发"(`loop_runner` 的旧"协议误用"分支留作兜底;`request_retriage` 混发仍打回) | 自动纠正 | 不执行夹带工具=宁可少做不做错 |
 | A7 | `path_guard.rs` | `local_file` 写/改工作区外路径 | 拒绝(`path_denied`) | 硬拦 | skills 目录只读放行(be46053) |
 
 ## B. 写前门(写操作/有副作用的工具之前)

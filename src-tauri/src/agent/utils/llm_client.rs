@@ -71,11 +71,14 @@ fn parse_executable_instruction(final_json_str: &str) -> Result<AgentInstruction
     let mut value: serde_json::Value = serde_json::from_str(&json_to_parse)
         .map_err(|error| format!("基础 JSON 语法错误: {} (处理前: {})", error, final_json_str))?;
     normalize_raw_instruction_value(&mut value);
-    let instruction: AgentInstruction =
+    let mut instruction: AgentInstruction =
         serde_json::from_value(value).map_err(|error| format!("数据结构转换失败: {}", error))?;
     instruction
         .validate_executable_shape()
         .map_err(|error| format!("指令可执行性校验失败: {}", error))?;
+    // submit_plan / prepare_finish 与工具调用混发：在进入主循环前就地丢弃夹带的工具入口（不执行），
+    // 下游写前门/审计台账都只会看到纯状态动作，免整轮打回重发。
+    instruction.strip_entry_when_status_action();
     Ok(instruction)
 }
 
