@@ -16,6 +16,94 @@ fn targeted_verification_guidance(
     )
 }
 
+/// 历史动作摘要中单个字符串的保留上限（超出部分省略，完整内容仍在工具输出工件里）。
+const HISTORY_STR_MAX_CHARS: usize = 160;
+/// 历史动作摘要中数组的保留项数。
+const HISTORY_ARRAY_MAX_ITEMS: usize = 8;
+/// 历史动作摘要总长上限（字符），超出则丢弃参数仅保留工具与描述。
+const HISTORY_ACTION_MAX_CHARS: usize = 3000;
+
+fn compact_history_value(v: &serde_json::Value, depth: usize) -> serde_json::Value {
+    use serde_json::Value;
+    if depth > 6 {
+        return Value::String("…".to_string());
+    }
+    match v {
+        Value::String(s) => {
+            let n = s.chars().count();
+            if n > HISTORY_STR_MAX_CHARS {
+                let head: String = s.chars().take(HISTORY_STR_MAX_CHARS).collect();
+                Value::String(format!("{}…(已省略{}字)", head, n - HISTORY_STR_MAX_CHARS))
+            } else {
+                v.clone()
+            }
+        }
+        Value::Array(a) => {
+            let mut out: Vec<Value> = a
+                .iter()
+                .take(HISTORY_ARRAY_MAX_ITEMS)
+                .map(|x| compact_history_value(x, depth + 1))
+                .collect();
+            if a.len() > HISTORY_ARRAY_MAX_ITEMS {
+                out.push(Value::String(format!(
+                    "…(另有{}项)",
+                    a.len() - HISTORY_ARRAY_MAX_ITEMS
+                )));
+            }
+            Value::Array(out)
+        }
+        Value::Object(m) => Value::Object(
+            m.iter()
+                .map(|(k, x)| (k.clone(), compact_history_value(x, depth + 1)))
+                .collect(),
+        ),
+        _ => v.clone(),
+    }
+}
+
+/// 把已执行的指令压成一条紧凑 JSON 写进 assistant 历史。
+/// 模型即使模仿这种历史形态，输出也是合法的指令 JSON，不再触发解析失败。
+pub(crate) fn history_action_json(instruction: &AgentInstruction, plan_title: Option<&str>) -> String {
+    use serde_json::{Map, Value};
+    let mut obj = Map::new();
+    if let Some(t) = plan_title.filter(|t| !t.is_empty()) {
+        obj.insert("plan_title".to_string(), json!(t));
+    }
+    if !instruction.description.is_empty() {
+        obj.insert("description".to_string(), json!(instruction.description));
+    }
+    let mut params_key: Option<(&str, Value)> = None;
+    if let Some(par) = &instruction.parallel {
+        params_key = Some(("parallel", serde_json::to_value(par).unwrap_or(Value::Null)));
+    } else if let Some(tree) = &instruction.plan_tree {
+        params_key = Some(("plan_tree", serde_json::to_value(tree).unwrap_or(Value::Null)));
+    } else if !instruction.commands.is_empty() {
+        params_key = Some(("commands", serde_json::to_value(&instruction.commands).unwrap_or(Value::Null)));
+    } else {
+        let tool = instruction.get_tool();
+        let action = instruction.get_action();
+        if !action.is_empty() && action != tool {
+            obj.insert("action".to_string(), json!(action));
+        }
+        obj.insert("tool".to_string(), json!(tool));
+        let params = instruction.get_params();
+        let empty = params.is_null() || params.as_object().is_some_and(|m| m.is_empty());
+        if !empty {
+            params_key = Some(("params", params));
+        }
+    }
+    let mut with_params = obj.clone();
+    if let Some((k, v)) = params_key {
+        with_params.insert(k.to_string(), compact_history_value(&v, 0));
+        let full = Value::Object(with_params).to_string();
+        if full.chars().count() <= HISTORY_ACTION_MAX_CHARS {
+            return full;
+        }
+        obj.insert(k.to_string(), json!("(参数过长已省略)"));
+    }
+    Value::Object(obj).to_string()
+}
+
 impl SandwichContext {
     /// 写入工具执行结果（Append-only 线性历史追加，最大化 Prompt Cache 命中率）。
     ///
@@ -29,12 +117,9 @@ impl SandwichContext {
         output_summary: &str,
         output_id: &str,
     ) {
-        let action_brief = format!(
-            "计划: {} | 工具: {} | 动作: {}",
-            self.active_plan_title().unwrap_or("未命名计划"),
-            instruction.get_tool(),
-            instruction.description,
-        );
+        // 历史里的动作摘要用模型自己的输出形态（JSON），而不是「计划: X | 工具: Y」纯文本：
+        // 实测 976ca63b：deepseek 见到满屏纯文本的历史后会模仿它，22% 的调用解析失败。
+        let action_brief = history_action_json(instruction, self.active_plan_title());
         self.turns_history.push(ChatMessage {
             role: "assistant".to_string(),
             content: json!(action_brief),
@@ -103,6 +188,66 @@ impl SandwichContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn instr(v: serde_json::Value) -> AgentInstruction {
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn history_action_is_json_and_mimicking_it_stays_parseable() {
+        let i = instr(json!({
+            "description": "读取控制器并检索入口",
+            "parallel": [
+                {"tool": "local_file", "args": {"action": "read", "path": "a.java"}},
+                {"tool": "search", "args": {"query": "saveCase"}}
+            ]
+        }));
+        let s = history_action_json(&i, Some("定位入口"));
+        assert!(!s.contains("计划:") && !s.contains(" | 工具:"), "{}", s);
+        // 模型模仿历史形态输出时，结果仍是带 parallel 的合法指令
+        let back: AgentInstruction = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.parallel.as_ref().map(|p| p.len()), Some(2));
+        assert_eq!(back.description, "读取控制器并检索入口");
+    }
+
+    #[test]
+    fn history_action_plain_tool_keeps_tool_action_params() {
+        let i = instr(json!({
+            "description": "读文件",
+            "tool": "local_file",
+            "action": "read",
+            "params": {"path": "src/a.rs"}
+        }));
+        let s = history_action_json(&i, None);
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["tool"], "local_file");
+        assert_eq!(v["action"], "read");
+        assert_eq!(v["params"]["path"], "src/a.rs");
+        assert!(v.get("plan_title").is_none());
+    }
+
+    #[test]
+    fn history_action_truncates_long_strings_and_caps_total_size() {
+        let big = "x".repeat(5000);
+        let i = instr(json!({
+            "description": "写大文件",
+            "tool": "local_file",
+            "action": "write",
+            "params": {"path": "a.txt", "content": big}
+        }));
+        let s = history_action_json(&i, None);
+        assert!(s.contains("已省略"), "{}", s);
+        assert!(s.chars().count() < 600, "len={}", s.chars().count());
+        serde_json::from_str::<serde_json::Value>(&s).unwrap();
+
+        let many: Vec<serde_json::Value> = (0..6)
+            .map(|n| json!({"path": format!("{}{}", "y".repeat(159), n), "k": "z".repeat(159)}))
+            .collect();
+        let i2 = instr(json!({"description": "批", "commands": many}));
+        let s2 = history_action_json(&i2, None);
+        assert!(s2.chars().count() <= HISTORY_ACTION_MAX_CHARS + 200, "{}", s2.chars().count());
+        serde_json::from_str::<serde_json::Value>(&s2).unwrap();
+    }
 
     #[test]
     fn truncated_guidance_requires_targeted_evidence_not_full_replay() {
