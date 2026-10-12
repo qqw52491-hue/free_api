@@ -507,3 +507,151 @@ fn is_git_worktree_destructive(cmd: &str) -> bool {
 pub fn is_safe_read_only_shell_command(raw_cmd: &str) -> bool {
     !is_destructive_shell_command(raw_cmd)
 }
+
+// ─── 敏感访问审查：连数据库 / 读凭据密钥文件 ─────────────────────────────────────
+
+/// 凭证/密钥类文件判定（保守：只认名字明确的几类）。
+fn is_credential_file_arg(arg: &str) -> bool {
+    if arg.starts_with('-') {
+        return false;
+    }
+    let lower = arg.to_ascii_lowercase();
+    let base = lower.rsplit('/').next().unwrap_or(&lower);
+    // 公钥/示例模板不含机密，优先豁免
+    if base.ends_with(".example")
+        || base.ends_with(".sample")
+        || base.ends_with(".template")
+        || base.ends_with(".pub")
+    {
+        return false;
+    }
+    if lower.contains("/.ssh/")
+        || lower.starts_with(".ssh/")
+        || lower.starts_with("~/.ssh")
+        || lower.contains(".aws/credentials")
+        || lower.contains(".kube/config")
+    {
+        return true;
+    }
+    base == ".env"
+        || base.starts_with(".env.")
+        || base.ends_with(".pem")
+        || base.ends_with(".key")
+        || base.ends_with(".p12")
+        || base.ends_with(".pfx")
+        || base.starts_with("id_rsa")
+        || base.starts_with("id_ed25519")
+        || base.starts_with("id_ecdsa")
+        || matches!(
+            base,
+            ".netrc"
+                | ".pgpass"
+                | ".my.cnf"
+                | ".npmrc"
+                | ".git-credentials"
+                | "credentials"
+                | "credentials.json"
+                | "secrets"
+        )
+        || base.starts_with("secrets.")
+}
+
+/// 敏感访问审查：命令会“连接数据库”或“把凭证/密钥文件内容读进上下文”时返回原因。
+/// 验证类任务里模型常自己搞环境去连库（775b167b 实测：读数据库凭据文件 +
+/// root 连本地 MySQL），凭据明文进入上下文与日志。这里只做机械识别（不判断合理性），
+/// 放行交给 ask_human 的人工确认。忽略 heredoc 正文（内嵌脚本不当作 shell 命令判）。
+pub fn sensitive_shell_access_review(cmd: &str) -> Option<String> {
+    const DB_CLIENTS: [&str; 11] = [
+        "mysql", "mariadb", "psql", "redis-cli", "mongo", "mongosh", "sqlcmd", "sqlplus",
+        "mysqldump", "pg_dump", "mongodump",
+    ];
+    const READERS: [&str; 16] = [
+        "cat", "sed", "head", "tail", "less", "more", "grep", "egrep", "fgrep", "rg", "awk",
+        "strings", "bat", "nl", "cut", "base64",
+    ];
+    let mut heredoc_end: Option<String> = None;
+    for line in cmd.lines() {
+        if let Some(end) = &heredoc_end {
+            if line.trim() == end {
+                heredoc_end = None;
+            }
+            continue;
+        }
+        if let Some(pos) = line.find("<<") {
+            let rest = line[pos + 2..].trim_start_matches('-').trim();
+            if !rest.starts_with('<') {
+                let delim = rest
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .trim_matches(|c| c == '\'' || c == '"')
+                    .to_string();
+                if !delim.is_empty() {
+                    heredoc_end = Some(delim);
+                }
+            }
+        }
+        for seg in split_shell_segments(line) {
+            let toks = shell_tokens(seg);
+            let mut i = 0;
+            while i < toks.len() {
+                let t = toks[i].as_str();
+                let is_assign = !t.starts_with('-')
+                    && t.split_once('=').is_some_and(|(k, _)| {
+                        !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    });
+                if is_assign || matches!(t, "sudo" | "env" | "nohup" | "time") {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            let Some(first) = toks.get(i) else { continue };
+            let name = first.rsplit('/').next().unwrap_or(first).to_ascii_lowercase();
+            let args = &toks[i + 1..];
+            if DB_CLIENTS.contains(&name.as_str()) {
+                let only_info = args
+                    .iter()
+                    .all(|a| matches!(a.as_str(), "--version" | "-V" | "-v" | "--help" | "-?"));
+                if !only_info {
+                    return Some(format!("命令会连接数据库（{}）", name));
+                }
+            }
+            if READERS.contains(&name.as_str()) {
+                if let Some(f) = args.iter().find(|a| is_credential_file_arg(a)) {
+                    return Some(format!("命令会把凭证/密钥文件 `{}` 的内容读进上下文", f));
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod sensitive_access_tests {
+    use super::sensitive_shell_access_review as review;
+
+    #[test]
+    fn flags_db_clients_and_credential_reads() {
+        assert!(review("mysql -h127.0.0.1 -uroot -e 'select 1'").is_some());
+        assert!(review("echo x; MYSQL_PWD=a mysql -uroot db").is_some());
+        assert!(review("psql postgres://u:p@h/db -c 'select 1'").is_some());
+        assert!(review("cat .env").is_some());
+        assert!(review("sed -n '1,12p' ~/.ssh/id_rsa").is_some());
+        assert!(review("grep -i password config/.env.production").is_some());
+        assert!(review("cd app && cat secrets.yml | head").is_some());
+    }
+
+    #[test]
+    fn leaves_ordinary_commands_alone() {
+        assert!(review("which mysql mariadb").is_none());
+        assert!(review("mysql --version").is_none());
+        assert!(review("cat src/main.rs").is_none());
+        assert!(review("cat .env.example").is_none());
+        assert!(review("cat ~/.ssh/id_rsa.pub").is_none());
+        assert!(review("grep -rn password src/").is_none());
+        assert!(review("cargo test && node --check a.js").is_none());
+        // heredoc 正文里的脚本不算 shell 命令
+        assert!(review("python3 - <<'PY'\nimport os\nmysql = 1\ncat = 2\nPY").is_none());
+    }
+}

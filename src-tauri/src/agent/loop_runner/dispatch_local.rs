@@ -28,6 +28,43 @@ pub(super) async fn dispatch_local_tool(
 ) -> Result<ArmOutcome, String> {
     Ok(ArmOutcome::Done({
         let is_write_tool = is_write_or_side_effect_tool(inst);
+
+        // 敏感访问门：命令连数据库或把凭证/密钥文件内容读进上下文——暂不执行，告诉模型“这条路不走”，
+        // 确需执行则用 ask_human 问主人（复用 git 破坏命令的“指纹核销”确认链路：原样引用命令 + 明确同意→重发放行）。
+        // 只覆盖顶层 local_shell（parallel 分支不经过此处）。
+        if inst.get_tool() == "local_shell" {
+            if let Some(cmd_str) = crate::agent::dispatcher::extract_shell_command_string(inst) {
+                if let Some(reason) = crate::agent::dispatcher::sensitive_shell_access_review(&cmd_str) {
+                    let fp = crate::agent::dispatcher::git_cmd_fingerprint(&cmd_str);
+                    if !ctx.checkpoint.is_git_destructive_confirmed(&fp) {
+                        ctx.checkpoint.block_git_destructive(&fp);
+                        let _ = save_checkpoint(ctx.state.inner(), ctx.checkpoint);
+                        let stderr = format!(
+                            "【敏感访问待确认】{reason}，已暂停，未执行。\n这条路不该自己走：凭证会明文进入上下文和日志，连库也可能碰到真实数据。\n建议改用不需要凭证的验证方式（编译/语法检查、单元测试、静态读代码）；无法验证的部分在报告里如实标「未验证」即可。\n确需执行：用 ask_human 询问主人，message 中原样包含完整命令 `{fp}`；主人明确同意（确认/可以/批准/执行）后原样重发本命令即可；拒绝或未表态均不放行。"
+                        );
+                        emit_tool_event(
+                            ctx.app,
+                            ctx.final_session_id,
+                            ctx.step_id,
+                            inst,
+                            "failed",
+                            Some("sensitive_access_needs_confirm".to_string()),
+                            Some(false),
+                            &stderr,
+                            Some(ctx.tool_started_at.elapsed().as_millis()),
+                            None,
+                        );
+                        return Ok(ArmOutcome::Early(DispatchResult {
+                            view: None,
+                            success: false,
+                            stdout: String::new(),
+                            stderr,
+                            route: "sensitive_access_needs_confirm".to_string(),
+                        }));
+                    }
+                }
+            }
+        }
         if is_write_tool {
 
             // git 工作区破坏命令对账门（实测事故 2026-09-25：终审歧义指令被执行为
