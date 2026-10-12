@@ -388,3 +388,55 @@ fn skills_block_whitelist_injects_listed_docs_only() {
     });
     assert!(empty.is_empty());
 }
+
+/// 症状级回归：用户报「保存失败: 不支持的关注域: '["安全"'」。
+/// 触发路径＝AI 产出的卡片夹带中文语义值，前端以 JSON 字符串数组提交，
+/// 后端按分隔符切分时切出 '["安全"' 残片命中非法值。修复后混合输入应静默丢弃非法值。
+#[test]
+fn focus_domains_mixed_valid_and_invalid_sanitized() {
+    let db = setup_db();
+    let card = upsert_card(&db, &json!({
+        "name": "role_mixed_domains",
+        "focus_domains": "[\"git_diff\",\"安全\"]",
+    }))
+    .unwrap();
+    assert_eq!(
+        card.parse_focus_domains(),
+        vec![crate::agent::protocol::FocusDomain::GitDiff],
+        "非法值应被丢弃，合法值保留且去重"
+    );
+}
+
+/// 症状级回归：全部值非法时仍拒绝，但报错文案必须是「人话」——
+/// 列出全部合法枚举，且不得残留 '["安全"' 这类 JSON 包装残片。
+#[test]
+fn focus_domains_all_invalid_reports_valid_enum_without_json_fragment() {
+    let db = setup_db();
+    let err = upsert_card(&db, &json!({
+        "name": "role_all_bad_domains",
+        "focus_domains": "[\"安全\",\"性能\"]",
+    }))
+    .unwrap_err();
+    for d in ["changed_files", "git_diff", "last_verify_log"] {
+        assert!(err.contains(d), "报错应列出合法枚举 {}: {}", d, err);
+    }
+    assert!(!err.contains("[\""), "不得残留 JSON 包装残片: {}", err);
+}
+
+/// 合法输入行为不得被本次修复改变（向下兼容反证）。
+#[test]
+fn focus_domains_valid_input_unchanged() {
+    let db = setup_db();
+    let card = upsert_card(&db, &json!({
+        "name": "role_valid_domains",
+        "focus_domains": "[\"changed_files\",\"last_verify_log\"]",
+    }))
+    .unwrap();
+    assert_eq!(
+        card.parse_focus_domains(),
+        vec![
+            crate::agent::protocol::FocusDomain::ChangedFiles,
+            crate::agent::protocol::FocusDomain::LastVerifyLog
+        ]
+    );
+}

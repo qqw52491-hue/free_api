@@ -168,13 +168,21 @@ fn parse_generated_role_from_value(parsed: &Value) -> GeneratedRoleResponse {
     let default_test_command = parsed.get("default_test_command").and_then(Value::as_str).unwrap_or("").trim().to_string();
     let persona_prompt = parsed.get("persona_prompt").and_then(Value::as_str).unwrap_or("").trim().to_string();
 
+    // LLM 常把中文语义词（如 "安全"/"性能"）当成关注域值写进数组，而关注域只有
+    // FocusDomain 枚举里的三种系统预装材料。非法值必须在生成源头丢弃，否则会被
+    // 原样带到 upsert 校验处，让整张角色卡保存失败（报错形如 '不支持的关注域: ["安全"'）。
     let focus_domains: Vec<String> = parsed.get("focus_domains")
         .and_then(Value::as_array)
         .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
-                .filter(|s| !s.is_empty())
-                .collect()
+            let mut list: Vec<crate::agent::protocol::FocusDomain> = Vec::new();
+            for v in arr.iter().filter_map(|v| v.as_str()) {
+                if let Some(d) = crate::agent::protocol::FocusDomain::from_domain_str(v) {
+                    if !list.contains(&d) {
+                        list.push(d);
+                    }
+                }
+            }
+            list.iter().map(|d| d.as_str().to_string()).collect()
         })
         .unwrap_or_else(|| vec!["git_diff".to_string(), "changed_files".to_string()]);
 

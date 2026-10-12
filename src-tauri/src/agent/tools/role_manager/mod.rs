@@ -217,18 +217,31 @@ fn validate_card_input(
         }
     }
 
+    // 关注域只有 FocusDomain 枚举里的三种合法值；LLM 生成的角色卡常夹带中文语义词
+    // （如「安全」「性能」）。非法值一律跳过，不让单个脏值把整张角色卡保存打回；
+    // 仅当用户/调用方提供的值「全部非法」时才报错，且文案动态列出全部合法枚举。
     let focus_domains = if let Some(arr) = params.get("focus_domains").and_then(|v| v.as_array()) {
-        let mut list = Vec::new();
+        let mut list: Vec<crate::agent::protocol::FocusDomain> = Vec::new();
+        let mut rejected: Vec<String> = Vec::new();
         for item in arr {
             if let Some(s) = item.as_str() {
-                if let Some(domain) = crate::agent::protocol::FocusDomain::from_domain_str(s) {
+                let s_clean = s.trim();
+                if s_clean.is_empty() { continue; }
+                if let Some(domain) = crate::agent::protocol::FocusDomain::from_domain_str(s_clean) {
                     if !list.contains(&domain) {
                         list.push(domain);
                     }
                 } else {
-                    return Err(format!("不支持的关注域: '{}'。可选关注域: changed_files, git_diff, last_verify_log", s));
+                    rejected.push(s_clean.to_string());
                 }
             }
+        }
+        if list.is_empty() && !rejected.is_empty() {
+            return Err(format!(
+                "不支持的关注域: '{}'。可选关注域: {}",
+                rejected.join("', '"),
+                crate::agent::protocol::FocusDomain::all().iter().map(|d| d.as_str()).collect::<Vec<_>>().join(", ")
+            ));
         }
         serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
     } else if let Some(s) = params.get("focus_domains").and_then(|v| v.as_str()) {
@@ -238,17 +251,28 @@ fn validate_card_input(
         } else if let Ok(list) = serde_json::from_str::<Vec<crate::agent::protocol::FocusDomain>>(trimmed) {
             serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
         } else {
-            let mut list = Vec::new();
-            for part in trimmed.split(|c| c == ',' || c == '；' || c == ' ') {
-                let part_clean = part.trim();
+            // 反序列化失败时按分隔符兜底切分：先剥掉残留的 JSON 包装符号
+            // （'["安全","性能"]' 直接按逗号切会留下 '["安全"' 这类碎片），再逐个校验。
+            let cleaned = trimmed.trim_matches(|c: char| c == '[' || c == ']' || c == '"' || c == '\'' || c.is_whitespace());
+            let mut list: Vec<crate::agent::protocol::FocusDomain> = Vec::new();
+            let mut rejected: Vec<String> = Vec::new();
+            for part in cleaned.split(|c| c == ',' || c == '；' || c == ' ') {
+                let part_clean = part.trim().trim_matches(|c: char| c == '[' || c == ']' || c == '"' || c == '\'');
                 if part_clean.is_empty() { continue; }
                 if let Some(domain) = crate::agent::protocol::FocusDomain::from_domain_str(part_clean) {
                     if !list.contains(&domain) {
                         list.push(domain);
                     }
                 } else {
-                    return Err(format!("不支持的关注域: '{}'。可选关注域: changed_files, git_diff, last_verify_log", part_clean));
+                    rejected.push(part_clean.to_string());
                 }
+            }
+            if list.is_empty() && !rejected.is_empty() {
+                return Err(format!(
+                    "不支持的关注域: '{}'。可选关注域: {}",
+                    rejected.join("', '"),
+                    crate::agent::protocol::FocusDomain::all().iter().map(|d| d.as_str()).collect::<Vec<_>>().join(", ")
+                ));
             }
             serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
         }

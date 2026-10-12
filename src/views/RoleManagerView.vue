@@ -1475,7 +1475,11 @@ async function saveRoleCard() {
         max_concurrency: Number(form.max_concurrency) || 0,
         enabled: form.enabled,
         custom_schema,
-        focus_domains: JSON.stringify(form.focus_domains),
+        // 前端兜底：只提交白名单内的关注域。历史脏数据或 AI 产出若夹带非法值（如中文
+        // 语义标签），会在后端校验处把整张角色卡保存打回，这里先就地过滤掉。
+        focus_domains: JSON.stringify(
+          form.focus_domains.filter((d) => focusDomainOptions.some((o) => o.value === d)),
+        ),
         input_schema,
       },
     });
