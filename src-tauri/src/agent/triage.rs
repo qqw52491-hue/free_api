@@ -388,12 +388,11 @@ pub async fn run_triage<R: tauri::Runtime>(
     session_id: &str,
     mut interrupt_rx: watch::Receiver<u64>,
 ) -> TriageVerdict {
-    // 分流只做分类（输出一份 JSON 判决），不需要 Pro 的深度推理；优先用 Flash 更快、
-    // 也避免慢速 Pro 模型撞 45s 超时而降级成 fallback。Flash 未配置时回退 Pro→vision。
-    let model_id = if !model_routing.flash.trim().is_empty() {
-        model_routing.flash.trim().to_string()
-    } else if !model_routing.pro.trim().is_empty() {
+    // 分流是全局复杂性判断，固定用 Pro 档；空则回退 flash→vision（与会话主模型同序）
+    let model_id = if !model_routing.pro.trim().is_empty() {
         model_routing.pro.trim().to_string()
+    } else if !model_routing.flash.trim().is_empty() {
+        model_routing.flash.trim().to_string()
     } else {
         model_routing.vision.trim().to_string()
     };
