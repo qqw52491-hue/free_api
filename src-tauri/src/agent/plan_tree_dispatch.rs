@@ -141,13 +141,23 @@ pub(crate) fn is_readonly_parallel_tool(tool: &str) -> bool {
 /// 只看工具名会把纯读取误判为可变而卡在上限 2。这里对 local_file 取 action 拼成
 /// `local_file/<action>`（action 取自显式字段或 params/args/command 里的 action），
 /// 交给 is_readonly_parallel_tool 判定；action 缺失时保持原工具名（按可变处理）。
-/// local_shell 等其它工具不放宽。
+/// local_shell 仅当命令命中纯只读白名单时按只读计；其它工具不放宽。
 pub(crate) fn parallel_branch_label(
     tool: &str,
     action: Option<&str>,
     payloads: &[Option<&Value>],
 ) -> String {
     let base = tool.rsplit(['/', ':']).next().unwrap_or(tool);
+    if base.eq_ignore_ascii_case("local_shell") {
+        // 纯只读白名单命令按只读分支计；其余（含取不到命令串）保持原工具名
+        let cmd = payloads.iter().flatten().find_map(|p| shell_command_text(p));
+        return match cmd {
+            Some(c) if crate::agent::dispatcher::is_pure_read_shell_command(&c) => {
+                format!("{}/read", tool)
+            }
+            _ => tool.to_string(),
+        };
+    }
     if !base.eq_ignore_ascii_case("local_file") {
         return tool.to_string();
     }
@@ -166,6 +176,19 @@ pub(crate) fn parallel_branch_label(
         Some(a) if !a.trim().is_empty() => format!("{}/{}", tool, a.trim()),
         _ => tool.to_string(),
     }
+}
+
+/// 从分支 payload 取 shell 命令串：payload 本身是字符串、或 `.command` 是字符串、
+/// 或 `.command.command` / `.cmd` 是字符串。
+fn shell_command_text(p: &Value) -> Option<String> {
+    if let Some(s) = p.as_str() {
+        return Some(s.to_string());
+    }
+    let c = p.get("command");
+    c.and_then(Value::as_str)
+        .or_else(|| c.and_then(|c| c.get("command")).and_then(Value::as_str))
+        .or_else(|| p.get("cmd").and_then(Value::as_str))
+        .map(str::to_string)
 }
 
 /// parallel 数组里的 JSON 分支 -> 有效工具名（见 parallel_branch_label）。
@@ -457,11 +480,19 @@ mod tests {
             lf("read", "c"),
         ];
         assert!(validate_controlled_parallel_batch(&no_action).is_err());
-        // local_shell 不放宽
+        // local_shell 取不到命令串不放宽
         let shell: Vec<_> = (0..3)
             .map(|_| serde_json::json!({"tool": "local_shell", "action": "read"}))
             .collect();
         assert!(validate_controlled_parallel_batch(&shell).is_err());
+        // local_shell 纯只读命令放宽到 4；混入有副作用命令则回到 2
+        let sh = |c: &str| serde_json::json!({"tool": "local_shell", "command": {"command": c}});
+        let reads: Vec<_> = ["ls out", "cat a.txt", "ffprobe x.mp4", "git status"].iter().map(|c| sh(c)).collect();
+        assert!(validate_controlled_parallel_batch(&reads).is_ok());
+        let mixed = vec![sh("ls"), sh("node render.mjs"), sh("cat a")];
+        assert!(validate_controlled_parallel_batch(&mixed).is_err());
+        let str_cmd: Vec<_> = (0..3).map(|_| serde_json::json!({"tool": "local_shell", "command": "ls -la"})).collect();
+        assert!(validate_controlled_parallel_batch(&str_cmd).is_ok());
     }
 
     #[test]
