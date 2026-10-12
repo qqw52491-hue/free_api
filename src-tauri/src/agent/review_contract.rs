@@ -90,13 +90,22 @@ impl ReviewContract {
             }
             // 【冻结要害】验证命令/脚本/哈希一经存在于契约，任务中途不得改写——
             // 否则模型改自己的考卷，客观锚失效（这是整个 B 路径的安全前提）。
+            // 例外：仅文件路径变了（命令骨架、参数、判分逻辑一字不动）——典型是产物改了名，
+            // 允许模型把命令里的路径对准真正的成品。这不让模型改考卷（检查本身没变）。
+            let path_only_change = existing.verify_script == candidate.verify_script
+                && existing.verify_sha256 == candidate.verify_sha256
+                && match (&existing.verify_command, &candidate.verify_command) {
+                    (Some(old), Some(new)) => same_command_except_paths(old, new),
+                    _ => false,
+                };
             if existing.verify_command.is_some()
+                && !path_only_change
                 && (candidate.verify_command != existing.verify_command
                     || candidate.verify_script != existing.verify_script
                     || candidate.verify_sha256 != existing.verify_sha256)
             {
                 return Err(format!(
-                    "审查契约义务 {} 的验证命令/脚本已冻结，中途不得改写；如需更换验证方式，请新增新义务并在方案审查中说明。",
+                    "审查契约义务 {} 的验证命令/脚本已冻结，中途不得改写（仅把命令里的文件路径改成真实产物路径是允许的，其它部分需保持一致）；如需更换验证方式，请新增新义务并在方案审查中说明。",
                     existing.id
                 ));
             }
@@ -315,6 +324,54 @@ fn same_closure(existing: &ReviewObligation, candidate: &ReviewObligation) -> bo
     normalized_status(existing) == normalized_status(candidate)
         && existing.evidence_refs == candidate.evidence_refs
         && existing.waived_reason == candidate.waived_reason
+}
+
+/// 两条命令是否「除文件路径 token 外完全一致」：按空白切 token，数量相同，逐个比较，
+/// 不同的 token 必须两边都像文件路径（含 `/` 或以 `.扩展名` 结尾，且不含 shell 元字符、不以 `-` 开头）。
+fn same_command_except_paths(old: &str, new: &str) -> bool {
+    fn path_like(t: &str) -> bool {
+        if t.is_empty() || t.starts_with('-') {
+            return false;
+        }
+        if t.chars().any(|c| matches!(c, ';' | '|' | '&' | '$' | '`' | '<' | '>' | '(' | ')' | '*' | '?' | '\n')) {
+            return false;
+        }
+        if t.contains('/') {
+            return true;
+        }
+        match t.rsplit_once('.') {
+            Some((stem, ext)) => {
+                !stem.is_empty() && (1..=5).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphanumeric())
+            }
+            None => false,
+        }
+    }
+    let a: Vec<&str> = old.split_whitespace().collect();
+    let b: Vec<&str> = new.split_whitespace().collect();
+    if a.is_empty() || a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b.iter()).all(|(x, y)| x == y || (path_like(x) && path_like(y)))
+}
+
+#[cfg(test)]
+mod path_only_change_tests {
+    use super::same_command_except_paths as same;
+
+    #[test]
+    fn only_paths_may_differ() {
+        assert!(same(
+            "ffprobe -v error -show_entries format=duration -i out/reel.mp4",
+            "ffprobe -v error -show_entries format=duration -i out/history.mp4"
+        ));
+        // 骨架/参数变了不行
+        assert!(!same("ffprobe -i a.mp4", "ffprobe -v quiet a.mp4"));
+        assert!(!same("ffprobe -i a.mp4", "true -i a.mp4"));
+        // 把路径换成带元字符的东西不行
+        assert!(!same("ffprobe -i a.mp4", "ffprobe -i a.mp4;true"));
+        assert!(!same("cargo test -p core", "cargo test -p other"));
+        assert!(!same("", ""));
+    }
 }
 
 #[cfg(test)]

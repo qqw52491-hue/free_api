@@ -352,7 +352,7 @@ pub fn obligation_missing_file_hint(failure_lines: &[String]) -> Option<&'static
     });
     if missing {
         Some(
-            "\n【若失败原因是验证命令引用的文件不存在】多半是产物实际文件名与契约里的路径不一致。命令已冻结不能改，两条正当出路：①让产物真实出现在该命令引用的路径（重命名、硬链接 `ln`，或直接输出到该路径，避免复制大文件）并保证 artifacts 登记的是最终交付路径；②若契约里的路径本身已不适用，把该义务标为 waived 并写明理由，再新增一条带正确路径命令的新义务。请如实说明，不要为通过验证而造假。",
+            "\n【若失败原因是验证命令引用的文件不存在】多半是产物实际文件名与契约里的路径不一致。检查本身冻结不能改，但**命令里的文件路径可以改成真实产物路径**：①用 review_contract_update 只把该义务 verify_command 里的路径换成实际交付文件（其余参数一字不动），并保证 artifacts 登记的是该最终路径；②或让产物出现在原路径（重命名、`ln` 硬链接，避免复制大文件）；③若该义务整体不再适用，标 waived 并写明理由、新增新义务。请如实说明，不要为通过验证而造假。",
         )
     } else {
         None
@@ -366,7 +366,7 @@ mod missing_file_hint_tests {
     #[test]
     fn hints_only_when_file_missing() {
         let miss = vec!["- 义务 [v] 验证命令 `ffprobe a.mp4` 退出码 1:  | stderr: a.mp4: No such file or directory".to_string()];
-        assert!(hint(&miss).unwrap().contains("waived"));
+        assert!(hint(&miss).unwrap().contains("review_contract_update"));
         let other = vec!["- 义务 [t] 验证命令 `cargo test` 退出码 101: tests failed".to_string()];
         assert!(hint(&other).is_none());
         assert!(hint(&[]).is_none());
