@@ -108,9 +108,13 @@ export function computeFormatStepOperation(step: AgentStepItem): StepOperationDi
     }
 
     const t = rawTool.toLowerCase();
-    const act = (step.action || p.action || "").toLowerCase();
     const isLocalFile = t === "local_file" || t.endsWith("/local_file");
     const isLocalShell = t === "local_shell" || t.endsWith("/local_shell");
+    let act = String(step.action || p.action || "").toLowerCase();
+    // action 槽有时只是工具名；本地文件缺省读取不能落入默认 MCP 展示。
+    if (isLocalFile && (!act || act === "local_file")) {
+        act = String(p.action || "read").toLowerCase();
+    }
 
     // 1. 读文件 (包含原生 local_file read)
     if (

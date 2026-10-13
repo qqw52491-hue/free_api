@@ -2159,6 +2159,8 @@ function buildMcpGroupSummary(steps: AgentStepItem[]): { summary: string } {
 
 function isMcpStep(step: AgentStepItem, op?: StepOperationDisplay): boolean {
     if (!step) return false;
+    const localTool = (step.tool || step.action || '').trim().toLowerCase();
+    if (localTool === 'local_file' || localTool === 'local_shell') return false;
     if (step.source === 'MCP') return true;
     if (op?.badgeIcon === '🧩' || op?.badgeLabel === 'MCP') return true;
     const t = (step.tool || '').toLowerCase();
@@ -2494,9 +2496,9 @@ function computeAmbientAction(step: AgentStepItem): AmbientActionDisplay {
             actualKind = 'search';
         } else if (isMcpStep(step, op)) {
             actualKind = 'mcp';
-        } else if (toolLower.includes('read') || toolLower.includes('view')) {
+        } else if (toolLower.includes('read') || toolLower.includes('view') || op.badgeLabel === '读取') {
             actualKind = 'read';
-        } else if (toolLower.includes('write') || toolLower.includes('create')) {
+        } else if (toolLower.includes('write') || toolLower.includes('create') || op.badgeLabel === '写入') {
             actualKind = 'write';
         }
 

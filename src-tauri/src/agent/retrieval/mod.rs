@@ -65,7 +65,7 @@ struct IndexedSearch {
 }
 
 const MAX_CACHED_SESSION_INDEXES: usize = 128;
-const SAME_FILE_SEARCH_HARD_LIMIT: usize = 3;
+const SAME_FILE_SEARCH_ADVISORY_THRESHOLD: usize = 6;
 
 static SEARCH_STEP_INDEX: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<String, SessionSearchIndex>>,
@@ -85,6 +85,13 @@ pub fn clear_session_search_index(session_id: &str) {
 }
 
 fn index_step(idx: &mut SessionSearchIndex, seq: i64, step: &Value) {
+    // 执行回执确认读取成功即可复位；省略 action 的 local_file 日志仍可能以工具名记账。
+    if is_meaningful_file_read_step(step) {
+        if let Some(key) = step_gate_file_key(step) {
+            idx.unread_file_search_counts.remove(&key);
+        }
+        return;
+    }
     match step.get("action").and_then(Value::as_str) {
         Some("search") => {
             if step.get("status").and_then(Value::as_str) != Some("succeeded") {
@@ -113,13 +120,6 @@ fn index_step(idx: &mut SessionSearchIndex, seq: i64, step: &Value) {
                     .map(|s| !s.is_empty())
                     .unwrap_or(false),
             });
-        }
-        Some("read") => {
-            if is_meaningful_file_read_step(step) {
-                if let Some(key) = step_gate_file_key(step) {
-                    idx.unread_file_search_counts.remove(&key);
-                }
-            }
         }
         // edit/write 步（不论成败）使此前的缓存命中失效——与原全量扫描的
         // INVALIDATING_ACTIONS 语义一致：cached 在写步之后清零。
@@ -479,7 +479,11 @@ fn is_cached_search_step(step: &Value) -> bool {
 }
 
 fn is_meaningful_file_read_step(step: &Value) -> bool {
-    step.get("action").and_then(Value::as_str) == Some("read")
+    let action = step.get("action").and_then(Value::as_str).unwrap_or("");
+    let tool = step.get("tool").and_then(Value::as_str).unwrap_or("");
+    (action.eq_ignore_ascii_case("read")
+        || action.eq_ignore_ascii_case("local_file")
+        || tool.eq_ignore_ascii_case("local_file"))
         && step.get("status").and_then(Value::as_str) == Some("succeeded")
         && step
             .get("view")
@@ -505,15 +509,13 @@ fn count_unread_file_searches(steps: &[Value], gate_key: &str) -> usize {
     }
     let mut count = 0usize;
     for step in steps.iter().rev() {
+        if is_meaningful_file_read_step(step)
+            && step_gate_file_key(step).as_deref() == Some(gate_key.as_str())
+        {
+            break;
+        }
         match step.get("action").and_then(Value::as_str) {
             Some("edit") | Some("write") => break,
-            Some("read") => {
-                if is_meaningful_file_read_step(step)
-                    && step_gate_file_key(step).as_deref() == Some(gate_key.as_str())
-                {
-                    break;
-                }
-            }
             Some("search") => {
                 if step.get("status").and_then(Value::as_str) == Some("succeeded")
                     && !is_cached_search_step(step)
@@ -528,20 +530,8 @@ fn count_unread_file_searches(steps: &[Value], gate_key: &str) -> usize {
     count
 }
 
-fn search_read_required_result(path: &str, count: usize) -> DispatchResult {
-    DispatchResult {
-        view: Some(json!({
-            "kind": "search-read-required",
-            "path": path,
-            "searches_since_read": count,
-            "required_tool": "local_file",
-            "required_action": "read"
-        })),
-        stdout: String::new(),
-        stderr: format!("❌ [search→read 硬闸] 文件「{}」自上次有效读取后已执行 {} 次不同检索，检索通道已暂停。请从已有 file:line 命中选择目标区块，调用 local_file(action=\"read\", path=\"{}\", start_line=..., end_line=...) 一次读取完整窗口（建议锚点 ±15 行）；读取成功后自动解除。不要换关键词或改写同一路径继续探测。", path, count, path),
-        success: false,
-        route: "host_rejection:search_read_required".to_string(),
-    }
+fn search_read_advisory(path: &str, count: usize) -> String {
+    format!("读取建议：文件「{}」自上次工具确认的成功读取后已执行 {} 次非缓存检索（含本次）。本次检索已执行，后续检索不受此计数限制。若需要完整函数或模板块，可根据已有 file:line 命中使用 local_file(action=\"read\", path=\"{}\", start_line=..., end_line=...) 读取目标区块；若仍在定位不同符号，可继续搜索。", path, count, path)
 }
 
 /// 统一联邦检索调度入口
@@ -667,6 +657,7 @@ pub fn dispatch_search(
     // 行表为空（旧快照/测试直接播种 steps_json）回退整载——两条路径语义等价。
     // conn 作用域必须收窄到此块内：reader() 在连接池缺省时降级为 db.0 同一把
     // 互斥锁，跨块存活会让下方 history 分支的 db.0.lock() 自锁死。
+    let mut unread_file_searches = 0usize;
     let prior_steps = {
         let conn = db.reader().ok();
         let mut fallback_steps: Vec<Value> = Vec::new();
@@ -674,12 +665,9 @@ pub fn dispatch_search(
         if let Some(conn) = conn.as_ref() {
             if sync_search_index(conn, session_id) {
                 indexed = true;
-                if let Some((raw_path, key)) = gate_file.as_ref() {
-                    let unread =
+                if let Some((_, key)) = gate_file.as_ref() {
+                    unread_file_searches =
                         indexed_unread_file_search_count(session_id, key).unwrap_or(0);
-                    if unread >= SAME_FILE_SEARCH_HARD_LIMIT {
-                        return search_read_required_result(raw_path, unread);
-                    }
                 }
                 if let Some(fp) = canonical_search_fingerprint(params_value) {
                     if let Some((step_id, output, out_id)) =
@@ -697,11 +685,8 @@ pub fn dispatch_search(
                 .as_ref()
                 .map(|c| load_latest_run_steps(c, session_id))
                 .unwrap_or_default();
-            if let Some((raw_path, key)) = gate_file.as_ref() {
-                let unread = count_unread_file_searches(&steps, key);
-                if unread >= SAME_FILE_SEARCH_HARD_LIMIT {
-                    return search_read_required_result(raw_path, unread);
-                }
+            if let Some((_, key)) = gate_file.as_ref() {
+                unread_file_searches = count_unread_file_searches(&steps, key);
             }
             if let (Some(conn), Some(fp)) =
                 (conn.as_ref(), canonical_search_fingerprint(params_value))
@@ -842,26 +827,24 @@ pub fn dispatch_search(
             .filter(|(_, n)| **n >= 3)
         {
             notes.push(format!(
-                "命中集中度提示：{} 条命中均位于「{}」。若需要该处完整结构（组件属性/函数体/模板块），请 local_file(action=read, start_line/end_line) 按行号窗口一次取回，勿换关键词对同一文件反复探测。",
+                "命中集中度提示：{} 条命中均位于「{}」。若需要该处完整结构（组件属性/函数体/模板块），可用 local_file(action=read, start_line/end_line) 读取目标区块；若仍在定位其他符号，可继续检索。",
                 n, file
             ));
         }
     }
 
-    // 同路径重搜 signpost：同参指纹只拦完全复读；"换词重搜同一目录"参数不同
-    // 会绕过（实测同一路径反复检索数十次）——放行后统计同路径历史检索次数，
-    // ≥2 次即注入软引导，把模型推向定向读取/工件内检索而非继续盲搜。
-    if let Some(path) = params
-        .path
-        .as_deref()
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-    {
+    // 计数只用于建议，不拒绝检索，也不判断换词是否有进展。
+    if let Some((path, _)) = gate_file.as_ref() {
+        let current_count = unread_file_searches + 1;
+        if code_ok && current_count >= SAME_FILE_SEARCH_ADVISORY_THRESHOLD {
+            notes.push(search_read_advisory(path, current_count));
+        }
+    } else if let Some(path) = params.path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
         let prior = indexed_same_path_count(session_id, &normalize_search_path(path))
             .unwrap_or_else(|| count_prior_same_path_searches(&prior_steps, path));
-        if prior >= 2 {
+        if prior + 1 >= SAME_FILE_SEARCH_ADVISORY_THRESHOLD {
             notes.push(format!(
-                "检索 signpost：路径「{}」本会话此前已成功检索 {} 次（含不同关键词），换词重搜同一路径收益递减——建议改用 local_file 定向读取已命中文件，或用 task_store.search_step_output 在既有输出的 output_id 上做工件内检索。若剩余探索面横跨多个模块/目录，优先 child_worker dispatches 一步批量并行派发只读侦察，比主循环串行搜索省步数。",
+                "检索 signpost：路径「{}」本会话此前已成功检索 {} 次（含缓存回执，本次不计入）。本次检索不受此计数限制；若已定位目标文件，可用 local_file 读取所需区块，也可继续定位其他符号。",
                 path, prior
             ));
         }

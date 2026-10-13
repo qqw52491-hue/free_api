@@ -102,7 +102,7 @@ pub(crate) fn validate_plan_submission(
     evidence_refs.dedup();
     if evidence_required && evidence_refs.is_empty() {
         return Err(
-            "【⚠️ submit_plan 结构不合法】evidence_refs 必须包含 1~6 条你已实际读取过的证据引用（文件路径或证据标识）；空手提交方案没有审查意义。"
+            "【⚠️ submit_plan 参数缺失】本次提交的 evidence_refs 为空，方案尚未提交审查。请在 evidence_refs 中补充 1~6 条已读取的证据引用（文件路径或证据标识）后重发；此错误不代表此前未取证。"
                 .to_string(),
         );
     }

@@ -74,8 +74,8 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "search",
-        summary: "代码与历史定位工具：search 只回答“在哪”；取得 file:line 后必须转 local_file.read 读取完整目标区块，不能靠换关键词拼接代码",
-        actions: &["search(query: string, kinds?: history|code|all, path?: string [kinds 含 code 时必填，缺省会被拒], ...) — 单文件命中带 ±3 行；连续 3 次真实检索未 read 时暂停该文件搜索"],
+        summary: "代码与历史定位工具：search 用于定位；需要理解完整代码结构时，建议按 file:line 使用 local_file.read 读取目标区块，仍在定位其他符号时可继续搜索",
+        actions: &["search(query: string, kinds?: history|code|all, path?: string [kinds 含 code 时必填，缺省会被拒], ...) — 单文件命中带 ±3 行；同文件自上次成功读取后第 6 次非缓存检索起附读取建议，不暂停或拒绝搜索"],
     },
     BuiltinToolSpec {
         name: "task_store",
@@ -94,7 +94,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         name: "child_reviewer",
         summary: "受限只读子调查：审查父证据包，回交带 ID/严重级别/物理行号的结构化 findings 与 routing（certain/needs_alignment/blocked）；收到结果后必须先分诊再行动：逐条判定接受/反驳(须附证据)/需澄清，不要直接照改，也不要直接忽略；不会调用工具或写入文件；支持单发或 dispatches 批量并发派发多个专家会审",
         actions: &[
-            "investigate(question: string, role?: string [挂载专精角色卡标识], evidence_refs?: string[] <=6, evidence_excerpt?: string <=6000 chars, resource_ids?: string[] <=2 [仅当前项目会话的受管资源；不得传路径] 【⚠️证据三选一必填：refs/excerpt/resource_ids 至少供给一项（通常为你刚读过的文件路径列表），空手派发会被拒】, custom_inputs?: object [专项业务参数；角色卡声明必填项必须供给；保留键 verified_facts/hard_constraints/definition_of_done 会升格为一级小节优先呈现；注意 plan_summary 不算证据], dispatches?: Array<{question, role?, evidence_refs|evidence_excerpt|resource_ids 三选一必填, ...}> [一步批量并发派发多个审查员会审])",
+            "investigate(question: string, role?: string [挂载专精角色卡标识], evidence_refs?: string[] <=6, evidence_excerpt?: string <=6000 chars, resource_ids?: string[] <=2 [仅当前项目会话的受管资源；不得传路径] 【⚠️证据三选一必填：refs/excerpt/resource_ids 至少供给一项（通常为你刚读过的文件路径列表），本次调用未提供三者中的任一项会被拒】, custom_inputs?: object [专项业务参数；角色卡声明必填项必须供给；保留键 verified_facts/hard_constraints/definition_of_done 会升格为一级小节优先呈现；注意 plan_summary 不算证据], dispatches?: Array<{question, role?, evidence_refs|evidence_excerpt|resource_ids 三选一必填, ...}> [一步批量并发派发多个审查员会审])",
         ],
     },
     BuiltinToolSpec {
@@ -256,7 +256,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         name: "local_file",
         summary: "本地文件读写与精准局部替换（受双白名单保护与SHA256乐观并发锁防覆盖保护）：修改已有文件优先使用 edit 局部替换。注：tmp/ 相对路径自动路由到会话专属临时草稿目录",
         actions: &[
-            "read(path: string, start_line?: number, end_line?: number) — 读取文件并建立并发哈希基线。≤300 行可整读；大文件先 search 定位一次，再按 file:line 锚点 ±15 行读取完整目标区块。成功读取会解除该文件的搜索暂停",
+            "read(path: string, start_line?: number, end_line?: number) — 读取文件并建立并发哈希基线。≤300 行可整读；大文件先 search 定位一次，再按 file:line 锚点 ±15 行读取完整目标区块。成功读取会重置该文件的检索建议计数；省略 action 默认 read",
             "write(path: string, content: string, force?: boolean) — 全量写入文件。⚠️【前置门禁】调用前必须已完成 child_reviewer 审查且获取 ReviewScorecard，否则系统底层无条件拦截丢弃！",
             "edit(path: string, target_content: string, replacement_content: string, force?: boolean) — 精准局部替换。⚠️【前置门禁】调用前必须已完成 child_reviewer 审查且获取 ReviewScorecard，否则系统底层无条件拦截丢弃！",
             "list(path?: string, depth?: number)",
@@ -334,16 +334,12 @@ mod tests {
     }
 
     #[test]
-    fn search_and_read_actions_document_search_read_gate() {
+    fn search_and_read_actions_document_nonblocking_advisory() {
         let menu = build_local_tools_menu();
-        assert!(
-            menu.contains("连续 3 次真实检索未 read"),
-            "search 动作描述应声明同文件 3 次未读即暂停的硬闸"
-        );
-        assert!(
-            menu.contains("成功读取会解除该文件的搜索暂停"),
-            "read 动作描述应声明成功读取解除搜索暂停"
-        );
+        assert!(menu.contains("第 6 次非缓存检索"));
+        assert!(menu.contains("不暂停或拒绝搜索"));
+        assert!(menu.contains("成功读取会重置该文件的检索建议计数"));
+        assert!(!menu.contains("连续 3 次真实检索未 read"));
     }
 
     #[test]

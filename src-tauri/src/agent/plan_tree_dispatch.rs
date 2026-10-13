@@ -288,7 +288,7 @@ pub(crate) fn validate_controlled_parallel_batch(
         "；含写入/执行/未知工具的批次不放宽"
     };
     Err(format!(
-        "parallel 单批最多允许 {} 个独立分支{}，当前为 {}。请先串行收缩范围与工具契约，再保留至多 {} 个互不依赖、参数已确定的分支。宿主不会改写子步骤参数。",
+        "parallel 单批最多允许 {} 个独立分支{}，本批包含 {} 个，尚未执行。请拆分为每批至多 {} 个分支，或改为串行执行；本错误仅针对分支数量，未判断范围或参数是否明确。",
         cap,
         cap_note,
         parallel_steps.len(),
@@ -333,7 +333,7 @@ pub(crate) fn validate_plan_tree_parallel_fanout(node: &PlanNode) -> Result<(), 
                             "含写入/执行/未知工具，不放宽"
                         };
                         return Err(format!(
-                            "plan_tree 并行组 [{}] 超过受控上限：本批最多允许 {} 个独立分支（{}），当前为 {}。请将每组并行收缩到至多 {} 个互不依赖、参数已确定的分支，或改为串行执行。宿主不会改写子步骤参数。",
+                            "plan_tree 并行组 [{}] 超过数量上限：本批最多允许 {} 个独立分支（{}），本组包含 {} 个，执行树尚未执行。请拆分为每组至多 {} 个分支，或改为串行执行；本错误未判断范围或参数是否明确。",
                             obj.id.clone().unwrap_or_else(|| "?".to_string()),
                             cap,
                             cap_note,

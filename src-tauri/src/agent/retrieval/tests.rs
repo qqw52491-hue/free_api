@@ -521,8 +521,8 @@
             None,
         );
         assert!(
-            result.stdout.contains("检索 signpost") && result.stdout.contains("2 次"),
-            "索引路径的同路径计数应与整载一致，实际: {}",
+            !result.stdout.contains("检索 signpost"),
+            "未到第 6 次时不应提前附计数建议，实际: {}",
             result.stdout
         );
     }
@@ -826,31 +826,24 @@
     }
 
     #[test]
-    fn test_search_read_hard_gate_blocks_after_three_unread_file_searches() {
-        let (_temp, file_str) = seed_gate_file("gate-block", "gate_target.rs");
+    fn test_sixth_unread_file_search_is_advisory_and_keeps_results() {
+        let (_temp, file_str) = seed_gate_file("advice-six", "gate_target.rs");
         let conn = setup_index_db();
-        let session = "sess-gate-block";
-        seed_trace(&conn, session, "run-g1");
-        for (seq, query) in ["alpha_one", "alpha_two", "alpha_three"]
-            .iter()
-            .enumerate()
-        {
-            insert_succeeded_file_search(&conn, "run-g1", seq as i64, &file_str, query);
+        let session = "sess-advice-six";
+        seed_trace(&conn, session, "run-advice-six");
+        for seq in 0..5 {
+            insert_succeeded_file_search(&conn, "run-advice-six", seq, &file_str, &format!("prior_{seq}"));
         }
         let db = crate::db::DbState(Arc::new(Mutex::new(conn)));
-        let result = dispatch_search(
-            &db,
-            session,
-            &json!({"query": "alpha_four", "kinds": ["code"], "path": file_str}),
-            None,
-        );
-        assert!(!result.success, "第 4 次换词检索应被硬闸拦截");
-        assert_eq!(result.route, "host_rejection:search_read_required");
-        assert!(result.stderr.contains("local_file"), "{}", result.stderr);
-        assert!(result.stderr.contains("±15"), "{}", result.stderr);
-        let view = result.view.expect("硬闸应产出结构化 view");
-        assert_eq!(view["kind"], "search-read-required");
-        assert_eq!(view["searches_since_read"], json!(3));
+        let result = dispatch_search(&db, session,
+            &json!({"query":"alpha_one", "kinds":["code"], "path":file_str}), None);
+        assert!(result.success, "建议不得拒绝搜索: {}", result.stderr);
+        assert_eq!(result.route, "retrieval");
+        let data: Value = serde_json::from_str(&result.stdout).unwrap();
+        assert!(data["total_hits"].as_u64().unwrap() > 0, "仍须返回真实命中");
+        assert!(result.stdout.contains("已执行 6 次非缓存检索"));
+        assert!(result.stdout.contains("本次检索已执行"));
+        assert!(!result.stdout.contains("检索通道已暂停"));
     }
 
     #[test]
@@ -882,7 +875,7 @@
             &json!({"query": "alpha_four", "kinds": ["code"], "path": file_str}),
             None,
         );
-        assert!(result.success, "有效读取后应解除搜索暂停: {}", result.stderr);
+        assert!(result.success, "有效读取后可继续搜索: {}", result.stderr);
         assert_eq!(result.route, "retrieval");
     }
 
@@ -923,7 +916,7 @@
             &json!({"query": "alpha_five", "kinds": ["code"], "path": file_str}),
             None,
         );
-        assert!(result.success, "去重回执不应计入硬闸: {}", result.stderr);
+        assert!(result.success, "去重回执不应计入建议计数: {}", result.stderr);
         assert_eq!(result.route, "retrieval");
     }
 
@@ -955,7 +948,7 @@
             &json!({"query": "alpha_four", "kinds": ["code"], "path": file_str}),
             None,
         );
-        assert!(result.success, "写步之后不应再被硬闸拦截: {}", result.stderr);
+        assert!(result.success, "写步后应可正常搜索: {}", result.stderr);
         assert_eq!(result.route, "retrieval");
     }
 
@@ -994,64 +987,39 @@
     }
 
     #[test]
-    fn test_search_read_gate_fallback_scans_steps_json() {
-        let (_temp, file_str) = seed_gate_file("gate-fallback", "gate_target.rs");
+    fn test_search_advisory_fallback_scans_steps_json_without_blocking() {
+        let (_temp, file_str) = seed_gate_file("advice-fallback", "gate_target.rs");
         let conn = setup_index_db();
-        let session = "sess-gate-fallback";
-        let steps: Vec<Value> = ["alpha_one", "alpha_two", "alpha_three"]
-            .iter()
-            .enumerate()
-            .map(|(i, query)| {
-                json!({
-                    "id": i + 1, "action": "search", "status": "succeeded",
-                    "params": {"query": query, "kinds": ["code"], "path": file_str},
-                    "output": "{\"total_hits\":1}",
-                    "view": {"kind": "search", "resolved_root": file_str}
-                })
-            })
-            .collect();
-        conn.execute(
-            "INSERT INTO agent_run_traces (id, session_id, goal, status, steps_json, started_at, updated_at)
-             VALUES ('run-g6', ?1, 'g', 'running', ?2, '2026-01-01', '2026-01-01')",
-            params![session, serde_json::to_string(&steps).unwrap()],
-        )
-        .unwrap();
+        let session = "sess-advice-fallback";
+        let steps: Vec<Value> = (0..6).map(|i| json!({
+            "id":i+1, "action":"search", "status":"succeeded",
+            "params":{"query":format!("prior_{i}"),"kinds":["code"],"path":file_str},
+            "output":"results", "view":{"kind":"search", "resolved_root":file_str}
+        })).collect();
+        conn.execute("INSERT INTO agent_run_traces (id, session_id, goal, status, steps_json, started_at, updated_at) VALUES ('run-advice-fallback',?1,'g','running',?2,'2026-01-01','2026-01-01')",
+            params![session,serde_json::to_string(&steps).unwrap()]).unwrap();
         let db = crate::db::DbState(Arc::new(Mutex::new(conn)));
-        let result = dispatch_search(
-            &db,
-            session,
-            &json!({"query": "alpha_four", "kinds": ["code"], "path": file_str}),
-            None,
-        );
-        assert!(!result.success, "steps_json 回退路径同样应被硬闸拦截");
-        assert_eq!(result.route, "host_rejection:search_read_required");
-        assert_eq!(result.view.unwrap()["searches_since_read"], json!(3));
+        let result = dispatch_search(&db, session,
+            &json!({"query":"alpha_one","kinds":["code"],"path":file_str}),None);
+        assert!(result.success);
+        assert_eq!(result.route,"retrieval");
+        assert!(result.stdout.contains("已执行 7 次非缓存检索"));
     }
 
     #[test]
-    fn test_hard_gate_fires_before_exact_cache_hit() {
-        // 回归：硬闸必须先于同参去重回执——否则达到阈值后复读旧指纹
-        // 仍可拿到缓存回执，模型靠重放既有查询无限烧轮次。
-        let (_temp, file_str) = seed_gate_file("gate-cache-order", "gate_target.rs");
+    fn test_search_cache_remains_available_above_advisory_threshold() {
+        let (_temp, file_str) = seed_gate_file("advice-cache", "gate_target.rs");
         let conn = setup_index_db();
-        let session = "sess-gate-cache-order";
-        seed_trace(&conn, session, "run-g7");
-        for (seq, query) in ["alpha_one", "alpha_two", "alpha_three"]
-            .iter()
-            .enumerate()
-        {
-            insert_succeeded_file_search(&conn, "run-g7", seq as i64, &file_str, query);
+        let session = "sess-advice-cache";
+        seed_trace(&conn, session, "run-advice-cache");
+        for seq in 0..6 {
+            insert_succeeded_file_search(&conn,"run-advice-cache",seq,&file_str,&format!("prior_{seq}"));
         }
         let db = crate::db::DbState(Arc::new(Mutex::new(conn)));
-        // 与第 1 次检索完全同参——旧实现会命中缓存返回 retrieval-cache。
-        let result = dispatch_search(
-            &db,
-            session,
-            &json!({"query": "alpha_one", "kinds": ["code"], "path": file_str}),
-            None,
-        );
-        assert!(!result.success, "达阈值后同参复读也应被硬闸拦截，而非命中缓存");
-        assert_eq!(result.route, "host_rejection:search_read_required");
+        let result = dispatch_search(&db,session,
+            &json!({"query":"prior_0","kinds":["code"],"path":file_str}),None);
+        assert!(result.success, "建议不能挡住缓存: {}",result.stderr);
+        assert!(result.stdout.contains("【检索去重】"));
     }
 
     #[test]
@@ -1093,4 +1061,56 @@
             result.stderr
         );
         assert_eq!(result.route, "retrieval");
+    }
+    #[test]
+    fn test_default_local_file_read_resets_index_and_fallback_count() {
+        let path = "/repo/AgentChatStream.vue";
+        let mut steps: Vec<Value> = (0..6).map(|i| json!({
+            "id":i,"action":"search","status":"succeeded",
+            "params":{"path":path,"query":format!("q{i}")},
+            "view":{"kind":"search","resolved_root":path}
+        })).collect();
+        steps.push(json!({"id":7,"tool":"local_file","action":"local_file","status":"succeeded",
+            "params":{"path":path,"start_line":440,"end_line":560},
+            "view":{"kind":"read","resolved_path":path}}));
+        assert!(is_meaningful_file_read_step(steps.last().unwrap()));
+        assert_eq!(count_unread_file_searches(&steps,path),0);
+        let mut idx = SessionSearchIndex {
+            run_id:"alias".into(),next_seq:0,searches:Vec::new(),last_write_seq:None,
+            path_counts:Default::default(),unread_file_search_counts:Default::default(),
+            last_accessed:std::time::Instant::now()
+        };
+        for (seq,step) in steps.iter().enumerate() { index_step(&mut idx,seq as i64,step); }
+        assert!(!idx.unread_file_search_counts.contains_key(path));
+        let mut failed = steps.last().unwrap().clone();
+        failed["status"] = json!("failed");
+        assert!(!is_meaningful_file_read_step(&failed));
+        let mut listed = steps.last().unwrap().clone();
+        listed["view"]["kind"] = json!("list");
+        assert!(!is_meaningful_file_read_step(&listed));
+    }
+
+    #[test]
+    fn test_fifth_search_has_no_count_advisory_and_later_searches_continue() {
+        let (_temp,file_str) = seed_gate_file("advice-boundary","gate_target.rs");
+        let conn = setup_index_db();let session = "sess-advice-boundary";
+        seed_trace(&conn,session,"run-advice-boundary");
+        for seq in 0..4 {insert_succeeded_file_search(&conn,"run-advice-boundary",seq,&file_str,&format!("prior_{seq}"));}
+        let db = crate::db::DbState(Arc::new(Mutex::new(conn)));
+        let params = json!({"query":"alpha_one","kinds":["code"],"path":file_str});
+        let fifth = dispatch_search(&db,session,&params,None);
+        assert!(fifth.success);assert!(!fifth.stdout.contains("读取建议："));
+        {
+            let conn = db.0.lock().unwrap();
+            for seq in 4..9 {insert_succeeded_file_search(&conn,"run-advice-boundary",seq,&file_str,&format!("prior_{seq}"));}
+        }
+        let tenth = dispatch_search(&db,session,&params,None);
+        assert!(tenth.success);assert!(tenth.stdout.contains("已执行 10 次非缓存检索"));
+        {
+            let conn = db.0.lock().unwrap();
+            insert_run_step(&conn,"run-advice-boundary",9,&json!({"tool":"local_file","action":"local_file",
+                "status":"succeeded","params":{"path":file_str},"view":{"kind":"read","resolved_path":file_str}}));
+        }
+        let after_read = dispatch_search(&db,session,&params,None);
+        assert!(after_read.success);assert!(!after_read.stdout.contains("读取建议："));
     }
