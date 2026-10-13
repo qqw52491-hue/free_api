@@ -89,6 +89,9 @@ pub(super) async fn dispatch_watch_stop(
 ) -> Result<ArmOutcome, String> {
     Ok(ArmOutcome::Done({
         let params = inst.get_params();
+        if let Some(result) = crate::agent::tools::input_validation::native_rejection("watch_stop", "", &params) {
+            return Ok(ArmOutcome::Early(result));
+        }
         let stop_outcome = match params.get("watch_id").and_then(|v| v.as_str()) {
             Some(watch_id) => {
                 crate::agent::watch_engine::stop_watch(ctx.state.inner(), ctx.parent_run_id, watch_id)

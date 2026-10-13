@@ -123,6 +123,10 @@ pub(crate) fn execute_command_inner(
     registry: &PluginRegistry,
     workspace_root: Option<&std::path::Path>,
 ) -> DispatchResult {
+    // 单步、流水线及并行叶子共用纯参数预检，先报错再做原有安全裁决。
+    if let Some(result) = crate::agent::tools::input_validation::native_rejection(tool, action, params) {
+        return result;
+    }
     // 0. 宿主层安全防护：
     // 项目专属会话禁止切换工作区（锁定在项目根目录，防止越界串扰）
     let lower_tool = tool.to_ascii_lowercase();

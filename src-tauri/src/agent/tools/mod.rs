@@ -8,3 +8,4 @@ pub mod wechat_manager;
 pub mod system_info;
 pub mod local_file;
 pub mod local_shell;
+pub(crate) mod input_validation;

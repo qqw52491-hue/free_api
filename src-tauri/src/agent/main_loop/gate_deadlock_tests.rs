@@ -29,6 +29,7 @@
             "local_file:read:success",
             "local_file:edit:target_not_found",
             "local_file:missing_workspace",
+            "tool_input:invalid_parameters",
             "child_worker:spawned",
             "child_reviewer:rejected_or_failed",
             "wait_jobs:resolved",

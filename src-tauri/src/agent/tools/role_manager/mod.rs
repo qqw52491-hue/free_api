@@ -777,15 +777,29 @@ pub fn validate_dispatch_inputs(card: &RoleCard, custom_inputs: Option<&Value>) 
             }
         })
         .collect();
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
+    if !missing.is_empty() {
+        return Err(format!(
             "【⚠️ 子任务派发被拒绝】角色卡 `{}` 声明的必填入参缺失: {}。请在 custom_inputs 中补齐后重新派发。",
             card.name,
             missing.join("、")
-        ))
+        ));
     }
+    // 只核验已声明且实际提供的字段类型；可选缺省/null 与额外字段保持兼容。
+    for field in &schema.fields {
+        let Some(value) = obj.and_then(|m| m.get(&field.name)).filter(|v| !v.is_null()) else { continue };
+        use crate::agent::protocol::ContractFieldType;
+        let valid = match field.field_type {
+            ContractFieldType::String => value.is_string(),
+            ContractFieldType::StringArray => value.as_array().is_some_and(|a| a.iter().all(Value::is_string)),
+            ContractFieldType::Number => value.is_number(),
+            ContractFieldType::Boolean => value.is_boolean(),
+        };
+        if !valid {
+            return Err(format!("【⚠️ 子任务派发被拒绝】角色卡 `{}` 的 custom_inputs.{} 类型错误：期望 {}。请按角色卡类型补齐后重新派发。",
+                card.name, field.name, field.field_type.as_str()));
+        }
+    }
+    Ok(())
 }
 
 pub fn dispatch(db: &DbState, action: &str, params: &Value) -> crate::agent::types::DispatchResult {

@@ -440,3 +440,26 @@ fn focus_domains_valid_input_unchanged() {
         ]
     );
 }
+
+#[test]
+fn dispatch_inputs_check_declared_types_without_closing_extra_fields() {
+    let card = RoleCard {
+        name: "typed_role".into(),
+        input_schema: json!({"fields":[
+            {"name":"text","description":"类型回归测试","field_type":"string","required":true},
+            {"name":"paths","description":"类型回归测试","field_type":"string[]","required":false},
+            {"name":"round","description":"类型回归测试","field_type":"number","required":false},
+            {"name":"approved","description":"类型回归测试","field_type":"boolean","required":false}
+        ]}).to_string(),
+        ..Default::default()
+    };
+    assert!(card.parse_input_schema().is_some(), "测试必须使用真实可解析的角色入参契约");
+    for bad in [json!({"text":false}), json!({"text":"ok","paths":["a",3]}),
+        json!({"text":"ok","round":"1"}), json!({"text":"ok","approved":"false"})] {
+        assert!(validate_dispatch_inputs(&card, Some(&bad)).unwrap_err().contains("类型错误"));
+    }
+    assert!(validate_dispatch_inputs(&card, Some(&json!({
+        "text":"ok","paths":[],"round":0,"approved":false,"extra":"allowed"
+    }))).is_ok());
+    assert!(validate_dispatch_inputs(&card, Some(&json!({"text":"ok","round":null}))).is_ok());
+}

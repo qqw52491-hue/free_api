@@ -142,6 +142,13 @@ pub async fn run_tool_phase(
     // 与工具调用混发属协议误用（提交语义含糊），直接拒绝让模型单独重提。
     let submit_plan_request = inst.submit_plan.clone();
 
+    // 参数错误不进入审查/冷却/读取台账：预检只读，不修改 checkpoint。
+    if let Some(result) = crate::agent::tools::input_validation::instruction_rejection(state.inner(), inst) {
+        emit_tool_event(app, final_session_id, step_id, inst, "failed",
+            Some(result.route.clone()), Some(false), &result.stderr, Some(0), None);
+        return Ok(result);
+    }
+
     // --- B. 执行动作 ---
     if let Some(reason) = context.repeated_failure_blocker(
         &inst.get_tool(),

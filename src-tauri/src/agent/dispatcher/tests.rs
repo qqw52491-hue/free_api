@@ -1070,3 +1070,34 @@
         assert_eq!(resolve_name("Notification"), "Notification");
         assert_eq!(resolve_name("other_tool"), "other_tool");
     }
+
+#[test]
+fn native_input_errors_precede_permissions_workspace_and_database() {
+    let db = DbState(Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap())));
+    let registry = PluginRegistry::new();
+    for (tool, action, params, field) in [
+        ("local_shell", "exec", json!({"path":".","depth":1}), "command"),
+        ("local_file", "write", json!({"path":"a.txt"}), "content"),
+        ("local_file", "edit", json!({"path":"a.txt","target_content":"a"}), "replacement_content"),
+        ("mcp_manager", "add_http", json!({}), "url"),
+        ("mcp_manager", "toggle", json!({"name":"x","enabled":"false"}), "enabled"),
+        ("artifact_manager", "create_document", json!({}), "content"),
+    ] {
+        let r = execute_command_inner(&db, "input-test", tool, action, &params, &registry, None);
+        assert!(!r.success);
+        assert_eq!(r.route, crate::agent::tools::input_validation::INVALID_INPUT_ROUTE);
+        assert!(r.stderr.contains(field), "{}", r.stderr);
+        assert!(!r.stderr.contains("权限安全拦截"));
+    }
+}
+
+#[test]
+fn preflight_does_not_reclassify_valid_write_or_destructive_shell() {
+    let db = DbState(Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap())));
+    for v in [json!({"tool":"local_file","action":"write","params":{"path":"a.txt","content":"ok"}}),
+        json!({"tool":"local_shell","command":{"command":"git reset --hard"}})] {
+        let inst: AgentInstruction = serde_json::from_value(v).unwrap();
+        assert!(crate::agent::tools::input_validation::instruction_rejection(&db, &inst).is_none());
+        assert!(is_write_or_side_effect_tool(&inst), "合法写入仍须经过原门禁");
+    }
+}

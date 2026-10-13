@@ -621,6 +621,9 @@ pub fn dispatch(
     action: &str,
     params: &serde_json::Value,
 ) -> DispatchResult {
+    if let Some(result) = crate::agent::tools::input_validation::native_rejection("artifact_manager", action, params) {
+        return result;
+    }
     let sub_action = if action.is_empty() {
         params
             .get("action")
@@ -885,4 +888,24 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&session_tmp);
     }
+    #[test]
+    fn malformed_document_creates_no_file_or_record_but_explicit_empty_is_valid() {
+        let db = test_db();
+        let session = format!("artifact-input-{}", uuid::Uuid::new_v4());
+        let dir = get_managed_artifacts_root().join(&session);
+        for params in [serde_json::json!({}), serde_json::json!({"content":null}), serde_json::json!({"content":12})] {
+            let result = dispatch(&db, &session, "create_document", &params);
+            assert!(!result.success);
+            assert_eq!(result.route, crate::agent::tools::input_validation::INVALID_INPUT_ROUTE);
+        }
+        assert!(!dir.exists(), "无效正文不得创建产物目录");
+        let item_count:i64 = db.0.lock().unwrap().query_row("SELECT COUNT(*) FROM agent_artifacts", [], |r| r.get(0)).unwrap();
+        assert_eq!(item_count, 0);
+        let result = dispatch(&db, &session, "create_document", &serde_json::json!({"content":""}));
+        assert!(result.success, "{}", result.stderr);
+        let size:i64 = db.0.lock().unwrap().query_row("SELECT size_bytes FROM agent_artifacts", [], |r| r.get(0)).unwrap();
+        assert_eq!(size, 0);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
 }

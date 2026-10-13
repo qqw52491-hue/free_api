@@ -71,6 +71,9 @@ fn redact_sensitive_args(args: &[serde_json::Value]) -> (Vec<serde_json::Value>,
 }
 
 pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> DispatchResult {
+    if let Some(result) = crate::agent::tools::input_validation::native_rejection("mcp_manager", action, params) {
+        return result;
+    }
     let act = if !action.is_empty() {
         action
     } else {

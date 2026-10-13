@@ -28,6 +28,9 @@ pub(super) async fn dispatch_wait_jobs(
 ) -> Result<ArmOutcome, String> {
     Ok(ArmOutcome::Done({
         let params = inst.get_params();
+        if let Some(result) = crate::agent::tools::input_validation::native_rejection("wait_jobs", "", &params) {
+            return Ok(ArmOutcome::Early(result));
+        }
         let target_ids: Option<Vec<String>> = params
             .get("job_ids")
             .and_then(|v| v.as_array())

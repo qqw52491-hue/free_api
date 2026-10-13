@@ -48,6 +48,12 @@ pub(super) async fn dispatch_child_worker(
 
         for (idx, worker_params) in items.iter().enumerate() {
             let item_num = idx + 1;
+            if let Err(error) = crate::agent::tools::input_validation::validate_child_item(ctx.state.inner(), "child_worker", worker_params) {
+                item_reports.push(format!("[{}/{}] ❌ {}", item_num, total, error));
+                fail_count += 1;
+                dispatch_input_incomplete = true;
+                continue;
+            }
             let mut scout_persona = String::new();
             let mut scout_model = routing.model_id.clone();
             let mut effective_worker_params = worker_params.clone();
