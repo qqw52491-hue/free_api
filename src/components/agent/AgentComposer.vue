@@ -440,8 +440,7 @@
                                                         'is-active': !isCardHibernatedForSlot(card.name, 'writer'),
                                                         'is-hibernated': isCardHibernatedForSlot(card.name, 'writer'),
                                                     }"
-                                                    :title="`${card.label || card.name} (${card.name})\n${card.persona_prompt || card.scope_hints || '通用改码写入角色卡'}\n${card.hard_scope ? '围栏: ' + card.hard_scope : ''}\n点击切换改码出战/排除`"
-                                                    @click="toggleSessionCardForSlot(card.name, 'writer')"
+                                                    :title="`${card.label || card.name} (${card.name})\n${card.persona_prompt || card.scope_hints || '通用改码写入角色卡'}\n${card.hard_scope ? '围栏: ' + card.hard_scope : ''}\n${card.is_system ? '系统基础卡常驻，不可休眠' : '点击切换改码出战/排除'}`" @click="toggleSessionCardForSlot(card.name, 'writer')"
                                                 >
                                                     <div class="member-card-header">
                                                         <div class="member-identity">
@@ -452,7 +451,7 @@
                                                                 <svg v-if="!isCardHibernatedForSlot(card.name, 'writer')" viewBox="0 0 24 24" class="check-icon"><path d="M20 6 9 17l-5-5"/></svg>
                                                             </div>
                                                             <div class="member-name-block">
-                                                                <strong class="member-label">{{ card.label || card.name }}</strong>
+                                                                <strong class="member-label">{{ card.label || card.name }}{{ card.is_system ? ' · 常驻基础卡' : '' }}</strong>
                                                                 <span class="member-slug">{{ card.name }}</span>
                                                             </div>
                                                         </div>
@@ -460,9 +459,9 @@
                                                             type="button"
                                                             class="session-toggle-btn"
                                                             :class="{ active: !isCardHibernatedForSlot(card.name, 'writer'), hibernated: isCardHibernatedForSlot(card.name, 'writer') }"
-                                                            :title="isCardHibernatedForSlot(card.name, 'writer') ? '点击恢复改码出战' : '点击在写入中排除'"
-                                                            :disabled="isRunning"
-                                                            @click.stop="toggleSessionCardForSlot(card.name, 'writer')"
+                                                            :title="card.is_system ? '系统基础卡常驻，不可休眠' : (isCardHibernatedForSlot(card.name, 'writer') ? '点击恢复改码出战' : '点击在写入中排除')"
+                                                            :disabled="isRunning || card.is_system"
+                                                             @click.stop="toggleSessionCardForSlot(card.name, 'writer')"
                                                         >
                                                             <span class="status-indicator"></span>
                                                             <span>{{ isCardHibernatedForSlot(card.name, 'writer') ? '✕ 排除' : '✓ 出战' }}</span>
@@ -727,8 +726,7 @@
                                                         'is-active': !isCardHibernatedForSlot(card.name, 'reviewer'),
                                                         'is-hibernated': isCardHibernatedForSlot(card.name, 'reviewer'),
                                                     }"
-                                                    :title="`${card.label || card.name} (${card.name})\n${card.persona_prompt || card.scope_hints || '通用质检验收角色卡'}\n${card.focus_domains ? '材料: ' + card.focus_domains : ''}\n点击切换审查出战/排除`"
-                                                    @click="toggleSessionCardForSlot(card.name, 'reviewer')"
+                                                    :title="`${card.label || card.name} (${card.name})\n${card.persona_prompt || card.scope_hints || '通用质检验收角色卡'}\n${card.focus_domains ? '材料: ' + card.focus_domains : ''}\n${card.is_system ? '系统基础卡常驻，不可休眠' : '点击切换审查出战/排除'}`" @click="toggleSessionCardForSlot(card.name, 'reviewer')"
                                                 >
                                                     <div class="member-card-header">
                                                         <div class="member-identity">
@@ -739,7 +737,7 @@
                                                                 <svg v-if="!isCardHibernatedForSlot(card.name, 'reviewer')" viewBox="0 0 24 24" class="check-icon"><path d="M20 6 9 17l-5-5"/></svg>
                                                             </div>
                                                             <div class="member-name-block">
-                                                                <strong class="member-label">{{ card.label || card.name }}</strong>
+                                                                <strong class="member-label">{{ card.label || card.name }}{{ card.is_system ? ' · 常驻基础卡' : '' }}</strong>
                                                                 <span class="member-slug">{{ card.name }}</span>
                                                             </div>
                                                         </div>
@@ -747,9 +745,9 @@
                                                             type="button"
                                                             class="session-toggle-btn"
                                                             :class="{ active: !isCardHibernatedForSlot(card.name, 'reviewer'), hibernated: isCardHibernatedForSlot(card.name, 'reviewer') }"
-                                                            :title="isCardHibernatedForSlot(card.name, 'reviewer') ? '点击恢复审查出战' : '点击在此工位排除'"
-                                                            :disabled="isRunning"
-                                                            @click.stop="toggleSessionCardForSlot(card.name, 'reviewer')"
+                                                            :title="card.is_system ? '系统基础卡常驻，不可休眠' : (isCardHibernatedForSlot(card.name, 'reviewer') ? '点击恢复审查出战' : '点击在此工位排除')"
+                                                            :disabled="isRunning || card.is_system"
+                                                             @click.stop="toggleSessionCardForSlot(card.name, 'reviewer')"
                                                         >
                                                             <span class="status-indicator"></span>
                                                             <span>{{ isCardHibernatedForSlot(card.name, 'reviewer') ? '✕ 排除' : '✓ 出战' }}</span>
@@ -895,8 +893,7 @@
                                                         'is-active': !isCardHibernatedForSlot(card.name, 'worker'),
                                                         'is-hibernated': isCardHibernatedForSlot(card.name, 'worker'),
                                                     }"
-                                                    :title="`${card.label || card.name} (${card.name})\n${card.persona_prompt || card.scope_hints || '通用调研探针角色卡'}\n${card.hard_scope ? '围栏: ' + card.hard_scope : ''}\n点击切换探针出战/排除`"
-                                                    @click="toggleSessionCardForSlot(card.name, 'worker')"
+                                                    :title="`${card.label || card.name} (${card.name})\n${card.persona_prompt || card.scope_hints || '通用调研探针角色卡'}\n${card.hard_scope ? '围栏: ' + card.hard_scope : ''}\n${card.is_system ? '系统基础卡常驻，不可休眠' : '点击切换探针出战/排除'}`" @click="toggleSessionCardForSlot(card.name, 'worker')"
                                                 >
                                                     <div class="member-card-header">
                                                         <div class="member-identity">
@@ -907,7 +904,7 @@
                                                                 <svg v-if="!isCardHibernatedForSlot(card.name, 'worker')" viewBox="0 0 24 24" class="check-icon"><path d="M20 6 9 17l-5-5"/></svg>
                                                             </div>
                                                             <div class="member-name-block">
-                                                                <strong class="member-label">{{ card.label || card.name }}</strong>
+                                                                <strong class="member-label">{{ card.label || card.name }}{{ card.is_system ? ' · 常驻基础卡' : '' }}</strong>
                                                                 <span class="member-slug">{{ card.name }}</span>
                                                             </div>
                                                         </div>
@@ -915,9 +912,9 @@
                                                             type="button"
                                                             class="session-toggle-btn"
                                                             :class="{ active: !isCardHibernatedForSlot(card.name, 'worker'), hibernated: isCardHibernatedForSlot(card.name, 'worker') }"
-                                                            :title="isCardHibernatedForSlot(card.name, 'worker') ? '点击恢复探针出战' : '点击在此工位排除'"
-                                                            :disabled="isRunning"
-                                                            @click.stop="toggleSessionCardForSlot(card.name, 'worker')"
+                                                            :title="card.is_system ? '系统基础卡常驻，不可休眠' : (isCardHibernatedForSlot(card.name, 'worker') ? '点击恢复探针出战' : '点击在此工位排除')"
+                                                            :disabled="isRunning || card.is_system"
+                                                             @click.stop="toggleSessionCardForSlot(card.name, 'worker')"
                                                         >
                                                             <span class="status-indicator"></span>
                                                             <span>{{ isCardHibernatedForSlot(card.name, 'worker') ? '✕ 排除' : '✓ 出战' }}</span>
@@ -1846,7 +1843,12 @@ function openRoleManager() {
     emit("open-roles");
 }
 
+function isBasicRoleCard(name: string): boolean {
+    return allRoleCards.value.some((c) => c.name === name && c.is_system);
+}
+
 function isCardHibernatedForSlot(name: string, slot: string): boolean {
+    if (isBasicRoleCard(name)) return false;
     const list = props.modelRouting?.disabled_role_cards || [];
     const nameLower = name.toLowerCase();
     const slotPrefix = `${slot.toLowerCase()}:`;
@@ -1865,7 +1867,7 @@ function isCardHibernatedForSlot(name: string, slot: string): boolean {
 }
 
 function toggleSessionCardForSlot(name: string, slot: string) {
-    if (props.isRunning) return;
+    if (props.isRunning || isBasicRoleCard(name)) return;
     const currentList = [...(props.modelRouting?.disabled_role_cards || [])];
     const nameLower = name.toLowerCase();
     const slotKey = `${slot.toLowerCase()}:${nameLower}`;
@@ -1968,6 +1970,7 @@ function hibernateAllCardsForSlot(slot: string) {
     const cards = slot === 'writer' ? writerRoleCards.value : slot === 'reviewer' ? reviewerRoleCards.value : scoutRoleCards.value;
     const slotPrefix = `${slot.toLowerCase()}:`;
     for (const card of cards) {
+        if (card.is_system) continue;
         const key = `${slotPrefix}${card.name.toLowerCase()}`;
         if (!currentList.some((d) => d.toLowerCase() === key)) {
             currentList.push(key);

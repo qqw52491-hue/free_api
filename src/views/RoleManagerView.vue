@@ -556,7 +556,7 @@
               <span class="role-avatar-icon">{{ extractEmoji(card.label) || '🤖' }}</span>
               <div class="role-title-box">
                 <strong class="role-label">{{ card.label }}</strong>
-                <span class="role-slug-name">@{{ card.name }}</span>
+                <span class="role-slug-name">@{{ card.name }}{{ card.is_system ? ' · 系统基础卡' : '' }}</span>
               </div>
             </div>
             <div class="role-status-toggle">
@@ -564,7 +564,8 @@
                 type="button"
                 class="switch-pill"
                 :class="{ on: card.enabled }"
-                :title="card.enabled ? '点击禁用该角色' : '点击启用该角色'"
+                :disabled="card.is_system"
+                :title="card.is_system ? '系统基础卡常驻，不可停用' : card.enabled ? '点击禁用该角色' : '点击启用该角色'"
                 @click="toggleRole(card)"
               >
                 {{ card.enabled ? '已启用' : '已停用' }}
@@ -618,11 +619,16 @@
           </div>
 
           <div class="role-card-actions">
-            <button class="btn btn-xs ghost" @click="editCard(card)">
+            <template v-if="card.is_system">
+              <ModelSelectDropdown :model-value="card.model_id" :models="models" placeholder="跟随档位路由"
+                @update:model-value="saveBasicModel(card, $event)" />
+              <button v-if="card.model_id" class="btn btn-xs ghost" @click="saveBasicModel(card, '')">恢复跟随路由</button>
+            </template>
+            <button v-else class="btn btn-xs ghost" @click="editCard(card)">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
               编辑
             </button>
-            <button class="btn btn-xs danger ghost" @click="deleteCard(card)">
+            <button class="btn btn-xs danger ghost" :disabled="card.is_system" :title="card.is_system ? '系统基础卡不可删除' : '删除自定义角色'" @click="deleteCard(card)">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
               删除
             </button>
@@ -650,6 +656,7 @@ interface RoleCard {
   hard_scope: string;
   max_concurrency: number;
   enabled: boolean;
+  is_system?: boolean;
   custom_schema?: string;
   focus_domains?: string;
   input_schema?: string;
@@ -1128,6 +1135,7 @@ function applyPreset(tpl: typeof presetTemplates[0]) {
 }
 
 function editCard(card: RoleCard) {
+  if (card.is_system) return;
   isCreating.value = false;
   isEditing.value = true;
   // 清空孵化器对话——上一张卡的调优历史若带入本会话，会作为 history 污染
@@ -1498,7 +1506,17 @@ async function saveRoleCard() {
   }
 }
 
+async function saveBasicModel(card: RoleCard, modelId: string) {
+  try {
+    await invoke('upsert_role_card', { card: { name: card.name, model_id: modelId } });
+    await loadCards();
+  } catch (err: any) {
+    alert(`模型设置失败: ${err?.message || err}`);
+  }
+}
+
 async function toggleRole(card: RoleCard) {
+  if (card.is_system) return;
   try {
     await invoke('toggle_role_card', { name: card.name });
     card.enabled = !card.enabled;
@@ -1508,6 +1526,7 @@ async function toggleRole(card: RoleCard) {
 }
 
 async function deleteCard(card: RoleCard) {
+  if (card.is_system) return;
   if (!confirm(`确定要删除角色「${card.label}」吗？`)) return;
   try {
     await invoke('delete_role_card', { name: card.name });

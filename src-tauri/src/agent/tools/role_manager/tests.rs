@@ -36,22 +36,81 @@
         assert!(upsert_card(&db, &json!({"name": "overflow_role"})).is_err());
     }
 
-    #[test]
-    fn test_default_tech_lead_card_seeded() {
-        let db = setup_db();
-        let tl = resolve_enabled_card(&db, "tech_lead").unwrap().expect("系统初始化应自动预装 tech_lead");
-        assert_eq!(tl.name, "tech_lead");
-        assert!(tl.allows_kind("reviewer"));
-        let custom_schema = tl.parse_custom_schema().expect("tech_lead 应具备合法的 custom_schema");
-        assert!(custom_schema.field_names().contains("decision"));
-        assert!(custom_schema.field_names().contains("file_coupling"));
-        assert!(custom_schema.field_names().contains("analysis"));
-        assert!(custom_schema.field_names().contains("escalate_roles"));
-
-        let input_schema = tl.parse_input_schema().expect("tech_lead 应具备合法的 input_schema");
-        assert!(input_schema.field_names().contains("plan_summary"));
-        assert!(input_schema.field_names().contains("target_files"));
+#[test]
+fn system_basics_seeded_with_native_contracts() {
+    let db = setup_db();
+    for (name, kind) in [(SYSTEM_WORKER, "worker"), (SYSTEM_WRITER, "writer"), (SYSTEM_REVIEWER, "reviewer")] {
+        let card = resolve_enabled_card(&db, name).unwrap().unwrap();
+        assert!(card.is_system && card.enabled);
+        assert_eq!(card.allowed_kinds, kind);
+        assert!(card.model_id.is_empty());
+        assert!(card.parse_custom_schema().is_none());
+        assert!(card.parse_input_schema().is_none());
+        assert!(!card.allows_kind(if kind == "reviewer" { "writer" } else { "reviewer" }));
     }
+    assert!(resolve_enabled_card(&db, "tech_lead").unwrap().is_none());
+}
+
+#[test]
+fn system_basics_protected_and_model_only_update_preserves_fields() {
+    let db = setup_db();
+    for name in [SYSTEM_WORKER, SYSTEM_WRITER, SYSTEM_REVIEWER] {
+        let before = resolve_enabled_card(&db, name).unwrap().unwrap();
+        assert!(delete_card(&db, &json!({"name":name})).unwrap_err().contains("系统基础卡"));
+        assert!(toggle_card(&db, &json!({"name":name})).unwrap_err().contains("系统基础卡"));
+        assert!(upsert_card(&db, &json!({"name":name,"allowed_kinds":"writer"})).is_err());
+        assert!(upsert_card(&db, &json!({"name":name,"is_system":false})).is_err());
+        let after = upsert_card(&db, &json!({"name":name,"model_id":"chosen-model"})).unwrap();
+        assert_eq!(after.persona_prompt, before.persona_prompt);
+        assert_eq!(after.allowed_kinds, before.allowed_kinds);
+        assert_eq!(after.model_id, "chosen-model");
+        assert!(!is_card_disabled_for(&[name.into(),format!("reviewer:{name}")],name,"reviewer"));
+    }
+    let conn = db.0.lock().unwrap();
+    ensure_default_role_cards(&conn).unwrap();
+    drop(conn);
+    assert_eq!(list_cards(&db, true).unwrap().len(), 3);
+    assert_eq!(resolve_enabled_card(&db, SYSTEM_REVIEWER).unwrap().unwrap().model_id,"chosen-model");
+}
+
+#[test]
+fn absent_tech_lead_uses_basic_reviewer_with_plan_protocol() {
+    let db = setup_db();
+    upsert_card(&db, &json!({"name":SYSTEM_REVIEWER,"model_id":"review-model"})).unwrap();
+    let card = resolve_plan_reviewer_card(&db, &[]).unwrap();
+    assert_eq!(card.name, SYSTEM_REVIEWER);
+    assert_eq!(card.model_id, "review-model");
+    let schema = card.parse_custom_schema().unwrap();
+    for field in ["decision", "file_coupling", "analysis"] {
+        assert!(schema.fields.iter().any(|f| f.name == field && f.required));
+    }
+    assert!(schema.fields.iter().any(|f| f.name == "escalate_roles"));
+    assert!(schema.validate_shape(&json!({"decision":"approved","file_coupling":"isolated","analysis":"通过"})).is_ok());
+    assert!(schema.validate_shape(&json!({"decision":"approved","analysis":"通过"})).is_err());
+    assert!(schema.validate_shape(&json!({"decision":"skip","file_coupling":"isolated","analysis":"通过"})).is_err());
+    assert!(validate_dispatch_inputs(&card,Some(&json!({}))).is_err());
+    assert!(validate_dispatch_inputs(&card,Some(&json!({"plan_summary":"实施方案"}))).is_ok());
+    let stored = resolve_enabled_card(&db,SYSTEM_REVIEWER).unwrap().unwrap();
+    assert!(stored.parse_custom_schema().is_none());
+    assert!(stored.parse_input_schema().is_none());
+}
+
+#[test]
+fn explicit_tech_lead_choice_is_not_bypassed() {
+    let db = setup_db();
+    upsert_card(&db,&json!({"name":"tech_lead","model_id":"custom","allowed_kinds":"reviewer","persona_prompt":"my rules"})).unwrap();
+    assert_eq!(resolve_plan_reviewer_card(&db,&[]).unwrap().persona_prompt,"my rules");
+    assert!(resolve_plan_reviewer_card(&db,&["reviewer:tech_lead".into()]).is_err());
+    toggle_card(&db,&json!("tech_lead")).unwrap();
+    assert!(resolve_plan_reviewer_card(&db,&[]).is_err());
+    toggle_card(&db,&json!("tech_lead")).unwrap();
+    upsert_card(&db,&json!({"name":"tech_lead","allowed_kinds":"worker"})).unwrap();
+    assert!(resolve_plan_reviewer_card(&db,&[]).is_err());
+    delete_card(&db,&json!("tech_lead")).unwrap();
+    let conn=db.0.lock().unwrap(); ensure_default_role_cards(&conn).unwrap();drop(conn);
+    assert!(resolve_enabled_card(&db,"tech_lead").unwrap().is_none());
+    assert_eq!(resolve_plan_reviewer_card(&db,&[]).unwrap().name,SYSTEM_REVIEWER);
+}
 
     #[test]
     fn test_default_tech_lead_card_preserves_user_edits_on_reseed() {
@@ -96,6 +155,7 @@
             hard_scope: "src/components, src/assets".into(),
             max_concurrency: 1,
             enabled: true,
+        is_system: false,
             custom_schema: String::new(),
             focus_domains: String::new(),
             input_schema: String::new(),
@@ -122,7 +182,7 @@
         for name in ["tech_lead", "architect", "security_specialist", "performance_expert"] {
             let _ = delete_card(&db, &json!({ "name": name }));
         }
-        assert!(build_role_cards_menu(&db).unwrap().is_empty());
+        assert!(build_role_cards_menu(&db).unwrap().contains("system_reviewer"));
         upsert_card(&db, &json!({"name": "a_role", "label": "角色A", "persona_prompt": "描述A"})).unwrap();
         upsert_card(&db, &json!({"name": "b_role", "label": "角色B"})).unwrap();
         toggle_card(&db, &json!({"name": "b_role"})).unwrap();
@@ -355,6 +415,7 @@ fn skills_block_whitelist_injects_listed_docs_only() {
             scope_hints: String::new(), default_test_command: String::new(),
             allowed_kinds: String::new(), hard_scope: String::new(),
             max_concurrency: 0, enabled: true,
+        is_system: false,
             custom_schema: String::new(), focus_domains: String::new(),
             input_schema: String::new(), allowed_skills: String::new(), allowed_mcp: String::new(),
         }
@@ -383,6 +444,7 @@ fn skills_block_whitelist_injects_listed_docs_only() {
         scope_hints: String::new(), default_test_command: String::new(),
         allowed_kinds: String::new(), hard_scope: String::new(),
         max_concurrency: 0, enabled: true,
+        is_system: false,
         custom_schema: String::new(), focus_domains: String::new(),
         input_schema: String::new(), allowed_skills: String::new(), allowed_mcp: String::new(),
     });
@@ -462,4 +524,13 @@ fn dispatch_inputs_check_declared_types_without_closing_extra_fields() {
         "text":"ok","paths":[],"round":0,"approved":false,"extra":"allowed"
     }))).is_ok());
     assert!(validate_dispatch_inputs(&card, Some(&json!({"text":"ok","round":null}))).is_ok());
+}
+
+#[test]
+fn disabled_custom_menu_still_keeps_system_basics() {
+    let db = setup_db();
+    upsert_card(&db,&json!({"name":"specialist","allowed_kinds":"reviewer"})).unwrap();
+    let menu=build_role_cards_menu_filtered(&db,&[SYSTEM_WORKER.into(),SYSTEM_WRITER.into(),SYSTEM_REVIEWER.into(),"specialist".into()]).unwrap();
+    for name in [SYSTEM_WORKER,SYSTEM_WRITER,SYSTEM_REVIEWER] { assert!(menu.contains(&format!("[{name}]"))); }
+    assert!(!menu.contains("[specialist]"));
 }

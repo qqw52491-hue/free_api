@@ -114,7 +114,9 @@ pub(super) async fn dispatch_child_writer(
             }
 
             let mut writer_custom_schema = None;
-            if let Some(role_name) = writer_params.get("role").and_then(|v| v.as_str()) {
+            let role_name = writer_params.get("role").and_then(|v| v.as_str())
+                .unwrap_or(crate::agent::tools::role_manager::SYSTEM_WRITER);
+            {
                 if crate::agent::tools::role_manager::is_card_disabled_for(&ctx.model_routing.disabled_role_cards, role_name, "writer") {
                     item_reports.push(format!(
                         "[{}/{}] ⏸️ 角色卡「{}」在当前会话的 writer 工位已被用户排除/休眠；请改用其他角色或直接以默认身份派发。",
@@ -201,9 +203,6 @@ pub(super) async fn dispatch_child_writer(
                         continue;
                     }
                 }
-            } else {
-                effective_params["role"] = json!("system_writer");
-                effective_params["role_label"] = json!("✍️ 隔离沙箱写入工兵");
             }
 
             let mut envelope = crate::agent::protocol::DispatchEnvelope::writer(

@@ -575,8 +575,8 @@ fn gate_interception(
                              原因: {}\n\
                              命中规则: `{}`\n\
                              系统已将任务切换为方案审查模式。在动笔修改代码前，请按顺序完成两步：\n\
-                             1. 调用 `child_reviewer`（指定 role: \"tech_lead\"）进行方案对齐（custom_inputs 传 plan_summary/target_files/discussion_round，且须三选一携带 evidence_refs/evidence_excerpt/resource_ids——通常就是刚读过的 target_files）；\n\
-                             2. 拿到裁决后调用 `submit_plan` 落账正式方案以获得 plan_id（含各 target_block 的 checklist）——【注意】即使 Tech Lead 返回 approved，缺少 submitted_plan 状态的写入仍会被拦截；若裁决为 rebuttal 则修订后再讨论，escalate 则按推荐专家（建议：{}）并发派发联合会审后再落账。",
+                             1. 单独输出 submit_plan，提交 plan_summary、target_files、evidence_refs、root_cause、assumptions、open_questions、intended_verification；宿主同时登记结构化方案并异步派发审查。tech_lead 缺失时使用基础 reviewer 加载相同方案审查协议，无需重建专业卡；\n\
+                             2. 调用 wait_jobs 收取裁决：approved 放行，rebuttal 修订后重新 submit_plan，escalate 按裁决指定的可用专家（策略建议：{}）派发联合会审。缺少角色时明确报告，不伪造角色或跳过审查。",
                             reason, matched_pattern, suggested_roles.join(", ")
                         );
                         Some(DispatchResult { view: None,

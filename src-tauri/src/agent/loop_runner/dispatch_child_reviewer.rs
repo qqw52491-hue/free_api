@@ -122,6 +122,7 @@ pub(super) async fn dispatch_child_reviewer(
             }
 
             let mut reviewer_custom_schema = None;
+            let mut card_model_bound = false;
             if let Some(role_name) = child_params.get("role").and_then(|v| v.as_str()) {
                 if crate::agent::tools::role_manager::is_card_disabled_for(&ctx.model_routing.disabled_role_cards, role_name, "reviewer") {
                     item_reports.push(format!(
@@ -150,6 +151,7 @@ pub(super) async fn dispatch_child_reviewer(
                         }
                         if !card.model_id.is_empty() {
                             reviewer_model = card.model_id.clone();
+                            card_model_bound = true;
                         }
                         if card.max_concurrency > 0 {
                             effective_params["max_concurrency"] = json!(card.max_concurrency.min(crate::agent::child_reviewer::MAX_TOTAL_CHILDREN_PER_RUN as i64));
@@ -217,7 +219,7 @@ pub(super) async fn dispatch_child_reviewer(
                 let auto_card = {
                     let cards = crate::agent::tools::role_manager::list_cards(ctx.state.inner(), false).unwrap_or_default();
                     let active: Vec<_> = cards.into_iter().filter(|c| {
-                        c.enabled && c.allows_kind("reviewer") && !crate::agent::tools::role_manager::is_card_disabled_for(&ctx.model_routing.disabled_role_cards, &c.name, "reviewer")
+                        !c.is_system && c.enabled && c.allows_kind("reviewer") && !crate::agent::tools::role_manager::is_card_disabled_for(&ctx.model_routing.disabled_role_cards, &c.name, "reviewer")
                     }).collect();
 
                     let q_text = child_params.get("question").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
@@ -240,6 +242,12 @@ pub(super) async fn dispatch_child_reviewer(
                     matched.or_else(|| if active.len() == 1 { active.into_iter().next() } else { None })
                 };
 
+                let auto_card = match auto_card {
+                    Some(card) => Some(card),
+                    None => crate::agent::tools::role_manager::resolve_enabled_card(
+                        ctx.state.inner(), crate::agent::tools::role_manager::SYSTEM_REVIEWER,
+                    )?,
+                };
                 if let Some(card) = auto_card {
                     reviewer_persona = crate::agent::tools::role_manager::persona_block(&card);
                     reviewer_persona += &crate::agent::tools::role_manager::skills_block(ctx.state.inner(), &card);
@@ -250,13 +258,15 @@ pub(super) async fn dispatch_child_reviewer(
                     }
                     if !card.model_id.is_empty() {
                         reviewer_model = card.model_id.clone();
+                        card_model_bound = true;
                     }
                     if card.max_concurrency > 0 {
                         effective_params["max_concurrency"] = json!(card.max_concurrency.min(crate::agent::child_reviewer::MAX_TOTAL_CHILDREN_PER_RUN as i64));
                     }
                 } else {
-                    effective_params["role"] = json!("system_reviewer");
-                    effective_params["role_label"] = json!("🛡️ 跨模型综合审查官");
+                    item_reports.push(format!("[{}/{}] ❌ 系统基础 reviewer 尚未初始化，请重启应用。", item_num, total));
+                    fail_count += 1;
+                    continue;
                 }
             }
 
@@ -265,6 +275,7 @@ pub(super) async fn dispatch_child_reviewer(
                 "child_reviewer:cross_family_check",
             );
             if ctx.model_routing.auto_cross_family_reviewer
+                && !card_model_bound
                 && reviewer_model == routing.model_id
                 && !explicit_reviewer_slot
             {

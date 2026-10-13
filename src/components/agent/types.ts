@@ -413,6 +413,7 @@ export interface RoleCard {
     hard_scope: string;
     max_concurrency: number;
     enabled: boolean;
+    is_system?: boolean;
     custom_schema?: string;
     focus_domains?: string;
     input_schema?: string;

@@ -104,40 +104,15 @@ pub async fn handle_submit_plan(
             Err(reason) => return reject(reason, "plan_liveness:submit_plan_invalid"),
         };
 
-    // ---- 解析 tech_lead 角色卡 ----
-    if crate::agent::tools::role_manager::is_card_disabled_for(
-        &model_routing.disabled_role_cards,
-        "tech_lead",
-        "reviewer",
+    // 专业卡缺失时用基础 reviewer + 方案协议；显式排除/停用不绕过。
+    let card = match crate::agent::tools::role_manager::resolve_plan_reviewer_card(
+        db, &model_routing.disabled_role_cards,
     ) {
-        return reject(
-            "【⚠️ submit_plan 已拒绝】tech_lead 角色卡已被用户在当前会话排除/休眠。\n请改用 child_reviewer 指定其他 reviewer 角色提交方案审查。"
-                .to_string(),
+        Ok(card) => card,
+        Err(error) => return reject(
+            format!("【⚠️ submit_plan 已拒绝】{error}"),
             "plan_liveness:submit_plan_role_unavailable",
-        );
-    }
-    let card = match crate::agent::tools::role_manager::resolve_enabled_card(db, "tech_lead") {
-        Ok(Some(card)) if card.allows_kind("reviewer") => card,
-        Ok(Some(_)) => {
-            return reject(
-                "【⚠️ submit_plan 已拒绝】tech_lead 角色卡未授权挂载为 reviewer。请改用 child_reviewer 指定其他角色。"
-                    .to_string(),
-                "plan_liveness:submit_plan_role_unavailable",
-            )
-        }
-        Ok(None) => {
-            return reject(
-                "【⚠️ submit_plan 已拒绝】tech_lead 角色卡不存在或已禁用。请改用 child_reviewer 指定其他 reviewer 角色。"
-                    .to_string(),
-                "plan_liveness:submit_plan_role_unavailable",
-            )
-        }
-        Err(error) => {
-            return reject(
-                format!("【⚠️ submit_plan 已拒绝】tech_lead 角色卡查询失败：{}。请改用 child_reviewer 重试。", error),
-                "plan_liveness:submit_plan_role_unavailable",
-            )
-        }
+        ),
     };
 
     // ---- 组装 Tech Lead 评审证据包 ----
@@ -383,6 +358,7 @@ pub async fn handle_submit_plan(
         card.model_id.clone()
     };
     if model_routing.auto_cross_family_reviewer
+        && card.model_id.is_empty()
         && reviewer_model == routing.model_id
         && !has_explicit_reviewer_slot
     {
@@ -441,16 +417,16 @@ pub async fn handle_submit_plan(
                 success: true,
                 stdout: if is_revision {
                     format!(
-                        "【✅ 修订方案已提交并重开审查】原放行状态已撤销，写入门禁重新生效。Tech Lead 修订评审已异步派发（child_run_id: {}，第 {} 轮）。\n\
+                        "【✅ 修订方案已提交并重开审查】原放行状态已撤销，写入门禁重新生效。{} 修订评审已异步派发（child_run_id: {}，第 {} 轮）。\n\
                          请调用 wait_jobs(job_ids:[\"{}\"]) 挂起等待裁决；结论注入后按 decision 行动：approved 恢复写入、rebuttal 继续修订重审、escalate 按指定专家派联合会审。\n\
                          【修订轮附带义务】获批后请用 todo_update 对照新方案核对任务台账：作废与新方案无关的待办、补充新工作项；已完成的有效工作保持 done 不受影响。",
-                        child_run_id, discussion_round, child_run_id
+                        card.label, child_run_id, discussion_round, child_run_id
                     )
                 } else {
                     format!(
-                        "【✅ 方案已提交并进入审查】结构化方案已落账，Tech Lead 方案评审已异步派发（child_run_id: {}，第 {} 轮）。\n\
+                        "【✅ 方案已提交并进入审查】结构化方案已落账，{} 方案评审已异步派发（child_run_id: {}，第 {} 轮）。\n\
                          请调用 wait_jobs(job_ids:[\"{}\"]) 挂起等待裁决；结论注入后按 decision 行动：approved 放行写入、rebuttal 修订后重审、escalate 按指定专家派联合会审。",
-                        child_run_id, discussion_round, child_run_id
+                        card.label, child_run_id, discussion_round, child_run_id
                     )
                 },
                 stderr: String::new(),

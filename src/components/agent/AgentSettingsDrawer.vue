@@ -72,19 +72,24 @@
                 </section>
                 <section class="role-cards-section">
                     <div class="section-heading"><h3>专精角色池</h3><small>{{ roleCards.length ? `${roleCards.length} 张角色卡` : '未创建' }}</small></div>
-                    <p class="section-description">角色卡 = 人设提示词 + 钉死模型 + 作用域。Agent 派发子任务时按角色标识挂载；上限 8 张。</p>
+                    <p class="section-description">角色卡 = 人设提示词 + 钉死模型 + 作用域。Agent 派发子任务时按角色标识挂载；上限 16 张；三个系统基础卡常驻，专业卡可自由管理。</p>
                     <div v-if="roleCardsLoading" class="mcp-empty">正在读取角色池…</div>
                     <div v-else-if="roleCards.length" class="role-card-list">
                         <article v-for="card in roleCards" :key="card.id" class="role-card-item" :class="{ disabled: !card.enabled }">
                             <div class="role-card-main">
-                                <strong>{{ card.label || card.name }} <small>[{{ card.name }}]</small></strong>
+                                <strong>{{ card.label || card.name }} <small>[{{ card.name }}]{{ card.is_system ? ' · 常驻基础卡' : '' }}</small></strong>
                                 <small>{{ roleModelLabel(card.model_id) }} · {{ card.enabled ? '启用' : '已禁用' }}<template v-if="card.default_test_command"> · {{ card.default_test_command }}</template></small>
                                 <p v-if="card.persona_prompt">{{ card.persona_prompt.length > 90 ? card.persona_prompt.slice(0, 90) + '…' : card.persona_prompt }}</p>
                             </div>
                             <div class="role-card-actions">
-                                <button type="button" @click="editRoleCard(card)">编辑</button>
-                                <button type="button" @click="toggleRoleCard(card.name)">{{ card.enabled ? '禁用' : '启用' }}</button>
-                                <button type="button" class="danger" @click="deleteRoleCard(card.name)">删除</button>
+                                <template v-if="card.is_system">
+                                    <ModelSelectDropdown :model-value="card.model_id" :models="roleModelOptions" size="sm"
+                                        placeholder="跟随档位路由" @update:model-value="saveBasicRoleModel(card, $event)" />
+                                    <button v-if="card.model_id" type="button" @click="saveBasicRoleModel(card, '')">跟随路由</button>
+                                </template>
+                                <button v-else type="button" @click="editRoleCard(card)">编辑</button>
+                                <button type="button" :disabled="card.is_system" @click="toggleRoleCard(card.name)">{{ card.enabled ? '禁用' : '启用' }}</button>
+                                <button type="button" class="danger" :disabled="card.is_system" @click="deleteRoleCard(card.name)">删除</button>
                             </div>
                         </article>
                     </div>
@@ -217,6 +222,7 @@ interface RoleCard {
     scope_hints: string;
     default_test_command: string;
     enabled: boolean;
+    is_system?: boolean;
 }
 interface RoleModelOption { id: string; name: string; display_name: string; platform_name: string; }
 const roleCards = ref<RoleCard[]>([]);
@@ -257,6 +263,7 @@ function openRoleFormDefaults() {
 }
 
 function editRoleCard(card: RoleCard) {
+    if (card.is_system) return;
     roleForm.value = { ...card, editingId: card.id };
     roleFormError.value = "";
     roleFormOpen.value = true;
@@ -277,7 +284,17 @@ async function saveRoleCard() {
     }
 }
 
+async function saveBasicRoleModel(card: RoleCard, modelId: string) {
+    try {
+        await invoke("upsert_role_card", { card: { name: card.name, model_id: modelId } });
+        await loadRoleCards();
+    } catch (error) {
+        alert(`模型设置失败: ${String(error)}`);
+    }
+}
+
 async function toggleRoleCard(name: string) {
+    if (roleCards.value.some((c) => c.name === name && c.is_system)) return;
     try {
         await invoke("toggle_role_card", { name });
         await loadRoleCards();
@@ -287,6 +304,7 @@ async function toggleRoleCard(name: string) {
 }
 
 async function deleteRoleCard(name: string) {
+    if (roleCards.value.some((c) => c.name === name && c.is_system)) return;
     try {
         await invoke("delete_role_card", { name });
         await loadRoleCards();

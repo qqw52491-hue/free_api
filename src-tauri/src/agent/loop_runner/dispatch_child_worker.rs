@@ -62,7 +62,9 @@ pub(super) async fn dispatch_child_worker(
             }
 
             let mut scout_custom_schema = None;
-            if let Some(role_name) = worker_params.get("role").and_then(|v| v.as_str()) {
+            let role_name = worker_params.get("role").and_then(|v| v.as_str())
+                .unwrap_or(crate::agent::tools::role_manager::SYSTEM_WORKER);
+            {
                 if crate::agent::tools::role_manager::is_card_disabled_for(&ctx.model_routing.disabled_role_cards, role_name, "worker") {
                     item_reports.push(format!(
                         "[{}/{}] ⏸️ 角色卡「{}」在当前会话的 worker/scout 工位已被用户排除/休眠；请改用其他角色或直接以默认身份派发。",
@@ -145,9 +147,6 @@ pub(super) async fn dispatch_child_worker(
                         continue;
                     }
                 }
-            } else {
-                effective_worker_params["role"] = json!("system_worker");
-                effective_worker_params["role_label"] = json!("🔍 独立只读侦察专员");
             }
 
             let mut envelope = crate::agent::protocol::DispatchEnvelope::worker(

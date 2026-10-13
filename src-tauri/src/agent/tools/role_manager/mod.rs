@@ -7,6 +7,19 @@ use uuid::Uuid;
 
 /// 角色池上限：每张卡的清单都会注入主 Agent 上下文，超池会稀释注意力与预算。
 pub const MAX_ROLE_CARDS: usize = 16;
+pub const SYSTEM_WORKER: &str = "system_worker";
+pub const SYSTEM_WRITER: &str = "system_writer";
+pub const SYSTEM_REVIEWER: &str = "system_reviewer";
+
+/// 保留标识由宿主判定，不能由调用者伪造 is_system 来解除保护。
+pub fn system_role_kind(name: &str) -> Option<&'static str> {
+    match name {
+        SYSTEM_WORKER => Some("worker"),
+        SYSTEM_WRITER => Some("writer"),
+        SYSTEM_REVIEWER => Some("reviewer"),
+        _ => None,
+    }
+}
 const MAX_NAME_CHARS: usize = 64;
 const MAX_LABEL_CHARS: usize = 80;
 const MAX_PERSONA_CHARS: usize = 3_000;
@@ -29,6 +42,8 @@ pub struct RoleCard {
     #[serde(default)]
     pub max_concurrency: i64,       // 0=跟随全局默认
     pub enabled: bool,
+    #[serde(default)]
+    pub is_system: bool,
     #[serde(default)]
     pub custom_schema: String,      // 结构化交付契约 (JSON 序列化的 ContractSchema)
     #[serde(default)]
@@ -114,6 +129,7 @@ fn map_card(row: &rusqlite::Row<'_>) -> rusqlite::Result<RoleCard> {
     Ok(RoleCard {
         id: row.get(0)?,
         name: row.get(1)?,
+        is_system: system_role_kind(&row.get::<_, String>(1)?).is_some(),
         label: row.get(2)?,
         model_id: row.get(3)?,
         persona_prompt: row.get(4)?,
@@ -151,7 +167,7 @@ pub fn list_cards(db: &DbState, include_disabled: bool) -> Result<Vec<RoleCard>,
     Ok(rows)
 }
 
-/// 派发时按角色标识取启用的卡；未命中/被禁用返回 None（派发退化为默认行为）。
+/// 按标识取启用卡；未命中/被禁用返回 None，是否兜底由调用入口决定。
 pub fn resolve_enabled_card(db: &DbState, name: &str) -> Result<Option<RoleCard>, String> {
     let name = name.trim();
     if name.is_empty() {
@@ -318,6 +334,24 @@ fn validate_card_input(
 }
 
 pub fn upsert_card(db: &DbState, params: &Value) -> Result<RoleCard, String> {
+    let name = params.get("name").and_then(Value::as_str).unwrap_or("").trim();
+    if system_role_kind(name).is_some() {
+        // 基础卡只开放模型绑定；专精人设/入参/交付字段请放在自定义卡中。
+        let object = params.as_object().ok_or("角色卡参数必须为对象")?;
+        if object.keys().any(|key| key != "name" && key != "model_id") {
+            return Err("系统基础卡仅支持修改 model_id；不能更改人设、工位或契约，请新建自定义角色卡。".into());
+        }
+        let model_id = params.get("model_id").and_then(Value::as_str)
+            .ok_or("系统基础卡模型设置需要字符串 model_id（空串表示跟随路由）")?;
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let changed = conn.execute(
+            "UPDATE agent_role_cards SET model_id = ?1, updated_at = ?2 WHERE name = ?3",
+            params![model_id, chrono::Utc::now().to_rfc3339(), name],
+        ).map_err(|e| e.to_string())?;
+        drop(conn);
+        if changed == 0 { return Err("系统基础卡尚未初始化，请重启应用。".into()); }
+        return resolve_enabled_card(db, name)?.ok_or("系统基础卡不可用".into());
+    }
     let (
         name,
         label,
@@ -381,6 +415,9 @@ pub fn toggle_card(db: &DbState, params: &Value) -> Result<String, String> {
             .and_then(|v| v.as_str())
             .ok_or_else(|| "role_manager.toggle 缺少 name。".to_string())?
     };
+    if system_role_kind(name).is_some() {
+        return Err("系统基础卡不能删除或停用；可调整模型绑定，专业需求请使用自定义卡。".into());
+    }
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let rows = conn
         .execute(
@@ -400,6 +437,9 @@ pub fn delete_card(db: &DbState, params: &Value) -> Result<String, String> {
             .and_then(|v| v.as_str())
             .ok_or_else(|| "role_manager.delete 缺少 name。".to_string())?
     };
+    if system_role_kind(name).is_some() {
+        return Err("系统基础卡不能删除或停用；可调整模型绑定，专业需求请使用自定义卡。".into());
+    }
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let rows = conn
         .execute("DELETE FROM agent_role_cards WHERE name = ?1", params![name])
@@ -407,10 +447,8 @@ pub fn delete_card(db: &DbState, params: &Value) -> Result<String, String> {
     Ok(format!("已删除角色 {}（{} 行）", name, rows))
 }
 
-/// 初始化与确保内置核心角色卡（如 1v1 方案评审与定级专用的 Tech Lead）
-pub fn ensure_default_role_cards(conn: &rusqlite::Connection) -> Result<(), String> {
-    let now = chrono::Utc::now().to_rfc3339();
-    let id = "default-role-tech-lead";
+/// 方案审查专用协议，仅作用于本次基础 reviewer 派发，不改变通用基础卡。
+fn with_plan_review_protocol(mut card: RoleCard) -> RoleCard {
     let input_schema = json!({
         "fields": [
             {
@@ -473,81 +511,63 @@ pub fn ensure_default_role_cards(conn: &rusqlite::Connection) -> Result<(), Stri
         "strict_closed_set": false
     }).to_string();
 
-    let persona_prompt = "你是一名资深技术主管 (Tech Lead)。你的核心职责是在主脑编写代码前，对其提交的方案 (Plan)、拟修改文件 (target_files) 和实施步骤进行深入的技术把关与 1v1 方案评审对齐。\n\n你必须客观评估：\n1. 方案可行性与严密性：方案设计是否逻辑自洽？是否存在遗漏的边界情况或破坏性变更？\n2. 改动关联度 (file_coupling)：\n   - isolated（单一/孤立）：各个修改文件职责明确、改动局部独立（如纯文案、单一组件样式、局部叶子函数修补、配置文件修改），即使改动了多个文件也是单一维度的修改。\n   - coupled（深度关联/跨层）：修改涉及多个架构层次、模块间契约变更、状态共享改造、全局鉴权/拦截器改动或数据库表结构与前端 IPC 联调。\n3. 讨论战况与定级决断 (decision)：\n   - approved：方案扎实清晰，改动范围可控（无论是单一改动，还是 1~2 轮内已对齐的关联改动）。直接放行，主脑可开工编码。输出合规评分卡（各项 >= 80），无阻塞缺陷。\n   - rebuttal：方案存在可修正的逻辑缺陷、未考虑的边界或不严谨处，需要在 1v1 讨论中进一步推演修改。请在 findings 中给出具体修改意见与定位。\n   - escalate：方案改动范围巨大且跨模块强关联（如高危架构重构、底层数据流变更），或者主脑在 2~3 轮对质后方案仍存在不可调和的架构分歧。单人评审无法完全兜底，必须升级为多专家联合会审！请在 escalate_roles 中指定需要增援的专家（如 'architect', 'security_specialist', 'performance_expert' 等）。";
+    let persona_prompt = "你是一名资深技术主管 (Tech Lead)。你的核心职责是在主脑编写代码前，对其提交的方案 (Plan)、拟修改文件 (target_files) 和实施步骤进行深入的技术把关与 1v1 方案评审对齐。\n\n你必须客观评估：\n1. 方案可行性与严密性：方案设计是否逻辑自洽？是否存在遗漏的边界情况或破坏性变更？\n2. 改动关联度 (file_coupling)：\n   - isolated（单一/孤立）：各个修改文件职责明确、改动局部独立（如纯文案、单一组件样式、局部叶子函数修补、配置文件修改），即使改动了多个文件也是单一维度的修改。\n   - coupled（深度关联/跨层）：修改涉及多个架构层次、模块间契约变更、状态共享改造、全局鉴权/拦截器改动或数据库表结构与前端 IPC 联调。\n3. 讨论战况与定级决断 (decision)：\n   - approved：方案扎实清晰，改动范围可控（无论是单一改动，还是 1~2 轮内已对齐的关联改动）。直接放行，主脑可开工编码。输出合规评分卡（各项 >= 80），无阻塞缺陷。\n   - rebuttal：方案存在可修正的逻辑缺陷、未考虑的边界或不严谨处，需要在 1v1 讨论中进一步推演修改。请在 findings 中给出具体修改意见与定位。\n   - escalate：方案改动范围巨大且跨模块强关联（如高危架构重构、底层数据流变更），或者主脑在 2~3 轮对质后方案仍存在不可调和的架构分歧。单人评审无法完全兜底，必须升级为多专家联合会审！请在 escalate_roles 中指定角色池中实际存在且可用的增援 reviewer；若缺少专业角色，明确报告缺口，不虚构角色标识。";
 
     // v2：在 v1 基础上追加审查清单——每次评审必须逐项核对并在意见中明确回答
     let persona_prompt_v2 = format!(
         "{persona_prompt}\n\n【审查清单（每次评审必须逐项核对，意见中明确回答每一项）】\n1. 状态机收敛：失败/超时/异常终态是否被纳入完成判定（is_complete、pending_count、all_failed）？\n2. 分支顺序：新产出的门禁路由在拦截链中的优先级是否正确（会不会被无关分支抢先）？\n3. 豁免链覆盖：新路由是否已加入 ask_human 冷却豁免白名单（漏加会造成二阶死锁）？\n4. 向后兼容：旧持久化数据（缺新字段的 checkpoint/会话）反序列化是否兼容？\n5. 测试覆盖：关键分支是否有回归测试，断言锁住的是行为还是实现细节？\n6. 监管披露：是否静默修改了监管行为而未在交付说明中披露？"
     );
 
-    // 仅在缺失时预装；用户对内置卡的编辑（换模型、改 Prompt、调 Schema）必须跨重启保留
-    conn.execute(
-        "INSERT INTO agent_role_cards (id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, enabled, custom_schema, focus_domains, input_schema, created_at, updated_at)
-         VALUES (?1, 'tech_lead', '技术主管 (Tech Lead - 方案评审与定级)', '', ?2, '负责改动实施前的 1v1 方案评审，评估技术含金量与文件关联度，决定放行、打回或升级多专家会审', '', 'reviewer', '', 0, 1, ?3, '[]', ?4, ?5, ?5)
-         ON CONFLICT(name) DO NOTHING",
-        rusqlite::params![id, persona_prompt_v2, custom_schema, input_schema, now],
-    )
-    .map_err(|e| format!("预装 tech_lead 角色卡失败: {e}"))?;
+    card.persona_prompt = persona_prompt_v2;
+    card.input_schema = input_schema;
+    card.custom_schema = custom_schema;
+    card
+}
 
-    // 种子升级（v1→v2）：仅当存量 persona 与 v1 默认完全一致（用户未编辑过）时，
-    // 升级到带审查清单的 v2；用户编辑过的卡原样保留
-    conn.execute(
-        "UPDATE agent_role_cards SET persona_prompt = ?1, updated_at = ?2
-         WHERE name = 'tech_lead' AND persona_prompt = ?3",
-        rusqlite::params![persona_prompt_v2, now, persona_prompt],
-    )
-    .map_err(|e| format!("升级 tech_lead 角色卡失败: {e}"))?;
+/// tech_lead 真正缺失才兜底；显式禁用/排除、工位不符和查询错误不绕过。
+pub fn resolve_plan_reviewer_card(db: &DbState, disabled_names: &[String]) -> Result<RoleCard, String> {
+    if is_card_disabled_for(disabled_names, "tech_lead", "reviewer") {
+        return Err("tech_lead 已被用户在当前会话排除/休眠；请指定其他 reviewer 审查。".into());
+    }
+    let tech_lead = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            &format!("SELECT {CARD_COLUMNS} FROM agent_role_cards WHERE name = 'tech_lead'"),
+            [], map_card,
+        ).optional().map_err(|e| e.to_string())?
+    };
+    if let Some(card) = tech_lead {
+        if !card.enabled { return Err("tech_lead 已禁用；请指定其他 reviewer 审查。".into()); }
+        if !card.allows_kind("reviewer") { return Err("tech_lead 未授权挂载为 reviewer；请指定其他 reviewer 审查。".into()); }
+        return Ok(card);
+    }
+    let card = resolve_enabled_card(db, SYSTEM_REVIEWER)?
+        .ok_or("系统基础 reviewer 尚未初始化，请重启应用。")?;
+    if !card.allows_kind("reviewer") { return Err("系统基础 reviewer 工位配置异常".into()); }
+    Ok(with_plan_review_protocol(card))
+}
 
-    // 联合会审专家预装：Tech Lead 的 escalate_roles 会点名这些专家，
-    // 卡不存在则多专家会审升级路径会因"查无此人"而断链。保护式预装（DO NOTHING）。
-    const COMMITTEE_SPECIALISTS: &[(&str, &str, &str, &str, &str)] = &[
-        (
-            "architect",
-            "架构评审专家",
-            "你是一名资深软件架构师，在多专家联合会审中负责架构维度的把关。评估要点：1) 改动是否与现有模块边界和分层契约一致；2) 状态共享与并发访问是否安全（锁、竞态、状态机收敛语义）；3) 是否引入不必要的耦合或破坏既有抽象；4) 向后兼容与迁移路径是否明确。在 findings 中给出具体定位（文件:行号）与理由。",
-            "架构/状态机/模块边界/并发安全",
-            "架构,并发,状态机,模块边界",
-        ),
-        (
-            "security_specialist",
-            "安全审查专家",
-            "你是一名应用安全专家，在多专家联合会审中负责安全维度的把关。评估要点：1) 输入校验与注入面（SQL/命令/路径拼接）；2) 鉴权与权限边界是否被改动弱化；3) 敏感信息（密钥/日志/临时文件）是否泄露；4) 失败路径是否泄露系统内部信息。在 findings 中给出具体定位与攻击场景。",
-            "安全/鉴权/注入面/敏感信息",
-            "安全,鉴权,注入,敏感信息",
-        ),
-        (
-            "performance_expert",
-            "性能评审专家",
-            "你是一名性能工程专家，在多专家联合会审中负责性能维度的把关。评估要点：1) 热点路径的复杂度与分配行为（重复计算/大对象拷贝/每步重编译）；2) 锁竞争与阻塞点；3) I/O 次数与批量机会；4) 缓存友好性与内存增长。在 findings 中给出具体定位与量化依据。",
-            "性能/热点/锁竞争/IO",
-            "性能,热点,锁,内存,IO",
-        ),
-    ];
-    for (idx, (name, label, persona, scope_hints, focus_domains)) in
-        COMMITTEE_SPECIALISTS.iter().enumerate()
-    {
+/// 只预装通用基础卡；用户删除的专业卡不会在重启后复活。
+pub fn ensure_default_role_cards(conn: &rusqlite::Connection) -> Result<(), String> {
+    let now = chrono::Utc::now().to_rfc3339();
+    for (name, kind, label, persona) in [
+        (SYSTEM_WORKER, "worker", "基础只读侦察员", "根据任务与提供的证据进行只读调查，区分已核实事实与推测，按 worker 原生交付协议回报。"),
+        (SYSTEM_WRITER, "writer", "基础写入执行员", "按明确的任务、范围和验收标准完成修改，保留无关内容，按 writer 原生交付协议回报改动与验证结果。"),
+        (SYSTEM_REVIEWER, "reviewer", "基础综合审查员", "根据任务要求与证据独立审查，给出可定位的结论，区分缺陷、证据缺口与通道故障，按 reviewer 原生交付协议回报。"),
+    ] {
         conn.execute(
             "INSERT INTO agent_role_cards (id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, enabled, custom_schema, focus_domains, input_schema, created_at, updated_at)
-             VALUES (?1, ?2, ?3, '', ?4, ?5, '', 'reviewer', '', 0, 1, '[]', ?6, '[]', ?7, ?7)
-             ON CONFLICT(name) DO NOTHING",
-            rusqlite::params![
-                format!("default-role-committee-{}", idx + 1),
-                name,
-                label,
-                persona,
-                scope_hints,
-                focus_domains,
-                now
-            ],
-        )
-        .map_err(|e| format!("预装联合会审专家 {name} 失败: {e}"))?;
+             VALUES (?1, ?2, ?3, '', ?4, '', '', ?5, '', 0, 1, '', '[]', '', ?6, ?6)
+             ON CONFLICT(name) DO UPDATE SET enabled = 1, allowed_kinds = excluded.allowed_kinds",
+            params![format!("default-role-{name}"), name, label, persona, kind, now],
+        ).map_err(|e| format!("初始化基础角色 {name} 失败: {e}"))?;
     }
-
     Ok(())
 }
 
 /// 检查角色卡在特定工位（如 "writer", "reviewer", "worker"）或全局是否处于禁用/休眠状态
 pub fn is_card_disabled_for(disabled_names: &[String], card_name: &str, kind: &str) -> bool {
+    if system_role_kind(card_name).is_some() { return false; }
     let name_lower = card_name.to_ascii_lowercase();
     let slot_prefix = format!("{}:", kind.to_ascii_lowercase());
     disabled_names.iter().any(|d| {
@@ -582,6 +602,7 @@ pub fn build_role_cards_menu_filtered(db: &DbState, disabled_names: &[String]) -
     let active_cards: Vec<RoleCard> = cards
         .into_iter()
         .filter(|c| {
+            if c.is_system { return true; }
             // 若全局禁用该卡片名称，排除
             if disabled_names.iter().any(|d| d.eq_ignore_ascii_case(&c.name)) {
                 return false;
@@ -597,7 +618,8 @@ pub fn build_role_cards_menu_filtered(db: &DbState, disabled_names: &[String]) -
     if active_cards.is_empty() {
         return Ok(String::new());
     }
-    let mut out = String::from("\n### 专精角色池（派发 child_reviewer/child_worker/child_writer 时传 \"role\": \"角色标识\" 即可挂载人设与专属模型；每张卡标注了「可挂载」类型，只能用于所列类型，否则派发会被拒）\n【提示】reviewer 角色建议在角色选择器中钉一个与规划者不同家族的模型：异构模型盲区互补，交叉审查收益最大。\n");
+    let mut out = String::from("\n### 角色池（派发 child_reviewer/child_worker/child_writer 时传 \"role\": \"角色标识\" 即可挂载人设与专属模型；每张卡标注了「可挂载」类型，只能用于所列类型，否则派发会被拒）\n【提示】reviewer 角色建议在角色选择器中钉一个与规划者不同家族的模型：异构模型盲区互补，交叉审查收益最大。\n");
+    out.push_str("【基础卡】system_worker / system_writer / system_reviewer 常驻，不可删除或休眠，默认跟随路由；专业卡可自由管理。tech_lead 缺失时 submit_plan 使用基础 reviewer 加载方案审查协议，不免除审查。\n");
     for card in active_cards {
         let model_note = if card.model_id.is_empty() {
             "跟随档位路由".to_string()
