@@ -1130,6 +1130,17 @@
                     </div>
                     <button v-if="isRunning" class="stop-control" type="button" :disabled="stopRequested" @click="$emit('stop')">{{ stopRequested ? '停止中' : '停止' }}</button>
                     
+                    <!-- 任务意图是结构化选择，不通过“继续”等自然语言猜测。 -->
+                    <button
+                        v-if="!isRunning && canResumeTask"
+                        type="button"
+                        class="mode-switch-pill"
+                        :title="stoppedTaskMode === 'resume' ? '保留原目标、方案和审查状态；点击改为新任务' : '开始新任务，重新分流；点击改为继续原任务'"
+                        @click.stop="stoppedTaskMode = stoppedTaskMode === 'resume' ? 'new' : 'resume'"
+                    >
+                        {{ stoppedTaskMode === 'resume' ? '↪ 继续原任务' : '＋ 新任务' }}
+                    </button>
+
                     <!-- 运行中模式切换：立即打断 vs 排队执行 -->
                     <button
                         v-if="isRunning && !isWaitingForHuman"
@@ -1151,7 +1162,7 @@
                         }"
                         type="button"
                         :disabled="!canSubmit || isSending"
-                        :title="isRunning ? (isWaitingForHuman ? '回答当前请求' : (submitMode === 'interrupt' ? '⚡ 立即打断当前任务并切换为新目标' : '⏳ 加入队列，等当前任务完成后自动执行')) : '开始任务'"
+                        :title="isRunning ? (isWaitingForHuman ? '回答当前请求' : (submitMode === 'interrupt' ? '⚡ 立即打断当前任务并切换为新目标' : '⏳ 加入队列，等当前任务完成后自动执行')) : (taskStartMode === 'resume' ? '继续原任务，保留审查状态' : '开始新任务')"
                         @click="submit"
                     >
                         <svg viewBox="0 0 24 24"><path d="m7 12 5-5 5 5M12 7v10"/></svg>
@@ -1268,6 +1279,7 @@ const props = defineProps<{
     isSending: boolean;
     stopRequested: boolean;
     canStart: boolean;
+    canResumeTask?: boolean;
     pauseReason: string;
     humanForm: AgentHumanForm | null;
     allModels: AgentModelOption[];
@@ -1287,13 +1299,19 @@ const emit = defineEmits<{
     "update:budget-mode": [mode: ContextBudgetMode];
     "update:autoPilot": [value: boolean];
     "update:planMode": [mode: PlanExecutionMode];
-    submit: [payload?: { text: string; attachments: ParsedAttachment[]; mode?: "interrupt" | "queue" }];
+    submit: [payload?: { text: string; attachments: ParsedAttachment[]; mode?: "interrupt" | "queue"; taskStartMode?: "resume" | "new" }];
     "cancel-queue": [index: number];
     stop: [];
     "open-settings": [];
     "open-roles": [];
     "attach-files": [paths: string[]];
 }>();
+
+const stoppedTaskMode = ref<"resume" | "new">("resume");
+watch(() => [props.sessionId, props.canResumeTask], () => { stoppedTaskMode.value = "resume"; });
+const taskStartMode = computed<"resume" | "new" | undefined>(() =>
+    props.isRunning ? undefined : props.canResumeTask ? stoppedTaskMode.value : undefined,
+);
 
 const currentPlanMode = computed<PlanExecutionMode>(() => {
     if (props.planMode) return props.planMode;
@@ -2417,7 +2435,7 @@ const placeholderText = computed(() => props.isRunning
         : (submitMode.value === "queue"
             ? "输入后续任务，将在当前任务执行完毕后自动开始…"
             : "输入新任务，立即中断当前任务并以此为新目标执行…")
-    : "想让 Agent 帮你做什么？",
+    : taskStartMode.value === "resume" ? "补充说明或输入继续，将保留原任务与审查状态…" : "想让 Agent 帮你做什么？",
 );
 const canSubmit = computed(() => {
     return Boolean(props.draft.trim()) || attachments.value.length > 0;
@@ -2480,9 +2498,9 @@ async function submit(explicitMode?: "interrupt" | "queue" | Event) {
 
         const visiblePrompt = promptParts.join("\n\n");
         attachments.value = [];
-        emit("submit", { text: visiblePrompt, attachments: realAttachments, mode });
+        emit("submit", { text: visiblePrompt, attachments: realAttachments, mode, taskStartMode: taskStartMode.value });
     } else {
-        emit("submit", { text: userText, attachments: [], mode });
+        emit("submit", { text: userText, attachments: [], mode, taskStartMode: taskStartMode.value });
     }
 }
 

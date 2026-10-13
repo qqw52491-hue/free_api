@@ -28,3 +28,11 @@
         assert!(token_budget_stop_reason(Some(&budget), i64::MAX).is_none());
         assert!(token_budget_stop_reason(None, i64::MAX).is_none());
     }
+
+    #[test]
+    fn explicit_failed_resume_gets_bounded_budget_without_resetting_cursor() {
+        let budget = AgentRunBudget { max_steps: Some(15), max_prompt_tokens: None };
+        assert_eq!(super::effective_retry_step_limit(Some(&budget), 300, true), 315);
+        assert_eq!(super::effective_retry_step_limit(Some(&budget), 10, false), 15);
+        assert_eq!(super::effective_retry_step_limit(None, usize::MAX, true), usize::MAX);
+    }

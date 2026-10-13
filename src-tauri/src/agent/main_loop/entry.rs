@@ -61,6 +61,7 @@ pub async fn run_agent_main_loop(
     transient_llm_request_retries: Option<u32>,
     attachments: Option<Vec<crate::commands::chat::ParsedAttachmentResult>>,
     plan_mode: Option<String>,
+    task_start_mode: Option<crate::agent::conversation::TaskStartMode>,
 ) -> Result<(), String> {
     run_agent_main_loop_in_workspace(
         app,
@@ -77,6 +78,7 @@ pub async fn run_agent_main_loop(
         None,
         plan_mode,
         None,
+        task_start_mode,
     )
     .await
 }
@@ -97,6 +99,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
     run_id_override: Option<String>,
     plan_mode: Option<String>,
     run_budget: Option<AgentRunBudget>,
+    task_start_mode: Option<crate::agent::conversation::TaskStartMode>,
 ) -> Result<(), String> {
     let final_session_id = session_id.unwrap_or_else(|| {
         std::time::SystemTime::now()
@@ -134,6 +137,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
         run_id,
         plan_mode,
         run_budget,
+        task_start_mode,
     )
     .await;
 

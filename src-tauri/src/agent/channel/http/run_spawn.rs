@@ -354,6 +354,7 @@ pub(crate) fn register_and_spawn_run(
             Some(spawn_run.clone()),
             Some(spawn_plan_mode),
             None,
+            None,
         )
         .await;
     });

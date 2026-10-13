@@ -79,6 +79,7 @@ async fn run_agent_main_loop_in_workspace_inner(
     run_id: String,
     plan_mode: Option<String>,
     run_budget: Option<AgentRunBudget>,
+    task_start_mode: Option<crate::agent::conversation::TaskStartMode>,
 ) -> Result<(), String> {
     // 立即注册人类干预与流式中断接收器，确保任务启动第一毫秒即可被前端即时打断
     let (tx, mut rx) = mpsc::channel::<HumanControl>(5);
@@ -238,13 +239,12 @@ async fn run_agent_main_loop_in_workspace_inner(
     // 捕获任务起点 Git 基准快照（用于 finish 时进行精准增量 Diff 审查）。
     // 自由会话（未选项目）的 workspace_dir 是会话产物目录而非真实工程——
     // 证据域缺失 → 降级为非 git 基线，审查改靠副作用台账/产物链。
-    let git_baseline = if is_explicit_workspace || auto_pilot {
+    let captured_git_baseline = if is_explicit_workspace || auto_pilot {
         crate::agent::reviewer_gatekeeper::GitBaseline::capture_at_run_start(&workspace_dir)
     } else {
         crate::agent::reviewer_gatekeeper::GitBaseline::non_git()
     };
-    // 登记给子审查员（child_reviewer 的 git_diff 取证按任务起点排除用户原有未提交改动）
-    git_baseline.register_for_session(&final_session_id);
+    // 续跑时优先恢复原任务基线，稍后在 checkpoint 选择后登记。
     // 项目会话进入前先拿工作区软锁（独占该目录直到本次 run 结束）
     let _workspace_run_lock = if is_project_session {
         Some(acquire_workspace_lock(&workspace_dir, &final_session_id, &run_id, &goal).await?)
@@ -428,7 +428,9 @@ async fn run_agent_main_loop_in_workspace_inner(
     // 崩溃恢复会沿用既有 checkpoint，不能重复追加用户消息；只有新轮次才写入消息历史。
     let existing_checkpoint = load_checkpoint(state.inner(), &final_session_id)?;
     let is_resuming_existing =
-        !crate::agent::conversation::should_start_new_turn(existing_checkpoint.as_ref());
+        !crate::agent::conversation::should_start_new_turn(existing_checkpoint.as_ref(), task_start_mode)?;
+    let resume_from_failed = is_resuming_existing
+        && existing_checkpoint.as_ref().is_some_and(|cp| cp.phase == AgentPhase::Failed);
     if !is_resuming_existing {
         crate::agent::conversation::begin_turn(
             state.inner(),
@@ -554,25 +556,14 @@ async fn run_agent_main_loop_in_workspace_inner(
         }
     }
     context.sync_fetched_tools_from_history();
-    // checkpoint 是恢复的权威来源：只要上一轮任务尚未到终态 (Done/Failed)，一律无缝续接！
+    // 检查点负责任务状态；显式续跑也可恢复 Failed，不能把“继续”作为新题重新分流。
     let mut checkpoint = match existing_checkpoint {
-        Some(existing) if !existing.phase.is_terminal() => {
-            existing.restore_context(&mut context);
+        Some(existing) if is_resuming_existing => {
             let mut cp = existing;
-            if cp.phase == AgentPhase::WaitUser {
-                // 等待中任务的目标以 current_goal 为准（旧 checkpoint 无此字段时回退锚点）
-                let waiting_goal = if cp.data.current_goal.is_empty() {
-                    &cp.data.user_goal
-                } else {
-                    &cp.data.current_goal
-                };
-                if !goal.trim().is_empty() && waiting_goal != &goal {
-                    context.add_error_feedback(&format!("【人类回复】{}", goal));
-                }
-                // 保持原本的任务主目标不变
-                context.user_goal = cp.data.user_goal.clone();
-                cp.begin_planning(cp.step_id, &context);
+            if cp.phase == AgentPhase::Failed {
+                cp.retire_stopped_stage_wait(state.inner())?;
             }
+            cp.restore_task_for_entry(&mut context, &goal);
             cp
         }
         Some(existing) => {
@@ -584,6 +575,35 @@ async fn run_agent_main_loop_in_workspace_inner(
         }
         None => AgentCheckpoint::new(final_session_id.clone(), &context),
     };
+
+    // 保存原任务审查起点，避免续跑前的改动被新基线当作用户原有改动排除。
+    let git_baseline = checkpoint.task_git_baseline.clone().unwrap_or_else(|| {
+        if is_resuming_existing {
+            crate::agent::reviewer_gatekeeper::GitBaseline::git_for_session(&final_session_id)
+                // 旧存档没有起点，不能用本次 pre_dirty 隐藏已发生的任务写入。
+                .unwrap_or_else(|| {
+                    let _ = app.emit(&format!("agent-log-{}", final_session_id),
+                        "⚠️ 旧检查点未保存原始 diff 基线，按当前 HEAD 收集审查材料，可能包含任务开始前的未提交改动；请核对归属。");
+                    crate::agent::reviewer_gatekeeper::GitBaseline::capture(&workspace_dir)
+                })
+        } else {
+            captured_git_baseline
+        }
+    });
+    checkpoint.task_git_baseline = Some(git_baseline.clone());
+    let task_started_at = *checkpoint.task_started_at.get_or_insert_with(|| {
+        if is_resuming_existing {
+            chrono::DateTime::parse_from_rfc3339(&checkpoint.created_at)
+                .map(|t| t.with_timezone(&chrono::Utc)).unwrap_or(run_started_at)
+        } else {
+            run_started_at
+        }
+    });
+    git_baseline.register_for_session(&final_session_id);
+    if is_resuming_existing {
+        let message = "↪️ 继续原任务：已恢复目标、方案、契约和审查要求；模型配置使用本次选择。";
+        let _ = app.emit(&format!("agent-log-{}", final_session_id), message);
+    }
 
     // 🧭 任务入口 LLM 分流（Triage）：新 turn 起步时由 Pro 档做一次结构化复杂度判决，
     // 判决落 checkpoint 后各门禁按 route 分流；恢复中的 run 沿用既有判决，不重复烧 Token。
@@ -757,11 +777,8 @@ async fn run_agent_main_loop_in_workspace_inner(
     }
 
     // 模式切换守卫：按目标执行模式（全自动/交叉审查/方案审批）规范化方案阶段；人工确认过的方案永久保留。
-    let target_plan_mode = crate::agent::checkpoint::PlanExecutionMode::from_str_or_auto_pilot(
-        plan_mode.as_deref(),
-        auto_pilot,
-    );
-    checkpoint.set_execution_mode(target_plan_mode);
+    // 续跑缺省保留自动升级的审查模式；显式配置才改变模式。
+    checkpoint.apply_entry_execution_mode(is_resuming_existing, plan_mode.as_deref(), auto_pilot);
     // 初始工作区是会话选择的已声明资源；恢复时保留 checkpoint 中已有的显式契约。
     // 仅在显式项目会话、存在 workspace_override 或 auto_pilot 模式下才声明主工作区。
     // 在未选项目的通用自由会话中，主工作区保持为 None（自由模式），避免将宿主机启动目录误作为资源约束强塞给 Agent 及外部 MCP。
@@ -1086,7 +1103,8 @@ async fn run_agent_main_loop_in_workspace_inner(
 
     // durable cursor 是调度权威：每个普通步骤提交后推进 step_id；恢复时也从这里继续。
     // 不再使用启动瞬间捕获范围的 for-loop，避免 checkpoint 更新后调度器仍沿旧游标运行。
-    let max_steps = effective_max_steps(run_budget.as_ref());
+    // 失败后的显式续跑获得本次运行的有限预算，但保留任务步骤游标，不能立即再次触顶。
+    let max_steps = effective_retry_step_limit(run_budget.as_ref(), checkpoint.step_id, resume_from_failed);
     let mut spent_prompt_tokens: i64 = 0;
     let mut budget_stop_reason: Option<String> = None;
     while checkpoint.step_id < max_steps {
@@ -2180,7 +2198,7 @@ async fn run_agent_main_loop_in_workspace_inner(
             // 跳过义务验证、宿主验证与终审 LLM 调用，直接进入终态提交。
             // 动态 blocker（新后台任务、新 Todo 等）已在上方 finish_challenged 判过，此处只省昂贵项。
             let current_diff_hash = git_baseline
-                .collect_review_material(&workspace_dir, &context, run_started_at)
+                .collect_review_material(&workspace_dir, &context, task_started_at)
                 .map(|(_, hash)| hash)
                 .unwrap_or_default();
             let contract_fp = crate::agent::finalization::contract_fingerprint(
@@ -2540,7 +2558,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                     step_id,
                     &workspace_dir,
                     &git_baseline,
-                    run_started_at,
+                    task_started_at,
                     &final_session_id,
                     &mut interrupt_rx,
                     checkpoint.last_reviewed_diff_hash.as_deref(),
@@ -2824,7 +2842,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                 step_id,
                 &workspace_dir,
                 &git_baseline,
-                run_started_at,
+                task_started_at,
                 &model_routing,
                 &mut interrupt_rx,
                 &open_todos,

@@ -15,6 +15,9 @@ mod durable;
 mod inquiry_ops;
 mod plan_batch;
 mod plan_ops;
+mod task_resume;
+#[cfg(test)]
+mod task_resume_tests;
 mod types;
 
 pub(crate) use durable::*;
@@ -29,6 +32,10 @@ pub struct AgentCheckpoint {
     /// 查询对照：agent_checkpoints.run_id == agent_run_traces.session_id。一个会话可有多条 trace。
     pub run_id: String,
     pub phase: AgentPhase,
+    #[serde(default)]
+    pub task_git_baseline: Option<crate::agent::reviewer_gatekeeper::GitBaseline>,
+    #[serde(default)]
+    pub task_started_at: Option<chrono::DateTime<chrono::Utc>>,
     pub data: DurableAgentContext,
     pub pending: Option<PendingToolCall>,
     /// LLM 已返回且已确认的结构化决策；工具开始前也必须可恢复。
@@ -335,6 +342,8 @@ impl AgentCheckpoint {
             schema_version: CHECKPOINT_SCHEMA_VERSION,
             run_id,
             phase: AgentPhase::CallLlm,
+            task_git_baseline: None,
+            task_started_at: None,
             data: DurableAgentContext::capture(context),
             pending: None,
             prepared_instruction: None,
@@ -497,7 +506,6 @@ impl AgentCheckpoint {
 
     pub fn mark_failed(&mut self, reason: String, context: &SandwichContext) {
         self.phase = AgentPhase::Failed;
-        self.pending = None;
         self.prepared_instruction = None;
         self.last_error = Some(reason);
         self.refresh_context(context);

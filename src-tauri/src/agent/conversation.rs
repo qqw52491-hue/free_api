@@ -62,9 +62,27 @@ fn append_message(
     Ok(())
 }
 
-/// 只要 checkpoint 存在且未达终态 (Done/Failed)，一律属于【任务未结束的续接】，不开启新回合。
-pub fn should_start_new_turn(existing: Option<&AgentCheckpoint>) -> bool {
-    !matches!(existing, Some(checkpoint) if !checkpoint.phase.is_terminal())
+/// 任务意图独立于模型配置；缺省保持旧客户端的非终态恢复行为。
+#[derive(Debug, Clone, Copy, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStartMode {
+    Resume,
+    New,
+}
+
+pub fn should_start_new_turn(
+    existing: Option<&AgentCheckpoint>,
+    task_start_mode: Option<TaskStartMode>,
+) -> Result<bool, String> {
+    match task_start_mode {
+        Some(TaskStartMode::New) => Ok(true),
+        Some(TaskStartMode::Resume) => match existing {
+            Some(cp) if cp.phase != crate::agent::checkpoint::AgentPhase::Done => Ok(false),
+            Some(_) => Err("上一任务已完成；请选择新任务，不能恢复已交付任务。".to_string()),
+            None => Err("没有可恢复的任务检查点；请选择新任务。".to_string()),
+        },
+        None => Ok(!matches!(existing, Some(cp) if !cp.phase.is_terminal())),
+    }
 }
 
 pub fn begin_turn(
@@ -177,9 +195,37 @@ mod tests {
             "继续整理报告".to_string(),
         );
         let mut unfinished = AgentCheckpoint::new("run-a".to_string(), &context);
-        assert!(!should_start_new_turn(Some(&unfinished)));
+        assert!(!should_start_new_turn(Some(&unfinished), None).unwrap());
         unfinished.mark_done(&context);
-        assert!(should_start_new_turn(Some(&unfinished)));
-        assert!(should_start_new_turn(None));
+        assert!(should_start_new_turn(Some(&unfinished), None).unwrap());
+        assert!(should_start_new_turn(None, None).unwrap());
+    }
+
+    #[test]
+    fn failed_task_requires_structured_resume_intent() {
+        let ctx = crate::agent::context::SandwichContext::new("system".into(), "原复杂任务".into());
+        let mut cp = AgentCheckpoint::new("session".into(), &ctx);
+        cp.mark_failed("用户取消".into(), &ctx);
+        assert!(should_start_new_turn(Some(&cp), None).unwrap(), "旧客户端保留旧行为");
+        assert!(!should_start_new_turn(Some(&cp), Some(TaskStartMode::Resume)).unwrap());
+        assert!(should_start_new_turn(Some(&cp), Some(TaskStartMode::New)).unwrap());
+    }
+
+    #[test]
+    fn explicit_new_task_can_replace_unfinished_task() {
+        let ctx = crate::agent::context::SandwichContext::new("system".into(), "原任务".into());
+        let cp = AgentCheckpoint::new("session".into(), &ctx);
+        assert!(!should_start_new_turn(Some(&cp), None).unwrap());
+        assert!(should_start_new_turn(Some(&cp), Some(TaskStartMode::New)).unwrap());
+    }
+
+    #[test]
+    fn resume_never_revives_completed_or_missing_task() {
+        let ctx = crate::agent::context::SandwichContext::new("system".into(), "目标".into());
+        let mut cp = AgentCheckpoint::new("session".into(), &ctx);
+        cp.mark_done(&ctx);
+        assert!(should_start_new_turn(Some(&cp), Some(TaskStartMode::Resume)).is_err());
+        assert!(should_start_new_turn(None, Some(TaskStartMode::Resume)).is_err());
+        assert!(serde_json::from_str::<TaskStartMode>("\"continue\"").is_err());
     }
 }

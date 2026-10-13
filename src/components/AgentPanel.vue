@@ -142,6 +142,7 @@
                     :is-sending="session.isSendingHuman.value"
                     :stop-requested="session.stopRequested.value"
                     :can-start="session.canStart.value"
+                    :can-resume-task="session.canResumeTask.value"
                     :pauseReason="session.pauseReason.value"
                     :humanForm="session.humanForm.value"
                     :all-models="allModels"
@@ -538,13 +539,13 @@ function handleOpenDiff(payload: FileDiffPayload) {
     inspectorCollapsed.value = false;
     inspectorRef.value?.openDiff(payload);
 }
-function submitComposer(payload?: { text: string; attachments?: any[]; mode?: "interrupt" | "queue" }) {
+function submitComposer(payload?: { text: string; attachments?: any[]; mode?: "interrupt" | "queue"; taskStartMode?: "resume" | "new" }) {
     const text = (payload?.text ?? composerDraft.value).trim();
     if (!text && (!payload?.attachments || payload.attachments.length === 0)) return;
     if (session.isRunning.value) {
         void session.sendHumanInput(text, payload?.mode || "interrupt", payload?.attachments);
     } else {
-        void session.runAgent(text || session.goalInput.value, payload?.attachments);
+        void session.runAgent(text || session.goalInput.value, payload?.attachments, payload?.taskStartMode);
     }
     composerDraft.value = "";
 }

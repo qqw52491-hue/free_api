@@ -251,6 +251,10 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     // 当前实时运行与已完成回合分开保存；新任务只重置实时数组。
     const steps = ref<AgentStepItem[]>([]);
     const historyRuns = ref<HistoryRunSnapshot[]>([]);
+    const canResumeTask = computed(() => {
+        const latest = historyRuns.value[historyRuns.value.length - 1];
+        return !isRunning.value && !!latest && ["failed", "cancelled", "running", "waiting_human"].includes(latest.status);
+    });
     const displayedSteps = computed(() => [...historyTurns.value.flatMap((turn) => turn.steps), ...steps.value]);
     const selectedStepId = ref<string | null>(null);
     const thought = ref("");
@@ -383,6 +387,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
 
     const planMode = ref<PlanExecutionMode>(initialPlanMode);
     const autoPilot = ref<boolean>(initialPlanMode !== "plan_approval");
+    let planModeChangedByUser = false;
 
     watch(planMode, (val) => {
         try {
@@ -408,10 +413,12 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     });
 
     function setPlanMode(mode: PlanExecutionMode) {
+        planModeChangedByUser = true;
         planMode.value = mode;
     }
 
     function setAutoPilot(val: boolean) {
+        planModeChangedByUser = true;
         autoPilot.value = val;
     }
 
@@ -1791,7 +1798,10 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         });
     }
 
-    async function runAgent(nextGoal?: string, attachments?: ParsedAttachment[]) {
+    async function runAgent(nextGoal?: string, attachments?: ParsedAttachment[], taskStartMode?: "resume" | "new") {
+        // 不按消息关键词猜意图；失败/取消后默认续跑，排队/目标替换显式新任务。
+        const selectedTaskMode = taskStartMode ?? (canResumeTask.value ? "resume" : undefined);
+        const requestedPlanMode = selectedTaskMode === "resume" && !planModeChangedByUser ? undefined : planMode.value;
         const requestedGoal = (nextGoal ?? goalInput.value).trim();
         if (!requestedGoal || isRunning.value) return;
 
@@ -1842,12 +1852,14 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
 
         // 进入启动窗口：invoke 在途且 channel-run-started 未到达期间，迟到的旧代 run-done 不得重置运行态
         awaitingRunStart = true;
+        planModeChangedByUser = false;
         try {
             await invoke("run_agent_main_loop", {
                 modelRouting: modelRouting.value,
                 goal: currentGoal.value,
                 autoPilot: autoPilot.value,
-                planMode: planMode.value,
+                planMode: requestedPlanMode,
+                taskStartMode: selectedTaskMode,
                 sessionId: currentSessionId,
                 logContext: logContext.value,
                 transientLlmRequestRetries: retryAttempts.value === 0 ? 1 : Math.min(100, Math.max(1, retryAttempts.value + 1)),
@@ -1895,13 +1907,13 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 if (queuedGoal) {
                     pendingReplacementGoal.value = "";
                     await nextTick();
-                    void runAgent(queuedGoal);
+                    void runAgent(queuedGoal, undefined, "new");
                 } else if (queuedGoals.value.length > 0) {
                     const next = queuedGoals.value.shift();
                     if (next) {
                         await nextTick();
                         appendLog(`[启动排队任务] ${next.text}`);
-                        void runAgent(next.text, next.attachments);
+                        void runAgent(next.text, next.attachments, "new");
                     }
                 }
             } else {
@@ -1996,7 +2008,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 humanForm.value = null;
                 isRunning.value = false;
                 runTerminal.value = false;
-                await runAgent(message);
+                await runAgent(message, undefined, "resume");
             }
         } catch (error) {
             appendLog(`[人工回答失败] ${toText(error)}`);
@@ -2049,7 +2061,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                     humanForm.value = null;
                     isRunning.value = false;
                     runTerminal.value = false;
-                    await runAgent(message, attachments);
+                    await runAgent(message, attachments, "resume");
                 }
             } else if (mode === "queue") {
                 // ⏳ 排队模式：加入排队队列，等当前任务正常执行完毕后再执行
@@ -2076,7 +2088,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                         pendingReplacementGoal.value = "";
                         humanInput.value = "";
                         isRunning.value = false;
-                        await runAgent(message, attachments);
+                        await runAgent(message, attachments, "new");
                         return;
                     }
                     throw interruptErr;
@@ -2138,6 +2150,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         latestContext,
         goalInput,
         currentGoal,
+        canResumeTask,
         sessionTitle,
         runState,
         statusDescription,

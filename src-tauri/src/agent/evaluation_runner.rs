@@ -589,6 +589,7 @@ pub async fn start_background_agent_evaluation(
                     max_prompt_tokens: max_prompt_tokens.map(|v| v as i64),
                 }
             }),
+            Some(crate::agent::conversation::TaskStartMode::New),
         ));
 
         let monitor_app = event_app.clone();

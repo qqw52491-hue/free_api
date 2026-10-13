@@ -540,6 +540,12 @@ pub(crate) fn deduplicate_mcp_output(
     }
 }
 
+/// 仅用户明确恢复失败任务时给新一轮预算；普通崩溃恢复仍沿用原上限。
+pub(super) fn effective_retry_step_limit(budget: Option<&AgentRunBudget>, cursor: usize, retry: bool) -> usize {
+    let limit = effective_max_steps(budget);
+    if retry { cursor.saturating_add(limit) } else { limit }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
