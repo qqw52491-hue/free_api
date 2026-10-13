@@ -1101,3 +1101,22 @@ fn preflight_does_not_reclassify_valid_write_or_destructive_shell() {
         assert!(is_write_or_side_effect_tool(&inst), "合法写入仍须经过原门禁");
     }
 }
+
+
+#[test]
+fn empty_parallel_placeholder_executes_the_original_file_read() {
+    let root = std::env::temp_dir().join(format!("free-api-empty-parallel-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("probe.txt"), "empty-parallel-read-ok").unwrap();
+    let db = DbState(Arc::new(Mutex::new(init_db(&PathBuf::from(":memory:")).unwrap())));
+    let registry = PluginRegistry::new();
+    let instruction: AgentInstruction = serde_json::from_value(json!({
+        "tool":"local_file", "command":{"action":"read","path":"probe.txt"},
+        "parallel":[]
+    })).unwrap();
+    let result = run_agent_step(&db, "empty-parallel-test", &instruction, &registry, Some(&root));
+    std::fs::remove_dir_all(&root).unwrap();
+    assert!(result.success, "{} / {}", result.route, result.stderr);
+    assert_ne!(result.route, "parallel_contract_rejected");
+    assert!(result.stdout.contains("empty-parallel-read-ok"), "{}", result.stdout);
+}

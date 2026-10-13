@@ -321,3 +321,54 @@ fn status_action_mixed_with_tool_drops_the_tool_entry() {
     assert!(!tool_only.strip_entry_when_status_action());
     assert!(tool_only.has_executable_entry());
 }
+
+
+#[test]
+fn empty_parallel_placeholder_preserves_single_step() {
+    // 对应实际失败形状：有效 local_shell 命令旁携带未使用的 parallel: []。
+    let instruction: AgentInstruction = serde_json::from_str(
+        r#"{"tool":"local_shell","command":{"command":"printf ok","timeout_secs":120},"parallel":[]}"#,
+    ).unwrap();
+    assert!(instruction.parallel.is_none());
+    assert_eq!(instruction.get_tool(), "local_shell");
+    assert_ne!(instruction.get_action(), "parallel");
+    assert_eq!(instruction.get_params(), json!({"command":"printf ok","timeout_secs":120}));
+    assert!(instruction.validate_executable_shape().is_ok());
+    let restored: AgentInstruction = serde_json::from_value(serde_json::to_value(&instruction).unwrap()).unwrap();
+    assert!(restored.parallel.is_none());
+    assert_eq!(restored.get_params(), instruction.get_params());
+}
+
+#[test]
+fn empty_parallel_alone_is_not_an_executable_action() {
+    let instruction: AgentInstruction = serde_json::from_value(json!({"parallel":[]})).unwrap();
+    assert!(instruction.parallel.is_none());
+    assert!(!instruction.has_executable_entry());
+    assert!(instruction.validate_executable_shape().is_err());
+}
+
+#[test]
+fn nonempty_parallel_and_invalid_types_keep_existing_semantics() {
+    let branches = json!([{"tool":"local_file","command":{"path":"a.txt"}}]);
+    let instruction: AgentInstruction = serde_json::from_value(json!({"parallel":branches})).unwrap();
+    assert_eq!(instruction.get_tool(), "parallel");
+    assert_eq!(instruction.get_action(), "parallel");
+    assert_eq!(instruction.get_params()["parallel"], branches);
+    for invalid in [json!(true), json!(1), json!({}), json!("not-an-array")] {
+        assert!(serde_json::from_value::<AgentInstruction>(json!({"parallel":invalid})).is_err());
+    }
+}
+
+#[test]
+fn empty_parallel_compatibility_does_not_clear_tool_parameter_arrays() {
+    let params = json!({"parallel":[],"job_ids":[],"content":""});
+    let instruction: AgentInstruction = serde_json::from_value(json!({
+        "tool":"example_tool", "params":params, "parallel":[]
+    })).unwrap();
+    assert!(instruction.parallel.is_none());
+    assert_eq!(instruction.get_params(), params);
+    let instruction: AgentInstruction = serde_json::from_value(json!({
+        "tool":"example_tool", "command":params, "parallel":[]
+    })).unwrap();
+    assert_eq!(instruction.get_params(), params);
+}

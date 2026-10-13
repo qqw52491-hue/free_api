@@ -679,6 +679,31 @@ pub async fn call_llm(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unused_parallel_placeholders_do_not_override_model_single_step() {
+        // 旧兼容继续成立；[] 和此前的空字符串、false、null 一样表示未使用。
+        for placeholder in [json!([]), json!(""), json!(false), json!(null)] {
+            let raw = json!({
+                "tool":"local_shell", "command":{"command":"printf ok"},
+                "parallel":placeholder
+            }).to_string();
+            let instruction = parse_executable_instruction(&raw).unwrap();
+            assert!(instruction.parallel.is_none());
+            assert_eq!(instruction.get_tool(), "local_shell");
+            assert_eq!(instruction.get_params()["command"], "printf ok");
+        }
+    }
+
+    #[test]
+    fn model_empty_parallel_without_an_action_is_rejected() {
+        assert!(parse_executable_instruction(r#"{"parallel":[]}"#).is_err());
+        let instruction = parse_executable_instruction(
+            r#"{"parallel":[{"tool":"local_file","command":{"path":"a.txt"}}]}"#,
+        ).unwrap();
+        assert_eq!(instruction.get_tool(), "parallel");
+        assert_eq!(instruction.parallel.as_ref().unwrap().len(), 1);
+    }
+
     use super::*;
 
     #[test]

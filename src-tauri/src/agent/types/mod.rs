@@ -4,6 +4,18 @@ use serde::{Deserialize, Serialize};
 
 pub const RUN_INTERRUPTED_ROUTE: &str = "run_interrupted";
 
+/// 顶层 parallel: [] 是未使用的占位，不应覆盖同一条指令中的单步动作。
+/// 在反序列化入口归一，覆盖模型解析、直接调用与检查点恢复；非空分支原样保留。
+fn deserialize_optional_parallel<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<serde_json::Value>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let parallel = Option::<Vec<serde_json::Value>>::deserialize(deserializer)?;
+    Ok(parallel.filter(|branches| !branches.is_empty()))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
@@ -484,7 +496,7 @@ pub struct AgentInstruction {
     #[serde(default)]
     pub commands: Vec<serde_json::Value>,
     /// 【并行扇出】支持单回合并发执行多个子任务 (allSettled 语义)
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_parallel")]
     pub parallel: Option<Vec<serde_json::Value>>,
     /// 【嵌套计划树】支持串行/并行任意嵌套的高阶计划树
     #[serde(default)]
