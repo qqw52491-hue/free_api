@@ -78,7 +78,7 @@
                         <article v-for="card in roleCards" :key="card.id" class="role-card-item" :class="{ disabled: !card.enabled }">
                             <div class="role-card-main">
                                 <strong>{{ card.label || card.name }} <small>[{{ card.name }}]{{ card.is_system ? ' · 常驻基础卡' : '' }}</small></strong>
-                                <small>{{ roleModelLabel(card.model_id) }} · {{ card.enabled ? '启用' : '已禁用' }}<template v-if="card.default_test_command"> · {{ card.default_test_command }}</template></small>
+                                <small>{{ roleModelLabel(card.model_id) }} · {{ card.is_system ? '常驻' : card.enabled ? '启用' : '已禁用' }}<template v-if="card.default_test_command"> · {{ card.default_test_command }}</template></small>
                                 <p v-if="card.persona_prompt">{{ card.persona_prompt.length > 90 ? card.persona_prompt.slice(0, 90) + '…' : card.persona_prompt }}</p>
                             </div>
                             <div class="role-card-actions">
@@ -88,8 +88,8 @@
                                     <button v-if="card.model_id" type="button" @click="saveBasicRoleModel(card, '')">跟随路由</button>
                                 </template>
                                 <button v-else type="button" @click="editRoleCard(card)">编辑</button>
-                                <button type="button" :disabled="card.is_system" @click="toggleRoleCard(card.name)">{{ card.enabled ? '禁用' : '启用' }}</button>
-                                <button type="button" class="danger" :disabled="card.is_system" @click="deleteRoleCard(card.name)">删除</button>
+                                <button v-if="!card.is_system" type="button" @click="toggleRoleCard(card.name)">{{ card.enabled ? '禁用' : '启用' }}</button>
+                                <button v-if="!card.is_system" type="button" class="danger" @click="deleteRoleCard(card.name)">删除</button>
                             </div>
                         </article>
                     </div>

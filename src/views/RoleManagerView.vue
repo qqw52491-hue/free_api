@@ -560,12 +560,13 @@
               </div>
             </div>
             <div class="role-status-toggle">
+              <span v-if="card.is_system" class="role-slug-name" title="系统基础卡保持启用">常驻</span>
               <button
+                v-else
                 type="button"
                 class="switch-pill"
                 :class="{ on: card.enabled }"
-                :disabled="card.is_system"
-                :title="card.is_system ? '系统基础卡常驻，不可停用' : card.enabled ? '点击禁用该角色' : '点击启用该角色'"
+                :title="card.enabled ? '点击禁用该角色' : '点击启用该角色'"
                 @click="toggleRole(card)"
               >
                 {{ card.enabled ? '已启用' : '已停用' }}
@@ -628,7 +629,7 @@
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
               编辑
             </button>
-            <button class="btn btn-xs danger ghost" :disabled="card.is_system" :title="card.is_system ? '系统基础卡不可删除' : '删除自定义角色'" @click="deleteCard(card)">
+            <button v-if="!card.is_system" class="btn btn-xs danger ghost" title="删除自定义角色" @click="deleteCard(card)">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
               删除
             </button>
