@@ -1,7 +1,7 @@
 use crate::agent::mcp::PluginRegistry;
 use crate::agent::mcp_catalog::invalidate_plugin;
 use crate::agent::plan_tree_dispatch::{
-    run_plan_tree_sync, validate_controlled_parallel_batch, MAX_CONTROLLED_PARALLEL_BRANCHES,
+    run_plan_tree_sync_with_images, validate_controlled_parallel_batch, MAX_CONTROLLED_PARALLEL_BRANCHES,
 };
 use crate::agent::retrieval;
 use crate::agent::task_store;
@@ -205,6 +205,28 @@ pub fn run_agent_step(
     registry: &PluginRegistry,
     workspace_root: Option<&std::path::Path>,
 ) -> DispatchResult {
+    run_agent_step_internal(db, session_id, instruction, registry, workspace_root, None)
+}
+
+pub(crate) fn run_agent_step_with_images(
+    db: &DbState,
+    session_id: &str,
+    instruction: &AgentInstruction,
+    registry: &PluginRegistry,
+    workspace_root: Option<&std::path::Path>,
+    pending: &crate::agent::tools::view_image::PendingImageQueue,
+) -> DispatchResult {
+    run_agent_step_internal(db, session_id, instruction, registry, workspace_root, Some(pending))
+}
+
+fn run_agent_step_internal(
+    db: &DbState,
+    session_id: &str,
+    instruction: &AgentInstruction,
+    registry: &PluginRegistry,
+    workspace_root: Option<&std::path::Path>,
+    pending: Option<&crate::agent::tools::view_image::PendingImageQueue>,
+) -> DispatchResult {
     let tool_name = instruction.get_tool();
     if is_finish_instruction(instruction) {
         return DispatchResult { view: None,
@@ -252,7 +274,7 @@ pub fn run_agent_step(
                 ),
                 ..Default::default()
             });
-        return run_plan_tree_sync(db, session_id, &plan_node, registry, workspace_root);
+        return run_plan_tree_sync_with_images(db, session_id, &plan_node, registry, workspace_root, pending);
     }
     if let Some(ref tree_val) = instruction.plan_tree {
         if let Ok(plan_node) =
@@ -262,7 +284,7 @@ pub fn run_agent_step(
                 "🌳 [PlanTree: {}] 检测到 plan_tree 复合树形计划，启动树形解释器...",
                 session_id
             );
-            return run_plan_tree_sync(db, session_id, &plan_node, registry, workspace_root);
+            return run_plan_tree_sync_with_images(db, session_id, &plan_node, registry, workspace_root, pending);
         }
     }
 
@@ -308,7 +330,7 @@ pub fn run_agent_step(
             // 是本层路由字段，原样转发会被下游 MCP 的参数契约拒绝（「tool」不是声明字段）。
             let step_params = cmd_val.get("command").cloned().unwrap_or_else(|| cmd_val.clone());
             let res =
-                execute_command_inner(db, session_id, step_tool, &step_action, &step_params, registry, workspace_root);
+                execute_command_with_images(db, session_id, step_tool, &step_action, &step_params, registry, workspace_root, pending);
             append_mcp_raw_results(&mut mcp_raw_items, res.view.as_ref());
 
             // 拼接输出结果
@@ -354,7 +376,7 @@ pub fn run_agent_step(
     }
 
     let params = instruction.get_params();
-    execute_command_inner(db, session_id, &tool_name, &action, &params, registry, workspace_root)
+    execute_command_with_images(db, session_id, &tool_name, &action, &params, registry, workspace_root, pending)
 }
 
 #[tauri::command]

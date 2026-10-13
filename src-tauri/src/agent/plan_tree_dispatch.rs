@@ -5,7 +5,7 @@
 //! 不超过 MAX_CONTROLLED_PARALLEL_BRANCHES（响亮拒绝而非静默截断）。
 
 use crate::agent::dispatcher::{
-    append_mcp_raw_results, emit_tool_event, execute_command_inner, mcp_raw_results_view,
+    append_mcp_raw_results, emit_tool_event, execute_command_with_images, mcp_raw_results_view,
 };
 use crate::agent::mcp::PluginRegistry;
 use crate::agent::plan_tree::PlanNode;
@@ -27,6 +27,17 @@ pub fn run_plan_tree_sync(
     registry: &PluginRegistry,
     workspace_root: Option<&std::path::Path>,
 ) -> DispatchResult {
+    run_plan_tree_sync_with_images(db, session_id, plan_node, registry, workspace_root, None)
+}
+
+pub(crate) fn run_plan_tree_sync_with_images(
+    db: &DbState,
+    session_id: &str,
+    plan_node: &crate::agent::plan_tree::PlanNode,
+    registry: &PluginRegistry,
+    workspace_root: Option<&std::path::Path>,
+    pending: Option<&crate::agent::tools::view_image::PendingImageQueue>,
+) -> DispatchResult {
     // 硬拒绝第一道：任何深度出现超限/空并行组，整棵树拒绝执行，一个分支都不跑。
     if let Err(error) = validate_plan_tree_parallel_fanout(plan_node) {
         println!("🚫 [PlanTree: {}] 并行扇出越界，拒绝执行: {}", session_id, error);
@@ -46,12 +57,14 @@ pub fn run_plan_tree_sync(
     let mcp_raw_items = Arc::new(Mutex::new(Vec::<Value>::new()));
     let mcp_raw_collector = mcp_raw_items.clone();
 
+    let pending = pending.cloned();
     let invoker: crate::agent::plan_tree::ToolInvoker = Arc::new(move |tool, args| {
         let db_c = db_clone.clone();
         let sid_c = sid.clone();
         let reg_c = reg_clone.clone();
         let items_c = mcp_raw_items.clone();
         let ws_c = ws_owned.clone();
+        let pending_c = pending.clone();
 
         Box::pin(async move {
             let action = args
@@ -63,7 +76,7 @@ pub fn run_plan_tree_sync(
             // 对 MCP 插件使用 handle.block_on，在 runtime 内嵌套 block_on 会直接 panic。
             // 用 spawn_blocking 把同步分发放到 blocking 线程执行，消除 runtime 嵌套。
             let res = tokio::task::spawn_blocking(move || {
-                execute_command_inner(
+                execute_command_with_images(
                     &db_c,
                     &sid_c,
                     &tool,
@@ -71,6 +84,7 @@ pub fn run_plan_tree_sync(
                     &args,
                     &reg_c,
                     ws_c.as_deref(),
+                    pending_c.as_ref(),
                 )
             })
             .await

@@ -94,6 +94,9 @@ pub(crate) fn validate_native(tool: &str, action: &str, params: &Value) -> Resul
                 "list" => optional(&tool, params, "path", "string")?,
                 _ => return Ok(()), // 未知动作由原执行层报错，不改变既有动作容错。
             }
+            if act == "read" {
+                super::local_file::validate_read_range(params)?;
+            }
             if act == "write" {
                 text(&tool, params, &["content"], true)?;
             }

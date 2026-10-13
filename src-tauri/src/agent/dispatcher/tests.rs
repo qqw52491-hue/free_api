@@ -1120,3 +1120,35 @@ fn empty_parallel_placeholder_executes_the_original_file_read() {
     assert_ne!(result.route, "parallel_contract_rejected");
     assert!(result.stdout.contains("empty-parallel-read-ok"), "{}", result.stdout);
 }
+
+
+#[test]
+fn reversed_read_range_is_rejected_before_workspace_or_business_checks() {
+    let db = DbState(Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap())));
+    let instruction: AgentInstruction = serde_json::from_value(json!({
+        "tool":"local_file", "command":{"path":"missing.txt","start_line":1960,"end_line":298}
+    })).unwrap();
+    let result = run_agent_step(&db, "range-preflight", &instruction, &PluginRegistry::new(), None);
+    assert_eq!(result.route, crate::agent::tools::input_validation::INVALID_INPUT_ROUTE);
+    assert!(result.stderr.contains("end_line (298) 小于 start_line (1960)"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parallel_reversed_read_range_does_not_crash_other_branch() {
+    let root = std::env::temp_dir().join(format!("free-api-range-parallel-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("probe.txt"), "valid-branch-still-executed\n").unwrap();
+    let db = DbState(Arc::new(Mutex::new(init_db(&PathBuf::from(":memory:")).unwrap())));
+    let instruction: AgentInstruction = serde_json::from_value(json!({"parallel":[
+        {"tool":"local_file","command":{"path":"probe.txt","start_line":1960,"end_line":298}},
+        {"tool":"local_file","command":{"path":"probe.txt"}}
+    ]})).unwrap();
+    let result = run_agent_step(&db, "range-parallel", &instruction, &PluginRegistry::new(), Some(&root));
+    assert!(!result.success);
+    assert!(result.stderr.contains("end_line (298) 小于 start_line (1960)"));
+    // Failure reports intentionally dehydrate successful payloads; verify the branch status instead.
+    assert!(result.stdout.contains("成功: 1, 失败: 1, 超时: 0"), "{}", result.stdout);
+    assert!(result.stdout.contains("\"ok\": true"));
+    assert!(!result.stderr.contains("panicked") && !result.stderr.contains("工具执行任务崩溃"));
+    std::fs::remove_dir_all(root).unwrap();
+}

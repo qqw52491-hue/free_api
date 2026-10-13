@@ -5,7 +5,7 @@ use crate::agent::child_reviewer::result_as_dispatch_output;
 use crate::agent::context::resource_scope::ResourceOperation;
 use crate::agent::control::{take_pending_interrupt, HumanControl};
 use crate::agent::dispatcher::{
-    emit_tool_event, is_finish_instruction, is_write_or_side_effect_tool, run_agent_step,
+    emit_tool_event, is_finish_instruction, is_write_or_side_effect_tool, run_agent_step_with_images,
 };
 use crate::agent::mcp::PluginRegistry;
 use crate::agent::run_state::{AgentRunEvent, AgentRunMachine};
@@ -190,9 +190,11 @@ pub(super) async fn dispatch_local_tool(
             (*guard).clone()
         };
 
+        let pending_images = crate::agent::tools::view_image::PendingImageQueue::default();
+        let tool_images = pending_images.clone();
         let mut tool_task = tokio::task::spawn_blocking(move || {
             println!("执行动作: {:?}", inst_c);
-            run_agent_step(&db, &sid, &inst_c, &registry, Some(&ws_root))
+            run_agent_step_with_images(&db, &sid, &inst_c, &registry, Some(&ws_root), &tool_images)
         });
 
         let mut dispatch_result = tokio::select! {
@@ -250,6 +252,9 @@ pub(super) async fn dispatch_local_tool(
         if dispatch_result.route == RUN_INTERRUPTED_ROUTE {
             return Ok(ArmOutcome::Early(dispatch_result));
         }
+        crate::agent::tools::view_image::transfer_pending_images(
+            &pending_images, &mut ctx.context.pending_view_images,
+        )?;
         let output = if dispatch_result.success {
             dispatch_result.stdout.clone()
         } else {

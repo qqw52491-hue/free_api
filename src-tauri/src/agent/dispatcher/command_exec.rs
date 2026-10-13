@@ -113,7 +113,25 @@ pub(crate) fn normalize_mcp_path_params(
     }
 }
 
-/// 执行单条指令的内部路由逻辑（4大核心原生工具 + MCP 插件路由，彻底杜绝历史兼容包袱）
+/// 带当前 agent 的一次性图片通道；普通工具仍进入原同步路由。
+pub(crate) fn execute_command_with_images(
+    db: &DbState,
+    session_id: &str,
+    tool: &str,
+    action: &str,
+    params: &serde_json::Value,
+    registry: &PluginRegistry,
+    workspace_root: Option<&std::path::Path>,
+    pending: Option<&crate::agent::tools::view_image::PendingImageQueue>,
+) -> DispatchResult {
+    if tool.eq_ignore_ascii_case("view_image") || action.eq_ignore_ascii_case("view_image") {
+        if let Some(pending) = pending {
+            return crate::agent::tools::view_image::dispatch(params, workspace_root, session_id, pending);
+        }
+    }
+    execute_command_inner(db, session_id, tool, action, params, registry, workspace_root)
+}
+
 pub(crate) fn execute_command_inner(
     db: &DbState,
     session_id: &str,

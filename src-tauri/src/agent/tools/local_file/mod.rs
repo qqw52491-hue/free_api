@@ -229,11 +229,30 @@ pub fn is_dispatch_result_tmp(result: &DispatchResult) -> bool {
     result.stdout.contains("\"is_tmp\": true")
 }
 
+/// 保留行号别名/默认值；只拒绝结束行早于起始行，不猜测或自动交换区间。
+pub(crate) fn validate_read_range(params: &serde_json::Value) -> Result<(), String> {
+    let start = params.get("start_line").or_else(|| params.get("startLine"))
+        .and_then(serde_json::Value::as_u64).unwrap_or(1);
+    if let Some(end) = params.get("end_line").or_else(|| params.get("endLine"))
+        .and_then(serde_json::Value::as_u64) {
+        if end < start {
+            return Err(format!("❌ local_file.read 参数错误：end_line ({end}) 小于 start_line ({start})，尚未读取文件。请提供 end_line >= start_line 的行号区间。"));
+        }
+    }
+    Ok(())
+}
+
 fn execute_read(
     workspace_root: &Path,
     session_id: &str,
     params: &serde_json::Value,
 ) -> DispatchResult {
+    if let Err(stderr) = validate_read_range(params) {
+        return DispatchResult {
+            view: None, stdout: String::new(), stderr, success: false,
+            route: super::input_validation::INVALID_INPUT_ROUTE.to_string(),
+        };
+    }
     let raw_path = match params.get("path").and_then(|v| v.as_str()) {
         Some(p) if !p.trim().is_empty() => p.trim(),
         _ => {
@@ -335,6 +354,13 @@ fn execute_read(
 
     let slice_start = if total_lines == 0 { 0 } else { start_line - 1 };
     let slice_end = end_line.min(total_lines);
+    if slice_start > slice_end {
+        return DispatchResult {
+            view: None, stdout: String::new(),
+            stderr: format!("❌ local_file.read 行号区间无法读取：start_line={start_line}，end_line={end_line}，文件共 {total_lines} 行。请提供有效区间。"),
+            success: false, route: super::input_validation::INVALID_INPUT_ROUTE.to_string(),
+        };
+    }
 
     let mut output = format!(
         "📄 文件: {} | 共 {} 行 | 显示第 {} 至 {} 行\n---\n",

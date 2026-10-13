@@ -353,3 +353,50 @@ fn test_self_created_file_lifecycle_and_session_cleanup() {
 
     let _ = std::fs::remove_dir_all(ws);
 }
+
+
+#[test]
+fn reversed_read_range_returns_parameters_error_without_panic() {
+    let ws = temp_dir();
+    let db = mock_db();
+    std::fs::write(ws.join("lines.txt"), (1..=2000).map(|i| format!("line {i}\n")).collect::<String>()).unwrap();
+    for action in ["read", "", "local_file"] {
+        for params in [
+            json!({"path":"lines.txt", "start_line":1960, "end_line":298}),
+            json!({"path":"lines.txt", "startLine":1960, "endLine":298}),
+        ] {
+            let result = dispatch(&db, "reversed-window", action, &params, Some(&ws));
+            assert!(!result.success);
+            assert_eq!(result.route, super::super::input_validation::INVALID_INPUT_ROUTE);
+            assert!(result.stderr.contains("1960") && result.stderr.contains("298"));
+            assert!(result.stderr.contains("尚未读取文件"));
+        }
+    }
+    // Reject mechanically invalid intervals before file access, even with a nonexistent path.
+    let result = execute_read(&ws, "reversed-window", &json!({"path":"absent", "start_line":9,"end_line":3}));
+    assert_eq!(result.route, super::super::input_validation::INVALID_INPUT_ROUTE);
+    std::fs::remove_dir_all(ws).unwrap();
+}
+
+#[test]
+fn valid_read_range_defaults_aliases_and_edges_stay_supported() {
+    let ws = temp_dir();
+    let db = mock_db();
+    std::fs::write(ws.join("lines.txt"), "first\nsecond\nthird\n").unwrap();
+    std::fs::write(ws.join("empty.txt"), "").unwrap();
+    for params in [
+        json!({"path":"lines.txt"}),
+        json!({"path":"lines.txt", "start_line":2,"end_line":2}),
+        json!({"path":"lines.txt", "startLine":2,"endLine":999}),
+        json!({"path":"lines.txt", "start_line":0,"end_line":0}),
+        json!({"path":"empty.txt"}),
+        json!({"path":"empty.txt", "start_line":1,"end_line":3}),
+        json!({"path":"lines.txt", "start_line":9}),
+    ] {
+        let result = dispatch(&db, "valid-window", "read", &params, Some(&ws));
+        assert!(result.success, "{params}: {}", result.stderr);
+    }
+    let result = dispatch(&db, "valid-window", "read", &json!({"path":"lines.txt","startLine":2,"endLine":2}), Some(&ws));
+    assert!(result.stdout.contains("second") && !result.stdout.contains("first") && !result.stdout.contains("third"));
+    std::fs::remove_dir_all(ws).unwrap();
+}
