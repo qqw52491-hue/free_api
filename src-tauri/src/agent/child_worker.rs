@@ -370,6 +370,40 @@ struct WorkerAction {
     missing_evidence: Vec<String>,
 }
 
+/// 只补充解析失败的诊断，不改变 WorkerAction 的字段、默认值或兼容范围。
+fn parse_worker_action(raw: &str) -> Result<WorkerAction, String> {
+    let json_text = extract_json(raw).ok_or_else(|| {
+        "【宿主反馈】侦查动作 JSON 提取失败：未找到完整的 JSON 对象。本次动作未执行，也未形成有效侦查结论。请重新输出一个完整的 JSON 对象，使用 action 指定动作（收尾使用 action=\"finish\"）。".to_string()
+    })?;
+    let mut deserializer = serde_json::Deserializer::from_str(json_text);
+    let action = serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
+        let path = error.path().to_string();
+        worker_action_parse_feedback(error.inner(), &path)
+    })?;
+    // 与原 serde_json::from_str 保持一致：不能忽略对象后的残留内容。
+    deserializer
+        .end()
+        .map_err(|error| worker_action_parse_feedback(&error, ""))?;
+    Ok(action)
+}
+
+fn worker_action_parse_feedback(error: &serde_json::Error, path: &str) -> String {
+    let layer = if error.is_data() {
+        "字段解析失败"
+    } else {
+        "JSON 语法解析失败"
+    };
+    let field = if path.is_empty() || path == "." {
+        String::new()
+    } else {
+        format!("；字段位置：{}", path)
+    };
+    format!(
+        "【宿主反馈】侦查动作{}{}。具体原因：{}。本次动作未执行，也未形成有效侦查结论。请按上述原因修正并重新输出完整 JSON。action 是字符串；intent 如提供应为字符串或 null；findings、evidence_refs、missing_evidence 如提供应为字符串数组；confidence 如提供应为字符串。工具参数放在 params 中；收尾使用 action=\"finish\" 并携带 findings。",
+        layer, field, error
+    )
+}
+
 /// 从模型输出中提取首个 JSON 对象（容忍围栏/前后缀噪声）
 fn extract_json(raw: &str) -> Option<&str> {
     let start = raw.find('{')?;
@@ -598,15 +632,13 @@ pub async fn run_worker_loop(
             }
         };
 
-        let Some(json_text) = extract_json(&raw) else {
-            messages.push(json!({"role": "assistant", "content": raw}));
-            messages.push(json!({"role": "user", "content": "【宿主反馈】输出不是合法 JSON 动作。请直接输出一个 JSON 对象动作或 finish。"}));
-            continue;
-        };
-        let Ok(parsed) = serde_json::from_str::<WorkerAction>(json_text) else {
-            messages.push(json!({"role": "assistant", "content": raw}));
-            messages.push(json!({"role": "user", "content": "【宿主反馈】JSON 字段不符合动作协议（需要 action/params 或 finish+findings）。请修正后重新输出。"}));
-            continue;
+        let parsed = match parse_worker_action(&raw) {
+            Ok(parsed) => parsed,
+            Err(feedback) => {
+                messages.push(json!({"role": "assistant", "content": raw}));
+                messages.push(json!({"role": "user", "content": feedback}));
+                continue;
+            }
         };
 
         if parsed.action == "finish" {
@@ -1007,6 +1039,90 @@ mod tests {
         assert_eq!(parsed.findings.len(), 1);
         assert_eq!(parsed.findings[0].why, "发现 A");
         assert_eq!(parsed.confidence, "supported");
+    }
+
+    #[test]
+    fn worker_action_feedback_reports_missing_field_and_execution_status() {
+        let error = parse_worker_action(r#"{"params":{"path":"."}}"#).unwrap_err();
+        assert!(error.contains("字段解析失败"), "{}", error);
+        assert!(error.contains("missing field `action`"), "{}", error);
+        assert!(error.contains("line 1 column"), "{}", error);
+        assert!(error.contains("本次动作未执行"), "{}", error);
+        assert!(error.contains("未形成有效侦查结论"), "{}", error);
+    }
+
+    #[test]
+    fn worker_action_feedback_reports_wrong_field_and_array_item() {
+        for (raw, field, expected) in [
+            (r#"{"action":7}"#, "action", "a string"),
+            (r#"{"action":"finish","findings":"结果"}"#, "findings", "a sequence"),
+            (r#"{"action":"finish","findings":["已核实",false]}"#, "findings[1]", "a string"),
+            (r#"{"action":"finish","evidence_refs":null}"#, "evidence_refs", "a sequence"),
+            (r#"{"action":"finish","confidence":false}"#, "confidence", "a string"),
+            (r#"{"action":"read_file","intent":[]}"#, "intent", "a string"),
+        ] {
+            let error = parse_worker_action(raw).unwrap_err();
+            assert!(error.contains(&format!("字段位置：{}", field)), "{}", error);
+            assert!(error.contains(expected), "{}", error);
+            assert!(error.contains("本次动作未执行"), "{}", error);
+        }
+    }
+
+    #[test]
+    fn worker_action_feedback_distinguishes_syntax_from_field_errors() {
+        let raw = "{\n  \"action\": \"read_file\"\n  \"params\": {\"path\": \"src/main.rs\"}\n}";
+        let error = parse_worker_action(raw).unwrap_err();
+        assert!(error.contains("JSON 语法解析失败"), "{}", error);
+        assert!(error.contains("expected `,` or `}`"), "{}", error);
+        assert!(error.contains("line 3 column"), "{}", error);
+        assert!(!error.contains("字段解析失败"), "{}", error);
+    }
+
+    #[test]
+    fn worker_action_feedback_distinguishes_missing_complete_object() {
+        for raw in [
+            "我继续读取文件",
+            r#"{"action":"read_file","params":{"path":"src/main.rs"}"#,
+            "<｜DSML｜function_calls><｜DSML｜invoke name=\"read_file\"><｜DSML｜parameter name=\"path\">LicenseService.java</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜function_calls>",
+        ] {
+            let error = parse_worker_action(raw).unwrap_err();
+            assert!(error.contains("JSON 提取失败"), "{}", error);
+            assert!(error.contains("未找到完整的 JSON 对象"), "{}", error);
+            assert!(error.contains("本次动作未执行"), "{}", error);
+            assert!(!error.contains("字段解析失败"), "{}", error);
+        }
+    }
+
+    #[test]
+    fn worker_action_feedback_does_not_tighten_existing_compatibility() {
+        let raw = "读取目录：\n```json\n{\"action\":\"list_dir\",\"params\":{\"path\":\".\"},\"extra\":true}\n```\n以上。";
+        let parsed = parse_worker_action(raw).unwrap();
+        assert_eq!(parsed.action, "list_dir");
+        assert_eq!(parsed.params["path"], ".");
+        assert!(parsed.findings.is_empty());
+        assert!(parsed.confidence.is_empty());
+        assert!(parsed.intent.is_none());
+        for raw in [
+            r#"{"action":"finish"}"#,
+            r#"{"action":"list_dir","intent":null,"params":null}"#,
+            r#"{"action":"list_dir","params":[]}"#,
+            r#"{"action":"unknown"}"#,
+        ] {
+            let old = serde_json::from_str::<WorkerAction>(extract_json(raw).unwrap()).unwrap();
+            let parsed = parse_worker_action(raw).unwrap();
+            assert_eq!(parsed.action, old.action);
+            assert_eq!(parsed.params, old.params);
+        }
+    }
+
+    #[test]
+    fn worker_action_feedback_allows_corrected_action_then_finish() {
+        assert!(parse_worker_action(r#"{"action":false}"#).is_err());
+        let parsed = parse_worker_action(r#"{"action":"read_file","params":{"path":"LicenseService.java"}}"#).unwrap();
+        assert_eq!(parsed.action, "read_file");
+        let parsed = parse_worker_action(r#"{"action":"finish","findings":["已查到调用点"],"confidence":"supported","evidence_refs":["LicenseService.java"]}"#).unwrap();
+        assert_eq!(parsed.action, "finish");
+        assert_eq!(parsed.findings, vec!["已查到调用点"]);
     }
 
     #[test]
