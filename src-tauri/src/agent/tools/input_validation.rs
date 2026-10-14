@@ -64,6 +64,10 @@ fn optional(tool: &str, params: &Value, field: &str, kind: &str) -> Result<(), S
 pub(crate) fn validate_native(tool: &str, action: &str, params: &Value) -> Result<(), String> {
     let tool = tool.to_ascii_lowercase();
     let action = action.to_ascii_lowercase();
+    let normalized = if tool == "local_shell" {
+        Some(crate::agent::tool_params::normalize_shell_params(params)?)
+    } else { None };
+    let params = normalized.as_ref().unwrap_or(params);
     let act = if action.is_empty() {
         params.get("action").and_then(Value::as_str).unwrap_or("")
     } else {
@@ -72,11 +76,12 @@ pub(crate) fn validate_native(tool: &str, action: &str, params: &Value) -> Resul
     match tool.as_str() {
         "local_shell" => {
             if let Err(error) = text(&tool, params, &["command", "cmd", "commandline"], false) {
-                return Err(format!("{error}\n示例：{{\"command\":\"cargo check\"}}。若要列目录，请使用 local_file(action=\"list\", path=\".\")。"));
+                return Err(format!("{error}\n本次在参数预检阶段拒绝，命令尚未执行。示例：{{\"tool\":\"local_shell\",\"params\":{{\"command\":\"cargo check\"}}}}。若要列目录，请使用 local_file(action=\"list\", path=\".\")。"));
             }
-            optional(&tool, params, "args", "string[]")?;
-            optional(&tool, params, "cwd", "string")?;
-            optional(&tool, params, "background", "boolean")?;
+            for (field, kind) in [("args", "string[]"), ("cwd", "string"), ("background", "boolean")] {
+                optional(&tool, params, field, kind).map_err(|error|
+                    format!("{error}\n本次在参数预检阶段拒绝，命令尚未执行；请修正 params.{field}，无需改动命令内容。"))?;
+            }
         }
         "local_file" => {
             let act = if act.is_empty() { "read" } else { act };
@@ -194,6 +199,7 @@ pub(crate) fn instruction_rejection(
     if inst.submit_plan.is_some() || inst.prepare_finish.is_some() {
         return None;
     }
+    if let Some(Err(error)) = inst.resolved_local_shell_params() { return Some(rejection(error)); }
     let raw_tool = inst.get_tool().to_ascii_lowercase();
     let action = inst.get_action();
     let action_lc = action.to_ascii_lowercase();

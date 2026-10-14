@@ -1152,3 +1152,138 @@ async fn parallel_reversed_read_range_does_not_crash_other_branch() {
     assert!(!result.stderr.contains("panicked") && !result.stderr.contains("工具执行任务崩溃"));
     std::fs::remove_dir_all(root).unwrap();
 }
+
+fn shell_params_fixture() -> (PathBuf,DbState,PluginRegistry) {
+    let root=std::env::temp_dir().join(format!("free-api-shell-params-{}",uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    let db=DbState(Arc::new(Mutex::new(init_db(&PathBuf::from(":memory:")).unwrap())));
+    (root,db,PluginRegistry::new())
+}
+#[test]
+fn shell_params_single_step_executes_preserved_cwd_args_and_env() {
+    let (root,db,registry)=shell_params_fixture();
+    let inst: AgentInstruction=serde_json::from_value(json!({"tool":"local_shell","command":"sh",
+        "params":{"cwd":"sub","args":["-c","printf '%s:%s' \"$CHECK\" \"${PWD##*/}\""],"env":{"CHECK":"canon"}},
+        "timeout_secs":30,"background":false})).unwrap();
+    assert!(crate::agent::tools::input_validation::instruction_rejection(&db,&inst).is_none());
+    let result=run_agent_step(&db,"shell-params-single",&inst,&registry,Some(&root));
+    assert!(result.success,"{}",result.stderr);
+    assert!(result.stdout.contains("canon:sub"),"{}",result.stdout);
+    assert_eq!(inst.get_params()["cwd"],json!("sub"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+#[test]
+fn shell_params_direct_dispatch_shorthand_uses_existing_default_directory() {
+    let (root,db,registry)=shell_params_fixture();
+    let result=execute_command_inner(&db,"shell-params-direct","local_shell","exec",&json!("pwd"),&registry,Some(&root));
+    assert!(result.success,"{}",result.stderr);
+    assert!(result.stdout.contains(root.to_str().unwrap()));
+    let result=crate::agent::tools::local_shell::dispatch(&db,"shell-params-handler","exec",&json!("printf handler-ok"),Some(&root));
+    assert!(result.success && result.stdout.contains("handler-ok"),"{}",result.stderr);
+    std::fs::remove_dir_all(root).unwrap();
+}
+#[test]
+fn shell_params_invalid_or_conflicting_parameters_do_not_execute() {
+    let (root,db,registry)=shell_params_fixture();
+    for raw in [json!({"tool":"local_shell","command":23}),json!({"tool":"local_shell","params":[]}),
+        json!({"tool":"local_shell","command":" \n "}),
+        json!({"tool":"local_shell","command":"touch marker-a","params":{"command":"touch marker-b"}}),
+        json!({"tool":"local_shell","command":"pwd","cwd":"one","params":{"cwd":"two"}})] {
+        let inst: AgentInstruction=serde_json::from_value(raw).unwrap();
+        let pre=crate::agent::tools::input_validation::instruction_rejection(&db,&inst).unwrap();
+        assert!(pre.stderr.contains("尚未执行"),"{}",pre.stderr);
+        let result=run_agent_step(&db,"shell-params-invalid",&inst,&registry,Some(&root));
+        assert_eq!(result.route,crate::agent::tools::input_validation::INVALID_INPUT_ROUTE);
+    }
+    assert!(!root.join("marker-a").exists() && !root.join("marker-b").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+#[test]
+fn shell_params_shorthand_still_obeys_cwd_boundary() {
+    let (root,db,registry)=shell_params_fixture();
+    let outside=std::env::temp_dir().join(format!("free-api-outside-{}",uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&outside).unwrap();
+    let inst: AgentInstruction=serde_json::from_value(json!({"tool":"local_shell","command":"pwd","cwd":outside})).unwrap();
+    let result=run_agent_step(&db,"shell-params-boundary",&inst,&registry,Some(&root));
+    assert!(!result.success);
+    assert_eq!(result.route,"local_shell:cwd_denied","{}",result.stderr);
+    std::fs::remove_dir_all(outside).unwrap();std::fs::remove_dir_all(root).unwrap();
+}
+#[test]
+fn shell_params_safety_reads_the_same_merged_args_as_execution() {
+    for raw in [json!({"tool":"local_shell","command":"git reset --hard"}),
+        json!({"tool":"local_shell","command":"sh","params":{"args":["-c","git reset --hard"]}})] {
+        let inst: AgentInstruction=serde_json::from_value(raw).unwrap();
+        assert!(is_write_or_side_effect_tool(&inst));
+        assert_eq!(extract_shell_command_string(&inst).unwrap(),"git reset --hard");
+        assert_ne!(git_destructive_review(&extract_shell_command_string(&inst).unwrap()),GitDestructiveVerdict::NotDestructive);
+    }
+}
+#[test]
+fn shell_params_pipeline_accepts_params_and_string_without_dropping_options() {
+    let (root,db,registry)=shell_params_fixture();
+    let inst: AgentInstruction=serde_json::from_value(json!({"commands":[
+        {"tool":"local_shell","command":"pwd","cwd":"sub"},
+        {"tool":"local_shell","params":{"command":"printf pipeline-ok"}}
+    ]})).unwrap();
+    let result=run_agent_step(&db,"shell-params-pipeline",&inst,&registry,Some(&root));
+    assert!(result.success,"{}",result.stderr);
+    assert!(result.stdout.contains("pipeline-ok") && result.stdout.contains(root.join("sub").to_str().unwrap()));
+    std::fs::remove_dir_all(root).unwrap();
+}
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn shell_params_parallel_and_plan_tree_share_the_canonical_contract() {
+    let (root,db,registry)=shell_params_fixture();
+    for raw in [json!({"parallel":[
+        {"tool":"local_shell","command":"pwd","cwd":"sub"},
+        {"tool":"local_shell","params":{"command":"printf parallel-ok"}}
+    ]}),json!({"plan_tree":[
+        {"tool":"local_shell","command":"pwd","cwd":"sub"},
+        {"tool":"local_shell","args":"printf tree-ok"}
+    ]})] {
+        let inst: AgentInstruction=serde_json::from_value(raw).unwrap();
+        let result=run_agent_step(&db,"shell-params-tree",&inst,&registry,Some(&root));
+        assert!(result.success,"{}",result.stderr);
+        assert!(result.stdout.contains(root.join("sub").to_str().unwrap()),"{}",result.stdout);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn shell_params_parallel_conflict_reports_error_without_running_bad_branch() {
+    let (root,db,registry)=shell_params_fixture();
+    let inst: AgentInstruction=serde_json::from_value(json!({"parallel":[
+        {"tool":"local_shell","command":"touch marker-a","params":{"command":"touch marker-b"}},
+        {"tool":"local_shell","params":{"command":"printf good-branch"}}
+    ]})).unwrap();
+    let result=run_agent_step(&db,"shell-params-conflict",&inst,&registry,Some(&root));
+    assert!(!result.success && result.stderr.contains("参数冲突"),"{}",result.stderr);
+    assert!(result.stdout.contains("成功: 1, 失败: 1"),"{}",result.stdout);
+    assert!(!root.join("marker-a").exists() && !root.join("marker-b").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn shell_params_pipeline_conflict_retains_completed_output_and_stops_later_steps() {
+    let (root,db,registry)=shell_params_fixture();
+    let inst:AgentInstruction=serde_json::from_value(json!({"commands":[
+        {"tool":"local_shell","command":"printf first-completed"},
+        {"tool":"local_shell","command":"touch marker-a","params":{"command":"touch marker-b"}},
+        {"tool":"local_shell","command":"touch marker-later"}
+    ]})).unwrap();
+    let result=run_agent_step(&db,"shell-params-pipeline-fail",&inst,&registry,Some(&root));
+    assert_eq!(result.route,"pipeline_fail_at_2");
+    assert!(result.stdout.contains("first-completed"));
+    assert!(result.stderr.contains("此前成功步骤已执行") && result.stderr.contains("参数冲突"));
+    for name in ["marker-a","marker-b","marker-later"] { assert!(!root.join(name).exists()); }
+    std::fs::remove_dir_all(root).unwrap();
+}
+#[test]
+fn shell_params_parallel_classification_includes_the_actual_script_in_args() {
+    use crate::agent::plan_tree_dispatch::{parallel_branch_label_from_json, validate_controlled_parallel_batch};
+    let write=json!({"tool":"local_shell","command":"sh","params":{"args":["-c","git reset --hard"]}});
+    assert_eq!(parallel_branch_label_from_json(&write),"local_shell");
+    assert!(validate_controlled_parallel_batch(&vec![write;3]).is_err());
+    let read=json!({"tool":"local_shell","command":"sh","params":{"args":["-c","pwd"]}});
+    assert_eq!(parallel_branch_label_from_json(&read),"local_shell/read");
+    assert!(validate_controlled_parallel_batch(&vec![read;4]).is_ok());
+}

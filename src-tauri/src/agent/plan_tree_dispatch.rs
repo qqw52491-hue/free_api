@@ -164,7 +164,13 @@ pub(crate) fn parallel_branch_label(
     let base = tool.rsplit(['/', ':']).next().unwrap_or(tool);
     if base.eq_ignore_ascii_case("local_shell") {
         // 纯只读白名单命令按只读分支计；其余（含取不到命令串）保持原工具名
-        let cmd = payloads.iter().flatten().find_map(|p| shell_command_text(p));
+        let cmd = payloads.iter().flatten().find_map(|p| {
+            if tool.eq_ignore_ascii_case("local_shell") {
+                serde_json::from_value::<crate::agent::types::AgentInstruction>(
+                    serde_json::json!({"tool":"local_shell","params":p}))
+                    .ok().and_then(|inst| crate::agent::dispatcher::extract_shell_command_string(&inst))
+            } else { shell_command_text(p) }
+        });
         return match cmd {
             Some(c) if crate::agent::dispatcher::is_pure_read_shell_command(&c) => {
                 format!("{}/read", tool)
@@ -211,6 +217,12 @@ pub(crate) fn parallel_branch_label_from_json(step: &Value) -> String {
     let action_field = step.get("action").and_then(Value::as_str);
     let tool = tool_field.or(action_field).unwrap_or("");
     let explicit_action = if tool_field.is_some() { action_field } else { None };
+    if tool.eq_ignore_ascii_case("local_shell") {
+        return serde_json::from_value::<crate::agent::plan_tree::PlanNodeObj>(step.clone())
+            .ok().and_then(|node| node.get_args().ok())
+            .map(|params| parallel_branch_label(tool, explicit_action, &[Some(&params)]))
+            .unwrap_or_else(|| tool.to_string());
+    }
     parallel_branch_label(
         tool,
         explicit_action,
@@ -226,6 +238,11 @@ pub(crate) fn parallel_branch_label_from_node(obj: &crate::agent::plan_tree::Pla
     } else {
         None
     };
+    if tool.eq_ignore_ascii_case("local_shell") {
+        return obj.get_args().map(|params|
+            parallel_branch_label(&tool, explicit_action, &[Some(&params)]))
+            .unwrap_or(tool);
+    }
     parallel_branch_label(
         &tool,
         explicit_action,

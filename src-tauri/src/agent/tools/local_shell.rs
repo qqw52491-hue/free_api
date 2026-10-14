@@ -323,6 +323,12 @@ pub fn dispatch(
     params: &serde_json::Value,
     workspace_root: Option<&Path>,
 ) -> DispatchResult {
+    // 直接调用 handler 的子任务也走同一字符串契约与原有目录检查。
+    let normalized = match crate::agent::tool_params::normalize_shell_params(params) {
+        Ok(value) => value,
+        Err(error) => return super::input_validation::rejection(error),
+    };
+    let params = &normalized;
     let ws_root = match workspace_root {
         Some(p) => p,
         None => {

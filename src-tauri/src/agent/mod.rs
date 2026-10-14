@@ -58,6 +58,7 @@ pub mod task_store;
 pub mod task_summary;
 pub mod telemetry;
 pub mod tool_manual;
+pub(crate) mod tool_params;
 pub mod tools;
 pub mod types;
 pub mod utils;

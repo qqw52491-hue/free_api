@@ -226,11 +226,14 @@ fn run_node_recursive<'a>(
                 let timeout_dur = obj.get_timeout();
 
                 // 解析参数中的 $id 变量引用
-                let raw_args = obj.get_args();
-                let resolved_args = scope.resolve_value(&raw_args).await;
-
+                let resolved_args = match obj.get_args() {
+                    Ok(raw_args) => Ok(scope.resolve_value(&raw_args).await),
+                    Err(error) => Err(error),
+                };
                 let start_step = Instant::now();
-                let invoker_future = (invoker)(tool_name.clone(), resolved_args);
+                let invoker_future = async {
+                    (invoker)(tool_name.clone(), resolved_args?).await
+                };
 
                 // 超时守卫
                 let exec_res = tokio::time::timeout(timeout_dur, invoker_future).await;

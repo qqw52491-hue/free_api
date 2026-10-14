@@ -228,6 +228,9 @@ fn run_agent_step_internal(
     pending: Option<&crate::agent::tools::view_image::PendingImageQueue>,
 ) -> DispatchResult {
     let tool_name = instruction.get_tool();
+    if let Some(Err(error)) = instruction.resolved_local_shell_params() {
+        return crate::agent::tools::input_validation::rejection(error);
+    }
     if is_finish_instruction(instruction) {
         return DispatchResult { view: None,
             stdout: instruction
@@ -326,9 +329,27 @@ fn run_agent_step_internal(
                 step_idx, step_tool, step_action
             );
 
-            // 执行单步。params 只透传子步骤的 command 载荷：cmd_val 顶层的 tool/action
-            // 是本层路由字段，原样转发会被下游 MCP 的参数契约拒绝（「tool」不是声明字段）。
-            let step_params = cmd_val.get("command").cloned().unwrap_or_else(|| cmd_val.clone());
+            // 本地 shell 与单步共用参数解析；其它工具保留既有透传，不改外部 MCP 契约。
+            let prepared_params = if step_tool.eq_ignore_ascii_case("local_shell") {
+                serde_json::from_value::<AgentInstruction>(cmd_val.clone())
+                    .map_err(|error| format!("local_shell 子步骤结构无效：{error}"))
+                    .and_then(|mut step| {
+                        step.tool = Some(step_tool.to_string());
+                        step.resolved_local_shell_params().unwrap()
+                    })
+            } else {
+                Ok(cmd_val.get("command").cloned().unwrap_or_else(|| cmd_val.clone()))
+            };
+            let step_params = match prepared_params {
+                Ok(params) => params,
+                Err(error) => return DispatchResult {
+                    view: mcp_raw_results_view(mcp_raw_items),
+                    stdout: total_stdout,
+                    stderr: format!("流水线第 {step_idx} 步参数预检拒绝：当前子步骤与后续步骤尚未执行；此前成功步骤已执行。\n{error}"),
+                    success: false,
+                    route: format!("pipeline_fail_at_{step_idx}"),
+                },
+            };
             let res =
                 execute_command_with_images(db, session_id, step_tool, &step_action, &step_params, registry, workspace_root, pending);
             append_mcp_raw_results(&mut mcp_raw_items, res.view.as_ref());

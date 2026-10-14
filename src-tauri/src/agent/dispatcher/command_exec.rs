@@ -141,6 +141,13 @@ pub(crate) fn execute_command_inner(
     registry: &PluginRegistry,
     workspace_root: Option<&std::path::Path>,
 ) -> DispatchResult {
+    let normalized = if tool.eq_ignore_ascii_case("local_shell") {
+        match crate::agent::tool_params::normalize_shell_params(params) {
+            Ok(value) => Some(value),
+            Err(error) => return crate::agent::tools::input_validation::rejection(error),
+        }
+    } else { None };
+    let params = normalized.as_ref().unwrap_or(params);
     // 单步、流水线及并行叶子共用纯参数预检，先报错再做原有安全裁决。
     if let Some(result) = crate::agent::tools::input_validation::native_rejection(tool, action, params) {
         return result;

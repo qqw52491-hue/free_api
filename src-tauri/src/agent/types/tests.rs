@@ -372,3 +372,36 @@ fn empty_parallel_compatibility_does_not_clear_tool_parameter_arrays() {
     })).unwrap();
     assert_eq!(instruction.get_params(), params);
 }
+
+#[test]
+fn shell_params_instruction_canonical_and_shorthand_forms_agree() {
+    for raw in [json!({"tool":"local_shell","params":{"command":"pwd"}}),
+        json!({"tool":"local_shell","command":{"command":"pwd"}}),
+        json!({"tool":"local_shell","command":"pwd"}),
+        json!({"tool":"LOCAL_SHELL","params":"pwd"})] {
+        let inst: AgentInstruction=serde_json::from_value(raw).unwrap();
+        assert_eq!(inst.get_params(),json!({"command":"pwd"}));
+        let restored: AgentInstruction=serde_json::from_value(serde_json::to_value(&inst).unwrap()).unwrap();
+        assert_eq!(restored.get_params(),inst.get_params());
+    }
+}
+#[test]
+fn shell_params_instruction_shorthand_preserves_options_in_params_and_sibling_fields() {
+    let inst: AgentInstruction=serde_json::from_value(json!({"tool":"local_shell","command":"sh",
+        "params":{"cwd":"sub","args":["-c","printf ok"],"env":{"CHECK":"ok"}},
+        "timeout_secs":90,"background":false})).unwrap();
+    assert_eq!(inst.get_params(),json!({"command":"sh","cwd":"sub","args":["-c","printf ok"],
+        "env":{"CHECK":"ok"},"timeout_secs":90,"background":false}));
+}
+#[test]
+fn shell_params_other_tools_and_mcp_namespaces_are_not_coerced() {
+    for tool in ["local_file","remote/local_shell","remote/shell_exec"] {
+        let inst: AgentInstruction=serde_json::from_value(json!({"tool":tool,"command":"a b"})).unwrap();
+        assert_eq!(inst.get_params(),json!("a b"));
+        assert!(inst.resolved_local_shell_params().is_none());
+    }
+}
+#[test]
+fn shell_params_truncated_json_is_still_rejected_before_normalization() {
+    assert!(serde_json::from_str::<AgentInstruction>(r#"{"tool":"local_shell","command":"echo"#).is_err());
+}

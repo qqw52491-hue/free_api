@@ -788,6 +788,15 @@ impl AgentInstruction {
         self.tool.clone().unwrap_or_else(|| "core".to_string())
     }
 
+    /// local_shell 的执行参数与所有前置检查使用同一归一化结果。
+    pub(crate) fn resolved_local_shell_params(&self) -> Option<Result<serde_json::Value, String>> {
+        if !self.get_tool().eq_ignore_ascii_case("local_shell") { return None; }
+        Some(crate::agent::tool_params::resolve_shell_call(
+            self.command.as_ref(), self.params.as_ref(),
+            self.extra_fields.iter().map(|(key, value)| (key.as_str(), value)),
+        ))
+    }
+
     pub fn get_params(&self) -> serde_json::Value {
         if let Some(ref par) = self.parallel {
             return serde_json::json!({ "parallel": par });
@@ -798,6 +807,9 @@ impl AgentInstruction {
         if !self.commands.is_empty() {
             return serde_json::json!({ "commands": self.commands });
         }
+
+        if let Some(Ok(params)) = self.resolved_local_shell_params() { return params; }
+        // 归一化失败的原始参数留给回执/审计；预检与执行入口会返回同一错误，不执行。
 
         // 发现 AI 有时会将动词（如 "type"）放在 command 字段，把其余参数放在 params 字段
         let c_is_verb = self.command.as_ref().map_or(false, |c| {

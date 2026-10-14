@@ -100,6 +100,9 @@ pub fn extract_shell_command_string(inst: &AgentInstruction) -> Option<String> {
         None
     };
 
+    if inst.get_tool().eq_ignore_ascii_case("local_shell") {
+        return parse_from_value(&inst.get_params());
+    }
     if let Some(ref cmd) = inst.command {
         if let Some(res) = parse_from_value(cmd) {
             return Some(res);
