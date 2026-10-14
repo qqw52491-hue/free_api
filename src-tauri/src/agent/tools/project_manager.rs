@@ -123,11 +123,14 @@ fn delete(db: &DbState, params: &serde_json::Value) -> DispatchResult {
         rusqlite::params![project_id],
     ) {
         Ok(0) => fail("delete", "项目不存在或已删除"),
-        Ok(_) => DispatchResult { view: None,
-            stdout: "项目已删除（关联的会话关系与资源登记已级联清除，工作区文件不受影响）。".to_string(),
-            stderr: String::new(),
-            success: true,
-            route: "project_manager:delete".to_string(),
+        Ok(_) => {
+            crate::agent::workspace_access::revoke_project(&project_id);
+            DispatchResult { view: None,
+                stdout: "项目已删除（关联的会话关系、资源登记与附加目录授权已清除，工作区文件不受影响）。".to_string(),
+                stderr: String::new(),
+                success: true,
+                route: "project_manager:delete".to_string(),
+            }
         },
         Err(e) => fail("delete", &e.to_string()),
     }

@@ -101,6 +101,7 @@ const SESSION_CLEANUP_EXEMPT: &[(&str, &str)] = &[
     ("models", "全局模型配置，随平台级联"),
     ("agent_projects", "项目级实体，生命周期归项目删除路径"),
     ("agent_project_resources", "项目级资源，FK 随 agent_projects 级联"),
+    ("agent_project_directories", "项目级目录授权，FK 随 agent_projects 级联"),
     ("agent_role_cards", "全局角色卡配置"),
     ("agent_custom_instructions", "全局自定义提示词/Skill"),
     ("mcp_plugins", "全局 MCP 插件配置"),

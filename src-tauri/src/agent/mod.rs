@@ -40,6 +40,7 @@ pub mod gate_messages;
 pub mod finalization;
 pub mod finish_guard;
 pub mod workspace_lock;
+pub(crate) mod workspace_access;
 pub mod stage_review;
 pub mod review_tools;
 pub mod eval_oracle;

@@ -26,6 +26,8 @@ pub(super) async fn dispatch_local_tool(
     ctx: &mut DispatchCtx<'_>,
     inst: &AgentInstruction,
 ) -> Result<ArmOutcome, String> {
+    // 用户可能在 LLM 请求等待期间更新目录授权，执行前刷新作用域而不改审查状态。
+    crate::agent::workspace_access::sync_context(ctx.final_session_id, ctx.workspace_dir, ctx.context);
     Ok(ArmOutcome::Done({
         let is_write_tool = is_write_or_side_effect_tool(inst);
 

@@ -113,6 +113,9 @@ pub fn run() {
             commands::vacuum_database,
             // 项目、项目会话与用户明确授权的项目内资源
             commands::list_agent_projects,
+            commands::projects::directories::list_agent_project_directories,
+            commands::projects::directories::set_agent_project_directory,
+            commands::projects::directories::remove_agent_project_directory,
             commands::create_agent_project,
             commands::delete_agent_project,
             commands::create_agent_project_session,

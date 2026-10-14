@@ -240,13 +240,31 @@ pub async fn execute_worker_action(
     params: &Value,
     hard_scope: &str,
 ) -> Result<String, String> {
+    execute_worker_action_in_session(workspace_root, action, params, hard_scope, None).await
+}
+
+async fn execute_worker_action_in_session(
+    workspace_root: &Path,
+    action: &str,
+    params: &Value,
+    hard_scope: &str,
+    session_id: Option<&str>,
+) -> Result<String, String> {
+    let resolve_read = |raw: &str| -> Result<PathBuf, String> {
+        if session_id.is_some() {
+            crate::agent::path_guard::ensure_readable_path(raw, workspace_root, session_id, false)
+                .map(|r| r.canonical_path)
+        } else {
+            ensure_contained(workspace_root, raw)
+        }
+    };
     match action {
         "read_file" => {
             let raw = params
                 .get("path")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "read_file 缺少 path。".to_string())?;
-            let canonical = ensure_contained(workspace_root, raw)?;
+            let canonical = resolve_read(raw)?;
             check_hard_scope(workspace_root, &canonical, hard_scope)?;
             let metadata = std::fs::metadata(&canonical)
                 .map_err(|error| format!("无法读取文件元数据: {}", error))?;
@@ -257,15 +275,24 @@ pub async fn execute_worker_action(
                     MAX_READ_FILE_BYTES
                 ));
             }
-            let bytes = std::fs::read(&canonical).map_err(|error| format!("读取失败: {}", error))?;
-            Ok(truncate_chars(&String::from_utf8_lossy(&bytes), MAX_ACTION_OUTPUT_CHARS))
+            let bytes =
+                std::fs::read(&canonical).map_err(|error| format!("读取失败: {}", error))?;
+            Ok(truncate_chars(
+                &String::from_utf8_lossy(&bytes),
+                MAX_ACTION_OUTPUT_CHARS,
+            ))
         }
         "list_dir" => {
-            let raw = params
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or(".");
-            let canonical = ensure_contained(workspace_root, raw)?;
+            let raw = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            let canonical = resolve_read(raw)?;
+            // 保留工作区内原有目录导航行为；新开放的外部目录仍遵守角色范围。
+            if !canonical.starts_with(
+                workspace_root
+                    .canonicalize()
+                    .map_err(|e| format!("工作区不可访问: {}", e))?,
+            ) {
+                check_hard_scope(workspace_root, &canonical, hard_scope)?;
+            }
             let mut entries = std::fs::read_dir(&canonical)
                 .map_err(|error| format!("列目录失败: {}", error))?
                 .filter_map(|entry| entry.ok())
@@ -274,7 +301,11 @@ pub async fn execute_worker_action(
             entries.sort_by_key(|entry| entry.file_name());
             let mut out = String::new();
             for entry in entries {
-                let file_type = if entry.path().is_dir() { "dir " } else { "file" };
+                let file_type = if entry.path().is_dir() {
+                    "dir "
+                } else {
+                    "file"
+                };
                 let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
                 out.push_str(&format!(
                     "{} {}\t{}\n",
@@ -299,12 +330,19 @@ pub async fn execute_worker_action(
             let output = match tokio::time::timeout(timeout_dur, command.output()).await {
                 Ok(res) => res.map_err(|error| format!("命令启动失败: {}", error))?,
                 Err(_) => {
-                    return Ok(format!("⚠️ 命令执行超时（超过 {} 秒），已被强制终止。", COMMAND_TIMEOUT_SECS));
+                    return Ok(format!(
+                        "⚠️ 命令执行超时（超过 {} 秒），已被强制终止。",
+                        COMMAND_TIMEOUT_SECS
+                    ));
                 }
             };
             let mut stdout = output.stdout;
             stdout.truncate(MAX_COMMAND_OUTPUT_BYTES);
-            let status = if output.status.success() { "✅" } else { "⚠️ 非零退出" };
+            let status = if output.status.success() {
+                "✅"
+            } else {
+                "⚠️ 非零退出"
+            };
             let body = format!("{}\n[stdout {}]", status, String::from_utf8_lossy(&stdout));
             Ok(truncate_chars(&body, MAX_ACTION_OUTPUT_CHARS))
         }
@@ -440,7 +478,7 @@ pub async fn run_worker_loop(
         } else {
             request.focus_paths.join(", ")
         };
-        let initial_user_prompt = render_worker_initial_prompt(&workspace_root, &focus, &request);
+        let initial_user_prompt = format!("{}{}", render_worker_initial_prompt(&workspace_root, &focus, &request), crate::agent::workspace_access::render(&parent_session_id, &workspace_root));
         vec![
             json!({"role": "system", "content": format!("{}{}", worker_system_prompt("scout"), persona)}),
             json!({"role": "user", "content": initial_user_prompt}),
@@ -616,7 +654,7 @@ pub async fn run_worker_loop(
             );
         }
 
-        let observation = match execute_worker_action(&workspace_root, &parsed.action, &parsed.params, &request.hard_scope).await {
+        let observation = match execute_worker_action_in_session(&workspace_root, &parsed.action, &parsed.params, &request.hard_scope, Some(&parent_session_id)).await {
             Ok(output) => output,
             Err(error) => format!("【动作被拒绝】{}", error),
         };
@@ -978,4 +1016,25 @@ mod tests {
         let parsed: WorkerAction = serde_json::from_str(json_text).unwrap();
         assert_eq!(parsed.action, "list_dir");
     }
+}
+
+
+#[cfg(test)]
+#[tokio::test]
+async fn scout_reads_project_reference_but_keeps_role_scope() {
+    use crate::agent::workspace_access::{bind_session, DirectoryAccess, ProjectDirectory, update_project};
+    let base = std::env::temp_dir().join(format!("scout-reference-{}", uuid::Uuid::new_v4()));
+    let primary = base.join("primary"); let reference = base.join("reference");
+    std::fs::create_dir_all(&primary).unwrap(); std::fs::create_dir_all(&reference).unwrap();
+    let file = reference.join("probe.txt"); std::fs::write(&file, "reference").unwrap();
+    let sid = uuid::Uuid::new_v4().to_string(); let pid = uuid::Uuid::new_v4().to_string();
+    bind_session(&sid, &primary, Some((pid.clone(), vec![ProjectDirectory { path: reference.to_string_lossy().into(), access: DirectoryAccess::ReadOnly }])));
+    let params = json!({"path": file});
+    assert!(execute_worker_action_in_session(&primary, "read_file", &params, "", Some(&sid)).await.unwrap().contains("reference"));
+    assert!(execute_worker_action_in_session(&primary, "read_file", &params, "src", Some(&sid)).await.is_err());
+    assert!(execute_worker_action_in_session(&primary, "list_dir", &json!({"path": reference}), "src", Some(&sid)).await.is_err());
+    assert!(execute_worker_action_in_session(&primary, "list_dir", &json!({"path":"."}), "src", Some(&sid)).await.is_ok());
+    update_project(&pid, &[]);
+    assert!(execute_worker_action_in_session(&primary, "read_file", &params, "", Some(&sid)).await.is_err());
+    bind_session(&sid, &primary, None); let _ = std::fs::remove_dir_all(base);
 }

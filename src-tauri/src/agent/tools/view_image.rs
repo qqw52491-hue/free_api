@@ -30,13 +30,13 @@ fn image_mime_for(path: &Path) -> Option<&'static str> {
 
 /// 纯逻辑核：路径白名单解析 → 位图格式/大小校验 → base64 编码。
 /// 成功返回 (display_path, data_url, size_bytes)；失败返回 (stderr, route)。
-/// 与 local_file 同一白名单：workspace ∪ session tmp，越界即拒。
+/// 与 local_file 读取同一权限：workspace ∪ session tmp ∪ 显式附加目录 ∪ skills。
 pub(crate) fn resolve_and_encode_image(
     raw_path: &str,
     workspace_dir: &Path,
     session_id: &str,
 ) -> Result<(String, String, u64), (String, &'static str)> {
-    let resolved = crate::agent::path_guard::ensure_allowed_path(
+    let resolved = crate::agent::path_guard::ensure_readable_path(
         raw_path,
         workspace_dir,
         Some(session_id),

@@ -364,7 +364,7 @@ pub(crate) fn build_path_scope_manifest(
                - 临时与未明确路径产物隔离: 凡未明确指定项目路径的临时文件、数据导出或中间草稿，统一写入此目录（路径如 \"tmp/filename.ext\"），严禁直接写入项目物理工作区根目录！写入后可调用 `artifact_manager(action: \"register_file\", path: \"tmp/filename.ext\")` 上屏供用户下载或系统程序打开。\n\
                - 交付门禁直接认 tmp/ 产物：方案 target_files 声明 \"tmp/x\" 与本目录产物/登记记录自动对账，finish 时无需也不许把产物拷入项目工作区——拷贝副本只会污染用户仓库。\n\
                - 草稿免审: 任务推演计划、分析草稿、临时数据均建议写入此目录；临时草稿免审豁免，不消耗测试配额，不会阻塞交付。\n\
-             • 物理牢笼约束: 任何超出上述双白名单的物理路径访问均会被 path_guard 拦截拒绝。\n",
+             • 物理牢笼约束: 受控文件工具按项目工作区、会话 tmp、技能只读目录及当前附加目录权限表校验；附加目录是显式扩展，不切换主工作区。Shell/MCP 不是 OS 沙箱。\n",
             workspace_dir.display(),
             session_tmp_dir.display()
         )
@@ -377,7 +377,7 @@ pub(crate) fn build_path_scope_manifest(
                - 临时产物与草稿隔离: 凡未明确要求存放于项目工程中的临时文件、数据导出或中间脚本，统一写入此目录（路径如 \"tmp/filename.ext\"），严禁直接写入宿主当前运行目录！写入后可调用 `artifact_manager(action: \"register_file\", path: \"tmp/filename.ext\")` 上屏供用户下载或系统程序打开。\n\
                - 交付门禁直接认 tmp/ 产物：方案 target_files 声明 \"tmp/x\" 与本目录产物/登记记录自动对账，finish 时无需也不许把产物拷入当前目录——拷贝副本只会污染宿主项目目录。\n\
                - 草稿免审: 任务推演计划、分析草稿、临时数据均建议写入此目录；临时草稿免审豁免，不消耗测试配额，不会阻塞交付。\n\
-             • 物理牢笼约束: 任何超出临时目录白名单的物理路径访问均会被 path_guard 拦截拒绝。\n",
+             • 物理牢笼约束: 受控文件工具按会话临时目录及应用技能只读目录校验；Shell/MCP 不是 OS 沙箱。\n",
             session_tmp_dir.display()
         )
     }

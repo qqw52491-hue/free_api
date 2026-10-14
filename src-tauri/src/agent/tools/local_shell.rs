@@ -6,7 +6,7 @@
 //! 3. 进程组级别隔离与双阶段优雅杀灭：开启 process_group(0)，超时先发 SIGTERM 软杀整个进程组（-pid），1.5秒未退硬发 SIGKILL，彻底防止孤儿进程/子进程树常驻泄漏；
 //! 4. 命令与参数智能归一化：无缝兼容单字符串命令 (command: "cargo test") 与结构化命令+参数数组 (command: "cargo", args: ["test", "--release"])，带标准单引号转义；
 //! 5. 自定义环境变量支持：支持传入 env: { "KEY": "VAL" } 灵活注入环境变量；
-//! 6. 工作区物理边界牢笼：命令默认在当前项目工作区根目录执行，自定义 cwd 必须通过 path_guard 双白名单核验；
+//! 6. 工作区物理边界牢笼：命令默认在当前项目工作区根目录执行，自定义 cwd 必须通过 path_guard 可写目录核验（主工作区/tmp/显式可写附加目录；不等价于脚本沙箱）；
 //! 7. 详细友好的 ENOENT 诊断：明确区分工作目录不存在与命令未在 PATH 中找到，并输出排查指引；
 //! 8. 结构化结果输出与诊断建议：输出 exit_code、duration_ms、kind、retryable、safe_to_retry、recommended_action，辅助大模型自愈纠错；
 //! 9. IDE 调试器注入剥离与非交互 stdin：清除 js-debug autoAttach 注入的 NODE_OPTIONS/VSCODE_INSPECTOR_OPTIONS
@@ -387,11 +387,11 @@ pub fn dispatch(
                         "kind": "cwd_denied",
                         "retryable": false,
                         "safe_to_retry": true,
-                        "recommended_action": "use_path_within_workspace",
+                        "recommended_action": "use_writable_directory_or_read_tools",
                     });
                     return DispatchResult { view: None,
                         stdout: String::new(),
-                        stderr: format!("❌ [执行目录拒绝] 指定的 cwd 不在合法白名单内: {}\n<!-- 结构化元数据: {} -->", e, payload),
+                        stderr: format!("❌ [执行目录拒绝] 指定的 cwd 未获可写目录权限: {}\n<!-- 结构化元数据: {} -->", e, payload),
                         success: false,
                         route: "local_shell:cwd_denied".to_string(),
                     };
@@ -1848,7 +1848,7 @@ mod tests {
 
         let res = dispatch(&test_db(), "test_sess", "exec", &params, Some(ws));
         assert!(!res.success);
-        assert!(res.stderr.contains("指定的 cwd 不在合法白名单内"));
+        assert!(res.stderr.contains("指定的 cwd 未获可写目录权限"));
         assert!(res.stderr.contains("\"kind\":\"cwd_denied\""));
     }
 

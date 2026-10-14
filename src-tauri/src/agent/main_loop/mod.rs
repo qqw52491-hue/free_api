@@ -237,6 +237,10 @@ async fn run_agent_main_loop_in_workspace_inner(
     // 运行起始时间：成功完成时自动登记运行期间新生成的工作区产物（微信回推文件链路）
     let run_started_at = chrono::Utc::now();
     // 捕获任务起点 Git 基准快照（用于 finish 时进行精准增量 Diff 审查）。
+    {
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        crate::commands::projects::directories::bind_session_directories(&conn, &final_session_id, &workspace_dir, is_project_session)?;
+    }
     // 自由会话（未选项目）的 workspace_dir 是会话产物目录而非真实工程——
     // 证据域缺失 → 降级为非 git 基线，审查改靠副作用台账/产物链。
     let captured_git_baseline = if is_explicit_workspace || auto_pilot {
@@ -502,9 +506,10 @@ async fn run_agent_main_loop_in_workspace_inner(
     }
 
     context.project_resource_manifest = Some(manifest_text);
+    crate::agent::workspace_access::sync_context(&final_session_id, &workspace_dir, &mut context);
     context.path_scope_pointer = Some(if is_explicit_workspace || auto_pilot {
         format!(
-            "【路径速记】项目工作区 `{}`；临时产物/草稿一律 `tmp/`；越界访问会被 path_guard 拦截。完整契约见会话开头静态段。",
+            "【路径速记】项目工作区 `{}`；临时产物/草稿一律 `tmp/`；附加目录及权限见开头当前项目配置段；受控文件工具越界访问会被 path_guard 拦截。",
             workspace_dir.display()
         )
     } else {
@@ -802,6 +807,8 @@ async fn run_agent_main_loop_in_workspace_inner(
             validation,
         );
     }
+
+    crate::agent::workspace_access::sync_context(&final_session_id, &workspace_dir, &mut context);
 
     // 🌟 注入本轮用户传入的附件 (图片 Base64 多模态 / 分层轻量挂载文档与代码)
     let mut injected_image_paths = std::collections::HashSet::new();
@@ -1108,6 +1115,9 @@ async fn run_agent_main_loop_in_workspace_inner(
     let mut spent_prompt_tokens: i64 = 0;
     let mut budget_stop_reason: Option<String> = None;
     while checkpoint.step_id < max_steps {
+        if crate::agent::workspace_access::sync_context(&final_session_id, &workspace_dir, &mut context) {
+            context.add_error_feedback("【目录权限更新】使用当前权限表；原任务、方案和审查状态保持不变。");
+        }
         // 心跳：每轮步边界刷新——停滞看门狗据此区分"慢"与"死"
         stall_probe.store(
             std::time::SystemTime::now()

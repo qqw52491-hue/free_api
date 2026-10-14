@@ -627,6 +627,16 @@ pub fn dispatch_search(
     let wants_history = kinds.iter().any(|k| k == "history" || k == "all");
     let wants_code = kinds.iter().any(|k| k == "code" || k == "all");
 
+    if wants_code {
+        if let (Some(ws), Some(raw)) = (workspace_root, params.path.as_deref().filter(|p| !p.trim().is_empty())) {
+            if crate::agent::workspace_access::is_project_bound(session_id, ws) {
+                if let Err(error) = crate::agent::path_guard::ensure_readable_path(raw, ws, Some(session_id), false) {
+                    return DispatchResult { view: None, stdout: String::new(), stderr: format!("search 路径权限校验失败，尚未检索或读取缓存：{}", error), success: false, route: "search:path_denied".into() };
+                }
+            }
+        }
+    }
+
     // 同文件硬闸的判定键：仅当 code 检索路径解析后确为单文件才建键
     // （目录检索与无效路径不进闸）；canonical 化使 ./x 与绝对路径同键。
     // 必须在去重缓存命中之前判定——已达阈值后同参复读命中缓存仍会烧轮次，

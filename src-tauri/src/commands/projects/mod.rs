@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use tauri::State;
 use uuid::Uuid;
 
+pub(crate) mod directories;
+
 const MAX_PROJECT_NAME_CHARS: usize = 120;
 const MAX_RESOURCE_LABEL_CHARS: usize = 200;
 const MAX_RESOURCE_PREVIEW_CHARS: usize = 120_000;
@@ -626,6 +628,7 @@ pub async fn delete_agent_project(
     if affected == 0 {
         return Err("项目不存在或已删除".to_string());
     }
+    crate::agent::workspace_access::revoke_project(&project_id);
     Ok(())
 }
 

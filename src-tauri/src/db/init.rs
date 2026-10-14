@@ -107,6 +107,15 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             UNIQUE(project_id, canonical_path),
             FOREIGN KEY (project_id) REFERENCES agent_projects(id) ON DELETE CASCADE
         );
+        -- 附加目录只保存用户显式授权；权限写入必然包含读取。
+        CREATE TABLE IF NOT EXISTS agent_project_directories (
+            project_id TEXT NOT NULL,
+            canonical_path TEXT NOT NULL,
+            access TEXT NOT NULL CHECK(access IN ('read_only', 'read_write')),
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(project_id, canonical_path),
+            FOREIGN KEY(project_id) REFERENCES agent_projects(id) ON DELETE CASCADE
+        );
         CREATE TABLE IF NOT EXISTS chat_messages (
             id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,

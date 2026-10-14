@@ -54,6 +54,8 @@
           </div>
         </div>
 
+        <ProjectDirectoryAccess v-if="project" :project-id="project.id" :root-path="project.root_path" />
+
         <!-- 2. 发起任务输入框 ("Start a task in this project" - 复用与 AgentComposer 一致的模型路由选择) -->
         <div class="pw-task-input-box" :class="{ focused: inputFocused }">
           <textarea
@@ -597,6 +599,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import ProjectDirectoryAccess from "./ProjectDirectoryAccess.vue";
 import ModelSelectDropdown from "./common/ModelSelectDropdown.vue";
 import RichContentRenderer from "./charts/RichContentRenderer.vue";
 import {

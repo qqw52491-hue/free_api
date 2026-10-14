@@ -59,7 +59,7 @@ pub struct AllowedPathResolution {
     pub newly_created_dir: Option<PathBuf>,
 }
 
-/// 核心工作区与会话临时目录双白名单校验
+/// 写权限校验：主工作区、会话临时目录以及项目显式配置的可读写附加目录。
 ///
 /// 1. 允许目标处于 workspace_root 范围内；
 /// 2. 允许目标处于 session_tmp_dir 范围内；
@@ -137,6 +137,9 @@ pub fn ensure_allowed_path(
     let canonical = match target.canonicalize() {
         Ok(path) => path,
         Err(_) => {
+            if std::fs::symlink_metadata(&target).is_ok() {
+                return Err(format!("目标路径无法解析（可能为失效符号链接），未执行操作: {}", target.display()));
+            }
             let parent = target
                 .parent()
                 .ok_or_else(|| format!("非法路径: {}", trimmed))?;
@@ -154,6 +157,7 @@ pub fn ensure_allowed_path(
         }
     };
 
+    // 主目录/tmp 权限不变；附加目录按当前项目显式配置判断。
     // 白名单命中判定
     let in_workspace = canonical.starts_with(&ws_canonical);
     let in_tmp = if let Some(ref tmp_root) = session_tmp_buf {
@@ -190,7 +194,15 @@ pub fn ensure_allowed_path(
             is_session_tmp: false,
             newly_created_dir: newly_created,
         })
+    } else if crate::agent::workspace_access::access_for_canonical(session_id, &ws_canonical, &canonical)
+        == Some(crate::agent::workspace_access::DirectoryAccess::ReadWrite) {
+        Ok(AllowedPathResolution { display_path: canonical.to_string_lossy().into_owned(), canonical_path: canonical,
+            is_session_tmp: false, newly_created_dir: None })
     } else {
+        if crate::agent::workspace_access::access_for_canonical(session_id, &ws_canonical, &canonical)
+            == Some(crate::agent::workspace_access::DirectoryAccess::ReadOnly) {
+            return Err(format!("❌ [目录只读] {} 处于当前项目的只读附加目录，本次操作未执行。读取请用 local_file.read/list、search 或 view_image；需要写入/作为 Shell cwd 时，请主人在项目页改为可读写。", canonical.display()));
+        }
         let allowed_ws_display = ws_canonical.display().to_string();
         let allowed_tmp_display = session_tmp_buf
             .map(|p| p.display().to_string())
@@ -198,7 +210,7 @@ pub fn ensure_allowed_path(
         Err(format!(
             "❌ [工作区越界拦截] 目标路径 \"{}\" 超出允许的操作范围。\n当前会话仅允许访问以下物理目录白名单：\n1. 项目工作区: {}\n2. 会话临时目录: {}",
             trimmed, allowed_ws_display, allowed_tmp_display
-        ))
+        ) + &format!("\n附加目录权限：\n{}", crate::agent::workspace_access::permission_listing(session_id, &ws_canonical)))
     }
 }
 
@@ -228,8 +240,24 @@ pub(crate) fn resolve_under_root(raw: &str, root: &Path) -> Option<AllowedPathRe
     })
 }
 
+/// 已存在目标或新文件的真实父目录。失效链接不是新文件，禁止跟随它写到围栏外。
+pub(crate) fn canonical_target(target: &Path) -> Option<PathBuf> {
+    if let Ok(path) = target.canonicalize() { return Some(path); }
+    if std::fs::symlink_metadata(target).is_ok() { return None; }
+    Some(target.parent()?.canonicalize().ok()?.join(target.file_name()?))
+}
+
+fn resolve_configured_read(raw: &str, primary: &Path, session: Option<&str>) -> Option<AllowedPathResolution> {
+    let p = Path::new(raw.trim());
+    let target = if p.is_absolute() { p.to_path_buf() } else { primary.join(p) };
+    let canonical = canonical_target(&target)?;
+    crate::agent::workspace_access::access_for_canonical(session, primary, &canonical)?;
+    Some(AllowedPathResolution { display_path: canonical.to_string_lossy().into_owned(), canonical_path: canonical,
+        is_session_tmp: false, newly_created_dir: None })
+}
+
 /// 只读场景的路径校验：在工作区/会话 tmp 白名单基础上，额外允许读应用技能目录。
-/// 写/编辑仍用 ensure_allowed_path，技能目录不可写。
+/// 写/编辑仍用 ensure_allowed_path；只读附加目录及技能目录不可写。
 pub fn ensure_readable_path(
     raw: &str,
     workspace_root: &Path,
@@ -238,8 +266,8 @@ pub fn ensure_readable_path(
 ) -> Result<AllowedPathResolution, String> {
     match ensure_allowed_path(raw, workspace_root, session_id, auto_create_if_tmp) {
         Ok(r) => Ok(r),
-        Err(e) => skills_root()
-            .and_then(|root| resolve_under_root(raw, &root))
+        Err(e) => resolve_configured_read(raw, workspace_root, session_id)
+            .or_else(|| skills_root().and_then(|root| resolve_under_root(raw, &root)))
             .ok_or(e),
     }
 }

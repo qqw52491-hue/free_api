@@ -43,6 +43,7 @@ impl ResourceScopeKind {
 pub enum ResourceScopeSource {
     UserExplicit,
     SessionSelected,
+    ProjectConfigured,
     EvaluationConfig,
     ToolVerified,
     Inferred,
@@ -53,6 +54,7 @@ impl ResourceScopeSource {
         match self {
             Self::UserExplicit => "user_explicit",
             Self::SessionSelected => "session_selected",
+            Self::ProjectConfigured => "project_configured",
             Self::EvaluationConfig => "evaluation_config",
             Self::ToolVerified => "tool_verified",
             Self::Inferred => "inferred",
@@ -315,6 +317,7 @@ impl ResourceScopeContract {
             _ => ResourceRelation::Unknown,
         };
         let should_guard = operation == ResourceOperation::Write
+            && !resolved_locator.is_some_and(|raw| crate::agent::workspace_access::scope_write_authorized(&self.bindings, raw))
             && relation == ResourceRelation::Outside
             && self.primary_filesystem().is_some_and(|binding| {
                 matches!(
