@@ -1563,3 +1563,23 @@
         drop(state);
         let _ = std::fs::remove_dir_all(base);
     }
+
+#[test]
+fn reviewer_thinking_cap_defaults_to_sixty_thousand() {
+    for value in [None, Some(""), Some("invalid"), Some("-1")] {
+        assert_eq!(super::reviewer_thinking_cap(value), 60_000);
+    }
+}
+
+#[test]
+fn reviewer_thinking_cap_preserves_explicit_override_and_bounds() {
+    for (value, expected) in [
+        ("20000", 20_000),
+        (" 60000 ", 60_000),
+        ("80000", 80_000),
+        ("1", 2_000),
+        ("999999", 200_000),
+    ] {
+        assert_eq!(super::reviewer_thinking_cap(Some(value)), expected);
+    }
+}

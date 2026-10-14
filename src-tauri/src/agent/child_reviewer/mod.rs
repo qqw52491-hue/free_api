@@ -23,6 +23,14 @@ pub use parse::*;
 pub use poll::*;
 pub use types::*;
 
+/// 解析单次审查调用的思考字符预算，不修改进程环境，便于独立回归验证。
+fn reviewer_thinking_cap(value: Option<&str>) -> usize {
+    value
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .map(|v| v.clamp(2_000, 200_000))
+        .unwrap_or(60_000)
+}
+
 /// 异步派发子审查任务：立即返回 child_run_id，后台执行 LLM 调用并写入 result_json。
 /// 父 Agent 不阻塞等待，可在后续 step 中通过 poll_completed_child_runs 轮询结果。
 pub async fn spawn_child_reviewer(
@@ -332,11 +340,9 @@ pub async fn spawn_child_reviewer(
         let app_handle = app;
         // 思考失控止损：单次调用的思考内容超过上限仍未给结论（实测 gemini-3.1-pro high 思考 4 万字反复复述同一批结论），
         // 切断流后追一句“立刻出结论”并降低推理强度重试一次，再失控才判超时交编排层。
-        let think_cap: usize = std::env::var("FREE_API_REVIEWER_THINK_CAP_CHARS")
-            .ok()
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .map(|v| v.clamp(2_000, 200_000))
-            .unwrap_or(20_000);
+        // 默认单次调用允许 60,000 个 Unicode 字符；显式环境变量仍优先。
+        let think_cap_override = std::env::var("FREE_API_REVIEWER_THINK_CAP_CHARS").ok();
+        let think_cap = reviewer_thinking_cap(think_cap_override.as_deref());
         let think_chars = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let think_chars_cb = think_chars.clone();
         let mut cur_effort = reasoning_effort.clone();
