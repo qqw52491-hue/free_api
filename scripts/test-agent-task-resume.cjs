@@ -7,7 +7,7 @@ const ts = require('typescript');
 const vue = require('vue');
 const root = path.resolve(__dirname, '..');
 const cache = new Map();
-let mounted = [], requests = [], traceStatus = 'cancelled';
+let mounted = [], requests = [], traceStatus = 'cancelled', creations = [], failCreation = false;
 const storage = new Map();
 global.localStorage = { getItem: k => storage.get(k) ?? null, setItem: (k,v) => storage.set(k,v) };
 global.window = { setInterval, clearInterval, setTimeout, clearTimeout };
@@ -19,6 +19,11 @@ const format = {
     toTimestamp: v => typeof v === 'number' ? v : Date.parse(v) || 0,
 };
 async function invoke(name, args) {
+    if (name === 'create_session' || name === 'create_agent_project_session') {
+        creations.push({ name, args });
+        if (failCreation) throw Error('cannot create session');
+        return { id: 'saved-session' };
+    }
     if (name === 'get_session_run_traces') return [{
         id: 'previous-run', goal: 'original complex task', status: traceStatus,
         started_at: '2026-10-13T08:00:00Z', updated_at: '2026-10-13T08:01:00Z', steps: [],
@@ -94,6 +99,32 @@ async function main() {
     await new Promise(resolve => setTimeout(resolve, 25));
     assert.equal(requests[0].taskStartMode, 'resume');
     assert.equal(requests[1].taskStartMode, 'new', 'queued task must not inherit failed predecessor');
-    console.log('PASS: 8 frontend task-intent scenarios (mocked I/O; real composable)');
+    requests = []; creations = []; failCreation = false;
+    let promoted = [];
+    s = useAgentSession('draft-directory', { onPromote: (...args) => promoted.push(args) });
+    s.modelRouting.value.pro = 'pro-model';
+    const ids = await Promise.all([s.ensureSession(), s.ensureSession()]);
+    assert.equal(ids[0], 'saved-session'); assert.equal(ids[1], 'saved-session');
+    assert.equal(creations.length, 1, 'settings and send share one creation');
+    assert.equal(promoted.length, 1); assert.equal(requests.length, 0, 'opening settings must not run a model');
+    assert.equal(s.activeSessionId.value, 'saved-session');
+    assert.equal(await s.ensureSession(), 'saved-session'); assert.equal(creations.length, 1);
+    await s.runAgent('use configured directory');
+    assert.equal(requests[0].sessionId, 'saved-session'); assert.equal(creations.length, 1);
+
+    requests = []; creations = []; failCreation = true;
+    s = useAgentSession('draft-failure');
+    s.modelRouting.value.pro = '';
+    await assert.rejects(() => s.ensureSession(), /cannot create session/);
+    assert.equal(s.activeSessionId.value, 'draft-failure');
+    await s.runAgent('must not start without saved session'); assert.equal(requests.length, 0);
+    failCreation = false; await s.ensureSession(); assert.equal(s.activeSessionId.value, 'saved-session');
+    assert.equal(creations[2].args.modelId, '', 'configuring directories does not require selecting a model');
+
+    creations = [];
+    s = useAgentSession('draft-project', { projectId: 'p1' });
+    await s.ensureSession(); assert.equal(creations[0].name, 'create_agent_project_session');
+    assert.equal(creations[0].args.projectId, 'p1');
+    console.log('PASS: task intent (8 scenarios) + settings session creation (6 scenarios); real composable, mocked I/O');
 }
 main().then(() => process.exit(0), e => { console.error(e); process.exit(1); });

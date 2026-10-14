@@ -91,6 +91,7 @@ const SESSION_SCOPED_TABLES: &[(&str, SessionKey)] = &[
     ("agent_stage_marks", SessionKey::SessionId),
     ("chat_messages", SessionKey::SessionId),
     ("agent_project_sessions", SessionKey::SessionId),
+    ("agent_session_directories", SessionKey::SessionId),
 ];
 
 /// 非会话级表归属白名单：新增表必须在 SESSION_SCOPED_TABLES 与本表之间
@@ -209,6 +210,7 @@ pub fn delete_session_completely(
     }
     conn.execute("DELETE FROM chat_sessions WHERE id=?1", rusqlite::params![id])
         .map_err(|e| format!("删除会话主记录失败: {e}"))?;
+    crate::agent::workspace_access::revoke_session(id);
 
     // 3.5 本会话的 step_logs 行已删除，此刻裁决 cas_blob 是否还有其它会话引用。
     // outputs 根目录沿用既有注入约定（生产=app_data_dir/free-api-chat，测试=临时目录）。

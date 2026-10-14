@@ -84,7 +84,7 @@
                 >
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M15 3v18"/></svg>
                 </button>
-                <button class="icon-control" type="button" title="设置" @click="settingsOpen = true">
+                <button class="icon-control" type="button" title="设置" @click="openSettings">
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.14.37.5.62.9.62H21a2 2 0 0 1 0 4h-.7c-.4 0-.76.25-.9.62Z" /></svg>
                 </button>
             </div>
@@ -160,7 +160,7 @@
                     @update:budget-mode="session.updateBudgetMode($event)"
                     @update:auto-pilot="session.setAutoPilot($event)"
                     @update:plan-mode="session.setPlanMode($event)"
-                    @open-settings="settingsOpen = true"
+                    @open-settings="openSettings"
                     @open-roles="emit('open-roles')"
                     @attach-files="handleAttachFiles"
                     @submit="submitComposer"
@@ -243,6 +243,8 @@
         />
         <AgentSettingsDrawer
             :open="settingsOpen"
+            :session-id="session.activeSessionId.value"
+            :project-id="projectId"
             :log-context="session.logContext.value"
             :retry-attempts="session.retryAttempts.value"
             :is-running="session.isRunning.value"
@@ -293,6 +295,16 @@ const session = useAgentSession(props.panelId, {
         emit("promoted", oldId, newId, title, projectId);
     },
 });
+
+async function openSettings() {
+    try {
+        // 临时对话可以在首个任务前授权目录；只创建会话，不触发模型请求。
+        if (!props.projectId) await session.ensureSession();
+        settingsOpen.value = true;
+    } catch (error) {
+        emit("show-toast", `打开当前对话设置失败：${String(error)}`, "warning");
+    }
+}
 
 // 分叉落地：把分叉点消息正文预填进输入框，用户可改写后再开跑
 watch(() => props.initialDraft, (v) => {

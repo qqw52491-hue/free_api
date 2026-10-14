@@ -116,6 +116,15 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             PRIMARY KEY(project_id, canonical_path),
             FOREIGN KEY(project_id) REFERENCES agent_projects(id) ON DELETE CASCADE
         );
+        -- 当前会话授权独立保存，续跑保留；删除会话时撤销，不继承到新对话。
+        CREATE TABLE IF NOT EXISTS agent_session_directories (
+            session_id TEXT NOT NULL,
+            canonical_path TEXT NOT NULL,
+            access TEXT NOT NULL CHECK(access IN ('read_only', 'read_write')),
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(session_id, canonical_path),
+            FOREIGN KEY(session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
+        );
         CREATE TABLE IF NOT EXISTS chat_messages (
             id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,

@@ -1798,6 +1798,28 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         });
     }
 
+    let creatingSession: Promise<string> | null = null;
+    async function ensureSession(): Promise<string> {
+        if (creatingSession) return creatingSession;
+        if (!activeSessionId.value.startsWith("draft-")) return activeSessionId.value;
+        creatingSession = (async () => {
+            const rawProjectId = typeof options?.projectId === "function" ? options.projectId() : options?.projectId;
+            const initialTitle = "新对话";
+            const created = await invoke<{ id: string }>(rawProjectId ? "create_agent_project_session" : "create_session", {
+                ...(rawProjectId ? { projectId: rawProjectId } : {}),
+                title: initialTitle,
+                modelId: modelRouting.value?.pro || "",
+            });
+            const oldId = activeSessionId.value;
+            activeSessionId.value = created.id;
+            await setupListeners(created.id);
+            options?.onPromote?.(oldId, created.id, initialTitle, rawProjectId);
+            return created.id;
+        })();
+        try { return await creatingSession; }
+        finally { creatingSession = null; }
+    }
+
     async function runAgent(nextGoal?: string, attachments?: ParsedAttachment[], taskStartMode?: "resume" | "new") {
         // 不按消息关键词猜意图；失败/取消后默认续跑，排队/目标替换显式新任务。
         const selectedTaskMode = taskStartMode ?? (canResumeTask.value ? "resume" : undefined);
@@ -1805,33 +1827,10 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         const requestedGoal = (nextGoal ?? goalInput.value).trim();
         if (!requestedGoal || isRunning.value) return;
 
-        let currentSessionId = activeSessionId.value;
-        if (currentSessionId.startsWith("draft-")) {
-            const rawProjectId = typeof options?.projectId === "function" ? options.projectId() : options?.projectId;
-            const initialTitle = "新对话";
-            try {
-                if (rawProjectId) {
-                    const created = await invoke<any>("create_agent_project_session", {
-                        projectId: rawProjectId,
-                        title: initialTitle,
-                        modelId: modelRouting.value?.pro || undefined,
-                    });
-                    currentSessionId = created.id;
-                } else {
-                    const created = await invoke<any>("create_session", {
-                        title: initialTitle,
-                        modelId: modelRouting.value?.pro || undefined,
-                    });
-                    currentSessionId = created.id;
-                }
-                const oldId = activeSessionId.value;
-                activeSessionId.value = currentSessionId;
-                await setupListeners(currentSessionId);
-                options?.onPromote?.(oldId, currentSessionId, initialTitle, rawProjectId);
-            } catch (err) {
-                appendLog(`[会话持久化异常] ${toText(err)}`);
-            }
-        }
+        let currentSessionId: string;
+        try { currentSessionId = await ensureSession(); }
+        catch (err) { appendLog(`[会话持久化异常] ${toText(err)}`); return; }
+        if (isRunning.value) return;
 
         const currentGeneration = ++runGeneration;
         // 关键修复：点击发送后，第一步立即重置并更新运行态，使气泡与规划指示 0ms 即刻上屏响应！
@@ -2144,6 +2143,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     }
 
     return {
+        activeSessionId,
+        ensureSession,
         modelRouting,
         updateBudgetMode,
         logContext,

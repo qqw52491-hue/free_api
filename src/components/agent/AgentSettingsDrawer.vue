@@ -10,6 +10,8 @@
                 <button type="button" @click="$emit('close')">关闭</button>
             </header>
             <div class="settings-scroll">
+                <ProjectDirectoryAccess v-if="sessionId && !projectId" :session-id="sessionId" />
+                <p v-else-if="projectId" class="section-description">目录权限随项目保存，请在项目页面的“附加目录权限”中配置。</p>
                 <section class="mcp-connection-section">
                     <div class="section-heading"><h3>MCP 连接</h3><small>{{ catalogSummary }}</small></div>
                     <p class="section-description">工具目录会按插件配置缓存；刷新会验证 stdio 连接并重新发现工具。</p>
@@ -134,9 +136,12 @@
 import { computed, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import ModelSelectDropdown from "../common/ModelSelectDropdown.vue";
+import ProjectDirectoryAccess from "../ProjectDirectoryAccess.vue";
 
 const props = withDefaults(defineProps<{
     open: boolean;
+    sessionId?: string;
+    projectId?: string;
     logContext: boolean;
     retryAttempts?: number;
     isRunning: boolean;

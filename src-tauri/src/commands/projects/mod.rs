@@ -7,6 +7,7 @@ use tauri::State;
 use uuid::Uuid;
 
 pub(crate) mod directories;
+pub(crate) mod session_directories;
 
 const MAX_PROJECT_NAME_CHARS: usize = 120;
 const MAX_RESOURCE_LABEL_CHARS: usize = 200;

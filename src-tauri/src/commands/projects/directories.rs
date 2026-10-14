@@ -33,21 +33,27 @@ pub(crate) fn set_project_directory_row(
     access: DirectoryAccess,
 ) -> Result<Vec<ProjectDirectory>, String> {
     let project = get_project(conn, project_id)?;
-    if !Path::new(raw.trim()).is_absolute() {
-        return Err("附加目录必须使用绝对路径，请选择本机目录。".into());
-    }
-    let path = canonical_directory(raw)?;
     let primary = canonical_directory(&project.root_path)?;
-    if path == primary || path.starts_with(&primary) {
-        return Err(
-            "该目录已属于主工作区（可读写），无需重复添加；附加目录不会覆盖主工作区权限。".into(),
-        );
-    }
+    let path = canonical_extra_directory(raw, &primary)?;
     let text = path.to_string_lossy().into_owned();
     conn.execute("INSERT INTO agent_project_directories (project_id, canonical_path, access, updated_at) VALUES (?1, ?2, ?3, ?4)
         ON CONFLICT(project_id, canonical_path) DO UPDATE SET access=excluded.access, updated_at=excluded.updated_at",
         params![project_id, text, access.as_str(), Utc::now().to_rfc3339()]).map_err(|e| e.to_string())?;
     refresh_project_directories(conn, project_id)
+}
+
+pub(super) fn canonical_extra_directory(raw: &str, primary: &Path) -> Result<PathBuf, String> {
+    if !Path::new(raw.trim()).is_absolute() {
+        return Err("附加目录必须使用绝对路径，请选择本机目录。".into());
+    }
+    let path = canonical_directory(raw)?;
+    let primary = primary.canonicalize().unwrap_or_else(|_| primary.into());
+    if path == primary || path.starts_with(&primary) {
+        return Err(
+            "该目录已属于主工作区（可读写），无需重复添加；附加目录不会覆盖主工作区权限。".into(),
+        );
+    }
+    Ok(path)
 }
 
 pub(crate) fn remove_project_directory_row(
@@ -92,7 +98,12 @@ pub(crate) fn bind_session_directories(
     } else {
         None
     };
-    crate::agent::workspace_access::bind_session(session_id, workspace, access);
+    if let Some(access) = access {
+        crate::agent::workspace_access::bind_session(session_id, workspace, Some(access));
+    } else {
+        let dirs = super::session_directories::read_session_directories(conn, session_id)?;
+        crate::agent::workspace_access::bind_conversation(session_id, workspace, dirs);
+    }
     Ok(())
 }
 

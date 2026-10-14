@@ -1,7 +1,7 @@
 <template>
   <section class="directory-access" aria-label="项目目录权限">
     <div class="directory-access-heading">
-      <div><h3>附加目录权限</h3><p>参考其他项目代码，或授权跨目录修改。</p></div>
+      <div><h3>{{ sessionId ? "当前对话 · 目录权限" : "附加目录权限" }}</h3><p>参考其他项目代码，或授权跨目录修改。</p></div>
       <div class="directory-access-actions">
         <button type="button" :disabled="busy || loading" :aria-expanded="workspacePickerOpen" @click="toggleWorkspacePicker">选择已有工作区</button>
         <button type="button" :disabled="busy || loading" @click="addDirectory">选择本机目录</button>
@@ -20,7 +20,7 @@
       </div>
     </div>
     <div class="directory-access-row primary">
-      <code :title="rootPath">{{ rootPath }}</code><span>主工作区 · 可读写</span>
+      <code :title="primaryPath">{{ primaryPath }}</code><span>{{ sessionId ? "会话工作区" : "主工作区" }} · 可读写</span>
     </div>
     <div v-for="directory in directories" :key="directory.path" class="directory-access-row">
       <code :title="directory.path">{{ directory.path }}</code>
@@ -31,7 +31,7 @@
     </div>
     <p v-if="loading" class="directory-access-note">正在加载目录权限…</p>
     <p v-else-if="!directories.length && !error" class="directory-access-note">尚未添加参考目录；新增默认只读。</p>
-    <p class="directory-access-note">按项目保存，运行中可调整。写权限包含读权限；重叠目录以最深规则为准，主工作区权限不变。移除只撤销授权，不删除磁盘文件。</p>
+    <p class="directory-access-note">{{ sessionId ? "仅当前对话有效，续跑或重新打开保留；不带入新对话。" : "按项目保存，" }}运行中可调整。写权限包含读权限；重叠目录以最深规则为准，主工作区权限不变。移除只撤销授权，不删除磁盘文件。</p>
     <p class="directory-access-note">本地文件、搜索、看图按权限校验。Shell 的 cwd 仅接受可写目录；任意脚本与外部 MCP 不是只读沙箱，MCP 需服务端另行授权。</p>
     <p v-if="error" role="alert" class="directory-access-error">{{ error }} <button v-if="!busy && !loading" type="button" @click="loadDirectories">重试加载</button></p>
     <p v-if="notice" role="status" class="directory-access-notice">{{ notice }}</p>
@@ -46,7 +46,10 @@ import { open } from "@tauri-apps/plugin-dialog";
 type DirectoryAccess = "read_only" | "read_write";
 interface ProjectDirectory { path: string; access: DirectoryAccess }
 interface AgentProject { id: string; name: string; root_path: string }
-const props = defineProps<{ projectId: string; rootPath: string }>();
+const props = defineProps<{ projectId?: string; rootPath?: string; sessionId?: string }>();
+const primaryPath = ref(props.rootPath || "");
+function ownerParams() { return props.sessionId ? { sessionId: props.sessionId } : { projectId: props.projectId }; }
+function mutationCommand(action: string) { return props.sessionId ? action.replace("_project_", "_session_") : action; }
 const directories = ref<ProjectDirectory[]>([]);
 const busy = ref(false);
 const loading = ref(false);
@@ -57,7 +60,7 @@ const workspaces = ref<AgentProject[]>([]);
 const workspacesLoading = ref(false);
 const workspacesError = ref("");
 const availableWorkspaces = computed(() => workspaces.value.filter(
-  project => project.id !== props.projectId && project.root_path !== props.rootPath,
+  project => project.id !== props.projectId && project.root_path !== primaryPath.value,
 ));
 let generation = 0;
 let workspaceRequest = 0;
@@ -97,7 +100,8 @@ async function addWorkspace(workspace: AgentProject) {
 
 async function loadDirectories() {
   const version = ++generation;
-  const projectId = props.projectId;
+  const owner = ownerParams();
+  primaryPath.value = props.rootPath || "";
   ++workspaceRequest;
   workspacePickerOpen.value = false;
   workspaces.value = [];
@@ -108,8 +112,13 @@ async function loadDirectories() {
   notice.value = "";
   loading.value = true;
   try {
-    const result = await invoke<ProjectDirectory[]>("list_agent_project_directories", { projectId });
-    if (version === generation) directories.value = result;
+    if (props.sessionId) {
+      const config = await invoke<{ root_path: string; directories: ProjectDirectory[] }>("get_agent_session_directory_config", owner);
+      if (version === generation) { primaryPath.value = config.root_path; directories.value = config.directories; }
+    } else {
+      const result = await invoke<ProjectDirectory[]>("list_agent_project_directories", owner);
+      if (version === generation) directories.value = result;
+    }
   } catch (e) {
     if (version === generation) error.value = `加载目录权限失败：${String(e)}`;
   } finally {
@@ -119,12 +128,12 @@ async function loadDirectories() {
 
 async function mutate(action: string, params: Record<string, unknown>) {
   const version = generation;
-  const projectId = props.projectId;
+  const owner = ownerParams();
   busy.value = true;
   error.value = "";
   notice.value = "";
   try {
-    const result = await invoke<ProjectDirectory[]>(action, { projectId, ...params });
+    const result = await invoke<ProjectDirectory[]>(mutationCommand(action), { ...owner, ...params });
     if (version === generation) {
       directories.value = result;
       notice.value = "已保存。后续受控工具调用使用新权限，Agent 下一步骤刷新目录清单；不重置原任务和审查。已开始的操作不被中断。";
@@ -141,7 +150,7 @@ async function addDirectory() {
   busy.value = true;
   error.value = "";
   try {
-    const path = await open({ directory: true, multiple: false, title: "添加参考目录（默认只读）", defaultPath: props.rootPath });
+    const path = await open({ directory: true, multiple: false, title: "添加参考目录（默认只读）", defaultPath: props.sessionId ? undefined : primaryPath.value || undefined });
     if (typeof path === "string" && version === generation) {
       await mutate("set_agent_project_directory", { path, access: "read_only" });
     }
@@ -159,7 +168,7 @@ async function changeAccess(path: string, event: Event) {
   if (saved) select.value = saved.access;
 }
 async function removeDirectory(path: string) { await mutate("remove_agent_project_directory", { path }); }
-watch(() => props.projectId, loadDirectories, { immediate: true });
+watch(() => [props.projectId, props.sessionId], loadDirectories, { immediate: true });
 </script>
 
 <style scoped>

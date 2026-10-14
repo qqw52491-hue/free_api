@@ -1,4 +1,4 @@
-//! 项目附加目录的运行时投影。数据库是持久权威；配置更新只刷新权限，不改任务/审查状态。
+//! 项目/会话附加目录的运行时投影。数据库是持久权威；配置更新只刷新权限，不改任务/审查状态。
 //! 这里约束受控文件 API，不是 OS 沙箱；任意 Shell/MCP 仍受各自的执行策略约束。
 use crate::agent::context::resource_scope::{
     ResourceScopeKind, ResourceScopeRole, ResourceScopeSource, ResourceScopeValidation,
@@ -31,7 +31,7 @@ pub struct ProjectDirectory {
 }
 #[derive(Clone)]
 struct SessionAccess {
-    project_id: String,
+    project_id: Option<String>,
     primary: PathBuf,
     directories: Vec<ProjectDirectory>,
 }
@@ -48,7 +48,7 @@ pub(crate) fn bind_session(
         map.insert(
             session.into(),
             SessionAccess {
-                project_id,
+                project_id: Some(project_id),
                 primary: primary.canonicalize().unwrap_or_else(|_| primary.into()),
                 directories,
             },
@@ -57,9 +57,36 @@ pub(crate) fn bind_session(
         map.remove(session);
     }
 }
+/// 临时对话与项目使用同一张运行时权限投影，只是配置归属不同。
+pub(crate) fn bind_conversation(session: &str, primary: &Path, directories: Vec<ProjectDirectory>) {
+    SESSIONS.write().unwrap_or_else(|e| e.into_inner()).insert(
+        session.into(),
+        SessionAccess {
+            project_id: None,
+            primary: primary.canonicalize().unwrap_or_else(|_| primary.into()),
+            directories,
+        },
+    );
+}
+pub(crate) fn session_primary(session: &str) -> Option<PathBuf> {
+    SESSIONS
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(session)
+        .map(|entry| entry.primary.clone())
+}
+pub(crate) fn revoke_session(session: &str) {
+    SESSIONS
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(session);
+}
 pub(crate) fn update_project(project: &str, directories: &[ProjectDirectory]) {
     let mut map = SESSIONS.write().unwrap_or_else(|e| e.into_inner());
-    for entry in map.values_mut().filter(|entry| entry.project_id == project) {
+    for entry in map
+        .values_mut()
+        .filter(|entry| entry.project_id.as_deref() == Some(project))
+    {
         entry.directories = directories.to_vec();
     }
 }
@@ -80,7 +107,7 @@ pub(crate) fn directories(session: Option<&str>, primary: &Path) -> Vec<ProjectD
         .map(|entry| entry.directories.clone())
         .unwrap_or_default()
 }
-pub(crate) fn is_project_bound(session: &str, primary: &Path) -> bool {
+pub(crate) fn is_session_bound(session: &str, primary: &Path) -> bool {
     let primary = primary.canonicalize().unwrap_or_else(|_| primary.into());
     SESSIONS
         .read()
@@ -177,7 +204,7 @@ pub(crate) fn sync_context(
         .clone()
         .unwrap_or_default();
     let base = old.split_once(MARKER).map(|(base, _)| base).unwrap_or(&old);
-    let next = if is_project_bound(session, primary) {
+    let next = if is_session_bound(session, primary) {
         format!("{}{}", base, render(session, primary))
     } else {
         base.into()

@@ -629,7 +629,7 @@ pub fn dispatch_search(
 
     if wants_code {
         if let (Some(ws), Some(raw)) = (workspace_root, params.path.as_deref().filter(|p| !p.trim().is_empty())) {
-            if crate::agent::workspace_access::is_project_bound(session_id, ws) {
+            if crate::agent::workspace_access::is_session_bound(session_id, ws) {
                 if let Err(error) = crate::agent::path_guard::ensure_readable_path(raw, ws, Some(session_id), false) {
                     return DispatchResult { view: None, stdout: String::new(), stderr: format!("search 路径权限校验失败，尚未检索或读取缓存：{}", error), success: false, route: "search:path_denied".into() };
                 }
