@@ -299,3 +299,69 @@ index 789..abc 100644
         assert!(!diff.lines().any(|l| (l.starts_with('+') || l.starts_with('-')) && l.contains("USER_EDIT")), "user line leaked as change: {}", diff);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+
+    #[test]
+    fn finish_format_retries_allow_five_corrections_then_stop() {
+        let mut retries = 0;
+        for expected in 1..=5 {
+            assert!(finish_format_retry_allowed(false, &mut retries, true));
+            assert_eq!(retries, expected);
+        }
+        assert!(!finish_format_retry_allowed(false, &mut retries, true));
+        assert_eq!(retries, 5);
+    }
+
+    #[test]
+    fn finish_format_retries_reset_after_valid_json_in_real_dsml_sequence() {
+        let mut retries = 0;
+        let dsml = r#"<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="read_file">
+<｜｜DSML｜｜ parameter name="path" string="true">adp-iam/src/main/java/cn/com/jit/adp/iam/license/LicenseService.java</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>"#;
+        let responses = [
+            dsml,
+            r#"{"tool":"read_file","path":"adp-iam/src/main/java/cn/com/jit/adp/iam/web/LicenseController.java"}"#,
+            dsml,
+        ];
+        for (idx, raw) in responses.iter().enumerate() {
+            let valid_json = serde_json::from_str::<serde_json::Value>(&extract_json_str(raw)).is_ok();
+            assert_eq!(finish_format_retry_allowed(valid_json, &mut retries, true), idx != 1);
+            assert_eq!(retries, if idx == 1 { 0 } else { 1 });
+        }
+        // 不新增 DSML 兼容，更不能把不可解析的输出伪造为审查通过。
+        assert!(parse_reviewer_json(dsml, "model", "diff", 0).is_service_failure());
+        for _ in 1..5 {
+            assert!(finish_format_retry_allowed(false, &mut retries, true));
+        }
+        assert!(!finish_format_retry_allowed(false, &mut retries, true));
+        assert!(!finish_format_retry_allowed(true, &mut retries, true));
+        assert_eq!(retries, 0);
+        assert!(finish_format_retry_allowed(false, &mut retries, true));
+    }
+
+    #[test]
+    fn finish_format_retries_respect_disabled_request_retries() {
+        let mut retries = 0;
+        assert!(!finish_format_retry_allowed(false, &mut retries, false));
+        assert_eq!(retries, 0);
+        retries = 3;
+        assert!(!finish_format_retry_allowed(true, &mut retries, false));
+        assert_eq!(retries, 0);
+    }
+
+    #[test]
+    fn finish_format_retry_feedback_matches_remaining_tool_budget() {
+        let feedback = finish_format_retry_feedback(1, 1, 8, false);
+        assert!(feedback.contains("连续格式纠正 1/5"));
+        assert!(feedback.contains("未执行其中的工具调用"));
+        assert!(feedback.contains("可以输出工具请求 JSON"));
+        assert!(feedback.contains(r#"{"tool":"read_file","path":"文件路径"}"#));
+        for (used, budget, forced) in [(8, 8, false), (0, 0, false), (1, 8, true)] {
+            let feedback = finish_format_retry_feedback(5, used, budget, forced);
+            assert!(feedback.contains("连续格式纠正 5/5"));
+            assert!(feedback.contains("当前不再允许请求取证工具"));
+            assert!(!feedback.contains("可以输出工具请求 JSON"));
+        }
+    }

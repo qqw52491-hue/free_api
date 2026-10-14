@@ -16,6 +16,42 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::watch;
 
 
+const MAX_FINISH_FORMAT_RETRIES: u32 = 5;
+
+/// 只计连续的非 JSON 输出；合法 JSON 会清零，不改变取证预算或判决校验。
+pub(crate) fn finish_format_retry_allowed(
+    valid_json: bool,
+    retries: &mut u32,
+    retry_enabled: bool,
+) -> bool {
+    if valid_json {
+        *retries = 0;
+        return false;
+    }
+    if !retry_enabled || *retries >= MAX_FINISH_FORMAT_RETRIES {
+        return false;
+    }
+    *retries += 1;
+    true
+}
+
+pub(crate) fn finish_format_retry_feedback(
+    retry: u32,
+    tool_steps_used: u32,
+    forensic_budget: u32,
+    forced_final: bool,
+) -> String {
+    let next_action = if !forced_final && tool_steps_used < forensic_budget {
+        r#"取证预算未尽：可以输出工具请求 JSON（例如 {"tool":"read_file","path":"文件路径"}），也可以输出最终判决 JSON（含 verdict 键）。"#
+    } else {
+        "当前不再允许请求取证工具，请基于已有证据输出最终判决 JSON（含 verdict 键）；未核实事项写入 missing_evidence。"
+    };
+    format!(
+        "【系统】终审输出格式解析失败：上一条输出不是合法 JSON，未执行其中的工具调用，也未获得有效审查结论。连续格式纠正 {}/{}。{}请只输出一个 JSON 对象，不要附加解释文字、Markdown 或 DSML 标签。",
+        retry, MAX_FINISH_FORMAT_RETRIES, next_action
+    )
+}
+
 /// 防敷衍复用指纹：diff 与交付摘要的联合哈希。
 /// diff 相同的两次 finish 若摘要不同，指纹不同——文本型交付的"修复"发生在
 /// 摘要里而非代码里，纯 diff 键会把改进版锁死在旧拦截上（实弹死循环）。
@@ -551,10 +587,10 @@ async fn evaluate_finish_diff_once(
     let mut timeout_retried = false;
     let mut cur_timeout_secs = review_timeout_secs;
 
-    // 非超时的调用报错 / 输出非 JSON：各给一次重试机会再降级，
-    // 避免弱模型偶发格式错误让终审静默沦为橡皮图章。
+    // 非超时调用报错仍只重试一次；非 JSON 输出独立计连续次数，最多纠正 5 次。
+    // 合法 JSON 会重置格式计数；耗尽纠正机会仍按审查通道失败退出，不放行交付。
     let mut call_error_retried = false;
-    let mut format_retried = false;
+    let mut format_retries = 0u32;
 
     let mut ignore_stream = |_: llm::StreamEvent<'_>| true;
     let (response_text, duration_ms) = loop {
@@ -638,6 +674,11 @@ async fn evaluate_finish_diff_once(
         // a. 判决 JSON（含 verdict 键）→ 收敛，交给下游统一解析
         let clean = extract_json_str(&raw);
         let as_value = serde_json::from_str::<serde_json::Value>(&clean).ok();
+        let retry_format = finish_format_retry_allowed(
+            as_value.is_some(),
+            &mut format_retries,
+            review_retry_allowed(),
+        );
         let is_tool_request = as_value
             .as_ref()
             .map(|v| v.get("tool").is_some() && v.get("verdict").is_none())
@@ -735,15 +776,27 @@ async fn evaluate_finish_diff_once(
             continue;
         }
 
-        // b2. 输出根本不是 JSON：让审查者按格式重答一次，再失败才降级
-        if as_value.is_none() && !format_retried && review_retry_allowed() {
-            format_retried = true;
+        // b2. 非 JSON 输出最多连续纠正 5 次；合法 JSON 已在上方清零计数。
+        // 格式错误不消耗取证预算，也不表示代码被判不合格。
+        if retry_format {
             messages.push(json!({"role": "assistant", "content": raw}));
             messages.push(json!({
                 "role": "user",
-                "content": "【系统】你上一条输出不是合法 JSON，系统无法解析。请只输出一个判决 JSON 对象（含 verdict 键），不要附加解释文字或 Markdown 以外的内容。"
+                "content": finish_format_retry_feedback(
+                    format_retries, tool_steps_used, forensic_budget, forced_final,
+                )
             }));
             continue;
+        }
+        if as_value.is_none() && format_retries >= MAX_FINISH_FORMAT_RETRIES {
+            return ReviewResult::failed_open(
+                &format!(
+                    "Reviewer 输出不是合法 JSON；已连续纠正 {} 次仍未获得有效审查结论",
+                    MAX_FINISH_FORMAT_RETRIES
+                ),
+                &model_id,
+                &review_fingerprint,
+            );
         }
 
         // c. 影响面覆盖校验：判决 JSON（含 verdict 键）落点前的最后义务——
