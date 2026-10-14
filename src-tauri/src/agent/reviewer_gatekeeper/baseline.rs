@@ -252,6 +252,8 @@ impl GitBaseline {
         // 3. 计算 Diff 的 SHA256 哈希
         let mut hasher = Sha256::new();
         hasher.update(trimmed.as_bytes());
+        let paths = self.collect_changed_file_paths(workspace, chrono::Utc::now());
+        Self::hash_changed_contents(&mut hasher, workspace, paths);
         let hash_hex = format!("{:x}", hasher.finalize());
 
         // 4. 控制 Diff 尺寸上限
@@ -323,6 +325,12 @@ impl GitBaseline {
         // 3. 计算 SHA256 哈希
         let mut hasher = Sha256::new();
         hasher.update(combined.as_bytes());
+        let paths = modified_files.iter()
+            .filter_map(|p| p.strip_prefix(workspace).ok())
+            .map(|p| p.to_string_lossy().into_owned())
+            .filter(|p| !is_noise_path(p))
+            .collect();
+        Self::hash_changed_contents(&mut hasher, workspace, paths);
         let hash_hex = format!("{:x}", hasher.finalize());
 
         // 4. 控制上限
@@ -337,6 +345,18 @@ impl GitBaseline {
         };
 
         Some((final_text, hash_hex))
+    }
+
+    /// 预览可截断，收据指纹不能截断：新文件尾部和同大小二进制变化也须使旧验收失效。
+    fn hash_changed_contents(hasher: &mut Sha256, workspace: &Path, mut paths: Vec<String>) {
+        paths.sort();
+        paths.dedup();
+        for path in paths {
+            hasher.update(b"\0file-content\0");
+            hasher.update((path.len() as u64).to_le_bytes());
+            hasher.update(path.as_bytes());
+            hasher.update(Self::file_content_hash(workspace, &path).as_bytes());
+        }
     }
 
     pub(crate) fn scan_modified_files(

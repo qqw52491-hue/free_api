@@ -7,7 +7,7 @@
 //!   会话 assistant 消息三者同生同灭，杜绝「checkpoint 已完成但 trace 仍 running」的半截态；
 //! - 事件通知与产物登记是提交后的可重放派生动作，不参与事务。
 //!
-//! 收据保鲜键：diff_hash + resource_scope.revision + 审查契约义务指纹。
+//! 收据保鲜键：diff_hash + resource_scope.revision + 审查契约内容指纹。
 //! 任一变化即收据失效，finish 重新走完整门禁，绝不按旧结论放行。
 
 use crate::agent::checkpoint::AgentCheckpoint;
@@ -116,7 +116,7 @@ pub fn contract_fingerprint(
     let Some(contract) = contract else {
         return String::new();
     };
-    let raw = serde_json::to_string(&contract.obligations).unwrap_or_default();
+    let raw = serde_json::to_string(contract).unwrap_or_default();
     let mut hasher = Sha256::new();
     hasher.update(raw.as_bytes());
     format!("{:x}", hasher.finalize())
@@ -553,6 +553,33 @@ mod tests {
             finish_payload: Value::Null,
             created_at: "2026-09-25T00:00:00Z".to_string(),
         }
+    }
+
+    #[test]
+    fn corrected_claim_or_contract_scope_invalidates_previous_acceptance() {
+        use crate::agent::review_contract::ReviewContract;
+        let mut c: ReviewContract = serde_json::from_value(serde_json::json!({
+            "scope_statement":"验收登录", "obligations":[{
+                "id":"login", "question":"登录是否正确", "status":"evidenced",
+                "evidence_refs":["AuthService.java:89-93"]
+            }]
+        }))
+        .unwrap();
+        let fp = contract_fingerprint(Some(&c));
+        let r = receipt("same-diff", 0, &fp);
+        assert!(r.is_ready() && r.is_fresh("same-diff", 0, &fp));
+        c.apply_update(
+            serde_json::from_value(serde_json::json!({"obligations":[{
+                "id":"login", "status":"evidenced", "evidence_refs":["src/AuthService.java:89-93"]
+            }]}))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(!r.is_fresh("same-diff", 0, &contract_fingerprint(Some(&c))));
+        let corrected = contract_fingerprint(Some(&c));
+        let r2 = receipt("same-diff", 0, &corrected);
+        c.scope_statement = "验收登录与发布包".into();
+        assert!(!r2.is_fresh("same-diff", 0, &contract_fingerprint(Some(&c))));
     }
 
     #[test]

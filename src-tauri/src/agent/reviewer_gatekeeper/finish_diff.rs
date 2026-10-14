@@ -52,16 +52,39 @@ pub(crate) fn finish_format_retry_feedback(
     )
 }
 
-/// 防敷衍复用指纹：diff 与交付摘要的联合哈希。
+/// 防敷衍复用指纹：diff、交付摘要、完整契约与 scope 版本的联合哈希。
 /// diff 相同的两次 finish 若摘要不同，指纹不同——文本型交付的"修复"发生在
 /// 摘要里而非代码里，纯 diff 键会把改进版锁死在旧拦截上（实弹死循环）。
-pub(crate) fn compose_review_fingerprint(diff_hash: &str, finish_summary: Option<&str>) -> String {
+pub(crate) fn compose_review_fingerprint(
+    diff_hash: &str,
+    finish_summary: Option<&str>,
+    contract_fingerprint: &str,
+    scope_revision: u64,
+) -> String {
     let mut h = Sha256::new();
     h.update(diff_hash.as_bytes());
     if let Some(s) = finish_summary {
         h.update(s.as_bytes());
     }
+    h.update(b"\0contract\0");
+    h.update(contract_fingerprint.as_bytes());
+    h.update(scope_revision.to_le_bytes());
     format!("{:x}", h.finalize())
+}
+
+/// 将完整模型申报移交终审；不截掉后四条证据，也不把 evidenced 当成已验收。
+fn append_contract_claims(
+    material: &mut String,
+    contract: Option<&crate::agent::review_contract::ReviewContract>,
+) {
+    if let Some(contract) = contract {
+        if let Ok(payload) = serde_json::to_string(contract) {
+            material.push_str(&format!(
+                "\n\n【当前完整审查契约（模型申报，不是验收结论）】\n{}\n请结合当前变更和真实观测核验全部义务；evidenced 是待核实证据，waived 是待核实豁免理由，不得仅凭状态判定已通过。\n",
+                payload
+            ));
+        }
+    }
 }
 
 /// 执行终态审查（Reviewer Gatekeeper）
@@ -200,18 +223,23 @@ async fn evaluate_finish_diff_once(
             trimmed
         ));
     }
+    append_contract_claims(&mut review_material, context.review_contract.as_ref());
     if review_material.trim().is_empty() {
         return ReviewResult::skipped_empty();
     }
 
-    // 防敷衍复用键 = diff + 交付摘要联合指纹：摘要改进（即使 diff 没变）必须触发重审，
+    // 防敷衍复用键包括 diff/摘要/契约/scope：补正任一审查输入必须允许重审，
     // 否则文本型交付一旦被打回就永久锁死在旧拦截上。
-    let review_fingerprint = compose_review_fingerprint(&diff_hash, finish_summary);
+    // 证据补正/范围变化即使没有改代码，也不能复用旧驳回。
+    let contract_fp = crate::agent::finalization::contract_fingerprint(context.review_contract.as_ref());
+    let review_fingerprint = compose_review_fingerprint(
+        &diff_hash, finish_summary, &contract_fp, context.resource_scope.revision,
+    );
 
     // 🧨 1.6 影响面机械枚举：改动符号的跨文件消费点清单注入审查材料，
     // refs 同时驱动下方取证环的 consumer_verdicts 逐条覆盖校验。
     // 注意：pack 追加在 diff_hash 计算之后——防敷衍复用键为
-    // review_fingerprint（diff + 交付摘要联合指纹，见上）。
+    // review_fingerprint（diff/摘要/契约/scope 联合指纹，见上）。
     let impact = if crate::agent::impact_pack::impact_pack_enabled() {
         baseline
             .collect_git_diff(workspace)
@@ -333,7 +361,7 @@ async fn evaluate_finish_diff_once(
         }
     }
 
-    // 2. 防敷衍拦截：若审查对象未变（diff+摘要联合指纹相同）且上次审查未通过，
+    // 2. 防敷衍拦截：若审查对象未变（diff/摘要/契约/scope 联合指纹相同）且上次审查未通过，
     // 且期间未发生人类人工仲裁特赦（无 human_waivers 介入），直接复用上次拦截结果，避免浪费 Token 重跑
     if let (Some(last_hash), Some(last_res)) = (last_reviewed_hash, last_review_result) {
         let has_active_waiver = human_waivers.map_or(false, |w| !w.trim().is_empty());
@@ -841,4 +869,49 @@ async fn evaluate_finish_diff_once(
         );
     }
     parsed
+}
+
+
+#[cfg(test)]
+mod contract_handoff_tests {
+    use super::*;
+
+    #[test]
+    fn corrected_contract_changes_rejection_cache_key_and_reaches_reviewer_in_full() {
+        let mut c: crate::agent::review_contract::ReviewContract = serde_json::from_value(json!({
+            "scope_statement":"登录验收", "obligations":[{
+                "id":"login","question":"登录闸门是否正确","status":"evidenced",
+                "evidence_refs":["old.java:89-93","step_2","step_3","step_4","step_5","step_6"]
+            }]
+        }))
+        .unwrap();
+        let fp = crate::agent::finalization::contract_fingerprint(Some(&c));
+        let key = compose_review_fingerprint("same-diff", Some("same summary"), &fp, 0);
+        assert_eq!(
+            key,
+            compose_review_fingerprint("same-diff", Some("same summary"), &fp, 0)
+        );
+        c.apply_update(serde_json::from_value(json!({"obligations":[{
+            "id":"login","status":"evidenced",
+            "evidence_refs":["src/AuthService.java:89-93","step_2","step_3","step_4","step_5","step_6"]
+        }]})).unwrap()).unwrap();
+        let corrected_fp = crate::agent::finalization::contract_fingerprint(Some(&c));
+        let corrected_key =
+            compose_review_fingerprint("same-diff", Some("same summary"), &corrected_fp, 0);
+        assert_ne!(key, corrected_key, "证据补正不能复用旧驳回");
+        assert_ne!(
+            corrected_key,
+            compose_review_fingerprint("same-diff", Some("same summary"), &corrected_fp, 1)
+        );
+        let mut material = String::new();
+        append_contract_claims(&mut material, Some(&c));
+        assert!(
+            material.contains("不是验收结论") && material.contains("src/AuthService.java:89-93")
+        );
+        assert!(material.contains("step_6"), "完整证据清单不得只取前两条");
+        assert!(material.contains("登录闸门是否正确"));
+        let mut absent = String::new();
+        append_contract_claims(&mut absent, None);
+        assert!(absent.is_empty());
+    }
 }

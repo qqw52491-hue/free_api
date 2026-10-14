@@ -845,7 +845,9 @@ mod tests {
         assert!(rendered.contains("【审查契约】"));
         assert!(rendered.contains("核验 finish 到 checkpoint 的调用链"));
         assert!(rendered.contains("[open] terminal：finish 是否由宿主语义门控？"));
-        assert!(rendered.contains("等待核验或显式豁免"));
+        assert!(rendered.contains("尚未申报完成依据"));
+        assert!(rendered.contains("申报不等于验收通过"));
+        assert!(rendered.contains("按义务 id 合并"));
     }
     #[test]
     fn change_verification_card_only_tracks_real_writes_and_their_closure() {

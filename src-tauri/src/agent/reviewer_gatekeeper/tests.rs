@@ -156,10 +156,10 @@ index 789..abc 100644
     /// 否则文本型交付（分析/解答）一旦被打回将永久锁死——实弹事故。
     #[test]
     pub(crate) fn review_fingerprint_tracks_summary_changes() {
-        let base = super::finish_diff::compose_review_fingerprint("diff-abc", Some("摘要 v1"));
-        let same = super::finish_diff::compose_review_fingerprint("diff-abc", Some("摘要 v1"));
-        let revised = super::finish_diff::compose_review_fingerprint("diff-abc", Some("摘要 v2 补充了根因证据"));
-        let diff_changed = super::finish_diff::compose_review_fingerprint("diff-def", Some("摘要 v1"));
+        let base = super::finish_diff::compose_review_fingerprint("diff-abc", Some("摘要 v1"), "contract", 0);
+        let same = super::finish_diff::compose_review_fingerprint("diff-abc", Some("摘要 v1"), "contract", 0);
+        let revised = super::finish_diff::compose_review_fingerprint("diff-abc", Some("摘要 v2 补充了根因证据"), "contract", 0);
+        let diff_changed = super::finish_diff::compose_review_fingerprint("diff-def", Some("摘要 v1"), "contract", 0);
         assert_eq!(base, same);
         assert_ne!(base, revised, "摘要改进必须产生新指纹以触发重审");
         assert_ne!(base, diff_changed);
@@ -364,4 +364,90 @@ index 789..abc 100644
             assert!(feedback.contains("当前不再允许请求取证工具"));
             assert!(!feedback.contains("可以输出工具请求 JSON"));
         }
+    }
+
+
+    #[test]
+    fn receipt_hash_covers_untracked_tail_and_equal_size_binary_not_just_preview() {
+        let root = std::env::temp_dir().join(format!("receipt-content-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(Command::new("git")
+            .args(["init", "-q"])
+            .arg(&root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .current_dir(&root)
+            .args([
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "baseline"
+            ])
+            .status()
+            .unwrap()
+            .success());
+        let baseline = GitBaseline::capture(&root);
+        let prefix = "x".repeat(4000);
+        std::fs::write(root.join("new.rs"), format!("{prefix}old")).unwrap();
+        std::fs::write(root.join("logo.png"), [0u8, 1, 2, 3]).unwrap();
+        let (preview, h1) = baseline.collect_git_diff(&root).unwrap();
+        assert_eq!(
+            h1,
+            baseline.collect_git_diff(&root).unwrap().1,
+            "只读不使验收失效"
+        );
+        std::fs::write(root.join("new.rs"), format!("{prefix}new")).unwrap();
+        let (preview2, h2) = baseline.collect_git_diff(&root).unwrap();
+        assert_eq!(preview, preview2, "摘要外的尾部未改变预览");
+        assert_ne!(h1, h2);
+        std::fs::write(root.join("logo.png"), [0u8, 1, 2, 4]).unwrap();
+        let (preview3, h3) = baseline.collect_git_diff(&root).unwrap();
+        assert_eq!(preview2, preview3);
+        assert_ne!(h2, h3);
+        // 登记已有产物不改工作区；真实分类必须两层都不把它记为写入。
+        assert!(
+            !crate::agent::context::audit::AuditLedger::is_mutating_side_effect_with_action(
+                "artifact_manager",
+                "register_file",
+                &json!({"path":"logo.png"})
+            )
+        );
+        assert_eq!(h3, baseline.collect_git_diff(&root).unwrap().1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fallback_receipt_hash_also_covers_contents_outside_preview() {
+        let root = std::env::temp_dir().join(format!("receipt-fallback-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let context = SandwichContext::new(String::new(), "验收".into());
+        let since = chrono::Utc::now() - chrono::Duration::seconds(60);
+        let prefix = "x".repeat(4000);
+        std::fs::write(root.join("new.rs"), format!("{prefix}old")).unwrap();
+        std::fs::write(root.join("logo.png"), [0u8, 1, 2, 3]).unwrap();
+        let (p1, h1) =
+            GitBaseline::collect_fallback_workspace_changes(&root, &context, since).unwrap();
+        std::fs::write(root.join("new.rs"), format!("{prefix}new")).unwrap();
+        let (p2, h2) =
+            GitBaseline::collect_fallback_workspace_changes(&root, &context, since).unwrap();
+        assert_eq!(p1, p2);
+        assert_ne!(h1, h2);
+        std::fs::write(root.join("logo.png"), [0u8, 1, 2, 4]).unwrap();
+        let (p3, h3) =
+            GitBaseline::collect_fallback_workspace_changes(&root, &context, since).unwrap();
+        assert_eq!(p2, p3);
+        assert_ne!(h2, h3);
+        assert_eq!(
+            h3,
+            GitBaseline::collect_fallback_workspace_changes(&root, &context, since)
+                .unwrap()
+                .1
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }

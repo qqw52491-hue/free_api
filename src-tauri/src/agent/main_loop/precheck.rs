@@ -90,7 +90,7 @@ pub(crate) async fn run_prepare_finish_precheck(
             .and_then(|c| c.closure_template())
             .map(|t| {
                 format!(
-                    "\n\n【怎么闭合审查义务】把下面这段 JSON 作为字段放进你下一条指令（与 tool/command 同级），只替换 <占位符>：\n{}\n说明：更新必须带齐全部义务，question 原文不要改；已有的验证命令由宿主保留，不用写；evidence_refs 填真实证据（`文件:起止行`，需在本次 diff 内；或 `step_N`）；确实不适用的改成 `\"status\":\"waived\"` 并写 `waived_reason`。跑 echo / git diff --stat 不会闭合任何义务。",
+                    "\n\n【怎么申报或补正审查义务】把下面这段 JSON 作为字段放进你下一条指令（与 tool/command 同级），只替换 <占位符>：\n{}\n说明：按 id 更新下面列出的义务即可，未提交项自动保留；已有项的 question、scope_statement 和冻结验证字段可省略。被打回的项允许补证或退回 open，申报保存不等于验收通过；evidence_refs 填真实证据（可定位的 `工作区相对路径:起止行`；或指向真实命令观测的 `step_N`）；确实不适用的改成 `\"status\":\"waived\"` 并写 `waived_reason`。跑 echo / git diff --stat 不会闭合任何义务。",
                     t
                 )
             })

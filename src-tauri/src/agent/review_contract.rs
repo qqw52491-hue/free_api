@@ -13,6 +13,8 @@ const MAX_WAIVER_REASON_CHARS: usize = 360;
 /// 普通任务保持 `None`，不会引入额外终态门槛。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReviewContract {
+    /// 更新时省略则保留既有范围；初次创建仍须提供。
+    #[serde(default)]
     pub scope_statement: String,
     pub obligations: Vec<ReviewObligation>,
 }
@@ -20,6 +22,8 @@ pub struct ReviewContract {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReviewObligation {
     pub id: String,
+    /// 已有义务更新时可省略；新增义务必须提供问题原文。
+    #[serde(default)]
     pub question: String,
     #[serde(default)]
     pub status: String,
@@ -54,13 +58,40 @@ impl ReviewContract {
         self.obligations.iter().any(|o| o.verify_command.is_some() || o.verify_script.is_some())
     }
 
-    /// 将模型提供的完整契约更新应用到已持久化状态。
-    /// 更新不得移除旧义务，也不得把已闭合义务退回 open。
-    pub fn apply_update(&mut self, mut update: ReviewContract) -> Result<(), String> {
-        // 模型看不到冻结字段（契约卡只渲染 id/question/状态）。更新里省略这些字段 = 保持原值，
-        // 不能因为“没抄”就被判成改写考卷（真要改成其它值仍照旧拒绝）。
-        for item in &mut update.obligations {
-            if let Some(e) = self.obligations.iter().find(|e| e.id == item.id) {
+    /// 按 id 原子合并申报更新：未提交的义务保留，不代表删除。
+    /// evidenced/waived 是模型申报，不是宿主验收结果；允许补证、纠错或退回 open。
+    /// 问题文本与已有验证命令仍保护，最终验收检查合并后的完整契约。
+    pub fn apply_update(&mut self, update: ReviewContract) -> Result<(), String> {
+        if update.obligations.is_empty() {
+            return Err(
+                "审查契约更新至少需要一项 obligations；未提交的既有义务会保留，不会删除。"
+                    .to_string(),
+            );
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        let mut merged = self.clone();
+        if !update.scope_statement.trim().is_empty() {
+            merged.scope_statement = update.scope_statement;
+        }
+        for mut item in update.obligations {
+            if !ids.insert(item.id.trim().to_string()) {
+                return Err(format!(
+                    "审查契约更新重复提交义务 {}；每个 id 只能出现一次。",
+                    item.id
+                ));
+            }
+            let existing = self.obligations.iter().find(|o| o.id == item.id);
+            if let Some(e) = existing {
+                if item.question.trim().is_empty() {
+                    item.question = e.question.clone();
+                }
+                if item.question.trim() != e.question.trim() {
+                    return Err(format!(
+                        "审查契约义务 {} 的问题文本不能被静默改写；请新增新义务，或保留原问题并以 waived 说明范围变化。",
+                        e.id
+                    ));
+                }
+                // 省略冻结字段 = 保持原值，不要求模型每次重抄验证标准。
                 if item.verify_command.is_none() {
                     item.verify_command = e.verify_command.clone();
                 }
@@ -73,70 +104,36 @@ impl ReviewContract {
                 if item.closure_form.is_none() {
                     item.closure_form = e.closure_form.clone();
                 }
+                let path_only_change = e.verify_script == item.verify_script
+                    && e.verify_sha256 == item.verify_sha256
+                    && match (&e.verify_command, &item.verify_command) {
+                        (Some(old), Some(new)) => same_command_except_paths(old, new),
+                        _ => false,
+                    };
+                if (e.verify_command.is_some()
+                    || e.verify_script.is_some()
+                    || e.verify_sha256.is_some())
+                    && !path_only_change
+                    && (item.verify_command != e.verify_command
+                        || item.verify_script != e.verify_script
+                        || item.verify_sha256 != e.verify_sha256)
+                {
+                    return Err(format!(
+                        "审查契约义务 {} 的验证命令/脚本已冻结，中途不得改写（仅把命令里的文件路径改成真实产物路径是允许的，其它部分需保持一致）；如需更换验证方式，请新增新义务并在方案审查中说明。",
+                        e.id
+                    ));
+                }
+            }
+            validate_obligation_closure(&item, existing.is_none())?;
+            if let Some(index) = merged.obligations.iter().position(|o| o.id == item.id) {
+                merged.obligations[index] = item;
+            } else {
+                merged.obligations.push(item);
             }
         }
-        validate_contract(&update)?;
-
-        // 新增 open 义务必须声明闭合通道——实测：未声明验证方式的 e2e 义务
-        // 在沙盒内物理闭不上，每步 not_applicable 空磨 28 步直到熔断。
-        for item in &update.obligations {
-            let is_new = !self.obligations.iter().any(|e| e.id == item.id);
-            validate_obligation_closure(item, is_new)?;
-        }
-
-        if self.obligations.is_empty() {
-            *self = update;
-            return Ok(());
-        }
-
-        for existing in &self.obligations {
-            let Some(candidate) = update
-                .obligations
-                .iter()
-                .find(|item| item.id == existing.id)
-            else {
-                return Err(format!(
-                    "审查契约更新遗漏既有义务 {}；不得静默删除已承诺的核验项。若不再适用，请保留该项并标为 waived，附上理由。",
-                    existing.id
-                ));
-            };
-            if candidate.question.trim() != existing.question.trim() {
-                return Err(format!(
-                    "审查契约义务 {} 的问题文本不能被静默改写；请新增新义务，或保留原问题并以 waived 说明范围变化。",
-                    existing.id
-                ));
-            }
-            // 【冻结要害】验证命令/脚本/哈希一经存在于契约，任务中途不得改写——
-            // 否则模型改自己的考卷，客观锚失效（这是整个 B 路径的安全前提）。
-            // 例外：仅文件路径变了（命令骨架、参数、判分逻辑一字不动）——典型是产物改了名，
-            // 允许模型把命令里的路径对准真正的成品。这不让模型改考卷（检查本身没变）。
-            let path_only_change = existing.verify_script == candidate.verify_script
-                && existing.verify_sha256 == candidate.verify_sha256
-                && match (&existing.verify_command, &candidate.verify_command) {
-                    (Some(old), Some(new)) => same_command_except_paths(old, new),
-                    _ => false,
-                };
-            if existing.verify_command.is_some()
-                && !path_only_change
-                && (candidate.verify_command != existing.verify_command
-                    || candidate.verify_script != existing.verify_script
-                    || candidate.verify_sha256 != existing.verify_sha256)
-            {
-                return Err(format!(
-                    "审查契约义务 {} 的验证命令/脚本已冻结，中途不得改写（仅把命令里的文件路径改成真实产物路径是允许的，其它部分需保持一致）；如需更换验证方式，请新增新义务并在方案审查中说明。",
-                    existing.id
-                ));
-            }
-            if is_closed(existing) && !same_closure(existing, candidate) {
-                return Err(format!(
-                    "审查契约义务 {} 已闭合，后续更新不得回退或改写其证据/豁免理由。",
-                    existing.id
-                ));
-            }
-        }
-
-        self.scope_statement = update.scope_statement;
-        self.obligations = update.obligations;
+        // 校验合并后的总量与全部字段；任意一项失败，本次申报一项也不落账。
+        validate_contract(&merged)?;
+        *self = merged;
         Ok(())
     }
 
@@ -148,45 +145,36 @@ impl ReviewContract {
             .collect()
     }
 
-    /// 给模型的“怎么闭合”模板：带齐全部义务（更新必须完整），question 原文，
-    /// 已闭合项原样保留，open 项给 evidenced + 占位证据。没有 open 义务时返回 None。
+    /// 只列尚未申报的 open 项；其他项无需重抄，验收打回的已有项也可按 id 补正。
     pub fn closure_template(&self) -> Option<String> {
-        if self.is_complete() {
+        if self.has_completion_claims() {
             return None;
         }
         let obligations: Vec<serde_json::Value> = self
             .obligations
             .iter()
-            .map(|o| match normalized_status(o).as_deref() {
-                Some("evidenced") => serde_json::json!({
-                    "id": o.id, "question": o.question, "status": "evidenced",
-                    "evidence_refs": o.evidence_refs
-                }),
-                Some("waived") => serde_json::json!({
-                    "id": o.id, "question": o.question, "status": "waived",
-                    "waived_reason": o.waived_reason
-                }),
-                _ => serde_json::json!({
-                    "id": o.id, "question": o.question, "status": "evidenced",
-                    "evidence_refs": ["<文件:起止行 或 step_N>"]
-                }),
+            .filter(|o| normalized_status(o).as_deref() == Some("open"))
+            .map(|o| {
+                serde_json::json!({
+                    "id": o.id, "status": "evidenced",
+                    "evidence_refs": ["<真实工作区相对路径:起止行 或 step_N>"]
+                })
             })
             .collect();
-        let v = serde_json::json!({
-            "review_contract_update": {
-                "scope_statement": self.scope_statement,
-                "obligations": obligations
-            }
-        });
-        serde_json::to_string(&v).ok()
+        serde_json::to_string(&serde_json::json!({
+            "review_contract_update": { "obligations": obligations }
+        }))
+        .ok()
     }
 
-    pub fn is_complete(&self) -> bool {
+    /// 仅表示每项都有完成/豁免申报，不代表证据、宿主验证或终审已经通过。
+    pub fn has_completion_claims(&self) -> bool {
         self.open_descriptions().is_empty()
     }
+
 }
 
-/// 原子应用模型发出的完整契约更新。校验失败时保留旧状态。
+/// 原子合并模型申报的局部或完整契约更新。校验失败时保留旧状态。
 pub fn apply_review_contract_update(
     target: &mut Option<ReviewContract>,
     update: ReviewContract,
@@ -364,19 +352,6 @@ fn normalized_status(item: &ReviewObligation) -> Option<String> {
     (!status.is_empty()).then_some(status)
 }
 
-fn is_closed(item: &ReviewObligation) -> bool {
-    matches!(
-        normalized_status(item).as_deref(),
-        Some("evidenced" | "waived")
-    )
-}
-
-fn same_closure(existing: &ReviewObligation, candidate: &ReviewObligation) -> bool {
-    normalized_status(existing) == normalized_status(candidate)
-        && existing.evidence_refs == candidate.evidence_refs
-        && existing.waived_reason == candidate.waived_reason
-}
-
 /// 两条命令是否「除文件路径 token 外完全一致」：按空白切 token，数量相同，逐个比较，
 /// 不同的 token 必须两边都像文件路径（含 `/` 或以 `.扩展名` 结尾，且不含 shell 元字符、不以 `-` 开头）。
 fn same_command_except_paths(old: &str, new: &str) -> bool {
@@ -455,51 +430,27 @@ mod tests {
     }
 
     #[test]
-    fn evidenced_and_waived_obligations_need_auditable_closure() {
-        let mut evidenced = obligation("implementation", "调用链是否真实接通？", "evidenced");
-        assert!(contract(vec![evidenced.clone()])
-            .apply_update(contract(vec![evidenced.clone()]))
-            .is_err());
-        evidenced.evidence_refs = vec!["main_loop.rs:695-905".to_string()];
-        assert!(contract(vec![evidenced])
-            .apply_update(contract(vec![obligation(
-                "implementation",
-                "调用链是否真实接通？",
-                "open"
-            )]))
-            .is_err());
-
-        let waived = obligation("tests", "是否存在可运行验证？", "waived");
-        assert!(contract(vec![waived])
-            .apply_update(contract(vec![obligation(
-                "tests",
-                "是否存在可运行验证？",
-                "open"
-            )]))
-            .is_err());
+    fn evidenced_and_waived_claims_still_require_evidence_or_reason() {
+        let mut current = contract(vec![obligation("implementation", "调用链是否真实接通？", "open")]);
+        let mut o = obligation("implementation", "调用链是否真实接通？", "evidenced");
+        assert!(current.apply_update(contract(vec![o.clone()])).is_err());
+        o.evidence_refs = vec!["main_loop.rs:695-905".into()];
+        current.apply_update(contract(vec![o.clone()])).unwrap();
+        o.status = "waived".into(); o.evidence_refs.clear();
+        assert!(current.apply_update(contract(vec![o])).is_err());
     }
 
     #[test]
-    fn contract_update_cannot_drop_or_reopen_existing_obligations() {
-        let mut current = contract(vec![obligation("scope", "范围是否明确？", "open")]);
+    fn completion_claim_can_be_reopened_without_deleting_the_obligation() {
+        let mut o = obligation("scope", "范围是否明确？", "evidenced");
+        o.evidence_refs = vec!["git diff --stat".into()];
+        let mut current = contract(vec![o]);
+        current.apply_update(contract(vec![obligation("scope", "范围是否明确？", "open")])).unwrap();
+        assert_eq!(current.open_descriptions().len(), 1);
+        assert!(!current.has_completion_claims());
+        let saved = current.clone();
         assert!(current.apply_update(contract(vec![])).is_err());
-
-        let mut evidenced = obligation("scope", "范围是否明确？", "evidenced");
-        evidenced.evidence_refs = vec!["git diff --stat".to_string()];
-        current
-            .apply_update(contract(vec![evidenced.clone()]))
-            .unwrap();
-        assert!(current
-            .apply_update(contract(vec![obligation(
-                "scope",
-                "范围是否明确？",
-                "open"
-            )]))
-            .is_err());
-        // 省略的 closure_form 按既有值保留（冻结字段省略 = 保持原值），其余字段必须与更新一致
-        let mut expected = evidenced;
-        expected.closure_form = current.obligations[0].closure_form.clone();
-        assert_eq!(current.obligations, vec![expected]);
+        assert_eq!(current, saved);
     }
 
     #[test]
@@ -518,7 +469,7 @@ mod tests {
             review.open_descriptions(),
             vec!["审查义务 scope：审查范围是否明确？"]
         );
-        assert!(!review.is_complete());
+        assert!(!review.has_completion_claims());
     }
 
     #[test]
@@ -631,14 +582,149 @@ mod omitted_frozen_fields_tests {
     }
 
     #[test]
-    fn template_lists_all_and_none_when_complete() {
+    fn template_lists_open_claims_and_none_when_all_claimed() {
         let c = ReviewContract { scope_statement: "s".into(), obligations: vec![frozen()] };
         let t = c.closure_template().unwrap();
-        assert!(t.contains("verify_build") && t.contains("evidenced") && t.contains("<文件:起止行"));
+        assert!(t.contains("verify_build") && t.contains("evidenced") && t.contains("<真实工作区相对路径:起止行"));
         let mut done = frozen();
         done.status = "waived".into();
         done.waived_reason = Some("n/a".into());
         let c2 = ReviewContract { scope_statement: "s".into(), obligations: vec![done] };
         assert!(c2.closure_template().is_none());
+    }
+}
+
+
+#[cfg(test)]
+mod claim_merge_tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn contract(v: Value) -> ReviewContract {
+        serde_json::from_value(v).unwrap()
+    }
+    fn current() -> ReviewContract {
+        contract(json!({"scope_statement":"登录与发布包验收", "obligations":[
+            {"id":"a","question":"登录拒绝","status":"evidenced","evidence_refs":["old.java:89-93"]},
+            {"id":"b","question":"正常登录","status":"evidenced","evidence_refs":["step_2"]},
+            {"id":"c","question":"上传身份","status":"waived","waived_reason":"用户限定范围"},
+            {"id":"d","question":"发布包","status":"open","closure_form":"evidence"},
+            {"id":"e","question":"回归","status":"open","closure_form":"command","verify_command":"cargo test"}
+        ]}))
+    }
+
+    #[test]
+    fn only_two_of_five_items_are_resubmitted_and_other_three_are_preserved() {
+        let mut c = current();
+        let kept = c.obligations[..3].to_vec();
+        c.apply_update(contract(json!({"obligations":[
+            {"id":"d","status":"evidenced","evidence_refs":["step_10"]},
+            {"id":"e","status":"evidenced","evidence_refs":["step_11"]}
+        ]})))
+        .unwrap();
+        assert_eq!(c.obligations.len(), 5);
+        assert_eq!(&c.obligations[..3], kept.as_slice());
+        assert!(c.has_completion_claims());
+        assert_eq!(
+            c.obligations[4].verify_command.as_deref(),
+            Some("cargo test")
+        );
+        assert!(c.closure_template().is_none());
+    }
+
+    #[test]
+    fn submitted_evidence_and_waiver_can_be_corrected_or_reopened() {
+        let mut c = current();
+        c.apply_update(contract(json!({"obligations":[
+            {"id":"a","status":"evidenced","evidence_refs":["src/AuthService.java:89-93"]},
+            {"id":"c","status":"waived","waived_reason":"用户明确不验收此项"}
+        ]})))
+        .unwrap();
+        assert_eq!(
+            c.obligations[0].evidence_refs,
+            vec!["src/AuthService.java:89-93"]
+        );
+        assert_eq!(
+            c.obligations[2].waived_reason.as_deref(),
+            Some("用户明确不验收此项")
+        );
+        c.apply_update(contract(json!({"obligations":[
+            {"id":"a","status":"open"},{"id":"c","status":"open"}
+        ]})))
+        .unwrap();
+        assert_eq!(c.open_descriptions().len(), 4);
+        assert!(c.obligations[0].evidence_refs.is_empty());
+        assert!(c.obligations[2].waived_reason.is_none());
+        let t = c.closure_template().unwrap();
+        assert!(!t.contains("正常登录"));
+        assert!(!t.contains("scope_statement") && !t.contains("verify_command"));
+    }
+
+    #[test]
+    fn frozen_script_only_stays_protected_while_claim_evidence_can_change() {
+        let mut c = current();
+        c.obligations[0].verify_script = Some("exit 1".into());
+        c.obligations[0].verify_sha256 = Some("original-script-hash".into());
+        c.apply_update(contract(json!({"obligations":[{
+            "id":"a","status":"evidenced","evidence_refs":["step_20"]
+        }]})))
+        .unwrap();
+        let saved = c.clone();
+        assert!(c
+            .apply_update(contract(json!({"obligations":[{
+                "id":"a","status":"evidenced","evidence_refs":["step_21"],"verify_script":"exit 0"
+            }]})))
+            .unwrap_err()
+            .contains("已冻结"));
+        assert_eq!(c, saved);
+        // 原有完整更新仍兼容，原样重提不使契约指纹变化。
+        let fp = crate::agent::finalization::contract_fingerprint(Some(&c));
+        c.apply_update(c.clone()).unwrap();
+        assert_eq!(
+            fp,
+            crate::agent::finalization::contract_fingerprint(Some(&c))
+        );
+    }
+
+    #[test]
+    fn rejected_partial_update_is_atomic_and_does_not_erase_omitted_items() {
+        let mut target = Some(current());
+        let saved = target.clone();
+        for items in [
+            json!([{"id":"a","status":"open"},{"id":"b","question":"偷换原问题","status":"open"}]),
+            json!([{"id":"a","status":"open"},{"id":"a","status":"open"}]),
+            json!([{"id":"a","status":"evidenced","evidence_refs":[]}]),
+            json!([{"id":"e","status":"open","verify_command":"echo passed"}]),
+            json!([]),
+        ] {
+            assert!(apply_review_contract_update(
+                &mut target,
+                contract(json!({"obligations":items}))
+            )
+            .is_err());
+            assert_eq!(target, saved);
+        }
+    }
+
+    #[test]
+    fn creation_and_merged_total_still_obey_full_contract_validation() {
+        let mut target = None;
+        assert!(apply_review_contract_update(
+            &mut target,
+            contract(json!({"obligations":[
+                {"id":"new","status":"evidenced","evidence_refs":["step_1"]}
+            ]}))
+        )
+        .is_err());
+        assert!(target.is_none());
+        let items: Vec<Value> = (0..12).map(|i| json!({"id":format!("o{i}"),"question":"核验", "status":"open","closure_form":"evidence"})).collect();
+        let mut c = contract(json!({"scope_statement":"s", "obligations":items}));
+        let saved = c.clone();
+        assert!(c
+            .apply_update(contract(json!({"obligations":[{
+                "id":"o12","question":"额外项","status":"open","closure_form":"evidence"
+            }]})))
+            .is_err());
+        assert_eq!(c, saved);
     }
 }

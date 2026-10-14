@@ -12,7 +12,7 @@ pub(crate) const VERIFICATION_RULES_TEXT: &str = "- 智能感知与主动闭环�
 
 /// 审查契约的闭合规则文案（静态）：契约存在时作为一次性历史事件注入；
 /// 尾部契约卡此后只渲染范围+义务清单动态值。
-pub(crate) const CONTRACT_RULES_TEXT: &str = "终态前：每项必须以 evidenced + evidence_refs 或 waived + waived_reason 闭合。evidence_refs 形态随证据域走：代码任务用 `文件:行号`（须落入真实 diff），非代码任务（运维/系统/外部产物）可用 `step_N`、命令+输出摘要等可核验观测（机械行号门将不适用跳过，终审按语义证据核验）；若义务本质是\"命令可通过\"，可给该项挂 `verify_command` 由宿主亲自执行判分（构造 exit 0=义务成立），无需行号证据。";
+pub(crate) const CONTRACT_RULES_TEXT: &str = "终态前：每项需有 evidenced + evidence_refs 或 waived + waived_reason 申报；申报不等于验收通过。review_contract_update 按义务 id 合并，可只提交需补正的项，其余保留；已有项的 question、scope_statement 和冻结字段可省略。允许补证、修改豁免理由或退回 open，但原问题和冻结验证标准仍受保护；最终验收检查完整契约及当前改动。evidence_refs 形态随证据域走：代码任务用可定位的 `工作区相对路径:行号`（与本次改动的关系由终审核验），非代码任务（运维/系统/外部产物）可用 `step_N`、命令+输出摘要等可核验观测（机械行号门将不适用跳过，终审按语义证据核验）；若义务本质是\"命令可通过\"，可给该项挂 `verify_command` 由宿主亲自执行判分（构造 exit 0=义务成立），无需行号证据。";
 
 pub struct ContextRenderer;
 
@@ -97,7 +97,7 @@ impl ContextRenderer {
                 let status = item.status.trim().to_ascii_lowercase();
                 let detail = match status.as_str() {
                     "evidenced" => format!(
-                        "证据: {}",
+                        "已申报证据，待验收: {}",
                         item.evidence_refs
                             .iter()
                             .take(2)
@@ -106,10 +106,10 @@ impl ContextRenderer {
                             .join("; ")
                     ),
                     "waived" => format!(
-                        "豁免: {}",
+                        "已申报豁免: {}",
                         item.waived_reason.as_deref().unwrap_or("未说明")
                     ),
-                    _ => "等待核验或显式豁免".to_string(),
+                    _ => "尚未申报完成依据".to_string(),
                 };
                 format!(
                     "- [{}] {}：{}（{}）",
@@ -121,7 +121,7 @@ impl ContextRenderer {
         if rules_emitted {
             // 闭合规则已事件化进历史（可缓存前缀），尾部只投影动态义务清单
             format!(
-                "【审查契约】\n范围：{}\n{}\n（闭合规则见历史规则卡）\n\n",
+                "【审查契约】\n范围：{}\n{}\n（申报规则见历史规则卡；申报不等于验收通过，可按 id 补正）\n\n",
                 contract.scope_statement, obligations
             )
         } else {

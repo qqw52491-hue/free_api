@@ -19,11 +19,16 @@ pub(crate) fn apply_instruction_state_updates(
 
     let review_contract_was_present = context.review_contract.is_some();
     if let Some(update) = instruction.review_contract_update.clone() {
-        if let Err(error) = apply_review_contract_update(&mut context.review_contract, update) {
-            context.add_error_feedback(&format!(
-                "【审查契约更新未采纳】{}\n请保留既有义务；每项必须为 open，或以 evidenced + evidence_refs、waived + waived_reason 闭合。",
+        let ids = update.obligations.iter().map(|o| o.id.as_str()).collect::<Vec<_>>().join(", ");
+        match apply_review_contract_update(&mut context.review_contract, update) {
+            Ok(()) => context.add_host_feedback(&format!(
+                "【审查契约申报已保存】本次更新义务：{}；未提交的义务保持原值。evidenced/waived 仅为完成/豁免申报，不代表验收通过；被打回的项可按 id 补正证据或退回 open。最终验收仍检查完整契约、当前改动和终审结果。",
+                ids
+            )),
+            Err(error) => context.add_host_feedback(&format!(
+                "【审查契约更新未采纳】{}\n本次契约更新未保存，原有契约状态保持不变；不表示同轮工具未执行。可仅提交需要补正的义务 id + status + 对应 evidence_refs/waived_reason；未提交项自动保留。已有项的 question、scope_statement 和冻结字段可省略，不能静默改写原问题或冻结验证标准。",
                 error
-            ));
+            )),
         }
     }
 

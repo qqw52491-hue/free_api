@@ -833,3 +833,111 @@ mod embedded_ref_tests {
         assert!(extract_embedded_file_line_refs("进程持有 MCP_X head=de27 一致").is_empty());
     }
 }
+
+
+#[cfg(test)]
+mod claim_correction_regressions {
+    use super::super::*;
+    use crate::agent::context::audit::AuditLedger;
+    use crate::agent::context::SandwichContext;
+    use crate::agent::dispatcher::is_write_or_side_effect_tool;
+    use serde_json::json;
+
+    #[test]
+    fn evidence_rejection_can_be_fixed_through_the_real_instruction_update_path() {
+        let root = std::env::temp_dir().join(format!("claim-correction-{}", uuid::Uuid::new_v4()));
+        let rel = "adp-iam/src/main/java/cn/com/jit/adp/iam/service/AuthService.java";
+        std::fs::create_dir_all(root.join(rel).parent().unwrap()).unwrap();
+        std::fs::write(root.join(rel), "// login gate\n".repeat(100)).unwrap();
+        let mut context = SandwichContext::new(String::new(), "验收登录与打包".into());
+        context.review_contract = Some(serde_json::from_value(json!({
+            "scope_statement":"登录与发布包", "obligations":[
+                {"id":"login-reject","question":"登录闸门是否正确","status":"evidenced","evidence_refs":["AuthService.java:89-93"]},
+                {"id":"packaging","question":"发布包是否完整","status":"open","closure_form":"evidence"}
+            ]
+        })).unwrap());
+        let diff = DiffContext::from_diff_and_paths(Some("diff --git a/pom.xml b/pom.xml\n--- a/pom.xml\n+++ b/pom.xml\n@@ -1 +1 @@\n-old\n+new\n"), &[]);
+        let blocked = review_contract_evidence_blockers(
+            context.review_contract.as_ref().unwrap(),
+            1,
+            Some(&diff),
+            Some(&root),
+            &[],
+        );
+        assert_eq!(blocked.len(), 1);
+        assert!(blocked[0].contains("login-reject") && blocked[0].contains("无法定位"));
+        let instruction: AgentInstruction = serde_json::from_value(json!({
+            "tool":"task_store", "params":{"action":"list_resources"},
+            "review_contract_update":{"obligations":[{
+                "id":"login-reject","status":"evidenced","evidence_refs":[format!("{rel}:89-93")]
+            }]}
+        }))
+        .unwrap();
+        assert!(!apply_instruction_state_updates(
+            &mut context,
+            &instruction,
+            136
+        ));
+        let c = context.review_contract.as_ref().unwrap();
+        assert_eq!(c.obligations.len(), 2);
+        assert_eq!(c.obligations[1].status, "open");
+        assert!(review_contract_evidence_blockers(c, 1, Some(&diff), Some(&root), &[]).is_empty());
+        // 修好这一项不等于整个任务通过：未提交的发布包义务仍阻塞最终交付。
+        assert!(finish_blockers(&[], Some(c), false, 0, None)
+            .iter()
+            .any(|b| b.contains("packaging")));
+        let feedback = context
+            .turns_history
+            .last()
+            .unwrap()
+            .content
+            .as_str()
+            .unwrap();
+        assert!(feedback.contains("申报已保存") && feedback.contains("不代表验收通过"));
+        let saved = context.review_contract.clone();
+        let bad: AgentInstruction =
+            serde_json::from_value(json!({"review_contract_update":{"obligations":[
+                {"id":"login-reject","status":"evidenced","evidence_refs":[]}
+            ]}}))
+            .unwrap();
+        apply_instruction_state_updates(&mut context, &bad, 137);
+        assert_eq!(context.review_contract, saved);
+        let feedback = context
+            .turns_history
+            .last()
+            .unwrap()
+            .content
+            .as_str()
+            .unwrap();
+        assert!(feedback.contains("更新未保存") && feedback.contains("原有契约状态保持不变"));
+        assert!(!feedback.contains("格式或执行错误"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn registering_existing_deliverables_is_not_a_physical_workspace_write() {
+        for (tool, action) in [
+            ("artifact_manager", "register_file"),
+            ("artifact_manager", "register_workspace_file"),
+            ("artifact_store", "register_file"),
+            ("task_store", "list_resources"),
+        ] {
+            let params = json!({"action":action,"path":"exports/report.pdf"});
+            let instruction: AgentInstruction =
+                serde_json::from_value(json!({"tool":tool,"params":params})).unwrap();
+            assert!(
+                !is_write_or_side_effect_tool(&instruction),
+                "{tool}/{action}"
+            );
+            assert!(
+                !AuditLedger::is_mutating_side_effect_with_action(tool, action, &params),
+                "{tool}/{action}"
+            );
+        }
+        assert!(AuditLedger::is_mutating_side_effect_with_action(
+            "local_file",
+            "write",
+            &json!({"path":"src/main.rs"})
+        ));
+    }
+}

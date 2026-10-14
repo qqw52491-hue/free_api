@@ -490,7 +490,7 @@ pub struct AgentInstruction {
     /// 必须单独成步（不与工具调用混发）。
     #[serde(default)]
     pub prepare_finish: Option<PrepareFinishRequest>,
-    /// 仅复杂审查、诊断或研究任务使用的完整审查契约更新。
+    /// 按义务 id 合并申报更新；未提交项保留。已有项可省略 question/范围/冻结字段；申报不等于验收。
     #[serde(default)]
     pub review_contract_update: Option<ReviewContract>,
     /// 最近真实写入后的验证证据或明确豁免；纯只读任务无需提供。

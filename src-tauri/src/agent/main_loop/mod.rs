@@ -1573,6 +1573,11 @@ async fn run_agent_main_loop_in_workspace_inner(
                     route: &format!("contract:update_rejected:{}", short),
                 },
             );
+        } else if let Some(update) = instruction.review_contract_update.as_ref() {
+            let _ = app.emit(
+                &format!("agent-log-{}", final_session_id),
+                format!("审查契约申报已保存（{} 项）；未提交项保留，不代表验收通过", update.obligations.len()),
+            );
         }
 
         // --- 阶段级写入审查（双触发：todo 阶段推进 / 累计写入文件数兜底）---
