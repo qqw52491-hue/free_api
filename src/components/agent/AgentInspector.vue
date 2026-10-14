@@ -683,13 +683,13 @@ const emit = defineEmits<{
 }>();
 
 const currentStepSubagents = computed(() => {
-    return extractSubagentsFromStep(props.selectedStep, props.steps);
+    return extractSubagentsFromStep(props.selectedStep, props.steps, props.teamState?.workers || []);
 });
 
 const selectedAgentId = ref<string>("master");
 
 const displayedWorkersList = computed(() => {
-    if (currentStepSubagents.value && currentStepSubagents.value.length > 0) {
+    if (props.selectedStep) {
         return currentStepSubagents.value;
     }
     return props.teamState?.workers || [];

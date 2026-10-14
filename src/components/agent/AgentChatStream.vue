@@ -405,6 +405,34 @@
                                 </button>
                                 <time class="ambient-text-time">{{ formatClock(item.step.timestamp) }}</time>
                             </article>
+
+                            <!-- 1.1 简报模式下并发 Workers 与子代理展开行 (每个 Agent 独立一行，与全量模式保持内容对齐) -->
+                            <div
+                                v-if="getAmbientWorkerRows(item.step).length > 0"
+                                class="ambient-workers-list"
+                            >
+                                <article
+                                    v-for="worker in getAmbientWorkerRows(item.step)"
+                                    :key="worker.id"
+                                    class="ambient-worker-row"
+                                    :class="`status-${worker.status}`"
+                                    @click="$emit('open-team-deck', item.step.id)"
+                                >
+                                    <span class="ambient-worker-lead">
+                                        <span class="ambient-worker-dot">
+                                            <span v-if="worker.status === 'running'" class="manus-spinner mini"></span>
+                                            <span v-else-if="worker.status === 'succeeded'" class="worker-check">✓</span>
+                                            <span v-else-if="worker.status === 'failed'" class="worker-cross">✕</span>
+                                            <span v-else class="worker-dot-icon">○</span>
+                                        </span>
+                                        <span class="action-tag action-tag-subagent">🤖 {{ worker.roleLabel || 'Worker' }}</span>
+                                        <span class="ambient-worker-name">{{ worker.name }}</span>
+                                    </span>
+                                    <span class="ambient-worker-desc">{{ worker.taskDesc }}</span>
+                                    <span v-if="worker.duration" class="ambient-worker-time">{{ worker.duration }}</span>
+                                </article>
+                            </div>
+
                             <!-- 命令输出：执行中自动展开实时输出，结束后自动收起；可用箭头手动展开/收起 -->
                             <Transition name="live-term-collapse">
                                 <div
@@ -986,7 +1014,7 @@
                                             <div class="header-main">
                                                 <span class="team-icon">👥</span>
                                                 <span class="orchestration-title">
-                                                    {{ step.status === 'running' ? '并发协作 · 正在调度子任务' : '并发协作 · 协同任务已交付' }}
+                                                    {{ getOrchestrationTitle(step) }}
                                                 </span>
                                                 <span v-if="getStepActiveWorkers(step).length > 0" class="worker-count-pill">
                                                     {{ getStepActiveWorkers(step).length }} 个 Worker
@@ -1295,6 +1323,8 @@ import AgentHumanInterventionCard from "./AgentHumanInterventionCard.vue";
 import { toolViewComponents } from "./views";
 import ArtifactList from "../artifacts/ArtifactList.vue";
 import FileIcon from "./FileIcon.vue";
+import { workerDisplayRows, type WorkerDisplayRow } from "./workerAssociation";
+import { extractSubagentsFromStep } from "./workerUtils";
 
 function parseUserMessageAttachments(content: string): { cleanText: string; attachments: ParsedAttachment[] } {
     if (!content) return { cleanText: "", attachments: [] };
@@ -1617,17 +1647,28 @@ function extractSubagentTask(step: any): string {
     return isSubAgentTool(step.tool) ? "独立子任务执行与审查" : "后台协同任务";
 }
 
-function getStepActiveWorkers(step: any): AgentWorkerItem[] {
-    const workers = props.teamState?.workers || [];
-    if (!workers.length) return [];
-    const stepJobId = step?.jobId || (step?.toolCall as any)?.id;
-    if (stepJobId) {
-        const matched = workers.filter(
-            (w) => w.id === stepJobId || (w.extra as any)?.jobId === stepJobId || (w.extra as any)?.stepId === step?.id
-        );
-        if (matched.length > 0) return matched;
-    }
-    return workers;
+// Object keys keep history and current-run steps isolated, even when step numbers repeat.
+const stepWorkersByStep = computed(() => {
+    const map = new Map<AgentStepItem, AgentWorkerItem[]>();
+    const collect = (steps: AgentStepItem[], workers: AgentWorkerItem[]) => {
+        for (const step of steps) map.set(step, extractSubagentsFromStep(step, steps, workers));
+    };
+    collect(props.steps, props.teamState?.workers || []);
+    for (const turn of props.historyTurns) collect(turn.steps, []);
+    return map;
+});
+function getStepActiveWorkers(step: AgentStepItem): AgentWorkerItem[] {
+    return stepWorkersByStep.value.get(step) || [];
+}
+const ambientWorkerRows = computed(() => workerDisplayRows([...stepWorkersByStep.value.values()].flat()));
+function getOrchestrationTitle(step: AgentStepItem): string {
+    const workers = getStepActiveWorkers(step);
+    if (!workers.length) return "并发协作 · 子任务调度记录";
+    return workers.some(w => w.status === "running" || w.status === "pending")
+        ? "并发协作 · 子任务执行中" : "并发协作 · 子任务已结束";
+}
+function getAmbientWorkerRows(step: AgentStepItem) {
+    return getStepActiveWorkers(step).map(w => ambientWorkerRows.value.get(w.id)).filter((row): row is WorkerDisplayRow => !!row);
 }
 
 
@@ -2175,13 +2216,14 @@ function isAmbientKeyStep(step: AgentStepItem): boolean {
     const tool = (step.tool || '').toLowerCase();
     const desc = (step.description || '').trim();
 
-    // 1. 过滤内部调度与编排工具 (parallel, core, agent_core, wait_jobs, dispatch)
-    if (tool === 'parallel' || tool === 'core' || tool === 'agent_core' || tool === 'wait_jobs' || tool === 'dispatch') {
+    // 1. 内部核心调度 (core, agent_core) 过滤；但子代理、并发与协同等待 (parallel, wait_jobs, dispatch) 必须保留
+    const isSub = isSubAgentTool(step.tool) || isSubAgentTool(step.action) || isWaitJobsTool(step.tool) || isWaitJobsTool(step.action) || tool === 'parallel' || tool === 'dispatch';
+    if ((tool === 'core' || tool === 'agent_core') && !isSub) {
         return false;
     }
-    // 过滤流水账式内部心跳/调度描述
-    if (desc === '执行下一步操作' || desc === '执行操作' || desc === '推进阶段目标') {
-        if (tool === 'core' || tool === 'parallel' || !tool) return false;
+    // 过滤无实质内容的纯流水账心跳描述 (仅当不是关键子任务/协同任务时过滤)
+    if ((desc === '执行下一步操作' || desc === '执行操作' || desc === '推进阶段目标') && !isSub) {
+        if (tool === 'core' || !tool) return false;
     }
 
     // 2. 纯风险阻碍或执行异常保留展示
@@ -2210,7 +2252,7 @@ function stepNarrative(step: AgentStepItem): string {
     return narr;
 }
 
-function getAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
+function buildAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
     const rawSteps = entry.steps || [];
     const items: AmbientDisplayItem[] = [];
 
@@ -3384,6 +3426,14 @@ function currentTimeline(): TimelineEntry[] {
 }
 
 const timelineEntries = computed<TimelineEntry[]>(() => [...historyTimelineEntries.value, ...currentTimeline()]);
+// Cache grouping/operation parsing independently of child-agent token streams.
+const ambientDisplayItems = computed(() => new Map(timelineEntries.value
+    .filter((entry): entry is PlanEntry => entry.type === "plan")
+    .map(entry => [entry.id, buildAmbientDisplayItems(entry)])));
+function getAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
+    return ambientDisplayItems.value.get(entry.id) || [];
+}
+
 function statusLabel(status: AgentToolStatus) { return { pending: "等待", running: "执行中", succeeded: "完成", failed: "失败", challenged: "验证未闭合" }[status] || "未知"; }
 function isSubAgentTool(tool?: string): boolean {
     const t = (tool || "").toLowerCase();
@@ -3404,26 +3454,12 @@ function isSubAgentTool(tool?: string): boolean {
 // 只按 running 过滤会让活行永远不出现。只看当前 run 的 props.steps，不碰历史。
 const workerLiveLines = computed(() => {
     const map = new Map<string, { key: string; text: string }>();
-    const workers = props.teamState?.workers || [];
-    const running = workers.filter(w => w.status === 'running');
-    if (!running.length) return map;
     for (const step of props.steps) {
         const isSub = isSubAgentTool(step.tool);
         const isWait = isWaitJobsTool(step.tool);
         if (!isSub && !isWait) continue;
-        const tool = (step.tool || '').toLowerCase();
-        const wantReviewer = isSub && (tool.includes('reviewer'));
-        const candidates = running.filter(w => isWait
-            ? true
-            : wantReviewer ? w.role === 'reviewer' : w.role !== 'reviewer');
-        if (!candidates.length) continue;
-        // 优先认领"本步骤派发后启动"（startedAt >= step.timestamp - 5s 容差）的
-        // 最早一个 worker——它最可能是该步骤孵化的执行者（同角色并发时按序认领）；
-        // 无合格候选时退化为同角色最新启动的运行者。
-        const spawned = candidates.filter(w => w.startedAt >= step.timestamp - 5000);
-        const w = spawned.length
-            ? spawned.sort((a, b) => a.startedAt - b.startedAt)[0]
-            : candidates.sort((a, b) => b.startedAt - a.startedAt)[0];
+        const w = getStepActiveWorkers(step).find(w => w.status === 'running');
+        if (!w) continue;
         const actionText = (w.currentStep || '').trim();
         const lineInfo = extractActiveThoughtLineInfo(w.thought || '', 120);
         const generic = /^(正在审查|正在后台|正在执行)/.test(actionText);

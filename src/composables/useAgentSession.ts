@@ -41,6 +41,7 @@ import {
 import { asRecord, numberOrUndefined, toText, toTimestamp } from "../components/agent/format";
 import { extractWorkerDetails, parseWorkerArtifacts } from "../components/agent/workerUtils";
 import { stripPlanDecisionMarker } from "../components/agent/planDecision";
+import { getStepJobIds, isWorkerStep, parseChildJobReceipts, stepWorkerTool } from "../components/agent/workerAssociation";
 
 const MAX_LOGS = 600;
 type ReasoningEffort = "auto" | "off" | "low" | "medium" | "high";
@@ -267,76 +268,9 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     const llmParseErrors = ref<LlmParseErrorItem[]>([]);
     const teamWorkers = ref<AgentWorkerItem[]>([]);
 
-    const derivedWorkers = computed<AgentWorkerItem[]>(() => {
-        // 如果当前没有在运行且没有显式注册 worker，则保持清空（避免历史子 agent 堆积）
-        if (!isRunning.value && teamWorkers.value.length === 0) {
-            return [];
-        }
-
-        const map = new Map<string, AgentWorkerItem>();
-
-        // 1. 先放入显式注册的 teamWorkers
-        for (const w of teamWorkers.value) {
-            map.set(w.id, { ...w });
-        }
-
-        // 2. 从当前运行的 steps 中同步，严格按 role 或 stepId 进行合并去重，绝不重复生成双重 worker
-        const runningSteps = steps.value.filter((s) => s.status === "running" || s.status === "pending");
-        const targetSteps = runningSteps.length > 0 ? runningSteps : (isRunning.value ? steps.value.slice(-1) : []);
-
-        for (const step of targetSteps) {
-            const isReviewer = step.tool === "child_reviewer" || step.action === "child_reviewer";
-            const isWriter = step.tool === "child_writer" || step.action === "child_writer";
-            const isWorker = step.tool === "child_worker" || step.action === "child_worker";
-            if (!isReviewer && !isWriter && !isWorker) continue;
-
-            const details = extractWorkerDetails(step);
-            const arts = parseWorkerArtifacts(step.result);
-            // 查找是否已存在同角色或相同 stepId 的 Worker
-            const existing = Array.from(map.values()).find((w) => w.role === details.role || (step.id && w.id.includes(step.id)));
-            if (existing) {
-                // 原地合并，绝不创建新条目导致出现两个一模一样的 Worker
-                existing.status = step.status;
-                if (details.taskDesc) existing.currentStep = details.taskDesc;
-                if (details.name && existing.name.length <= 8) existing.name = details.name;
-                if (step.thought) existing.thought = step.thought;
-                if (typeof step.result === "string") existing.output = step.result;
-                if (arts.findings) existing.findings = arts.findings;
-                if (arts.scorecard) existing.scorecard = arts.scorecard;
-                if (arts.evidenceRefs) existing.evidenceRefs = arts.evidenceRefs;
-                if (arts.confidence) existing.confidence = arts.confidence;
-                if (arts.steps && arts.steps.length > 0) existing.steps = arts.steps;
-                if (arts.extra) existing.extra = arts.extra;
-                if (arts.customSchema) existing.customSchema = arts.customSchema;
-                if (step.status === "succeeded") existing.progress = 100;
-            } else {
-                const id = `${details.role}-${step.id || step.stepId}`;
-                map.set(id, {
-                    id,
-                    name: details.name,
-                    role: details.role,
-                    roleLabel: details.roleLabel,
-                    status: step.status,
-                    currentStep: details.taskDesc,
-                    currentTool: step.tool || details.role,
-                    progress: step.status === "succeeded" ? 100 : 65,
-                    startedAt: step.timestamp,
-                    durationMs: step.metrics?.toolDurationMs,
-                    thought: step.thought,
-                    output: typeof step.result === "string" ? step.result : undefined,
-                    findings: arts.findings,
-                    scorecard: arts.scorecard,
-                    evidenceRefs: arts.evidenceRefs,
-                    confidence: arts.confidence,
-                    steps: arts.steps,
-                    extra: arts.extra,
-                    customSchema: arts.customSchema,
-                });
-            }
-        }
-
-        return Array.from(map.values());
-    });
+    // Workers are registered by exact child id. Keep reactive item identity stable:
+    // spreading them here subscribed the whole list to every thought/output token.
+    const derivedWorkers = computed<AgentWorkerItem[]>(() => teamWorkers.value);
 
     const teamState = computed<AgentTeamState>(() => {
         const workers = derivedWorkers.value;
@@ -931,6 +865,66 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         }, 1200);
     }
 
+    function syncWorkersFromStep(stepItem: AgentStepItem) {
+        if (!isWorkerStep(stepItem)) return;
+        const tool = stepWorkerTool(stepItem);
+        const receipts = parseChildJobReceipts(stepItem);
+        const ids = getStepJobIds(stepItem);
+        const isDispatch = ["child_worker", "child_reviewer", "child_writer", "resume_child"].includes(tool);
+        // The temporary dispatch row is not a child and must disappear once the receipt arrives.
+        teamWorkers.value = teamWorkers.value.filter(w => !(w.extra?.dispatchPlaceholder === true &&
+            w.extra?.parentStepId === stepItem.id && (ids.length > 0 || stepItem.status !== "running" && stepItem.status !== "pending")));
+        if (isDispatch && !ids.length && (stepItem.status === "running" || stepItem.status === "pending")) {
+            const id = `dispatch-${stepItem.id}`;
+            if (!teamWorkers.value.some(w => w.id === id)) {
+                const details = extractWorkerDetails(stepItem);
+                teamWorkers.value.push({ id, name: details.name, role: details.role, roleLabel: details.roleLabel,
+                    status: "pending", currentStep: "正在派发，等待子任务编号…", currentTool: tool, progress: 0,
+                    startedAt: stepItem.timestamp, extra: { parentStepId: stepItem.id, dispatchPlaceholder: true } });
+            }
+        }
+        for (const id of ids) {
+            const receipt = receipts.find(r => r.id === id);
+            const childTool = receipt?.tool || (isDispatch && tool !== "resume_child" ? tool : "child_worker");
+            let rawParams = stepItem.rawParams ?? stepItem.params;
+            if (typeof rawParams === "string") { try { rawParams = JSON.parse(rawParams); } catch { rawParams = {}; } }
+            const params = asRecord(rawParams);
+            const dispatches = Array.isArray(params.dispatches) ? params.dispatches : [];
+            const childParams = receipt?.dispatchIndex != null ? dispatches[receipt.dispatchIndex] : params;
+            const details = extractWorkerDetails({ ...stepItem, tool: childTool, action: childTool, params: childParams });
+            let worker = teamWorkers.value.find(w => w.id === id);
+            if (!worker) {
+                worker = { id, name: details.name, role: details.role, roleLabel: details.roleLabel,
+                    status: receipt?.status || "running", currentStep: "正在后台独立处理任务…", currentTool: childTool,
+                    progress: receipt?.status === "succeeded" ? 100 : 35, startedAt: stepItem.timestamp || Date.now() };
+                teamWorkers.value.push(worker);
+            }
+            // Dispatch success only means launched; it never completes the child.
+            if (receipt && isDispatch) {
+                worker.name = details.name;
+                worker.role = details.role;
+                worker.roleLabel = details.roleLabel;
+                worker.extra = { ...worker.extra, parentStepId: stepItem.id };
+            } else if (receipt?.tool) {
+                worker.role = details.role;
+                // A wait receipt identifies the job type, not a replacement for its custom role label.
+                if (!worker.roleLabel || ["Worker", "侦察", "审查员", "写入员"].includes(worker.roleLabel)) worker.roleLabel = details.roleLabel;
+            }
+            if (receipt?.status) {
+                worker.status = receipt.status;
+                worker.durationMs = receipt.durationMs;
+                worker.currentStep = receipt.status === "succeeded" ? "任务已完成并回收结论"
+                    : receipt.status === "failed" ? "子任务失败，查看错误详情" : worker.currentStep;
+                if (receipt.status === "succeeded" || receipt.status === "failed") worker.progress = 100;
+                if (receipt.output != null) {
+                    worker.output = receipt.output;
+                    const arts = parseWorkerArtifacts(receipt.output);
+                    for (const [key, value] of Object.entries(arts)) if (value != null) (worker as any)[key] = value;
+                }
+            }
+        }
+    }
+
     function handleToolEvent(payload: Record<string, unknown>) {
         if (runTerminal.value) return;
         const eventType = String(payload.event_type || payload.type || "started").toLowerCase();
@@ -1016,6 +1010,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             }
         }
 
+        syncWorkersFromStep(steps.value[targetIdx >= 0 && !isPreviousCompleted ? targetIdx : steps.value.length - 1]);
         appendLog(`[工具执行] ${name}/${action} (${status})${durationMs ? ` ${durationMs}ms` : ""}`);
     }
 
@@ -1122,7 +1117,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             
             let worker = childRunId ? teamWorkers.value.find((w) => w.id === childRunId) : undefined;
             if (!worker && (!childRunId || childRunId === "reviewer-1" || childRunId === "worker-1")) {
-                worker = teamWorkers.value.find((w) => isWorkerStream ? w.role === "worker" : w.role === "reviewer");
+                worker = teamWorkers.value.find((w) => w.id === (isWorkerStream ? "worker-1" : "reviewer-1"));
             }
             if (!worker) {
                 const displayName = explicitRoleLabel 
@@ -1143,6 +1138,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 teamWorkers.value.push(worker);
             }
 
+            if (explicitRoleLabel) worker.roleLabel = explicitRoleLabel;
             if (streamType === "thinking") {
                 actionPhaseText.value = chunk 
                     ? `🔍 ${isWorkerStream ? '子侦察' : '子审查'}独立推导中: ${chunk.slice(0, 35)}...` 
@@ -1167,18 +1163,18 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
 
             let worker = childRunId ? teamWorkers.value.find((w) => w.id === childRunId) : undefined;
             if (!worker && (!childRunId || childRunId === "worker-1" || childRunId === "reviewer-1")) {
-                worker = teamWorkers.value.find((w) => isReviewerAction ? w.role === "reviewer" : w.role === "worker");
+                worker = teamWorkers.value.find((w) => w.id === (isReviewerAction ? "reviewer-1" : "worker-1"));
             }
-            // 审查员动作先于卡片创建时兜底建卡——否则静默丢事件=用户视角假死
-            if (!worker && isReviewerAction && childRunId) {
+            // 子任务动作先于流式卡片创建时，按真实 child id 建卡，避免丢失首个动作
+            if (!worker && childRunId) {
                 worker = {
                     id: childRunId,
-                    name: "代码质量审查员",
-                    role: "reviewer",
-                    roleLabel: "审查员",
+                    name: isReviewerAction ? "代码质量审查员" : "后台侦察工作者",
+                    role: isReviewerAction ? "reviewer" : "worker",
+                    roleLabel: isReviewerAction ? "审查员" : "侦察",
                     status: "running",
-                    currentStep: "正在审查...",
-                    currentTool: "child_reviewer",
+                    currentStep: isReviewerAction ? "正在审查..." : "正在后台执行…",
+                    currentTool: isReviewerAction ? "child_reviewer" : "child_worker",
                     progress: 40,
                     startedAt: Date.now(),
                     thought: "",
@@ -1489,56 +1485,6 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             return;
         }
 
-        function syncWorkersFromStep(stepItem: AgentStepItem) {
-            // 当 wait_for_jobs 完成时，将之前所有 running 的后台 worker 标记为完成
-            const tool = (stepItem.tool || stepItem.action || "").toLowerCase();
-            if (tool.includes("wait_job") && stepItem.status === "succeeded") {
-                teamWorkers.value.forEach((w) => {
-                    w.status = "succeeded";
-                    w.progress = 100;
-                    w.currentStep = "任务已完成并成功回收结论";
-                    if (w.steps) {
-                        w.steps.forEach((s) => (s.status = "succeeded"));
-                    }
-                });
-                return;
-            }
-
-            const isReviewer = tool === "child_reviewer";
-            const isWriter = tool === "child_writer";
-            const isWorker = tool === "child_worker";
-            if (!isReviewer && !isWriter && !isWorker) return;
-
-            const details = extractWorkerDetails(stepItem);
-            let worker = teamWorkers.value.find((w) => (stepItem.id && w.id.includes(stepItem.id)) || w.id === stepItem.id);
-            if (!worker && teamWorkers.value.length <= 1) {
-                worker = teamWorkers.value.find((w) => w.role === details.role);
-            }
-            if (!worker) {
-                teamWorkers.value.push({
-                    id: `${details.role}-${stepItem.id || stepItem.stepId}`,
-                    name: details.name,
-                    role: details.role,
-                    roleLabel: details.roleLabel,
-                    status: stepItem.status === "succeeded" ? "succeeded" : "running",
-                    currentStep: details.taskDesc,
-                    currentTool: stepItem.tool || details.role,
-                    progress: stepItem.status === "succeeded" ? 100 : 60,
-                    startedAt: Date.now(),
-                });
-            } else {
-                worker.status = stepItem.status === "succeeded" ? "succeeded" : "running";
-                if (details.taskDesc) worker.currentStep = details.taskDesc;
-                if (details.name && worker.name.length <= 8) worker.name = details.name;
-                if (stepItem.status === "succeeded") {
-                    worker.progress = 100;
-                    if (worker.steps) {
-                        worker.steps.forEach((s) => (s.status = "succeeded"));
-                    }
-                }
-            }
-        }
-
         function getLatestStep(stepId: number): AgentStepItem | undefined {
             for (let i = steps.value.length - 1; i >= 0; i--) {
                 if (steps.value[i].stepId === stepId) {
@@ -1568,7 +1514,6 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 existing.status = "succeeded";
                 if (payload.finding) existing.finding = toText(payload.finding);
                 if (payload.finding_kind || payload.findingKind) existing.findingKind = (payload.finding_kind || payload.findingKind) as any;
-                syncWorkersFromStep(existing);
                 if (payload.metrics || payload.token_usage) {
                     const rawM = asRecord(payload.metrics || payload.token_usage);
                     existing.metrics = {
@@ -1600,20 +1545,9 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                         } catch { }
                     }
 
-                    // 如果是 wait_jobs 完成，同步更新团队中所有 running 的 Worker 为完成状态
-                    const toolName = (existing.tool || existing.action || "").toLowerCase();
-                    if (toolName.includes("wait_job")) {
-                        teamWorkers.value.forEach((w) => {
-                            if (w.status === "running" || w.status === "pending") {
-                                w.status = "succeeded";
-                                w.progress = 100;
-                                w.durationMs = Date.now() - w.startedAt;
-                                w.currentStep = "任务已完成并成功回收结论";
-                            }
-                        });
-                    }
                 }
             }
+            if (existing) syncWorkersFromStep(existing);
             appendLog(`[步骤完成 #${stepId + 1}] ${existing?.description || ""}`);
             autoScrollToBottom();
             return;
@@ -1646,6 +1580,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                     existing.rawResult = payload.output;
                 }
             }
+            if (existing) syncWorkersFromStep(existing);
             appendLog(`[步骤遇到错误 #${stepId + 1}] ${existing?.description || ""}`);
             autoScrollToBottom();
             return;

@@ -9,6 +9,7 @@ const root = path.resolve(__dirname, '..');
 const cache = new Map();
 let mounted = [], requests = [], traceStatus = 'cancelled', creations = [], failCreation = false;
 const storage = new Map();
+const handlers = new Map();
 global.localStorage = { getItem: k => storage.get(k) ?? null, setItem: (k,v) => storage.set(k,v) };
 global.window = { setInterval, clearInterval, setTimeout, clearTimeout };
 const noOp = () => {};
@@ -42,7 +43,7 @@ function load(filename) {
     function localRequire(id) {
         if (id === 'vue') return { ...vue, onMounted: fn => mounted.push(fn), onUnmounted: noOp };
         if (id === '@tauri-apps/api/core') return { invoke };
-        if (id === '@tauri-apps/api/event') return { listen: async () => noOp };
+        if (id === '@tauri-apps/api/event') return { listen: async (channel, fn) => { handlers.set(channel, fn); return () => { if (handlers.get(channel) === fn) handlers.delete(channel); }; } };
         if (id.endsWith('/format')) return format;
         if (id.endsWith('/usePersistedAgentConversation')) return {
             usePersistedAgentConversation: () => ({ conversationMessages: vue.ref([]), isConversationLoading: vue.ref(false), loadConversation: async () => {} }),
@@ -127,4 +128,5 @@ async function main() {
     assert.equal(creations[0].args.projectId, 'p1');
     console.log('PASS: task intent (8 scenarios) + settings session creation (6 scenarios); real composable, mocked I/O');
 }
-main().then(() => process.exit(0), e => { console.error(e); process.exit(1); });
+module.exports = { load, session, emit: (channel, payload) => { assert(handlers.has(channel), channel); return handlers.get(channel)({ payload }); } };
+if (require.main === module) main().then(() => process.exit(0), e => { console.error(e); process.exit(1); });

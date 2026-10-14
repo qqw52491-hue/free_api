@@ -1,3 +1,4 @@
+import { getStepJobIds, getStepWorkers, isWorkerStep, parseChildJobReceipts, stepWorkerTool } from "./workerAssociation";
 import type { AgentStepItem, AgentWorkerItem, AgentWorkerStep, ReviewScorecard, ContractSchema } from "./types";
 
 export function inferStepIntent(tool: string, rawTarget: string, explicitIntent?: string): { title: string; cleanTarget: string } {
@@ -507,222 +508,46 @@ export function extractWorkerDetails(step: AgentStepItem): { name: string; taskD
 
 export function extractSubagentsFromStep(
     step: AgentStepItem | null | undefined,
-    allSteps?: AgentStepItem[]
+    allSteps: AgentStepItem[] = [],
+    liveWorkers: AgentWorkerItem[] = [],
 ): AgentWorkerItem[] {
-    if (!step) return [];
-    const tool = (step.tool || step.action || "").toLowerCase();
-    const isSub = tool === "child_worker" || tool === "child_reviewer" || tool === "child_writer";
-    const isWait = tool.includes("wait_job");
-    if (!isSub && !isWait) return [];
-
-    // 模式 0：如果当前选中的是 wait_jobs 挂起等待步骤，向前追溯对应派发步骤的全部并发子任务！
-    if (isWait && allSteps && allSteps.length > 0) {
-        const currentIdx = allSteps.findIndex((s) => s.id === step.id || s.stepId === step.stepId);
-        const searchRange = currentIdx > 0 ? allSteps.slice(0, currentIdx) : allSteps;
-
-        // 向前查找最近的并发派发步骤 (child_worker/child_reviewer)
-        for (let i = searchRange.length - 1; i >= 0; i--) {
-            const prevStep = searchRange[i];
-            const pTool = (prevStep.tool || prevStep.action || "").toLowerCase();
-            if (pTool === "child_worker" || pTool === "child_reviewer" || pTool === "child_writer") {
-                const prevWorkers = extractSubagentsFromStep(prevStep);
-                if (prevWorkers.length > 0) {
-                    const resultStr = typeof step.result === "string" ? step.result : JSON.stringify(step.result || "");
-                    return prevWorkers.map((pw) => {
-                        let findings = pw.findings;
-                        let steps = pw.steps;
-                        let durationMs = pw.durationMs || step.metrics?.toolDurationMs;
-                        let extra = pw.extra;
-                        let customSchema = pw.customSchema;
-
-                        // 若 wait_jobs 的 resultStr 包含输出块，尝试补充
-                        if (resultStr.includes(pw.id) || resultStr.includes("【任务 ID:")) {
-                            let targetOutput = resultStr;
-                            if (resultStr.includes("【任务 ID:")) {
-                                const jobSections = resultStr.split(/(?=- 【任务 ID:)/g);
-                                for (const sec of jobSections) {
-                                    if (sec.includes(pw.id) || jobSections.length === 1) {
-                                        const outputMatch = sec.match(/输出:\s*([\s\S]+)$/);
-                                        if (outputMatch) targetOutput = outputMatch[1].trim();
-                                        break;
-                                    }
-                                }
-                            }
-                            const arts = parseWorkerArtifacts(targetOutput);
-                            if (arts.findings && arts.findings.length > 0) findings = arts.findings;
-                            if (arts.steps && (!steps || steps.length <= 3)) steps = arts.steps;
-                            if (arts.extra) extra = arts.extra;
-                            if (arts.customSchema) customSchema = arts.customSchema;
-                        }
-
-                        return {
-                            ...pw,
-                            status: "succeeded",
-                            progress: 100,
-                            findings,
-                            steps,
-                            durationMs,
-                            extra,
-                            customSchema,
-                        };
-                    });
-                }
-            }
-        }
+    if (!step || !isWorkerStep(step)) return [];
+    const ids = getStepJobIds(step);
+    if (!ids.length) {
+        // Only an exact, explicitly registered pending dispatch placeholder is eligible.
+        return allSteps.includes(step) ? getStepWorkers(step, liveWorkers) : [];
     }
-
-    const workers: AgentWorkerItem[] = [];
-
-    let rawParams: any = step.params;
-    if (typeof rawParams === "string") {
-        try { rawParams = JSON.parse(rawParams); } catch {}
+    const liveById = new Map(getStepWorkers(step, liveWorkers).map(w => [w.id, w]));
+    const related = new Set(ids);
+    const receipts = new Map(parseChildJobReceipts(step).map(r => [r.id, r]));
+    const origins = new Map<string, AgentStepItem>();
+    // Resolve metadata/results by ID, not by "the closest dispatch" or the same role.
+    for (const source of allSteps) for (const r of parseChildJobReceipts(source)) {
+        if (!related.has(r.id)) continue;
+        receipts.set(r.id, { ...receipts.get(r.id), ...r });
+        if (r.status == null && stepWorkerTool(source) !== "wait_jobs" && stepWorkerTool(source) !== "wait_for_jobs") origins.set(r.id, source);
     }
-
-    const resultStr = typeof step.result === "string" ? step.result : JSON.stringify(step.result || "");
-
-    // 模式 A：如果是 wait_jobs 挂起等待步骤，从结果中拆解多个完成的任务块
-    // 格式形如：- 【任务 ID: child-run-xxx | 类型: child_worker】状态: succeeded, 耗时: 12000ms \n 描述: ... \n 输出: ...
-    if (isWait && resultStr.includes("【任务 ID:")) {
-        const jobSections = resultStr.split(/(?=- 【任务 ID:)/g);
-        for (const sec of jobSections) {
-            const idMatch = sec.match(/【任务 ID:\s*([^\s|]+)/);
-            if (!idMatch) continue;
-            const jobId = idMatch[1];
-            const typeMatch = sec.match(/类型:\s*([^\s】]+)/);
-            const statusMatch = sec.match(/状态:\s*([^\s,]+)/);
-            const durationMatch = sec.match(/耗时:\s*(\d+)ms/);
-            const descMatch = sec.match(/描述:\s*([^\n]+)/);
-            const outputMatch = sec.match(/输出:\s*([\s\S]+)$/);
-
-            const jobType = typeMatch ? typeMatch[1] : "child_worker";
-            const jobStatus = statusMatch ? (statusMatch[1] === "succeeded" ? "succeeded" : "failed") : step.status;
-            const duration = durationMatch ? Number(durationMatch[1]) : undefined;
-            const desc = descMatch ? descMatch[1].trim() : `子任务 ${jobId.slice(0, 8)}`;
-            const outputRaw = outputMatch ? outputMatch[1].trim() : "";
-
-            const isRev = jobType === "child_reviewer";
-            const role = isRev ? "reviewer" : "worker";
-            const arts = parseWorkerArtifacts(outputRaw);
-
-            const cleanDesc = desc.replace(/^[🔍⚡🛡️🔧\s]+/, "");
-            const shortDesc = cleanDesc.length > 16 ? cleanDesc.slice(0, 15) + "…" : cleanDesc;
-
-            workers.push({
-                id: jobId,
-                name: `${isRev ? '审查' : '侦察'}: ${shortDesc}`,
-                role,
-                roleLabel: isRev ? "审查" : "侦察",
-                status: jobStatus as any,
-                currentStep: desc,
-                currentTool: jobType,
-                progress: jobStatus === "succeeded" ? 100 : 70,
-                startedAt: step.timestamp,
-                durationMs: duration || step.metrics?.toolDurationMs,
-                thought: undefined,
-                output: outputRaw && outputRaw !== "（无附加输出）" ? outputRaw : undefined,
-                findings: arts.findings,
-                evidenceRefs: arts.evidenceRefs,
-                confidence: arts.confidence,
-                steps: arts.steps,
-                extra: arts.extra,
-                customSchema: arts.customSchema,
-            });
-        }
-    }
-
-    // 模式 B：检查 params 中是否有批量派发数组 (dispatches, workers, tasks, parallel, 或 params 本身是数组)
-    if (workers.length === 0) {
-        let dispatchList: any[] = [];
-        if (Array.isArray(rawParams)) {
-            dispatchList = rawParams;
-        } else if (rawParams && typeof rawParams === "object") {
-            if (Array.isArray(rawParams.dispatches)) dispatchList = rawParams.dispatches;
-            else if (Array.isArray(rawParams.workers)) dispatchList = rawParams.workers;
-            else if (Array.isArray(rawParams.tasks)) dispatchList = rawParams.tasks;
-            else if (Array.isArray(rawParams.parallel)) dispatchList = rawParams.parallel;
-        }
-
-        if (dispatchList.length > 0) {
-            dispatchList.forEach((sub: any, idx: number) => {
-                const subTool = sub.tool || sub.action || tool;
-                const isRev = subTool === "child_reviewer";
-                const role = isRev ? "reviewer" : "worker";
-                const explicitRole = sub.role_label || sub.roleLabel || sub.role || sub.card_label;
-                const taskText = String(sub.task || sub.question || sub.goal || sub.instruction || `子任务 #${idx + 1}`);
-                const cleanDesc = taskText.replace(/^[🔍⚡🛡️🔧\s]+/, "");
-                const shortDesc = cleanDesc.length > 16 ? cleanDesc.slice(0, 15) + "…" : cleanDesc;
-                const displayName = explicitRole ? String(explicitRole) : `${isRev ? '审查' : '侦察'}: ${shortDesc}`;
-                workers.push({
-                    id: `step-${step.stepId}-sub-${idx}`,
-                    name: displayName,
-                    role,
-                    roleLabel: explicitRole ? String(explicitRole) : (isRev ? "审查" : "侦察"),
-                    status: step.status,
-                    currentStep: taskText,
-                    currentTool: subTool,
-                    progress: step.status === "succeeded" ? 100 : 70,
-                    startedAt: step.timestamp,
-                    durationMs: step.metrics?.toolDurationMs,
-                });
-            });
-        }
-    }
-
-    // 模式 C：检查派发输出 summary (如: [1/2] ✅ 已派发 child_run_id=xxx 任务: 后端调度... [2/2] ...)
-    if (workers.length === 0 && resultStr.includes("已派发 child_run_id=")) {
-        const lines = resultStr.split("\n");
-        for (const line of lines) {
-            const match = line.match(/child_run_id=([^\s]+)\s+任务:\s*([^\n]+)/);
-            if (match) {
-                const childId = match[1];
-                const taskText = match[2].trim();
-                const isRev = taskText.includes("审查");
-                const role = isRev ? "reviewer" : "worker";
-                const cleanDesc = taskText.replace(/^[🔍⚡🛡️🔧\s]+/, "");
-                const shortDesc = cleanDesc.length > 16 ? cleanDesc.slice(0, 15) + "…" : cleanDesc;
-                workers.push({
-                    id: childId,
-                    name: `${isRev ? '审查' : '侦察'}: ${shortDesc}`,
-                    role,
-                    roleLabel: isRev ? "审查" : "侦察",
-                    status: step.status,
-                    currentStep: taskText,
-                    currentTool: isRev ? "child_reviewer" : "child_worker",
-                    progress: step.status === "succeeded" ? 100 : 70,
-                    startedAt: step.timestamp,
-                    durationMs: step.metrics?.toolDurationMs,
-                });
-            }
-        }
-    }
-
-    // 模式 D：常规单发子任务回退
-    if (workers.length === 0) {
-        const details = extractWorkerDetails(step);
-        const arts = parseWorkerArtifacts(step.result);
-        workers.push({
-            id: `step-${step.stepId}-worker`,
-            name: details.name,
-            role: details.role,
-            roleLabel: details.roleLabel,
-            status: step.status,
-            currentStep: details.taskDesc,
-            currentTool: step.tool || details.role,
-            progress: step.status === "succeeded" ? 100 : 70,
-            startedAt: step.timestamp,
-            durationMs: step.metrics?.toolDurationMs,
-            thought: step.thought,
-            output: typeof step.result === "string" ? step.result : undefined,
-            findings: arts.findings,
-            evidenceRefs: arts.evidenceRefs,
-            confidence: arts.confidence,
-            steps: arts.steps,
-            extra: arts.extra,
-            customSchema: arts.customSchema,
-        });
-    }
-
-    return workers;
+    return ids.map(id => {
+        const live = liveById.get(id);
+        if (live) return live;
+        const receipt = receipts.get(id);
+        const source = origins.get(id) || step;
+        let params: any = source.rawParams ?? source.params;
+        if (typeof params === "string") { try { params = JSON.parse(params); } catch { params = {}; } }
+        if (receipt?.dispatchIndex != null && Array.isArray(params?.dispatches)) params = params.dispatches[receipt.dispatchIndex];
+        const tool = receipt?.tool || (stepWorkerTool(source).startsWith("child_") ? stepWorkerTool(source) : "child_worker");
+        const details = extractWorkerDetails({ ...source, tool, action: tool, params });
+        const arts = parseWorkerArtifacts(receipt?.output);
+        const status = receipt?.status || "pending";
+        return { id, name: details.name, role: details.role, roleLabel: details.roleLabel, status,
+            currentStep: status === "succeeded" ? "任务已完成并回收结论" : status === "failed" ? "子任务失败，查看错误详情"
+                : receipt?.description || details.taskDesc || "尚未收到子任务结论",
+            currentTool: tool, progress: status === "succeeded" || status === "failed" ? 100 : 0,
+            startedAt: source.timestamp, durationMs: receipt?.durationMs, output: receipt?.output,
+            findings: arts.findings, scorecard: arts.scorecard, evidenceRefs: arts.evidenceRefs,
+            confidence: arts.confidence, steps: arts.steps, extra: arts.extra, customSchema: arts.customSchema,
+        };
+    });
 }
 
 export function formatWorkerName(name: string): string {

@@ -463,6 +463,7 @@
 import { computed, ref, watch } from "vue";
 import type { AgentTeamState, AgentWorkerItem, AgentToolStatus, AgentStepItem, AgentWorkerStep, ReviewScorecard } from "./types";
 import { extractSubagentsFromStep, formatFinding } from "./workerUtils";
+import { isWorkerStep } from "./workerAssociation";
 import ExtraContractDeck from "./ExtraContractDeck.vue";
 import AgentStepRow from "./AgentStepRow.vue";
 
@@ -602,11 +603,11 @@ function handleWorkerClick(workerId: string) {
 
 // 从当前选中的历史步骤中解析出绑定的子 Agent (用于历史回看，支持 wait_jobs 溯源关联)
 const stepWorkers = computed(() => {
-    return extractSubagentsFromStep(props.selectedStep, props.steps);
+    return extractSubagentsFromStep(props.selectedStep, props.steps, props.teamState?.workers || []);
 });
 
 const isViewingHistoryStep = computed(() => {
-    return stepWorkers.value.length > 0;
+    return !!props.selectedStep && isWorkerStep(props.selectedStep);
 });
 
 const workersList = computed(() => {
