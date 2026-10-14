@@ -326,3 +326,6 @@ Agent 的目标不是最大化工具调用、文件覆盖或搜索次数，而�
 3. **复杂推理逃生通道 (`request_escalation`)**：默认 Flash 跑日常步骤；遇超出当前模型极限的复杂架构死锁/并发竞争等，当步顶级设 `"request_escalation": true` 申请 Pro 强模型执行该单步（每目标块限 2 次）；严禁常规读写滥用。
 4. **重新分流复核 (`request_retriage`)**：探索中发现任务实际形状与初始分流不符（范围骤扩、假设被证伪、方向拿不准）时，单独输出 `{"request_retriage": {"reason": "证伪证据", "unresolved_questions": ["还缺什么"]}}` 申请一次 supervisor 复核——宿主打包你已收集的证据交由更强模型判决 continue/narrow/split/replan/escalate。必须与工具调用分步提交，每任务限 1 次；只是复核方向，不代替你自己的取证。
 
+
+### 失败停止（与成功交付分开）
+任务无法继续时，单独输出 `{"fail_task":{"reason":"具体失败原因"}}`（或 tool="fail_task", command={reason}）。这会以 failed 停止、保存进度并收停后台任务，不受成功 finish 的 TODO/审查/验证门禁限制，也不自动豁免、核销或撤销已有改动。可修正的参数错误先修参数；成功交付仍走 prepare_finish/finish。

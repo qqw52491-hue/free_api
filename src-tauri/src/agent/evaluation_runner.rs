@@ -883,6 +883,7 @@ mod tests {
             stage_review_committee: false,
             disabled_role_cards: Default::default(),
             auto_cross_family_reviewer: false,
+            reviewer_backup_model: String::new(),
         };
 
         let (resolved, metadata) = fixed_evaluation_model_routing(&db, requested, None).unwrap();

@@ -74,6 +74,7 @@ function loadModelRouting(): ModelRouting {
         role_models: {},
         stage_reviewer_override: undefined,
         stage_review_committee: false,
+        reviewer_backup_model: "",
     };
     try {
         const stored = JSON.parse(localStorage.getItem(MODEL_ROUTING_STORAGE_KEY) || "{}") as Partial<ModelRouting> & { reasoning_effort?: unknown; reasoning_effort_version?: unknown };
@@ -98,6 +99,7 @@ function loadModelRouting(): ModelRouting {
                 : {},
             stage_reviewer_override: typeof stored.stage_reviewer_override === "string" ? stored.stage_reviewer_override : undefined,
             stage_review_committee: stored.stage_review_committee === true,
+            reviewer_backup_model: typeof stored.reviewer_backup_model === "string" ? stored.reviewer_backup_model.trim() : "",
         };
     } catch {
         return fallback;
@@ -787,6 +789,14 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         if (terminal) {
             runTerminal.value = true;
             isRunning.value = false;
+            if (nextState !== "succeeded") {
+                for (const worker of teamWorkers.value) {
+                    if (["running", "pending"].includes(worker.status)) {
+                        worker.status = "failed";
+                        worker.extra = { ...worker.extra, stoppedByParent: true, stopReason: "父任务已停止" };
+                    }
+                }
+            }
             finishLiveShellOutput();
             stopElapsedTimer();
             if (isThinking.value) {

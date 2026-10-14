@@ -671,11 +671,11 @@
                                                         type="button"
                                                         class="slot-choice-pill heter"
                                                         :class="{ active: !getSlotChoice('reviewer') }"
-                                                        title="系统异构对抗兜底：自动选择跨模型家族严审"
+                                                        title="跟随角色卡及默认审查路由；不是故障备用模型"
                                                         :disabled="isRunning"
                                                         @click="setSlotChoice('reviewer', '')"
                                                     >
-                                                        🌐 异构兜底
+                                                        🌐 默认路由
                                                     </button>
                                                     <button
                                                         type="button"
@@ -714,6 +714,17 @@
                                                         </option>
                                                     </select>
                                                 </div>
+                                            </div>
+
+                                            <div class="station-model-bar" title="仅使用你指定的备用；为空不自动换模型。备用失败后停止并保留进度。">
+                                                <span class="station-model-label">审查备用:</span>
+                                                <select class="slot-model-select" :disabled="isRunning"
+                                                    :value="modelRouting.reviewer_backup_model || ''"
+                                                    @change="setReviewerBackup(($event.target as HTMLSelectElement).value)">
+                                                    <option value="">不启用（默认）</option>
+                                                    <option v-for="m in allModels" :key="m.id" :value="m.id">{{ m.display_name || m.name }}</option>
+                                                </select>
+                                                <span class="reviewer-backup-hint">未配置或备用失败：停止并保留进度</span>
                                             </div>
 
                                             <!-- 审查卡片网格 -->
@@ -1832,6 +1843,11 @@ function isCustomSpecificModel(slotKey: string): boolean {
     return choice !== "" && choice !== "pro" && choice !== "flash" && choice !== "vision";
 }
 
+function setReviewerBackup(modelId: string) {
+    if (props.isRunning) return;
+    emit("update:model-routing", { ...props.modelRouting, reviewer_backup_model: modelId });
+}
+
 function setSlotChoice(slotKey: string, choice: string) {
     if (props.isRunning) return;
     const roleModels = { ...(props.modelRouting?.role_models || {}) };
@@ -2551,3 +2567,6 @@ defineExpose({
 </script>
 
 <style scoped src="./agent-composer.css"></style>
+<style scoped>
+.reviewer-backup-hint { font-size: 11px; color: var(--text-muted, #888); }
+</style>

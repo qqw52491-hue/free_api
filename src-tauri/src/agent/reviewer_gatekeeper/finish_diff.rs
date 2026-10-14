@@ -58,6 +58,53 @@ pub async fn evaluate_finish_diff(
     // 撞在「Diff 未变」缓存上，实弹死循环）。
     finish_summary: Option<&str>,
 ) -> ReviewResult {
+    let interrupt_generation = *interrupt_rx.borrow();
+    let result = evaluate_finish_diff_once(app, db, context, model_routing, step_id, workspace, baseline, run_started_at, session_id, interrupt_rx, last_reviewed_hash, last_review_result, stage_carry_over, host_verification, human_waivers, gate_notices, approved_target_files, triage, _plan_mode, finish_summary, None).await;
+    if !result.is_service_failure() || *interrupt_rx.borrow() != interrupt_generation { return result; }
+    let backup = match db.0.lock() {
+        Ok(conn) => crate::agent::router::configured_reviewer_backup(&conn, &result.model_id, &model_routing.reviewer_backup_model),
+        Err(e) => Err(e.to_string()),
+    };
+    match backup {
+        Ok(Some((id, name))) => {
+            let _ = app.emit(&format!("agent-log-{session_id}"), format!("终审通道失败；仅尝试用户配置的备用 {name}，不放行交付。"));
+            evaluate_finish_diff_once(app, db, context, model_routing, step_id, workspace, baseline, run_started_at, session_id, interrupt_rx, None, None, stage_carry_over, host_verification, human_waivers, gate_notices, approved_target_files, triage, _plan_mode, finish_summary, Some(&id)).await
+        }
+        Ok(None) => result,
+        Err(e) => ReviewResult::failed_open(&format!("{}；备用不可用：{e}", result.summary), &result.model_id, &result.diff_hash),
+    }
+}
+
+async fn evaluate_finish_diff_once(
+    app: &AppHandle,
+    db: &DbState,
+    context: &SandwichContext,
+    model_routing: &ModelRoutingConfig,
+    step_id: usize,
+    workspace: &Path,
+    baseline: &GitBaseline,
+    run_started_at: chrono::DateTime<chrono::Utc>,
+    session_id: &str,
+    interrupt_rx: &mut watch::Receiver<u64>,
+    last_reviewed_hash: Option<&str>,
+    last_review_result: Option<&ReviewResult>,
+    stage_carry_over: &[String],
+    host_verification: Option<&str>,
+    human_waivers: Option<&str>,
+    // 门禁适用域交接：机械门 NotApplicable 跳过的检查项说明（Skip 不静默，
+    // 终审须以命令退出码/终端输出/API 响应等语义证据核验这些项）
+    gate_notices: &[String],
+    approved_target_files: Option<&[String]>,
+    // 任务入口分流判决：mechanical_only 短路、终审角色与产物质量标准分流均由此驱动
+    triage: Option<&crate::agent::triage::TriageVerdict>,
+    // 保留参数：未来"控制面自改"机械升级规则将按模式分流（当前不变量由提示词契约承担）
+    _plan_mode: Option<crate::agent::checkpoint::PlanExecutionMode>,
+    // 本次 finish 携带的交付摘要文本。分析/解答/报告类任务的成果物在 summary
+    // 里而非 diff——终审必须能看到它，且它参与复用指纹（否则摘要改进永远
+    // 撞在「Diff 未变」缓存上，实弹死循环）。
+    finish_summary: Option<&str>,
+    model_override: Option<&str>,
+) -> ReviewResult {
     let started_at = std::time::Instant::now();
 
     // 0. 分流判决：终审仅需机械校验（mechanical_only）→ 直接通过，不调 LLM。
@@ -254,7 +301,7 @@ pub async fn evaluate_finish_diff(
     // 且期间未发生人类人工仲裁特赦（无 human_waivers 介入），直接复用上次拦截结果，避免浪费 Token 重跑
     if let (Some(last_hash), Some(last_res)) = (last_reviewed_hash, last_review_result) {
         let has_active_waiver = human_waivers.map_or(false, |w| !w.trim().is_empty());
-        if !last_hash.is_empty() && last_hash == review_fingerprint && !last_res.is_passed() && !has_active_waiver {
+        if !last_hash.is_empty() && last_hash == review_fingerprint && !last_res.is_passed() && !last_res.is_service_failure() && !has_active_waiver {
             let mut reused = last_res.clone();
             reused.summary = format!("【复用上次拦截 (交付材料未变)】{}", last_res.summary);
             reused.duration_ms = 0;
@@ -274,7 +321,7 @@ pub async fn evaluate_finish_diff(
         .and_then(|role| resolve_enabled_card(db, &role).ok().flatten())
         .filter(|card| card.allows_kind("reviewer"))
         .or_else(|| resolve_enabled_card(db, "reviewer").ok().flatten());
-    let (model_id, persona_extra) = if let Some(card) = resolved_card {
+    let (mut model_id, persona_extra) = if let Some(card) = resolved_card {
         if card.allows_kind("reviewer") {
             let mid = if !card.model_id.trim().is_empty() {
                 card.model_id.trim().to_string()
@@ -290,6 +337,8 @@ pub async fn evaluate_finish_diff(
         let decision = AgentRouter::route_for_role(context, model_routing, step_id, roles::REVIEWER);
         (decision.model_id, String::new())
     };
+
+    if let Some(id) = model_override { model_id = id.to_string(); }
 
     if model_id.trim().is_empty() {
         return ReviewResult::failed_open("未配置有效的 Reviewer 模型", "none", &review_fingerprint);
@@ -540,7 +589,7 @@ pub async fn evaluate_finish_diff(
                     }
                     return ReviewResult::failed_open(
                         &format!(
-                            "Reviewer 审查超时（>{}s，重试后仍超时），已降级放行",
+                            "Reviewer 审查超时（>{}s，重试后仍超时），未获得有效审查结论",
                             cur_timeout_secs
                         ),
                         &model_id,
@@ -598,7 +647,7 @@ pub async fn evaluate_finish_diff(
         if is_tool_request {
             if forced_final {
                 return ReviewResult::failed_open(
-                    "Reviewer 强制收敛后仍请求取证工具，已降级放行",
+                    "Reviewer 强制收敛后仍请求取证工具，未获得有效审查结论",
                     &model_id,
                     &review_fingerprint,
                 );

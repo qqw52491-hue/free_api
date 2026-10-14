@@ -117,6 +117,14 @@ async function main() {
  assert.equal(component.getAmbientDisplayItems(timeline.value[0]).filter(i=>i.type==='step').length,38);
  const count = Array.from({length:35},(_,i)=>step(`step-${i+20}`,'local_shell',{},'ok')).reduce((n,st)=>n+getStepWorkers(st,s.teamWorkers.value).length,0);
  assert.equal(count,0,'35 ordinary steps produce no repeated child rows');
+ // Parent failure must settle active child projections, retain completed results, and ignore late streams.
+ progress({type:'complete',success:false,message:'审查通道失败，任务未完成'});
+ assert.equal(s.runState.value,'failed');
+ assert.equal(s.teamWorkers.value.find(w=>w.id===a).status,'succeeded');
+ assert.equal(s.teamWorkers.value.find(w=>w.id===c).status,'failed');
+ assert.equal(s.teamWorkers.value.find(w=>w.id===c).extra.stoppedByParent,true);
+ progress({type:'worker_stream',child_run_id:c,delta:'late stream'});
+ assert.equal(s.teamWorkers.value.find(w=>w.id===c).status,'failed');
  console.log('PASS: exact dispatch/wait/history association, batch partial failure, failover, resume, both real event channels, 100-chunk reactivity regression');
 }
 main().then(()=>process.exit(0),e=>{console.error(e);process.exit(1)});

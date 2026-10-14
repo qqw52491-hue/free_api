@@ -412,7 +412,16 @@ where
 
 // 这是ai 回答的具体格式
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FailTaskRequest {
+    #[serde(default)]
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentInstruction {
+    /// 失败停止是独立终态，不走成功 finish 的验收门禁，不核销未完成义务。
+    #[serde(default)]
+    pub fail_task: Option<FailTaskRequest>,
     /// 【强制反思】AI 对上一步执行结果的客观评估，用于检测循环和死路
     #[serde(default)]
     pub reflection: String,
@@ -586,7 +595,8 @@ impl AgentInstruction {
     /// 返回 None 维持原样（走未知工具报错）。混发（另带 tool/commands）
     /// 不解包——那条歧义仍归协议误用分支处理。
     pub fn unwrap_standalone_tool_alias(&self) -> Option<AgentInstruction> {
-        if self.submit_plan.is_some()
+        if self.fail_task.is_some()
+            || self.submit_plan.is_some()
             || self.prepare_finish.is_some()
             || self.parallel.is_some()
             || self.plan_tree.is_some()
@@ -596,12 +606,15 @@ impl AgentInstruction {
             return None;
         }
         let tool = self.tool.as_deref().map(str::trim)?;
-        if !matches!(tool, "submit_plan" | "prepare_finish") {
+        if !matches!(tool, "submit_plan" | "prepare_finish" | "fail_task") {
             return None;
         }
         let mut next = self.clone();
         let payload = next.command.take().or_else(|| next.params.take())?;
         match tool {
+            "fail_task" => {
+                next.fail_task = serde_json::from_value(payload).ok()?;
+            }
             "submit_plan" => {
                 next.submit_plan = serde_json::from_value(payload).ok()?;
             }
@@ -614,11 +627,11 @@ impl AgentInstruction {
         Some(next)
     }
 
-    /// submit_plan / prepare_finish 与工具调用混发：保留状态动作、丢弃夹带的工具入口
+    /// fail_task / submit_plan / prepare_finish 与工具调用混发：保留状态动作、丢弃夹带的工具入口
     /// （不执行——语义含糊时宁可不做，也不做错），并记录被丢弃的内容供回显。
     /// 返回是否发生了丢弃。request_retriage 混发不在此列，仍按协议误用处理。
     pub fn strip_entry_when_status_action(&mut self) -> bool {
-        if self.submit_plan.is_none() && self.prepare_finish.is_none() {
+        if self.fail_task.is_none() && self.submit_plan.is_none() && self.prepare_finish.is_none() {
             return false;
         }
         if !self.has_executable_entry() {
@@ -675,6 +688,7 @@ impl AgentInstruction {
             || self.request_retriage.is_some()
             || self.submit_plan.is_some()
             || self.prepare_finish.is_some()
+            || self.fail_task.is_some()
         {
             return Ok(());
         }

@@ -1184,6 +1184,7 @@ async fn run_agent_main_loop_in_workspace_inner(
             session_id: &final_session_id,
             workspace_dir: &workspace_dir,
             interrupt_rx: interrupt_rx.clone(),
+            reviewer_backup_model: &model_routing.reviewer_backup_model,
         };
         // 阶段审查退款须批后统一结算（逐条结算会误判在途而漏退）
         let mut stage_refund_pending = false;
@@ -1311,6 +1312,12 @@ async fn run_agent_main_loop_in_workspace_inner(
             )?;
         }
 
+        if let Some(reason) = checkpoint.pending_task_failure.clone() {
+            crate::agent::failure::finish_failed_run(&app, state.inner(), &final_session_id, &run_id,
+                &goal, &run_trace_steps, &mut checkpoint, &context, &mut run_machine, reason.clone()).await?;
+            return Err(reason);
+        }
+
         // 步边界状态刷新：收养旧 checkpoint 的手写名单（升级一次性迁移）
         // 并按台账重算 consumed 标志。名单退役后"在途/齐套"全部由
         // batch_id+consumed_at 推导——孤儿 id 让门禁等死人的死锁类
@@ -1429,39 +1436,26 @@ async fn run_agent_main_loop_in_workspace_inner(
                 res
             }
             Err(error) => {
-                let terminal_error = format!("任务执行失败: {}", error);
-                advance_run_state(
-                    &app,
-                    &final_session_id,
-                    &mut run_machine,
-                    AgentRunEvent::Fail {
-                        reason: terminal_error.clone(),
-                    },
-                )?;
-                checkpoint.mark_failed(terminal_error.clone(), &context);
-                save_checkpoint(state.inner(), &mut checkpoint)?;
-                let failure_completion = json!({ "summary": terminal_error });
-                let _ = crate::agent::run_trace::upsert_snapshot(
-                    state.inner(),
-                    &run_id,
-                    &final_session_id,
-                    &goal,
-                    "failed",
-                    &run_trace_steps,
-                    Some(&failure_completion),
-                );
-                let _ = app.emit(
-                    &format!("agent-progress-{}", final_session_id),
-                    json!({
-                        "type": "complete",
-                        "message": terminal_error,
-                        "success": false
-                    }),
-                );
+                crate::agent::failure::finish_failed_run(&app, state.inner(), &final_session_id, &run_id,
+                    &goal, &run_trace_steps, &mut checkpoint, &context, &mut run_machine,
+                    format!("任务执行失败: {}", error)).await?;
                 return Err(error);
             }
         };
         let (mut instruction, mut result) = (outcome.instruction, outcome.result);
+        // wait_jobs 消费失败回执、或明确 fail_task：不再经过成功 finish / 状态更新段。
+        if let Some(reason) = checkpoint.pending_task_failure.clone() {
+            run_trace_steps.push(json!({"id": step_id, "instruction": instruction, "status":"failed",
+                "route":result.route, "output":reason}));
+            crate::agent::failure::finish_failed_run(&app, state.inner(), &final_session_id, &run_id,
+                &goal, &run_trace_steps, &mut checkpoint, &context, &mut run_machine, reason.clone()).await?;
+            return Err(reason);
+        }
+        // 无效失败请求是参数错误；不得顺带核销 TODO/契约或执行混发内容。
+        if instruction.fail_task.is_some() || instruction.get_tool() == "fail_task" {
+            instruction = AgentInstruction { description: instruction.description.clone(),
+                tool: Some("fail_task".into()), ..Default::default() };
+        }
         // 结构化路由信号：按真实 DispatchResult 记录成功/失败（替代对反馈文本 ❌ 的脆弱匹配）
         context.record_step_outcome(result.success);
         // P3 降级逃生口：跨门禁死锁——写门禁拦截→文案指引 ask_human→冷却/配额拒绝→回门禁
@@ -2588,6 +2582,18 @@ async fn run_agent_main_loop_in_workspace_inner(
                 )
                 .await;
 
+                if review_res.is_service_failure() {
+                    if let Some(reason) = take_pending_interrupt(&mut rx) {
+                        finish_interrupted_run(&app, state.inner(), &final_session_id, &run_id,
+                            &goal, &run_trace_steps, &mut checkpoint, &context, &mut run_machine, reason).await?;
+                        return Ok(());
+                    }
+                    let reason = review_res.summary.clone();
+                    crate::agent::failure::finish_failed_run(&app, state.inner(), &final_session_id, &run_id,
+                        &goal, &run_trace_steps, &mut checkpoint, &context, &mut run_machine, reason.clone()).await?;
+                    return Err(reason);
+                }
+
                 // 审查效能报告：撤回率是误报率的上界（含合理补救型撤回）
                 {
                     let (tw, tm) = (checkpoint.review_total_withdrawn, checkpoint.review_total_maintained);
@@ -2875,6 +2881,16 @@ async fn run_agent_main_loop_in_workspace_inner(
                 }
             }
         }
+        if let Some(reason) = checkpoint.pending_task_failure.clone() {
+            if let Some(reason) = take_pending_interrupt(&mut rx) {
+                finish_interrupted_run(&app, state.inner(), &final_session_id, &run_id,
+                    &goal, &run_trace_steps, &mut checkpoint, &context, &mut run_machine, reason).await?;
+                return Ok(());
+            }
+            crate::agent::failure::finish_failed_run(&app, state.inner(), &final_session_id, &run_id,
+                &goal, &run_trace_steps, &mut checkpoint, &context, &mut run_machine, reason.clone()).await?;
+            return Err(reason);
+        }
         let is_effectively_challenged = finish_challenged || reviewer_challenged;
         if is_effectively_challenged {
             let detail = context
@@ -3156,28 +3172,9 @@ async fn run_agent_main_loop_in_workspace_inner(
     } else if !run_machine.state().is_terminal() {
         let terminal_error = budget_stop_reason
             .unwrap_or_else(|| format!("任务在达到最大步数 {} 后未完成", max_steps));
-        advance_run_state(
-            &app,
-            &final_session_id,
-            &mut run_machine,
-            AgentRunEvent::Fail {
-                reason: terminal_error.clone(),
-            },
-        )?;
-        checkpoint.mark_failed(terminal_error.clone(), &context);
-        save_checkpoint(state.inner(), &mut checkpoint)?;
-        let failure_completion = json!({ "summary": terminal_error });
-        if let Err(error) = crate::agent::run_trace::upsert_snapshot(
-            state.inner(),
-            &run_id,
-            &final_session_id,
-            &goal,
-            "failed",
-            &run_trace_steps,
-            Some(&failure_completion),
-        ) {
-            eprintln!("[run-trace] 无法保存失败快照: {error}");
-        }
+        crate::agent::failure::finish_failed_run(&app, state.inner(), &final_session_id, &run_id,
+            &goal, &run_trace_steps, &mut checkpoint, &context, &mut run_machine, terminal_error.clone()).await?;
+        return Err(terminal_error);
     }
     {
         let mut channels = intervention_channels().lock().await;

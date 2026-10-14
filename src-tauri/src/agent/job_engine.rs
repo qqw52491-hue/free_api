@@ -155,7 +155,7 @@ pub fn notify_job_state_changed() {
     JOB_WATCH.0.send_modify(|version| *version = version.wrapping_add(1));
 }
 
-fn job_watch_receiver() -> watch::Receiver<u64> {
+pub(crate) fn job_watch_receiver() -> watch::Receiver<u64> {
     JOB_WATCH.1.clone()
 }
 
@@ -174,7 +174,7 @@ pub fn finish_job(
     conn.execute(
         "UPDATE agent_background_jobs 
          SET status = ?2, finished_at = ?3, duration_ms = ?4, result_json = ?5, error_kind = ?6
-         WHERE id = ?1",
+         WHERE id = ?1 AND status = 'running'",
         params![job_id, status, now, duration_ms as i64, result_json, error_kind],
     )
     .map_err(|e| e.to_string())?;
@@ -580,6 +580,13 @@ pub fn has_running_jobs(db: &DbState, parent_run_id: &str) -> bool {
 /// 将指定 parent_run 下所有仍处于 running 状态的后台任务标记为 cancelled
 pub fn cancel_all_running_jobs(db: &DbState, parent_run_id: &str) -> Result<usize, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let pids: Vec<u32> = {
+        let mut stmt = conn.prepare("SELECT params_json FROM agent_background_jobs WHERE parent_run_id=?1 AND status='running' AND job_type='shell'").map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(params![parent_run_id], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?;
+        rows.filter_map(Result::ok).filter_map(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .filter_map(|v| v.get("pid").and_then(|v| v.as_u64()))
+            .filter_map(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 1).collect()
+    };
     let now = Utc::now().to_rfc3339();
     let rows_updated = conn
         .execute(
@@ -590,6 +597,9 @@ pub fn cancel_all_running_jobs(db: &DbState, parent_run_id: &str) -> Result<usiz
         )
         .map_err(|e| e.to_string())?;
 
+    drop(conn);
+    // 只收停本 run 登记的 shell 进程组，不枚举用户的其他进程。
+    for pid in pids { crate::agent::tools::local_shell::kill_process_group(pid, "KILL"); }
     notify_job_state_changed();
     Ok(rows_updated)
 }

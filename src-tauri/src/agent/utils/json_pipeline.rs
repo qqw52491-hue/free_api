@@ -427,6 +427,7 @@ pub fn normalize_raw_instruction_value(val: &mut serde_json::Value) {
             "require_memory",
             "submit_plan",
             "prepare_finish",
+            "fail_task",
             "review_contract_update",
             "change_verification_update",
             "self_report",

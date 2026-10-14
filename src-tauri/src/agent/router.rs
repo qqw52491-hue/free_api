@@ -51,6 +51,9 @@ pub struct ModelRoutingConfig {
     /// 且方案静默经仲裁放行）。true = 恢复旧的跨家族优选行为。
     #[serde(default)]
     pub auto_cross_family_reviewer: bool,
+    /// 仅允许用户显式指定的审查备用模型；空串默认禁用，不扫描模型池。
+    #[serde(default)]
+    pub reviewer_backup_model: String,
 }
 
 impl Default for ModelRoutingConfig {
@@ -72,6 +75,7 @@ impl Default for ModelRoutingConfig {
             stage_review_committee: false,
             disabled_role_cards: Vec::new(),
             auto_cross_family_reviewer: false,
+            reviewer_backup_model: String::new(),
         }
     }
 }
@@ -130,7 +134,7 @@ pub fn prefer_cross_family_reviewer(
     current_model: &str,
 ) -> (String, Option<String>) {
     // 家族判定必须用模型【名称】——传入的 current_model 与候选均为 UUID，
-    // 对 UUID 判家族恒为 "other"（与 reviewer_failover_model 修过的生产 bug 同源）。
+    // 对 UUID 判家族恒为 "other"（模型 ID 不代表家族）。
     // 查名失败时回退用原值判（兼容直接传模型名的调用方）。
     let current_name: String = conn
         .query_row(
@@ -189,58 +193,17 @@ pub(crate) fn recently_failed_models(conn: &rusqlite::Connection) -> std::collec
         .unwrap_or_default()
 }
 
-/// 审查者故障转移选型：主审查员模型不可靠（超时/非法输出）时，
-/// 从启用模型中挑一个**不同平台**的异构家族备选；无跨平台可选时退化为
-/// 同平台异构家族；再无则 None（调用方退款并升级人工）。
-/// 注意：failover 是可靠性兜底，会牺牲跨家族盲区互补性，运行报告需显式标注。
-pub fn reviewer_failover_model(
-    conn: &rusqlite::Connection,
-    primary_model_id: &str,
-) -> Option<String> {
-    // 家族判定必须用模型【名称】——id 是 UUID，对 UUID 判家族恒为 "other"，
-    // 会导致候选永远为空（单测捕获的生产 bug）。
-    let (primary_platform, primary_name): (Option<String>, String) = conn
-        .query_row(
-            "SELECT platform_id, name FROM models WHERE id = ?1",
-            [primary_model_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .ok()?;
-    let primary_family = model_family(&primary_name);
-    let models: Vec<(String, String, String)> = {
-        let Ok(mut stmt) =
-            conn.prepare("SELECT id, name, platform_id FROM models WHERE enabled = 1 AND id != ?1")
-        else {
-            return None;
-        };
-        stmt.query_map([primary_model_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
-        })
-        .map(|rows| rows.filter_map(|r| r.ok()).collect())
-        .unwrap_or_default()
-    };
-    let failed = recently_failed_models(conn);
-    let candidates: Vec<(String, String)> = models
-        .into_iter()
-        .filter(|(id, name, _)| {
-            let f = model_family(name);
-            f != primary_family && f != "other" && id != primary_model_id && !failed.contains(id)
-        })
-        .map(|(id, _, platform)| (id, platform))
-        .collect();
-    // 第一优先：不同平台 + 异构家族；第二优先：同平台异构家族
-    let cross_platform: Vec<&(String, String)> = candidates
-        .iter()
-        .filter(|(_, platform)| Some(platform) != primary_platform.as_ref())
-        .collect();
-    let pick = if let Some(first) = cross_platform.first() {
-        Some((*first).clone())
-    } else if let Some(first) = candidates.first() {
-        Some((*first).clone())
-    } else {
-        None
-    };
-    pick.map(|(id, _)| id)
+/// 显式备用校验：不扫描其他模型、不中转第三个模型，旧配置缺省为空。
+pub(crate) fn configured_reviewer_backup(
+    conn: &rusqlite::Connection, primary: &str, configured: &str,
+) -> Result<Option<(String, String)>, String> {
+    let id = configured.trim();
+    if id.is_empty() || id == primary { return Ok(None); }
+    let result = conn.query_row("SELECT name, enabled FROM models WHERE id=?1",
+        rusqlite::params![id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)))
+        .map_err(|e| format!("配置的审查备用模型 {id} 不可用：{e}"))?;
+    if !result.1 { return Err(format!("配置的审查备用模型 {} 已禁用", result.0)); }
+    Ok(Some((id.to_string(), result.0)))
 }
 
 impl ModelRoutingConfig {
@@ -649,7 +612,7 @@ impl AgentRouter {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn reviewer_failover_prefers_cross_platform_heterogeneous() {
+    fn reviewer_backup_is_explicit_and_never_scans_pool() {
         use crate::db::init_db;
         let dir = std::env::temp_dir().join(format!("fover-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -669,16 +632,14 @@ mod tests {
             [],
         )
         .unwrap();
-        // 主审查员 = exec（openai 系，pa 平台）→ 备选必须跨平台 + 异构家族优先
-        let pick = super::reviewer_failover_model(&conn, "m-exec");
-        assert_eq!(pick.as_deref(), Some("m-cross-cross-platform"), "应优先跨平台异构");
-        // 移除跨平台候选 → 退化为同平台异构家族
-        conn.execute("DELETE FROM models WHERE id='m-cross-cross-platform'", []).unwrap();
-        let pick = super::reviewer_failover_model(&conn, "m-exec");
-        assert_eq!(pick.as_deref(), Some("m-cross-same-platform"));
-        // 全部同家族 → None（退款 + 升级人工）
-        conn.execute("DELETE FROM models WHERE id='m-cross-same-platform'", []).unwrap();
-        assert_eq!(super::reviewer_failover_model(&conn, "m-exec"), None);
+        use super::configured_reviewer_backup as pick;
+        assert_eq!(pick(&conn, "m-exec", "").unwrap(), None);
+        assert_eq!(pick(&conn, "m-exec", "m-exec").unwrap(), None);
+        assert_eq!(pick(&conn, "m-exec", " m-same-family ").unwrap().unwrap().0, "m-same-family");
+        assert!(pick(&conn, "m-exec", "missing").is_err());
+        conn.execute("UPDATE models SET enabled=0 WHERE id='m-same-family'", []).unwrap();
+        assert!(pick(&conn, "m-exec", "m-same-family").is_err(), "不能自动改选其他启用模型");
+        assert_eq!(pick(&conn, "m-exec", "").unwrap(), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1112,6 +1073,7 @@ mod serde_probe {
     fn role_models_deserializes_from_js_shape() {
         let json = r#"{"pro":"34217be8","flash":"34217be8","vision":"34217be8","reasoning_effort":"high","role_models":{"reviewer":"4b78ff71-0be8-43e1-a02c-5a5b77f7d6b4"}}"#;
         let cfg: super::ModelRoutingConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.reviewer_backup_model.is_empty(), "旧配置默认不启用备用");
         assert_eq!(cfg.role_models.get("reviewer").map(|s| s.as_str()), Some("4b78ff71-0be8-43e1-a02c-5a5b77f7d6b4"));
     }
 }

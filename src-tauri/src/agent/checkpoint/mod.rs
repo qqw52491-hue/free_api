@@ -68,6 +68,12 @@ pub struct AgentCheckpoint {
     /// 不重复执行义务验证与终审 LLM 调用。
     #[serde(default)]
     pub pending_finalization: Option<crate::agent::finalization::FinalizationReceipt>,
+    /// durable 失败请求：与回执消费同事务落账，崩溃后不能吞掉失败继续施工。
+    #[serde(default)]
+    pub pending_task_failure: Option<String>,
+    /// 按物理 child_run_id 保存原始派发，联合会审不能借用最后一位专家的题目。
+    #[serde(default)]
+    pub reviewer_dispatches: std::collections::BTreeMap<String, crate::agent::child_reviewer::PlanReviewerDispatchSnapshot>,
     /// 方案制定与前置门禁阶段
     #[serde(default)]
     pub plan_phase: PlanPhase,
@@ -357,6 +363,8 @@ impl AgentCheckpoint {
             last_reviewed_diff_hash: None,
             last_review_result: None,
             pending_finalization: None,
+            pending_task_failure: None,
+            reviewer_dispatches: Default::default(),
             plan_phase: PlanPhase::Exploring,
             plan_reviewer_retry_count: 0,
             approved_plan_summary: None,

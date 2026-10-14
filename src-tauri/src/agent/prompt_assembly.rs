@@ -51,6 +51,11 @@ pub(crate) fn builtin_tool_specs() -> &'static [BuiltinToolSpec] {
 /// 和外部 MCP schema 仍由 tool_manual 按需加载。真实 handler 继续负责最终校验。
 const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     BuiltinToolSpec {
+        name: "fail_task",
+        summary: "无法继续时明确失败停止，不是成功交付：单独输出 {\"fail_task\":{\"reason\":\"具体失败原因\"}}。宿主保留已有改动/证据/TODO/审查要求并停止后台任务；无需先完成或豁免义务。不要附带写入或把未完成任务包装为 finish。",
+        actions: &["fail_task(reason: non-empty string)"],
+    },
+    BuiltinToolSpec {
         name: "finish",
         summary: "终态交付：全流程完成后的收尾交卷指令。【交付前准备】代码类任务先完成真实测试验证，并闭合全部审查意见与待办，再交付；文件交付物把路径列表放进 artifacts（`tmp/xxx` 会话产物路径即可，交付门禁直接识别），系统会在界面底部自动生成下载与打开卡片。【两步交付范例】改动过文件、或带审查义务/待办的任务（含排查诊断类）分两步走——预检的 summary 一句话即可，完整报告留到预检就绪后的 finish 再写，避免被打回后白写长报告。第 N 步只输出预检：{\"prepare_finish\": {\"summary\": \"已完成X，验证Y通过\"}}；收到「✅ 终态预检就绪」后，第 N+1 步输出：{\"tool\": \"finish\", \"command\": {\"summary\": \"已完成X，验证Y通过\", \"artifacts\": [\"tmp/report.md\"]}}，finish 直接复用预检收据，免重复验证与终审；收到「⚠️ 终态预检未就绪」则先逐项闭合，再重新预检。",
         actions: &["finish(summary: string, artifacts?: string[])"],

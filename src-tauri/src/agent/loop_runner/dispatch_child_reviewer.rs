@@ -298,40 +298,7 @@ pub(super) async fn dispatch_child_reviewer(
                 }
             }
 
-            // 死模型健康门：显式钉死/角色卡模型不经过跨家族优选，recently_failed_models
-            // 此前只在 failover 侧查询——主选侧盲选会把死平台模型反复派发（实测
-            // 190c3bdf 连派 41 次零成功）。命中近期失败集 → 走同款 failover 换一个，
-            // 无备选则保留原选（fail-open：宁可派给可疑模型也不阻塞审查）。
-            {
-                let reviewer_failed = ctx
-                    .state
-                    .inner()
-                    .writer_bounded(std::time::Duration::from_secs(5))
-                    .await
-                    .map(|conn| {
-                        crate::agent::router::recently_failed_models(&conn)
-                            .contains(&reviewer_model)
-                    })
-                    .unwrap_or(false);
-                if reviewer_failed {
-                    let swapped = ctx
-                        .state
-                        .inner()
-                        .writer_bounded(std::time::Duration::from_secs(5))
-                        .await
-                        .ok()
-                        .and_then(|conn| {
-                            crate::agent::router::reviewer_failover_model(&conn, &reviewer_model)
-                        });
-                    if let Some(fallback) = swapped {
-                        item_reports.push(format!(
-                            "[{}/{}] ⚠️ 审查模型 {} 近 30 分钟派发失败记录存在，自动切换为 {}（原模型不健康，failover 兜底）",
-                            item_num, total, reviewer_model, fallback
-                        ));
-                        reviewer_model = fallback;
-                    }
-                }
-            }
+            // 不凭历史健康记录擅自改派：实际失败后仅使用显式配置的备用。
 
             // ---- 证据范围对账（investigate 通道）----
             // submit_plan 通道在 handle_submit_plan 已做同样计算；investigate 直连
@@ -431,6 +398,7 @@ pub(super) async fn dispatch_child_reviewer(
                         ctx.final_session_id,
                         "child_reviewer:spawn_returned",
                     );
+                    ctx.checkpoint.reviewer_dispatches.insert(child_run_id.clone(), snapshot.clone());
                     // 派发快照：供消费端在 reviewer 故障（invalid_output/超时）时自动故障转移重派
                     if !ctx.checkpoint.plan_phase.is_approved() {
                         ctx.checkpoint.set_plan_reviewer_dispatch_snapshot(&snapshot);

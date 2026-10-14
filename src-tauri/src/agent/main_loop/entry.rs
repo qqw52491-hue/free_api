@@ -122,6 +122,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
         retries,
     );
 
+    let cleanup_db = DbState(state.0.clone());
     let result = run_agent_main_loop_in_workspace_inner(
         app,
         state,
@@ -141,86 +142,43 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
     )
     .await;
 
+    // 其他宿主错误经 ? 提前返回时也必须收停；已走失败出口的再次调用是幂等的。
+    if result.is_err() {
+        for warning in crate::agent::failure::stop_run_runtime(&cleanup_db, &run_guard.session_id, &run_guard.run_id).await {
+            eprintln!("[failure-cleanup] {warning}");
+        }
+    }
     run_guard.finish(&result);
     result
 }
 
-/// 审查者故障转移重派（invalid_output / timed_out 时走这里）。
-/// 返回 Ok(Some(new_run_id)) = 已重派；Ok(None) = 不满足重派条件（封顶/已批准/无派发记录）。
-/// 【冒烟实测抓到的坑】failover 原来只挂在 wait_jobs 结果路径上——超时结果若经
-/// 通用后台信箱（poll_pending_inbox）路径消费，会绕过 failover 且无条件置 consumed，
-/// 主 Agent 将永远等不到备用审查员的结论。所有消费路径必须共用本函数。
-///
-/// failed_run_id：被替换的失败任务 id。重派成功后本函数内部完成
-/// 齐套屏障的预期 id 替换（replace_expected_reviewer_run_id）——该步骤收编在此
-/// 而非留给调用方：曾因 wait_jobs 路径换 id 而自动注入路径漏换，旧 id 永远
-/// 无法交付，齐套屏障死锁。收编后结构性杜绝调用方遗忘。
+/// 仅使用显式备用重派失败的同一道审查；按 child_run_id 取快照，避免联合会审串题。
 pub(crate) async fn try_plan_reviewer_failover(
-    app: Option<&AppHandle>,
-    state: &DbState,
-    run_id: &str,
-    session_id: &str,
-    workspace_dir: &std::path::Path,
-    checkpoint: &mut AgentCheckpoint,
-    interrupt_rx: watch::Receiver<u64>,
-    // 当前仅 invalid_output/timeout/request_or_stream 共用同一重派动作；保留参数供
-    // 后续"按 kind 分化重派策略"设计（届时启用）
-    _error_kind: &crate::agent::types::ChildErrorKind,
-    failed_run_id: Option<&str>,
+    app: Option<&AppHandle>, state: &DbState, run_id: &str, session_id: &str,
+    workspace_dir: &std::path::Path, checkpoint: &mut AgentCheckpoint,
+    interrupt_rx: watch::Receiver<u64>, backup_model: &str,
+    _error_kind: &crate::agent::types::ChildErrorKind, failed_run_id: Option<&str>,
 ) -> Result<Option<String>, String> {
-    if checkpoint.plan_reviewer_failover_count >= 2
-        || checkpoint.plan_reviewer_last_dispatch.is_none()
-        || checkpoint.plan_phase.is_approved()
-    {
-        return Ok(None);
-    }
-    let mut dispatch = match checkpoint.plan_reviewer_dispatch_snapshot() {
-        Some(d) => d,
-        None => return Ok(None),
+    if backup_model.trim().is_empty() { return Ok(None); }
+    let Some(failed_id) = failed_run_id else { return Ok(None) };
+    let mut dispatch = checkpoint.reviewer_dispatches.get(failed_id).cloned()
+        .ok_or_else(|| format!("审查 {failed_id} 缺少原始派发快照，不能猜测或借用别人的审查题目"))?;
+    let selected = {
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        crate::agent::router::configured_reviewer_backup(&conn, &dispatch.model, backup_model)?
     };
-    let (failover_model, model_name) = {
-        let conn = state.0.lock().map_err(|err| err.to_string())?;
-        let m = crate::agent::router::reviewer_failover_model(&conn, &dispatch.model);
-        let name = m.as_deref().and_then(|id| {
-            conn.query_row("SELECT name FROM models WHERE id = ?1", rusqlite::params![id], |r| r.get::<_, String>(0)).ok()
-        });
-        (m, name)
-    };
-    if let Some(model) = failover_model {
-        dispatch.model = model;
-    }
+    let Some((model, name)) = selected else { return Ok(None) };
+    dispatch.model = model;
     if let Some(obj) = dispatch.params.as_object_mut() {
-        let label = if let Some(ref mn) = model_name {
-            format!("🛡️ 故障转移备选审查官 ({})", mn)
-        } else {
-            "🛡️ 故障转移备选审查官".to_string()
-        };
-        obj.insert("role_label".to_string(), serde_json::json!(label));
+        obj.insert("role_label".into(), json!(format!("🛡️ 用户配置的备用审查官 ({name})")));
     }
-    // retry_of 传入失败 run：备胎继承同一 task_id，attempt 由落库侧自动递增——
-    // 台账里"同一道题换了模型重答"一脉相承，成本可归因到同一逻辑任务。
-    match dispatch
-        .spawn(
-            app.cloned(),
-            state,
-            run_id,
-            session_id,
-            workspace_dir,
-            interrupt_rx,
-            failed_run_id,
-        )
-        .await
-    {
-        Ok(new_run_id) => {
-            checkpoint.plan_reviewer_failover_count += 1;
-            checkpoint.set_plan_reviewer_dispatch_snapshot(&dispatch);
-            // 齐套屏障自动接管：备胎行自带原 batch_id（snapshot 盖章继承），
-            // 台账推导下天然属于本批待决成员——不再需要手动换名单
-            let _ = failed_run_id;
-            Ok(Some(new_run_id))
-        }
-        Err(spawn_err) => Err(spawn_err),
+    // 继承 task_id/attempt/batch，spawn 内认养已经存在的更晚 attempt，崩溃重投不重复派发。
+    let new_id = dispatch.spawn(app.cloned(), state, run_id, session_id, workspace_dir,
+        interrupt_rx, Some(failed_id)).await?;
+    checkpoint.plan_reviewer_failover_count += 1;
+    if dispatch.purpose.as_deref() == Some("plan_review") {
+        checkpoint.set_plan_reviewer_dispatch_snapshot(&dispatch);
     }
+    checkpoint.reviewer_dispatches.insert(new_id.clone(), dispatch);
+    Ok(Some(new_id))
 }
-
-

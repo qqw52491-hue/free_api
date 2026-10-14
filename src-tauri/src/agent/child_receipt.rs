@@ -24,6 +24,7 @@ pub(crate) struct ReceiptEnv<'a> {
     pub session_id: &'a str,
     pub workspace_dir: &'a Path,
     pub interrupt_rx: watch::Receiver<u64>,
+    pub reviewer_backup_model: &'a str,
 }
 
 /// reducer 输出：checkpoint 状态变更已就地完成，这里只承载外部可见效果。
@@ -103,6 +104,36 @@ pub(crate) async fn reduce_child_receipt(
         None
     };
     let receipt = &receipt_owned;
+
+    // 请求/超时/无效结构是审查通道失败，不是“方案不通过”。
+    // 必须先处理备用，再进入各类审查聚合；未配置或备用已失败则进入统一失败出口。
+    let kind = receipt.error_kind.as_deref().map(ChildErrorKind::parse);
+    let channel_failed = receipt.kind == "review" && !receipt.is_success()
+        && kind.as_ref().is_some_and(|k| k.is_failover_eligible()
+            || matches!(k, ChildErrorKind::ContractViolation(_)));
+    if channel_failed {
+        let failover = crate::agent::main_loop::try_plan_reviewer_failover(env.app, env.db,
+            env.parent_run_id, env.session_id, env.workspace_dir, checkpoint,
+            env.interrupt_rx.clone(), env.reviewer_backup_model, kind.as_ref().unwrap(),
+            Some(&receipt.child_run_id)).await;
+        match failover {
+            Ok(Some(new_id)) => return ReceiptEffects {
+                model_text: format!("审查通道失败（{}）；仅改用用户配置的备用重派 child_run_id={}。没有批准方案。", receipt.child_run_id, new_id),
+                redispatched_to: Some(new_id), contract_violation, ..Default::default()
+            },
+            other => {
+                let backup_note = match other {
+                    Err(e) => format!("备用派发失败：{e}"),
+                    _ if env.reviewer_backup_model.trim().is_empty() => "未配置审查备用模型".into(),
+                    _ => "配置的备用已失败或与当前模型相同，不再重派".into(),
+                };
+                let detail: String = receipt.payload.as_ref().map(ToString::to_string).unwrap_or_default().chars().take(1600).collect();
+                checkpoint.pending_task_failure.get_or_insert_with(|| format!(
+                    "审查通道无法继续：child_run_id={}，异常={}；{}。诊断：{}",
+                    receipt.child_run_id, receipt.error_kind.as_deref().unwrap_or("unknown"), backup_note, detail));
+            }
+        }
+    }
 
     // ── 阶段审查/对质回执：独立语义（不占方案审查预算，infra 失败视为未审）──
     // 归属判定由台账 purpose/batch_id 推导（含已交付成员——对质目标是交付过的审查员）
@@ -272,48 +303,7 @@ async fn reduce_reviewer_receipt(
         }
     }
 
-    // 审查者故障转移链：invalid_output/超时/请求层失败 → 备用审查员重派。
-    // 封顶 2 次；齐套屏障 expected-id 替换由 failover 内部完成（结构性防遗忘）。
-    let receipt_kind = receipt
-        .error_kind
-        .as_deref()
-        .map(ChildErrorKind::parse);
-    if receipt_kind
-        .as_ref()
-        .map(|k| k.is_failover_eligible())
-        .unwrap_or(false)
-    {
-        match crate::agent::main_loop::try_plan_reviewer_failover(
-            env.app,
-            env.db,
-            env.parent_run_id,
-            env.session_id,
-            env.workspace_dir,
-            checkpoint,
-            env.interrupt_rx.clone(),
-            receipt_kind.as_ref().unwrap(),
-            Some(&receipt.child_run_id),
-        )
-        .await
-        {
-            Ok(Some(new_run_id)) => {
-                text.push_str(&format!(
-                    "\n🔁 审查者故障转移：上次结论异常（{}），已自动改用备用审查员重派 (child_run_id: {})\n",
-                    receipt.error_kind.as_deref().unwrap_or("?"),
-                    new_run_id
-                ));
-                effects.redispatched_to = Some(new_run_id);
-                return text;
-            }
-            Ok(None) => {}
-            Err(spawn_err) => {
-                text.push_str(&format!(
-                    "\n⚠️ 审查者故障转移重派失败: {}（转人工裁决路径不受影响）\n",
-                    spawn_err
-                ));
-            }
-        }
-    }
+    let receipt_kind = receipt.error_kind.as_deref().map(ChildErrorKind::parse);
 
     // 基础设施失败（超时/取消/中断/非法输出/请求层失败）不是实质性审查：
     // 记录批次失败 + 退还预算（零产出不烧预算）。
@@ -430,6 +420,7 @@ mod tests {
             session_id: "sess-1",
             workspace_dir: ws,
             interrupt_rx: rx,
+            reviewer_backup_model: "",
         }
     }
 
@@ -613,7 +604,9 @@ mod tests {
         )
         .unwrap();
 
-        let env = test_env(&db, &ws);
+        let mut env = test_env(&db, &ws);
+        env.reviewer_backup_model = "m2";
+        db.0.lock().unwrap().execute("INSERT INTO models (id,platform_id,name,display_name,created_at) VALUES ('m2','p1','test-backup','Backup','2024-01-01')", []).unwrap();
         let mut context = SandwichContext::new("sys".into(), "goal".into());
         let mut cp = AgentCheckpoint::new("run-1".into(), &context);
         cp.set_plan_review_batch("batch-x", 1);
@@ -634,6 +627,11 @@ mod tests {
             .with_batch_id("batch-x"),
         );
 
+        cp.reviewer_dispatches.insert(old_id.clone(), cp.plan_reviewer_dispatch_snapshot().unwrap());
+        // 最近一次别人的派发不应覆盖此物理 child 的原题。
+        cp.set_plan_reviewer_dispatch_snapshot(&PlanReviewerDispatchSnapshot::new(
+            "unrelated-model", "pro", "low", "", json!({"question":"别人的审查题目"})));
+
         let r = receipt("review", &old_id, Some("timed_out"), json!({"status":"timed_out"}));
         let effects = reduce_child_receipt(&env, &mut cp, &mut context, &r).await;
 
@@ -646,6 +644,9 @@ mod tests {
         assert_eq!(cp.plan_review_pending_count(&db), 1, "唯一待决 = 备胎");
         assert!(!cp.plan_reviewer_consumed, "备胎在途 → 屏障继续拦截");
         assert_eq!(cp.plan_reviewer_failover_count, 1);
+        assert!(cp.pending_task_failure.is_none());
+        assert_eq!(cp.reviewer_dispatches[&new_id].params["question"], "审查本方案");
+        assert_eq!(cp.reviewer_dispatches[&new_id].model, "m2");
 
         // 逻辑身份继承：同一道题两次作答，task_id 不变、attempt 递增、purpose/batch 沿用
         {
@@ -767,6 +768,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(base);
     }
 
+
+    #[tokio::test]
+    async fn unconfigured_or_exhausted_backup_stops_without_third_model_or_approval() {
+        for (configured, current) in [("", "primary"), ("backup", "backup")] {
+            let (base, db) = test_db("no-auto-backup");
+            let mut env = test_env(&db, &base);
+            env.reviewer_backup_model = configured;
+            let mut context = SandwichContext::new("sys".into(), "goal".into());
+            let mut cp = AgentCheckpoint::new("sess-1".into(), &context);
+            let phase = cp.plan_phase;
+            let identity = crate::agent::child_reviewer::ChildRunIdentity {
+                task_id:"review-task".into(), attempt_id:1, purpose:Some("plan_review".into()),
+                batch_id:Some("batch-stop".into()), contract_id:None, contract_schema:None,
+            };
+            let id = crate::agent::child_reviewer::begin_child_run_extended(&db,"run-1","sess-1",&base,current,0,"review",None,None,None,&identity).unwrap();
+            cp.reviewer_dispatches.insert(id.clone(), PlanReviewerDispatchSnapshot::new(current,"flash","high","",json!({"question":"审查原方案"})).with_purpose("plan_review").with_batch_id("batch-stop"));
+            db.0.lock().unwrap().execute("UPDATE agent_child_runs SET status='failed',consumed_at='2026-01-01' WHERE id=?1",[&id]).unwrap();
+            cp.set_plan_review_batch("batch-stop",1);
+            let r = receipt("review",&id,Some("request_or_stream"),json!({"error":"402 insufficient balance"}));
+            let effects=reduce_child_receipt(&env,&mut cp,&mut context,&r).await;
+            assert!(effects.redispatched_to.is_none());
+            assert!(cp.pending_task_failure.is_some());
+            assert_eq!(cp.plan_phase,phase,"失败不是批准");
+            let n:i64=db.0.lock().unwrap().query_row("SELECT COUNT(*) FROM agent_child_runs",[],|r|r.get(0)).unwrap();
+            assert_eq!(n,1,"不能自行找第三个模型重派");
+            let _=std::fs::remove_dir_all(base);
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_failure_and_review_parameter_rejection_do_not_fail_parent_task() {
+        let (base,db)=test_db("repairable");
+        let env=test_env(&db,&base);
+        let mut context=SandwichContext::new("sys".into(),"goal".into());
+        let mut cp=AgentCheckpoint::new("sess-1".into(),&context);
+        for (kind,error) in [("worker","request_or_stream"),("review","input_validation:missing_question")] {
+            let r=receipt(kind,"no-row",Some(error),json!({"error":error}));
+            reduce_child_receipt(&env,&mut cp,&mut context,&r).await;
+            assert!(cp.pending_task_failure.is_none(),"{kind}/{error} should remain repairable");
+        }
+        let _=std::fs::remove_dir_all(base);
+    }
+
     #[test]
     fn job_result_normalizes_into_delivery_receipt() {
         let job = crate::agent::job_engine::BackgroundJobResult {
@@ -792,8 +836,7 @@ mod tests {
     async fn contract_schema_violation_downgrades_success_to_invalid_output() {
         // 运行时校验：run 台账带 contract_schema（必填 cve_refs），
         // 交付缺失该字段 → 就地转 invalid_output + contract_violation 标记。
-        // 按既定语义：契约违例按实质结果交付（产物为真有缺陷交付，
-        // 不触发 failover——确定性违规换模型照样犯），但必须被标记出来。
+        // 缺必填契约字段不是有效裁决：保留违规台账，未配置备用则失败停止，不能算审查通过。
         let (base, db) = test_db("contract");
         let ws = base.join("ws");
         std::fs::create_dir_all(&ws).unwrap();

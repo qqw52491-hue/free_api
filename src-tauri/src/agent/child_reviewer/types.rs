@@ -108,6 +108,13 @@ pub struct PlanReviewerDispatchSnapshot {
 }
 
 impl PlanReviewerDispatchSnapshot {
+    pub(crate) fn from_envelope(env: &crate::agent::protocol::DispatchEnvelope) -> Self {
+        Self { model: env.model_id.clone(), tier: env.model_tier.clone(), effort: env.reasoning_effort.clone(),
+            persona: env.persona.clone(), params: env.input_payload.clone(), custom_schema: env.custom_schema.clone(),
+            focus_domains: env.focus_domains.clone(), specialized_context: env.specialized_context.clone(),
+            purpose: env.purpose.clone(), batch_id: env.batch_id.clone() }
+    }
+
     pub fn new(
         model: impl Into<String>,
         tier: impl Into<String>,
@@ -214,6 +221,8 @@ impl PlanReviewerDispatchSnapshot {
             envelope = envelope.with_custom_schema(self.custom_schema.clone());
         }
 
+        envelope.focus_domains = self.focus_domains.clone();
+        envelope.specialized_context = self.specialized_context.clone();
         envelope.dispatch(app, db, workspace_root, interrupt_rx).await
     }
 }

@@ -397,6 +397,8 @@ export interface ModelRouting {
     stage_reviewer_override?: string;
     /** 阶段审查联合会审模式：true = 并发唤起匹配专家（至多 3 位）；false = 智能自适应单审（默认） */
     stage_review_committee?: boolean;
+    /** 审查失败时仅尝试此模型；空串/缺省不启用备用 */
+    reviewer_backup_model?: string;
     /** 本会话排除/休眠的角色卡名称列表（无需修改全局工坊，即可在当前会话动态启闭某专家） */
     disabled_role_cards?: string[];
 }

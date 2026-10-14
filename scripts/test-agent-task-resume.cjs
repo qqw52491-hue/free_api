@@ -75,11 +75,14 @@ async function main() {
     for (const status of ['failed', 'cancelled', 'running', 'waiting_human']) {
         const s = await session(status);
         assert.equal(s.canResumeTask.value, true, status);
+        assert.equal(s.modelRouting.value.reviewer_backup_model, '', 'default backup must be off');
+        s.modelRouting.value.reviewer_backup_model = 'explicit-backup';
         s.modelRouting.value.stage_reviewer_override = 'flash';
         await s.runAgent('换模型继续');
         assert.equal(requests[0].taskStartMode, 'resume');
         assert.equal(requests[0].planMode, undefined, 'changing model must not reset plan mode');
         assert.equal(requests[0].modelRouting.stage_reviewer_override, 'flash');
+        assert.equal(requests[0].modelRouting.reviewer_backup_model, 'explicit-backup');
     }
     let s = await session('cancelled');
     await s.runAgent('a genuinely new task', undefined, 'new');

@@ -242,6 +242,10 @@ impl SessionRunGuard {
                 let existing_steps =
                     crate::agent::run_trace::load_run_steps(db.inner(), &self.run_id)
                         .unwrap_or_default();
+                let terminal_saved = db.0.lock().ok().and_then(|conn| conn.query_row(
+                    "SELECT status='failed' AND completion_json IS NOT NULL FROM agent_run_traces WHERE id=?1",
+                    rusqlite::params![self.run_id], |r| r.get::<_, bool>(0)).ok()).unwrap_or(false);
+                if !terminal_saved {
                 let _ = crate::agent::run_trace::upsert_snapshot(
                     db.inner(),
                     &self.run_id,
@@ -251,6 +255,7 @@ impl SessionRunGuard {
                     &existing_steps,
                     Some(&json!({ "summary": error })),
                 );
+                }
                 notify_session_event(&self.session_id, "failed");
                 let _ = self.app.emit(
                     "channel-run-done",

@@ -418,6 +418,9 @@ pub async fn dispatch(
             .dispatch(Some(app.clone()), db, workspace, interrupt_rx)
             .await?;
 
+        checkpoint.reviewer_dispatches.insert(child_run_id.clone(),
+            crate::agent::child_reviewer::PlanReviewerDispatchSnapshot::from_envelope(&envelope));
+
         // 批次锚点落 checkpoint：在途/收口此后全部由台账推导
         checkpoint.stage_review_batch_id = Some(stage_batch_id);
         checkpoint.stage_review_budget_used += 1;
@@ -509,6 +512,9 @@ pub async fn dispatch(
         let child_run_id = envelope
             .dispatch(Some(app.clone()), db, workspace, interrupt_rx.clone())
             .await?;
+
+        checkpoint.reviewer_dispatches.insert(child_run_id.clone(),
+            crate::agent::child_reviewer::PlanReviewerDispatchSnapshot::from_envelope(&envelope));
 
         // 成员身份由台账 batch_id 承担（dispatch 时已盖章）；锚点写一次即可
         dispatched_run_ids.push(child_run_id.clone());

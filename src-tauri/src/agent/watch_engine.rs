@@ -234,15 +234,43 @@ fn file_snapshot(path: &Path) -> Result<String, String> {
 }
 
 async fn run_command_snapshot(target: &str, workspace_root: Option<&Path>) -> Result<(String, String), String> {
+    run_command_snapshot_cancellable(target, workspace_root, None).await
+}
+
+async fn run_command_snapshot_cancellable(
+    target: &str, workspace_root: Option<&Path>, cancellation: Option<(&DbState, &str)>,
+) -> Result<(String, String), String> {
     let mut command = tokio::process::Command::new("sh");
+    command.kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
     command.arg("-c").arg(target).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
     if let Some(root) = workspace_root {
         command.current_dir(root);
     }
-    let output = tokio::time::timeout(Duration::from_secs(COMMAND_TIMEOUT_SECS), command.output())
-        .await
-        .map_err(|_| "watch command 超时".to_string())?
-        .map_err(|error| format!("watch command 启动失败: {}", error))?;
+    let mut changed = crate::agent::job_engine::job_watch_receiver();
+    let child = command.spawn().map_err(|error| format!("watch command 启动失败: {error}"))?;
+    let pid = child.id();
+    let cancel = async {
+        if let Some((db, watch_id)) = cancellation {
+            loop {
+                if load_watch_state(db, watch_id).is_none() { break; }
+                if changed.changed().await.is_err() { break; }
+            }
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+    let result = tokio::select! {
+        output = tokio::time::timeout(Duration::from_secs(COMMAND_TIMEOUT_SECS), child.wait_with_output()) =>
+            output.map_err(|_| "watch command 超时".to_string())
+                .and_then(|v| v.map_err(|e| format!("watch command 执行失败: {e}"))),
+        _ = cancel => Err("watch command 已取消".to_string()),
+    };
+    if result.is_err() {
+        if let Some(pid) = pid { crate::agent::tools::local_shell::kill_process_group(pid, "KILL"); }
+    }
+    let output = result?;
     let mut stdout = output.stdout;
     stdout.truncate(MAX_COMMAND_OUTPUT_BYTES);
     let detail = truncate_for_event(&stdout);
@@ -273,15 +301,25 @@ pub async fn run_watch_loop(
     workspace_root: Option<PathBuf>,
 ) {
     let interval = Duration::from_secs(interval_secs);
+    let mut changed = crate::agent::job_engine::job_watch_receiver();
     loop {
-        tokio::time::sleep(interval).await;
+        let delay = tokio::time::sleep(interval);
+        tokio::pin!(delay);
+        loop {
+            tokio::select! {
+                _ = &mut delay => break,
+                _ = changed.changed() => {
+                    if load_watch_state(&db, &watch_id).is_none() { return; }
+                }
+            }
+        }
         // 每个周期先确认监听行仍处于 running；被取消即退出（取消方负责广播唤醒等待者）
         let Some(current) = load_watch_state(&db, &watch_id) else {
             return;
         };
         // 单次执行同时产出快照哈希与事件详情，避免 command 型监听被重复触发
         let (snapshot, detail) = if current.kind == "command" {
-            match run_command_snapshot(&current.target, workspace_root.as_deref()).await {
+            match run_command_snapshot_cancellable(&current.target, workspace_root.as_deref(), Some((&db, &watch_id))).await {
                 Ok((hash, output)) => (hash, output),
                 Err(error) => {
                     emit_watch_event(
@@ -539,6 +577,24 @@ mod tests {
             |row| row.get::<_, i64>(0),
         )
         .unwrap() as usize
+    }
+
+
+    #[tokio::test]
+    async fn cancelled_watch_interrupts_inflight_command_without_waiting_for_timeout() {
+        let (base, db) = setup_test_db();
+        let id = crate::agent::job_engine::begin_job(&db,"run-watch-cancel","s1","watch","long probe",
+            &serde_json::to_string(&WatchState { kind:"command".into(),target:"sleep 60".into(),interval_secs:5,last_snapshot:String::new(),events_emitted:0 }).unwrap()).unwrap();
+        let db2 = DbState(db.0.clone());
+        let id2 = id.clone();
+        let task = tokio::spawn(async move {
+            run_command_snapshot_cancellable("sleep 60",None,Some((&db2,&id2))).await
+        });
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        crate::agent::job_engine::cancel_all_running_jobs(&db,"run-watch-cancel").unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(2),task).await.expect("cancellation must wake the active command").unwrap();
+        assert!(result.unwrap_err().contains("取消"));
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[tokio::test]

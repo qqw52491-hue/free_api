@@ -38,6 +38,7 @@ pub mod reviewer_gatekeeper;
 pub mod gate_applicability;
 pub mod gate_messages;
 pub mod finalization;
+pub(crate) mod failure;
 pub mod finish_guard;
 pub mod workspace_lock;
 pub(crate) mod workspace_access;

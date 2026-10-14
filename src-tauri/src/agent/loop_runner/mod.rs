@@ -142,6 +142,17 @@ pub async fn run_tool_phase(
     // 与工具调用混发属协议误用（提交语义含糊），直接拒绝让模型单独重提。
     let submit_plan_request = inst.submit_plan.clone();
 
+    // 明确失败动作先于业务门禁和任何工具副作用；混发的工具及状态更新均不执行。
+    if let Some(request) = &inst.fail_task {
+        let result = crate::agent::failure::failure_action_result(request);
+        if result.route == "task:failed" {
+            checkpoint.pending_task_failure = Some(request.reason.trim().to_string());
+        }
+        emit_tool_event(app, final_session_id, step_id, inst, "failed",
+            Some(result.route.clone()), Some(false), &result.stderr, Some(0), None);
+        return Ok(result);
+    }
+
     // 参数错误不进入审查/冷却/读取台账：预检只读，不修改 checkpoint。
     if let Some(result) = crate::agent::tools::input_validation::instruction_rejection(state.inner(), inst) {
         emit_tool_event(app, final_session_id, step_id, inst, "failed",

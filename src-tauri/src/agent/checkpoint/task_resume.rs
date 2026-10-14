@@ -73,6 +73,8 @@ impl AgentCheckpoint {
         self.gate_human_escape_directed = false;
         // 终态预检需重新确认运行期条件；不是免审收据。
         self.pending_finalization = None;
+        self.pending_task_failure = None;
+        self.reviewer_dispatches.clear();
         self.prepared_instruction = None;
         self.last_error = None;
         // 尚无确定结果的副作用只恢复人工核实入口，绝不自动重放。

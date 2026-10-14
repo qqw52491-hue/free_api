@@ -66,7 +66,7 @@ pub(crate) fn parse_reviewer_json(
     }
 
     // JSON 解析彻底失败：Fail-Open 避免卡死
-    ReviewResult::failed_open("Reviewer 输出非标准 JSON，已降级放行", model_id, diff_hash)
+    ReviewResult::failed_open("Reviewer 输出非标准 JSON，未获得有效审查结论", model_id, diff_hash)
 }
 
 pub(crate) fn extract_json_str(text: &str) -> String {

@@ -106,6 +106,7 @@ pub(super) async fn dispatch_wait_jobs(
                     session_id: ctx.final_session_id,
                     workspace_dir: ctx.workspace_dir,
                     interrupt_rx: ctx.interrupt_rx.clone(),
+                    reviewer_backup_model: &ctx.model_routing.reviewer_backup_model,
                 };
                 let mut stage_refund_pending = false;
                 let mut applied_receipts: Vec<crate::agent::checkpoint::AppliedReceipt> =

@@ -212,9 +212,8 @@ pub(crate) async fn finish_interrupted_run(
         format!("⏹️ {} 不再派发旧计划。", message),
     )
     .ok();
-    let _ = crate::agent::child_reviewer::cancel_running_child_runs(db, run_id);
-    let _ = crate::agent::job_engine::cancel_all_running_jobs(db, run_id);
-    intervention_channels().lock().await.remove(session_id);
-    stream_interrupt_channels().lock().await.remove(session_id);
+    for warning in crate::agent::failure::stop_run_runtime(db, session_id, run_id).await {
+        eprintln!("[control] {warning}");
+    }
     Ok(())
 }

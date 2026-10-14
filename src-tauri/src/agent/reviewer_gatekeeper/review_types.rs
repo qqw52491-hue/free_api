@@ -38,7 +38,11 @@ pub struct NitIssue {
 
 impl ReviewResult {
     pub fn is_passed(&self) -> bool {
-        self.blocking_issues.is_empty()
+        !self.is_service_failure() && self.blocking_issues.is_empty()
+    }
+
+    pub fn is_service_failure(&self) -> bool {
+        self.verdict == "failed_open"
     }
 
     pub fn skipped_empty() -> Self {
@@ -58,10 +62,10 @@ impl ReviewResult {
     pub fn failed_open(reason: &str, model_id: &str, diff_hash: &str) -> Self {
         Self {
             verdict: "failed_open".to_string(),
-            score: 85,
+            score: 0,
             blocking_issues: Vec::new(),
             nit_issues: Vec::new(),
-            summary: format!("⚠️ 终审未完成，产物未经审查（审查服务异常）: {}", reason),
+            summary: format!("终审通道失败，审查未完成: {}", reason),
             duration_ms: 0,
             model_id: model_id.to_string(),
             diff_hash: diff_hash.to_string(),

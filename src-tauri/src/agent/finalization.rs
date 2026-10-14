@@ -298,6 +298,9 @@ pub async fn evaluate_prepare_finish(
                 prepare_request.and_then(|r| r.summary.as_deref()),
             )
             .await;
+            if review_res.is_service_failure() {
+                checkpoint.pending_task_failure = Some(review_res.summary.clone());
+            }
             if review_res.is_passed() {
                 receipt_review = ReceiptReview::Passed {
                     score: review_res.score,
@@ -356,6 +359,34 @@ pub async fn evaluate_prepare_finish(
 /// transaction：任一写入失败整体回滚，不产生「一处已提交、一处还在 running」的半截态。
 /// checkpoint 沿用乐观锁版本谓词；冲突时回滚并返回错误，调用方下一步重试即可。
 pub fn commit_finalization(
+    db: &DbState, checkpoint: &mut AgentCheckpoint, run_id: &str, session_id: &str,
+    goal: &str, steps: &[Value], completion: &Value, assistant_message: &str, model_id: &str,
+) -> Result<(), String> {
+    commit_terminal(db, checkpoint, run_id, session_id, goal, steps, completion, assistant_message, model_id, "succeeded")
+}
+
+pub(crate) fn commit_failure(
+    db: &DbState, checkpoint: &mut AgentCheckpoint, run_id: &str, session_id: &str,
+    goal: &str, steps: &[Value], completion: &Value, assistant_message: &str,
+) -> Result<(), String> {
+    if checkpoint.phase != crate::agent::checkpoint::AgentPhase::Failed {
+        return Err("失败提交要求 Failed 检查点，不得冒充成功交付".into());
+    }
+    commit_terminal(db, checkpoint, run_id, session_id, goal, steps, completion, assistant_message, "", "failed")
+}
+
+fn commit_terminal(
+    db: &DbState, checkpoint: &mut AgentCheckpoint, run_id: &str, session_id: &str,
+    goal: &str, steps: &[Value], completion: &Value, assistant_message: &str, model_id: &str, status: &str,
+) -> Result<(), String> {
+    // 任何 SQL 失败均保持调用方 version 不变，不仅仅处理乐观锁冲突。
+    let mut candidate = checkpoint.clone();
+    commit_terminal_inner(db, &mut candidate, run_id, session_id, goal, steps, completion, assistant_message, model_id, status)?;
+    *checkpoint = candidate;
+    Ok(())
+}
+
+fn commit_terminal_inner(
     db: &DbState,
     checkpoint: &mut AgentCheckpoint,
     run_id: &str,
@@ -365,6 +396,7 @@ pub fn commit_finalization(
     completion: &Value,
     assistant_message: &str,
     model_id: &str,
+    status: &str,
 ) -> Result<(), String> {
     let mut conn = db.0.lock().map_err(|error| error.to_string())?;
     let now = Utc::now().to_rfc3339();
@@ -406,7 +438,7 @@ pub fn commit_finalization(
         if rows != 1 {
             checkpoint.version = previous_version;
             return Err(
-                "checkpoint 乐观锁冲突：终态提交已整体回滚，请下一步重试 finish".to_string(),
+                "checkpoint 乐观锁冲突：终态提交已整体回滚".to_string(),
             );
         }
     }
@@ -424,7 +456,7 @@ pub fn commit_finalization(
             completion_json=COALESCE(excluded.completion_json, agent_run_traces.completion_json),
             updated_at=excluded.updated_at,
             completed_at=CASE WHEN excluded.status IN ('succeeded', 'failed', 'cancelled') THEN excluded.updated_at ELSE agent_run_traces.completed_at END",
-        params![run_id, session_id, goal, "succeeded", steps_json, completion_json, now],
+        params![run_id, session_id, goal, status, steps_json, completion_json, now],
     )
     .map_err(|error| error.to_string())?;
 
