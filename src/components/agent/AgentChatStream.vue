@@ -1325,6 +1325,7 @@ import ArtifactList from "../artifacts/ArtifactList.vue";
 import FileIcon from "./FileIcon.vue";
 import { workerDisplayRows, type WorkerDisplayRow } from "./workerAssociation";
 import { extractSubagentsFromStep } from "./workerUtils";
+import { getWorkerLiveLine } from "./liveThoughtPreview";
 
 function parseUserMessageAttachments(content: string): { cleanText: string; attachments: ParsedAttachment[] } {
     if (!content) return { cleanText: "", attachments: [] };
@@ -1802,7 +1803,7 @@ function getLine3Key(entry: PlanEntry): string {
         const keyId = liveThoughtInfo.value.lineKey || preview.line3.lineKey || 0;
         return `think-${entry.id}-${keyId}`;
     }
-    // worker 行并入其自增 key：worker 动作每次刷新都触发翻牌，而不是原地静默变字
+    // 流式正文原地更新；只有真实动作/输出源切换才翻牌，不跟随隐藏思考行号。
     const workerLive = getLine3WorkerLive(entry, preview);
     if (workerLive) {
         return `worker-${entry.id}-${workerLive.key}`;
@@ -3448,26 +3449,25 @@ function isSubAgentTool(tool?: string): boolean {
 }
 // 子 agent / 挂起等待步骤 → 匹配活跃 worker 的实时动作行
 // 痛点修复：以前"派发审查"步骤只显示死文案"后台协同中"，
-// 审查员在干嘛完全看不见。worker.currentStep 逐事件更新、
-// thought 逐 chunk 追加——取它们合成一行活文本。
+// 实时文本优先使用事件入口维护的增量预览，没有文本时才显示 currentStep。
+// 不在 computed 内扫描完整 thought；同一 worker 的多个步骤共享一份活行。
 // 匹配不限步骤状态：异步派发下父步骤常抢先报 succeeded 而 worker 仍在跑，
 // 只按 running 过滤会让活行永远不出现。只看当前 run 的 props.steps，不碰历史。
 const workerLiveLines = computed(() => {
     const map = new Map<string, { key: string; text: string }>();
+    const byWorker = new Map<string, { key: string; text: string }>();
     for (const step of props.steps) {
         const isSub = isSubAgentTool(step.tool);
         const isWait = isWaitJobsTool(step.tool);
         if (!isSub && !isWait) continue;
         const w = getStepActiveWorkers(step).find(w => w.status === 'running');
         if (!w) continue;
-        const actionText = (w.currentStep || '').trim();
-        const lineInfo = extractActiveThoughtLineInfo(w.thought || '', 120);
-        const generic = /^(正在审查|正在后台|正在执行)/.test(actionText);
-        const text = (!generic && actionText) ? actionText : (lineInfo.text || actionText || '正在后台执行…');
-        map.set(step.id, {
-            key: `${w.id}-s${w.steps?.length ?? 0}-l${lineInfo.lineKey}`,
-            text: `${w.roleLabel || w.name}：${text}`,
-        });
+        let line = byWorker.get(w.id);
+        if (!line) {
+            line = getWorkerLiveLine(w);
+            byWorker.set(w.id, line);
+        }
+        map.set(step.id, line);
     }
     return map;
 });

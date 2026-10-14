@@ -42,6 +42,7 @@ import { asRecord, numberOrUndefined, toText, toTimestamp } from "../components/
 import { extractWorkerDetails, parseWorkerArtifacts } from "../components/agent/workerUtils";
 import { stripPlanDecisionMarker } from "../components/agent/planDecision";
 import { getStepJobIds, isWorkerStep, parseChildJobReceipts, stepWorkerTool } from "../components/agent/workerAssociation";
+import { createIncrementalThoughtPreview } from "../components/agent/liveThoughtPreview";
 
 const MAX_LOGS = 600;
 type ReasoningEffort = "auto" | "off" | "low" | "medium" | "high";
@@ -269,6 +270,10 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     const humanInterventions = ref<AgentHumanIntervention[]>([]);
     const llmParseErrors = ref<LlmParseErrorItem[]>([]);
     const teamWorkers = ref<AgentWorkerItem[]>([]);
+    const workerPreviewStreams = new Map<string, {
+        thinking: ReturnType<typeof createIncrementalThoughtPreview>;
+        content: ReturnType<typeof createIncrementalThoughtPreview>;
+    }>();
 
     // Workers are registered by exact child id. Keep reactive item identity stable:
     // spreading them here subscribed the whole list to every thought/output token.
@@ -1149,6 +1154,26 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             }
 
             if (explicitRoleLabel) worker.roleLabel = explicitRoleLabel;
+            if (chunk) {
+                let previews = workerPreviewStreams.get(childRunId);
+                if (!previews) {
+                    previews = {
+                        thinking: createIncrementalThoughtPreview(),
+                        content: createIncrementalThoughtPreview(),
+                    };
+                    // A resumed/restored worker may already contain an earlier prefix: seed once.
+                    previews.thinking.append(worker.thought || "");
+                    previews.content.append(worker.output || "");
+                    workerPreviewStreams.set(childRunId, previews);
+                }
+                const kind = streamType === "thinking" ? "thinking" : "content";
+                const preview = previews[kind].append(chunk);
+                const previous = worker.livePreview;
+                if (!previous || previous.streamType !== kind || previous.text !== preview.text
+                    || previous.lineKey !== preview.lineKey) {
+                    worker.livePreview = { ...preview, streamType: kind };
+                }
+            }
             if (streamType === "thinking") {
                 actionPhaseText.value = chunk 
                     ? `🔍 ${isWorkerStream ? '子侦察' : '子审查'}独立推导中: ${chunk.slice(0, 35)}...` 
@@ -1278,6 +1303,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                     params,
                     timestamp: Date.now(),
                 });
+                // The new concrete action supersedes the preceding model stream.
+                worker.livePreview = undefined;
                 worker.currentStep = title;
                 worker.currentTool = action;
                 worker.progress = Math.min(90, 20 + worker.steps.length * 15);
@@ -1645,6 +1672,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         humanInterventions.value = [];
         llmParseErrors.value = [];
         teamWorkers.value = [];
+        workerPreviewStreams.clear();
         clearResources();
         liveSpeed.value = null;
         liveTtft.value = null;
@@ -2062,6 +2090,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     });
 
     onUnmounted(() => {
+        workerPreviewStreams.clear();
         stopElapsedTimer();
         disposeResources();
         unlisteners.forEach((unlisten) => unlisten());

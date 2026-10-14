@@ -472,6 +472,8 @@ export interface AgentWorkerItem {
     startedAt: number;
     thought?: string;
     output?: string;
+    // UI-only incremental preview; complete thought/output remain unchanged.
+    livePreview?: { text: string; lineKey: number; totalLines: number; streamType: "thinking" | "content" };
     summary?: string;
     findings?: string[];
     scorecard?: ReviewScorecard;
