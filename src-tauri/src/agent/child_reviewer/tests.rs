@@ -1475,3 +1475,91 @@
         assert_eq!(count, 2, "认养不得新增台账行（重复 failover 会被拒）");
         let _ = std::fs::remove_dir_all(base);
     }
+
+
+    #[test]
+    fn reviewer_submission_reports_count_then_exact_reference_from_license_incident() {
+        // 10-14 实弹：JSON 完整，但 missing_evidence 有 5 项、引用省略了末尾说明。
+        let allowed = vec!["AuthService.java:86-101 登录入口".to_string()];
+        let mut raw = json!({
+            "findings": [], "confidence": "supported",
+            "evidence_refs": ["AuthService.java:86-101"],
+            "missing_evidence": ["lic.jar 依赖", "pom 依赖", "拦截顺序", "挂载路径", "pubring 打包"]
+        });
+        let count_error = parse_controlled_output(&raw.to_string(), &allowed).unwrap_err();
+        assert!(count_error.contains("missing_evidence 实际 5 项，最多 3 项"));
+        let feedback = review_output_rejection_feedback(&count_error, 1, 20);
+        assert!(feedback.contains(&count_error));
+        assert!(feedback.contains("提交校验未通过"));
+        assert!(feedback.contains("不代表方案被驳回"));
+        assert!(!feedback.contains("必须是最终审查 JSON（含 findings 键）或取证请求"));
+
+        raw["missing_evidence"] = json!(["合并后的依赖缺口", "拦截顺序", "路径与打包"]);
+        let ref_error = parse_controlled_output(&raw.to_string(), &allowed).unwrap_err();
+        assert!(ref_error.contains("引用 \"AuthService.java:86-101\""));
+        assert!(ref_error.contains("AuthService.java:86-101 登录入口"));
+        assert!(ref_error.contains("原样使用完整引用"));
+        raw["evidence_refs"] = json!(allowed);
+        assert!(parse_controlled_output(&raw.to_string(), &allowed).is_ok());
+    }
+
+    #[test]
+    fn reviewer_submission_keeps_json_syntax_and_required_field_errors() {
+        let syntax = parse_controlled_output(r#"{"findings":[],"confidence":}"#, &[]).unwrap_err();
+        assert!(syntax.contains("JSON 解析失败"));
+        assert!(syntax.contains("line 1 column"));
+        let missing = parse_controlled_output(r#"{"confidence":"supported"}"#, &[]).unwrap_err();
+        assert!(missing.contains("missing field `findings`"));
+        let wrong_type = parse_controlled_output(r#"{"findings":[],"confidence":42}"#, &[]).unwrap_err();
+        assert!(wrong_type.contains("invalid type: integer `42`, expected a string"));
+    }
+
+    #[test]
+    fn reviewer_submission_reports_findings_count_and_confidence_value() {
+        let raw = json!({"findings": ["a", "b", "c", "d", "e", "f"], "confidence": "supported"});
+        let error = parse_controlled_output(&raw.to_string(), &[]).unwrap_err();
+        assert!(error.contains("findings 实际 6 项，最多 5 项"));
+        let error = parse_controlled_output(r#"{"findings":[],"confidence":"high"}"#, &[]).unwrap_err();
+        assert!(error.contains("实际为 \"high\""));
+        assert!(error.contains("confirmed、supported 或 unverified"));
+    }
+
+    #[test]
+    fn reviewer_submission_terminal_feedback_does_not_request_another_retry() {
+        let reason = "missing_evidence 实际 5 项，最多 3 项";
+        let feedback = review_output_rejection_feedback(reason, 20, 20);
+        assert!(feedback.contains(reason));
+        assert!(feedback.contains("invalid_output 结束"));
+        assert!(!feedback.contains("重新输出"));
+    }
+
+    #[test]
+    fn reviewer_invalid_submission_reason_survives_persistence_and_parent_poll() {
+        let base = std::env::temp_dir().join(format!("free-api-review-invalid-{}", Uuid::new_v4()));
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let state = DbState(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::db::init_db(&base.join("test.db")).unwrap(),
+        )));
+        let child = begin_child_run(&state, "parent-invalid", "sess-invalid", &workspace, "m", 1, "review", None).unwrap();
+        let raw = json!({"findings": [], "confidence": "supported", "missing_evidence": ["a", "b", "c", "d", "e"]}).to_string();
+        let reason = parse_controlled_output(&raw, &[]).unwrap_err();
+        let payload = child_invalid_result_json(&child, 10, 20, 30, &raw, &reason);
+        finish_child_run(&state, &child, "invalid_output", 10, 20, 30,
+            Some(ChildErrorKind::InvalidOutput), Some(&payload));
+        {
+            let conn = state.0.lock().unwrap();
+            let stored: String = conn.query_row("SELECT result_json FROM agent_child_runs WHERE id = ?1",
+                params![child], |r| r.get(0)).unwrap();
+            let value: Value = serde_json::from_str(&stored).unwrap();
+            assert_eq!(value["validation_error"], reason);
+            assert_eq!(value["raw_result_json"], raw);
+        }
+        let results = poll_completed_child_runs(&state, "parent-invalid").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, "invalid_output");
+        assert_eq!(results[0].error_kind.as_deref(), Some("invalid_output"));
+        assert!(results[0].missing_evidence[0].contains(&reason));
+        drop(state);
+        let _ = std::fs::remove_dir_all(base);
+    }

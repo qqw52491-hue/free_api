@@ -345,18 +345,22 @@ pub(crate) fn child_invalid_result_json(
     completion_tokens: i64,
     prompt_tokens: i64,
     raw: &str,
-) -> String {    let mut value: serde_json::Value = serde_json::from_str(&child_error_result_json(
+    validation_error: &str,
+) -> String {
+    let mut value: serde_json::Value = serde_json::from_str(&child_error_result_json(
         child_run_id,
         "invalid_output",
         &ChildErrorKind::InvalidOutput,
         duration_ms,
         completion_tokens,
         prompt_tokens,
-        None,
+        Some(validation_error),
     ))
     .unwrap_or(serde_json::json!({}));
     let truncated: String = raw.chars().take(4000).collect();
     value["raw_result_json"] = serde_json::Value::String(truncated);
+    // 原因同时进入父 Agent 的失败摘要和落库诊断，避免只有最后的原始输出可查。
+    value["validation_error"] = serde_json::Value::String(validation_error.to_string());
     value.to_string()
 }
 

@@ -584,7 +584,9 @@ pub async fn spawn_child_reviewer(
             // 1. 最终审查 JSON（含 findings 键）→ 收敛。
             //    收敛前先做覆盖型契约校验：缺项时把【具体缺哪些点】喂回模型
             //    重答（实测：缺项错误只落库、子任务至死不知道漏了啥）。
-            if let Ok(parsed) = parse_controlled_output(&raw, &allowed_refs) {
+            let parsed_output = parse_controlled_output(&raw, &allowed_refs);
+            let mut rejection_reason = parsed_output.as_ref().err().cloned().unwrap_or_default();
+            if let Ok(parsed) = parsed_output {
                 let coverage_err = extract_json_object(&raw)
                     .and_then(|f| serde_json::from_str::<serde_json::Value>(f).ok())
                     .and_then(|v| {
@@ -698,11 +700,23 @@ pub async fn spawn_child_reviewer(
                     budget_warned = true;
                     continue;
                 }
+                rejection_reason = format!(
+                    "取证请求未执行：取证预算已用尽（已使用 {} 步，最多 {} 步），本次仍提交了 tool 请求。请基于已有证据提交最终审查 JSON。",
+                    tool_steps_used, reviewer_tool_steps
+                );
             }
 
-            // 3. 非合规输出（乱码/空响应/预算耗尽后仍要取证）：计数判罚，
-            //    累计 3 次才 invalid_output——给模型多次改正机会，仍有上界。
+            // 3. 提交校验失败：反馈真实原因；沿用原有计数和重试上限。
             non_compliant_strikes += 1;
+            let feedback = review_output_rejection_feedback(
+                &rejection_reason, non_compliant_strikes, MAX_NON_COMPLIANT_STRIKES,
+            );
+            if let Some(ref handle) = app_handle {
+                let _ = handle.emit(
+                    &format!("agent-log-{}", session_id_clone),
+                    format!("[child_reviewer {}] {}", child_run_id_clone, feedback),
+                );
+            }
             if non_compliant_strikes >= MAX_NON_COMPLIANT_STRIKES {
                 finish_child_run(
                     &db_clone,
@@ -718,6 +732,7 @@ pub async fn spawn_child_reviewer(
                         completion_tokens,
                         prompt_tokens,
                         &raw,
+                        &rejection_reason,
                     )),
                 );
                 return;
@@ -725,10 +740,7 @@ pub async fn spawn_child_reviewer(
             messages.push(json!({"role": "assistant", "content": raw}));
             messages.push(json!({
                 "role": "user",
-                "content": format!(
-                    "【系统】输出不合规（第 {}/{} 次）：必须是最终审查 JSON（含 findings 键）或取证请求 JSON（含 tool 键）。请重新输出。",
-                    non_compliant_strikes, MAX_NON_COMPLIANT_STRIKES
-                )
+                "content": feedback
             }));
         };
 

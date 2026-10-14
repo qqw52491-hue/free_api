@@ -314,7 +314,8 @@ pub(super) async fn dispatch_resume_child(
                                                     duration_ms,
                                                     completion_tokens,
                                                     prompt_tokens,
-                                                    &format!("解析错误: {parse_err}\n原始输出: {}", stream_result.full_response),
+                                                    &stream_result.full_response,
+                                                    &parse_err,
                                                 )),
                                             );
                                             return;

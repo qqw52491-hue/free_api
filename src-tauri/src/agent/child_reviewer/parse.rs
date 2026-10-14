@@ -194,6 +194,18 @@ pub(crate) fn extract_json_object(raw: &str) -> Option<&str> {
     Some(&trimmed[start..=end])
 }
 
+pub(crate) fn review_output_rejection_feedback(reason: &str, attempt: u32, limit: u32) -> String {
+    let next_action = if attempt >= limit {
+        "已达到提交校验重试上限，子审查任务以 invalid_output 结束。"
+    } else {
+        "请按上述具体错误修正并重新输出完整审查 JSON。"
+    };
+    format!(
+        "【系统】审查结果提交校验未通过（第 {}/{} 次）：{}\n本次未形成有效审查结论，不代表方案被驳回。{}",
+        attempt, limit, reason, next_action
+    )
+}
+
 pub(crate) fn parse_controlled_output(
     raw: &str,
     allowed_refs: &[String],
@@ -208,21 +220,19 @@ pub(crate) fn parse_controlled_output(
     Vec<String>,
 ), String> {
     let output: RawChildReviewOutput = serde_json::from_str(raw)
-        .or_else(|_| {
-            extract_json_object(raw).ok_or_else(|| "child_reviewer 未返回规定的 JSON 审查摘要。".to_string())
-            .and_then(|fragment| {
-                serde_json::from_str(fragment)
-                    .map_err(|_| "child_reviewer 未返回规定的 JSON 审查摘要。".to_string())
-            })
-        })?;
+        .or_else(|original_error| match extract_json_object(raw) {
+            Some(fragment) => serde_json::from_str(fragment),
+            None => Err(original_error),
+        })
+        .map_err(|error| format!("child_reviewer 审查 JSON 解析失败：{}。请修正对应字段或 JSON 语法。", error))?;
     if output.findings.len() > 5 {
-        return Err("child_reviewer.findings 最多包含 5 项。".to_string());
+        return Err(format!("child_reviewer.findings 实际 {} 项，最多 5 项。请缩减或合并为至多 5 项。", output.findings.len()));
     }
     if !matches!(output.confidence.as_str(), "confirmed" | "supported" | "unverified") {
-        return Err("child_reviewer.confidence 必须是 confirmed、supported 或 unverified。".to_string());
+        return Err(format!("child_reviewer.confidence 实际为 {:?}，允许值是 confirmed、supported 或 unverified。", output.confidence));
     }
     if output.missing_evidence.len() > 3 {
-        return Err("child_reviewer.missing_evidence 最多 3 项。".to_string());
+        return Err(format!("child_reviewer.missing_evidence 实际 {} 项，最多 3 项。请缩减或合并为至多 3 项。", output.missing_evidence.len()));
     }
 
     let allowed_refs_set = allowed_refs.iter().collect::<BTreeSet<_>>();
@@ -230,7 +240,10 @@ pub(crate) fn parse_controlled_output(
     for reference in &output.evidence_refs {
         let reference = normalize_nonempty(reference, 160, "evidence_refs")?;
         if !allowed_refs.is_empty() && !allowed_refs_set.contains(&reference) {
-            return Err("child_reviewer 只能引用父 Agent 显式传入的 evidence_refs。".to_string());
+            return Err(format!(
+                "child_reviewer.evidence_refs 引用 {:?} 不在父 Agent 显式传入的列表中。请原样使用完整引用（包括末尾说明），允许列表：{}。",
+                reference, serde_json::to_string(allowed_refs).unwrap_or_default()
+            ));
         }
         output_refs.insert(reference);
     }
