@@ -2477,24 +2477,16 @@ async fn run_agent_main_loop_in_workspace_inner(
                 let obligation_failures: Vec<String> = obligation_results
                     .iter()
                     .filter(|r| !r.passed)
-                    .map(|r| {
-                        format!(
-                            "- 义务 [{}] 验证命令 `{}` 退出码 {}: {}",
-                            r.obligation_id, r.command, r.exit_code, r.output_tail
-                        )
-                    })
+                    .map(crate::agent::host_verify::format_obligation_failure)
                     .collect();
                 if !obligation_failures.is_empty() {
                     checkpoint.finish_reviewed = true;
-                    let reject_msg = format!(
-                        "【⚠️ 交付门禁拦截打回：契约绑定的宿主验证命令未通过，finish 未生效！】\n{}\n（说明：命令退出码即为判定依据，冻结脚本不可修改）。\n【必须采取的行动】：请真实修复对应代码使验证通过后重试；严禁未验证直接提交交付。",
-                        obligation_failures.join("\n")
-                    );
-                    let reject_msg = match crate::agent::host_verify::obligation_missing_file_hint(&obligation_failures) {
-                        Some(h) => format!("{}{}", reject_msg, h),
-                        None => reject_msg,
-                    };
-                    context.add_error_feedback(&reject_msg);
+                    let reject_msg = crate::agent::host_verify::obligation_failure_report(&obligation_failures);
+                    // 逐项注入，避免多个义务合并后被通用 3000 字符报错截断再次吞掉诊断。
+                    // 验证失败不是 JSON 格式错误，不要求模型修正合法指令的格式。
+                    for failure in &obligation_failures {
+                        context.add_host_feedback(&crate::agent::host_verify::obligation_failure_report(std::slice::from_ref(failure)));
+                    }
                     crate::agent::dispatcher::emit_tool_event(
                         &app,
                         &final_session_id,

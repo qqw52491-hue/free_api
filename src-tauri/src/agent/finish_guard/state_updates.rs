@@ -120,7 +120,7 @@ pub(crate) fn apply_instruction_state_updates(
                     None
                 };
                 if let Some((id, paths, reason)) = expanded_info {
-                    context.add_error_feedback(&format!(
+                    context.add_host_feedback(&format!(
                         "【✅ Scope 边界扩展已放行】目标块 [{}] 允许修改范围已扩充包含：{:?}（理由：{}）",
                         id, paths, reason
                     ));
@@ -168,4 +168,46 @@ pub(crate) fn apply_todo_update_guarded(
         incoming.push(restored);
     }
     context.todo_list = incoming;
+}
+
+
+#[cfg(test)]
+mod scope_feedback_tests {
+    use super::*;
+    use crate::agent::target_block::TargetBlock;
+    use serde_json::json;
+
+    fn context_with_block() -> context::SandwichContext {
+        let mut ctx = context::SandwichContext::new("sys".into(), "goal".into());
+        let mut block = TargetBlock::new("b1", "修复前端");
+        block.scope = vec!["src/a.rs".into()];
+        ctx.block_manager.set_blocks(vec![block]);
+        ctx
+    }
+
+    fn instruction(reason: &str) -> AgentInstruction {
+        serde_json::from_value(json!({"tool":"core", "action":"continue", "command":"", "params":{}, "scope_extension":{"paths":["src/b.rs"],"reason":reason}})).unwrap()
+    }
+
+    #[test]
+    fn approved_scope_feedback_is_notification_not_format_error() {
+        let mut ctx = context_with_block();
+        apply_instruction_state_updates(&mut ctx, &instruction("必要的类型联动"), 3);
+        assert!(ctx.active_target_block().unwrap().scope.contains(&"src/b.rs".to_string()));
+        let text = ctx.turns_history.last().unwrap().content.as_str().unwrap();
+        assert!(text.contains("Scope 边界扩展已放行"));
+        assert!(text.starts_with("【宿主反馈】"));
+        assert!(!text.contains("格式或执行错误"));
+        assert!(!text.contains("纯 JSON"));
+    }
+
+    #[test]
+    fn rejected_scope_stays_rejected_and_does_not_expand() {
+        let mut ctx = context_with_block();
+        apply_instruction_state_updates(&mut ctx, &instruction(""), 3);
+        assert!(!ctx.active_target_block().unwrap().scope.contains(&"src/b.rs".to_string()));
+        let text = ctx.turns_history.last().unwrap().content.as_str().unwrap();
+        assert!(text.contains("Scope 扩展驳回"));
+        assert!(text.contains("reason"));
+    }
 }

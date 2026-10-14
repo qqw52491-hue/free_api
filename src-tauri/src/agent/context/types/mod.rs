@@ -1218,6 +1218,22 @@ impl SandwichContext {
         self.turns_history.push(msg);
     }
 
+    /// 中性宿主反馈：状态通知或真实验证结果，不附加 JSON 格式错误指控。
+    /// 每条有界；契约验证逐义务注入，足以保留各自的命令、目录与诊断摘录。
+    pub fn add_host_feedback(&mut self, text: &str) {
+        let text = if text.chars().count() > 8000 {
+            let head: String = text.chars().take(5000).collect();
+            let tail: String = text.chars().rev().take(2000).collect::<String>().chars().rev().collect();
+            format!("{}\n[宿主反馈较长，已截断中间 {} 字符]\n{}", head, text.chars().count() - 7000, tail)
+        } else {
+            text.to_string()
+        };
+        self.turns_history.push(ChatMessage {
+            role: "user".to_string(),
+            content: json!(format!("【宿主反馈】\n{}", text)),
+        });
+    }
+
     /// 注入错误反馈信息，告知 AI 修正它的输出（带安全截断，防止海量报错或异常全量 JSON 打爆上下文）
     pub fn add_error_feedback(&mut self, error_msg: &str) {
         let trimmed_msg = if error_msg.chars().count() > 3000 {

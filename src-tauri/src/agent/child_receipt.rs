@@ -240,6 +240,12 @@ pub(crate) async fn reduce_child_receipt(
     effects
 }
 
+fn review_scorecard_description(sc: &crate::agent::child_reviewer::ReviewScorecard) -> String {
+    let tc = sc.test_coverage.map_or_else(|| "N/A".to_string(), |tc| format!("{}/100", tc));
+    format!("\n审查评分卡: 综合平均 {} 分 (正确性: {}/100, 破坏性风险: {}/100, 代码规范: {}/100, 测试覆盖: {}) -> 评分条件: [{}]\n说明：此处仅表示评分条件，不能代表整体审查放行；阻塞缺陷与方案门禁状态另行判定。\n", sc.average_score(), sc.correctness, sc.risk, sc.style, tc,
+        if sc.passes_gate() { "✅已满足" } else { "⚠️未满足（均分需>=75且risk需>=60）" })
+}
+
 /// 审查者（review）回执处理：故障转移 → infra 记账退款 → 交付聚合。
 async fn reduce_reviewer_receipt(
     env: &ReceiptEnv<'_>,
@@ -251,18 +257,7 @@ async fn reduce_reviewer_receipt(
     let findings = receipt.findings();
     let formatted_findings = format_findings(&findings);
     let routing_str = receipt.routing().unwrap_or_else(|| "certain".to_string());
-    let scorecard_desc = if let Some(ref sc) = receipt.scorecard() {
-        let tc_str = sc
-            .test_coverage
-            .map_or_else(|| "N/A".to_string(), |tc| format!("{}/100", tc));
-        format!(
-            "\n审查评分卡: 综合平均 {} 分 (正确性: {}/100, 破坏性风险: {}/100, 代码规范: {}/100, 测试覆盖: {}) -> 门禁状态: [{}]\n",
-            sc.average_score(), sc.correctness, sc.risk, sc.style, tc_str,
-            if sc.passes_gate() { "✅合格放行" } else { "🚨未达标拦截(均分需>=75且risk需>=60)" }
-        )
-    } else {
-        String::new()
-    };
+    let scorecard_desc = receipt.scorecard().as_ref().map(review_scorecard_description).unwrap_or_default();
     let mut text = format!(
         "【🔍 子审查代理已完成 (child_run_id: {})】\n结论: {}\n建议路由: [{}]{}成本: 输入 {} / 输出 {} tokens, 耗时 {}ms\n发现:\n- {}\n",
         receipt.child_run_id,
@@ -397,6 +392,44 @@ mod tests {
     use crate::agent::child_reviewer::PlanReviewerDispatchSnapshot;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn scorecard_pass_only_reports_score_condition_not_overall_release() {
+        let score = crate::agent::child_reviewer::ReviewScorecard::new(85, 75, 85, None);
+        assert!(score.passes_gate());
+        let text = review_scorecard_description(&score);
+        assert!(text.contains("综合平均 81 分"));
+        assert!(text.contains("评分条件: [✅已满足]"));
+        assert!(text.contains("不能代表整体审查放行"));
+        assert!(!text.contains("门禁状态:"));
+        assert!(!text.contains("合格放行"));
+        let failing = crate::agent::child_reviewer::ReviewScorecard::new(80, 40, 80, None);
+        assert!(!failing.passes_gate());
+        assert!(review_scorecard_description(&failing).contains("评分条件: [⚠️未满足"));
+    }
+
+    #[tokio::test]
+    async fn blocked_review_receipt_with_high_score_is_not_described_as_gate_release() {
+        let (base, db) = test_db("score-label");
+        let ws = base.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let env = test_env(&db, &ws);
+        let mut ctx = SandwichContext::new("sys".into(), "goal".into());
+        let mut cp = AgentCheckpoint::new("run-1".into(), &ctx);
+        let delivery = receipt("review", "score-label-run", None, json!({
+            "child_run_id":"score-label-run", "status":"succeeded", "confidence":"supported", "routing":"blocked",
+            "findings":[{"id":"F1","severity":"blocking","finality":"regardless","location":"a.rs:1","current":"c","why":"真实阻塞项","suggestion":"s","evidence_strength":"confirmed"}],
+            "evidence_refs":[], "missing_evidence":[], "duration_ms":10, "completion_tokens":5,
+            "scorecard":{"correctness":85,"risk":75,"style":85,"test_coverage":null}
+        }));
+        let mut effects = ReceiptEffects::default();
+        let text = reduce_reviewer_receipt(&env, &mut cp, &mut ctx, &delivery, &mut effects).await;
+        assert!(text.contains("建议路由: [blocked]"), "{}", text);
+        assert!(text.contains("评分条件: [✅已满足]"), "{}", text);
+        assert!(text.contains("真实阻塞项"), "{}", text);
+        assert!(!text.contains("合格放行"), "{}", text);
+        std::fs::remove_dir_all(base).unwrap();
+    }
 
     fn test_db(tag: &str) -> (std::path::PathBuf, DbState) {
         let base = std::env::temp_dir().join(format!(

@@ -19,6 +19,55 @@ fn tail(s: &str, max: usize) -> String {
     }
 }
 
+// 只选择原始输出中的诊断片段，不据此推断失败原因或改变退出码判定。
+fn verification_stream_excerpt(text: &str, limit: usize) -> String {
+    let text = text.trim();
+    let total = text.chars().count();
+    if total <= limit {
+        return text.to_string();
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    let mut selected = vec![false; lines.len()];
+    for (i, line) in lines.iter().enumerate() {
+        let lower = line.to_lowercase();
+        if ["[error]", "error:", "error[", "error ts", "exception", "failed", "panicked", "caused by:", "fatal:", "not found", "no such file", "失败", "错误"]
+            .iter().any(|marker| lower.contains(marker))
+        {
+            for keep in selected.iter_mut().take((i + 4).min(lines.len())).skip(i.saturating_sub(1)) {
+                *keep = true;
+            }
+        }
+    }
+    let mut diagnostics = String::new();
+    for (line, keep) in lines.iter().zip(selected) {
+        if keep {
+            diagnostics.push_str(line);
+            diagnostics.push('\n');
+            if diagnostics.chars().count() >= limit / 2 {
+                break;
+            }
+        }
+    }
+    if diagnostics.is_empty() {
+        let head: String = text.chars().take(limit / 2).collect();
+        return format!("[原始输出 {} 字符，以下仅保留开头和末尾，已截断]\n{}\n…\n{}", total, head, tail(text, limit / 2));
+    }
+    let head: String = text.chars().take(limit / 4).collect();
+    let diagnostics: String = diagnostics.chars().take(limit / 2).collect();
+    format!("[原始输出 {} 字符，以下为不连续诊断摘录，已截断；不得视为完整日志]\n[诊断标记及相邻行]\n{}\n[输出开头]\n{}\n[输出末尾]\n{}", total, diagnostics, head, tail(text, limit / 4))
+}
+
+fn obligation_output_excerpt(stdout: &str, stderr: &str) -> String {
+    let mut sections = Vec::new();
+    if !stdout.trim().is_empty() {
+        sections.push(format!("[stdout]\n{}", verification_stream_excerpt(stdout, 3000)));
+    }
+    if !stderr.trim().is_empty() {
+        sections.push(format!("[stderr]\n{}", verification_stream_excerpt(stderr, 2000)));
+    }
+    if sections.is_empty() { "（stdout/stderr 均为空）".to_string() } else { sections.join("\n") }
+}
+
 /// 验证命令的工作目录解析：模型/审查员声明的 verify 命令常是裸工具调用
 /// （如 `cargo test --lib`），而仓库 manifest 常在子目录（如 src-tauri/）。
 /// 在 worktree 根裸跑必然 "could not find manifest" —— 实测一场 finish 被同一
@@ -165,9 +214,29 @@ pub async fn run(workspace: &Path) -> Option<String> {
 pub struct ObligationVerifyResult {
     pub obligation_id: String,
     pub command: String,
+    /// sh 启动时的目录；命令内显式 cd 的后续目录由命令本身决定。
+    pub working_dir: std::path::PathBuf,
     pub exit_code: String,
     pub output_tail: String,
     pub passed: bool,
+}
+
+/// prepare_finish 与 finish 共用同一份失败诊断，避免预检仅剩退出码。
+pub fn format_obligation_failure(result: &ObligationVerifyResult) -> String {
+    let execution = match result.exit_code.as_str() {
+        "fail-closed" => "验证命令未能执行（启动前或启动时失败）",
+        "timeout" => "验证命令已启动，执行超时",
+        _ => "验证命令已执行，未通过",
+    };
+    format!("义务 [{}] 验证失败（退出码 {}；{}）\n验证命令: `{}`\n宿主启动目录: {}\n输出/诊断:\n{}", result.obligation_id, result.exit_code, execution, result.command, result.working_dir.display(), result.output_tail)
+}
+
+pub fn obligation_failure_report(failures: &[String]) -> String {
+    let report = format!("【⚠️ 交付门禁拦截打回：契约绑定的宿主验证命令未通过，finish 未生效！】\n{}\n（说明：命令退出码即为判定依据，冻结脚本不可修改）。\n下一步：依据上述真实诊断定位失败原因（验证命令、运行环境或代码），处理后重跑验证；未验证通过不得宣称交付完成。", failures.join("\n"));
+    match obligation_missing_file_hint(failures) {
+        Some(hint) => format!("{}{}", report, hint),
+        None => report,
+    }
 }
 
 /// 【B 路径执行器】运行契约义务绑定的冻结验证脚本/命令。
@@ -186,6 +255,7 @@ pub async fn run_obligation_verifications(
             continue;
         };
         let id = ob.id.clone();
+        let working_dir = resolve_verify_dir(workspace, command);
         // 冻结脚本：写临时文件运行（sha256 核验快照完整性）
         let mut script_path: Option<std::path::PathBuf> = None;
         if let Some(script) = ob.verify_script.as_deref().filter(|c| !c.trim().is_empty()) {
@@ -196,6 +266,7 @@ pub async fn run_obligation_verifications(
                     results.push(ObligationVerifyResult {
                         obligation_id: id,
                         command: command.to_string(),
+                        working_dir: working_dir.clone(),
                         exit_code: "fail-closed".to_string(),
                         output_tail: "冻结脚本哈希不匹配（快照损坏或被篡改），按失败处理".to_string(),
                         passed: false,
@@ -214,6 +285,7 @@ pub async fn run_obligation_verifications(
                     results.push(ObligationVerifyResult {
                         obligation_id: id,
                         command: command.to_string(),
+                        working_dir: working_dir.clone(),
                         exit_code: "fail-closed".to_string(),
                         output_tail: format!("冻结脚本写入临时文件失败: {e}"),
                         passed: false,
@@ -233,11 +305,12 @@ pub async fn run_obligation_verifications(
             }
             _ => command.to_string(),
         };
+        let working_dir = resolve_verify_dir(workspace, &effective_command);
         let mut verify_cmd = tokio::process::Command::new("sh");
         verify_cmd
             .arg("-c")
             .arg(&effective_command)
-            .current_dir(resolve_verify_dir(workspace, &effective_command))
+            .current_dir(&working_dir)
             .kill_on_drop(true);
         crate::agent::tools::local_shell::sanitize_debugger_env(&mut verify_cmd);
         let outcome = tokio::time::timeout(Duration::from_secs(120), verify_cmd.output()).await;
@@ -248,17 +321,14 @@ pub async fn run_obligation_verifications(
                 let code = out.status.code().unwrap_or(-1);
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 let stderr = String::from_utf8_lossy(&out.stderr);
-                let mut out_tail = tail(&stdout, 400);
-                if !stderr.is_empty() {
-                    out_tail.push_str(" | stderr: ");
-                    out_tail.push_str(&tail(&stderr, 200));
-                }
-                (code.to_string(), out_tail, code == 0)
+                let excerpt = obligation_output_excerpt(&stdout, &stderr);
+                (code.to_string(), excerpt, code == 0)
             }
         };
         results.push(ObligationVerifyResult {
             obligation_id: id,
             command: command.to_string(),
+            working_dir,
             exit_code,
             output_tail: tail,
             passed,
@@ -370,5 +440,110 @@ mod missing_file_hint_tests {
         let other = vec!["- 义务 [t] 验证命令 `cargo test` 退出码 101: tests failed".to_string()];
         assert!(hint(&other).is_none());
         assert!(hint(&[]).is_none());
+    }
+}
+
+
+#[cfg(test)]
+mod feedback_tests {
+    use super::*;
+    use crate::agent::review_contract::ReviewObligation;
+    use crate::agent::context::SandwichContext;
+
+    fn obligation(command: &str) -> ReviewObligation {
+        serde_json::from_value(serde_json::json!({
+            "id": "unit", "question": "验证测试", "verify_command": command
+        })).unwrap()
+    }
+
+    #[test]
+    fn maven_excerpt_keeps_real_error_before_generic_help_tail() {
+        let mut log = "[INFO] downloading dependency\n".repeat(150);
+        log.push_str("[ERROR] No tests matching pattern LicenseServiceTest were executed!\n[ERROR] module: adp-common\n");
+        log.push_str(&"[INFO] additional build output\n".repeat(150));
+        log.push_str("[ERROR] For more information see http://cwiki.apache.org/MojoFailureException\n");
+        let excerpt = obligation_output_excerpt(&log, "");
+        assert!(excerpt.contains("No tests matching pattern LicenseServiceTest"), "{}", excerpt);
+        assert!(excerpt.contains("adp-common"), "{}", excerpt);
+        assert!(excerpt.contains("已截断"), "{}", excerpt);
+        assert!(excerpt.contains("不得视为完整日志"), "{}", excerpt);
+        assert!(excerpt.chars().count() < 3400);
+    }
+
+    #[test]
+    fn excerpts_preserve_both_streams_and_bound_unicode_output() {
+        let log = format!("{}\nerror[E0308]: 错误类型\n{}", "输出\n".repeat(2000), "后续\n".repeat(2000));
+        let excerpt = obligation_output_excerpt(&log, "sh: verifier: not found");
+        assert!(excerpt.contains("error[E0308]: 错误类型"));
+        assert!(excerpt.contains("[stdout]") && excerpt.contains("[stderr]"));
+        assert!(excerpt.contains("sh: verifier: not found"));
+        assert!(excerpt.chars().count() < 3700);
+        assert_eq!(obligation_output_excerpt("", ""), "（stdout/stderr 均为空）");
+        let unmarked = verification_stream_excerpt(&"中".repeat(5000), 2000);
+        assert!(unmarked.contains("开头和末尾"));
+        assert!(unmarked.chars().count() < 2100);
+    }
+
+    #[tokio::test]
+    async fn executed_failure_returns_command_directory_exit_and_both_streams() {
+        let dir = std::env::temp_dir().join(format!("verify-feedback-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let command = "printf '%s\\n' '[ERROR] No tests matching pattern were executed'; printf '%s\\n' 'stderr detail' >&2; exit 7";
+        let results = run_obligation_verifications(&dir, &[obligation(command)]).await;
+        let result = &results[0];
+        assert!(!result.passed);
+        assert_eq!(result.exit_code, "7");
+        assert_eq!(result.working_dir, dir);
+        let feedback = format_obligation_failure(result);
+        assert!(feedback.contains(command));
+        assert!(feedback.contains(&dir.to_string_lossy().to_string()));
+        assert!(feedback.contains("验证命令已执行"));
+        assert!(feedback.contains("No tests matching pattern") && feedback.contains("stderr detail"));
+        let report = obligation_failure_report(&[feedback]);
+        assert!(report.contains("验证命令、运行环境或代码"));
+        assert!(!report.contains("请真实修复对应代码"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn frozen_hash_failure_stays_fail_closed_and_reports_not_executed() {
+        let mut ob = obligation("sh verify.sh");
+        ob.verify_script = Some("exit 0".to_string());
+        ob.verify_sha256 = Some("incorrect-hash".to_string());
+        let results = run_obligation_verifications(&std::env::temp_dir(), &[ob]).await;
+        assert!(!results[0].passed);
+        assert_eq!(results[0].exit_code, "fail-closed");
+        let feedback = format_obligation_failure(&results[0]);
+        assert!(feedback.contains("验证命令未能执行"));
+        assert!(feedback.contains("冻结脚本哈希不匹配"));
+    }
+
+    #[tokio::test]
+    async fn command_success_remains_success_with_empty_output() {
+        let results = run_obligation_verifications(&std::env::temp_dir(), &[obligation("exit 0")]).await;
+        assert!(results[0].passed);
+        assert_eq!(results[0].exit_code, "0");
+        assert_eq!(results[0].output_tail, "（stdout/stderr 均为空）");
+    }
+
+    #[test]
+    fn separate_obligation_feedback_keeps_all_diagnostics_without_generic_error_wrapper() {
+        let mut ctx = SandwichContext::new("sys".into(), "goal".into());
+        for id in ["unit", "symptom"] {
+            let failure = ObligationVerifyResult {
+                obligation_id: id.to_string(), command: format!("mvn -Dtest={}", id),
+                working_dir: "/tmp/ws".into(), exit_code: "1".into(),
+                output_tail: format!("DIAGNOSTIC_{}\n{}\nEND_{}", id, "真实诊断\n".repeat(1000), id),
+                passed: false,
+            };
+            ctx.add_host_feedback(&obligation_failure_report(&[format_obligation_failure(&failure)]));
+        }
+        let messages = ctx.assemble_messages();
+        for id in ["unit", "symptom"] {
+            let msg = messages.iter().find_map(|m| m.content.as_str().filter(|t| t.contains(&format!("DIAGNOSTIC_{}", id)))).unwrap();
+            assert!(msg.contains(&format!("END_{}", id)));
+            assert!(msg.contains("宿主启动目录"));
+            assert!(!msg.contains("格式或执行错误"));
+        }
     }
 }

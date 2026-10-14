@@ -335,16 +335,20 @@ pub(crate) fn dehydrate_historical_turn(msg: &ChatMessage) -> ChatMessage {
         }
     }
 
-    // 2. 如果是历史早期的格式/执行错误且已过去（> 300 字符），压缩冗余报错堆栈
+    // 2. 旧报错只做文字脱水；这里没有核销信息，不能宣称后续已处理。
     if text.starts_with("【❌ 格式或执行错误】") && text.len() > 300 {
-        let first_err_line = text.lines().nth(1).unwrap_or("执行异常");
-        let compact_err: String = first_err_line.chars().take(120).collect();
+        let body = text.strip_prefix("【❌ 格式或执行错误】").unwrap_or(text);
+        let body = body.split("请根据上述错误反思原因并调整策略").next().unwrap_or(body).trim();
+        let compact_err = if body.chars().count() > 1200 {
+            let head: String = body.chars().take(700).collect();
+            let tail: String = body.chars().rev().take(500).collect::<String>().chars().rev().collect();
+            format!("{}\n[历史错误较长，已省略中间内容]\n{}", head, tail)
+        } else {
+            body.to_string()
+        };
         return ChatMessage {
             role: "user".to_string(),
-            content: json!(format!(
-                "【历史执行错误 (后续步骤已处理)】: {}",
-                compact_err
-            )),
+            content: json!(format!("【历史错误摘要（处理状态未确认）】\n{}", compact_err)),
         };
     }
 
@@ -941,5 +945,60 @@ mod tests {
         assert!(off < minimal && minimal < full, "档位体积应递增");
         // Off 档仍需保留未闭合契约（否则 finish 死锁）
         assert!(off > 0, "有待闭合义务时 Off 档不能是零字节");
+    }
+}
+
+
+#[cfg(test)]
+mod historical_error_feedback_tests {
+    use super::*;
+
+    #[test]
+    fn blank_second_line_does_not_erase_historical_error_reason() {
+        let raw = format!("【❌ 格式或执行错误】\n\n【执行失败】义务 unit 验证失败\n验证命令: mvn test\nNo tests matching pattern\n{}\n请根据上述错误反思原因并调整策略，严格输出 JSON", "详情\n".repeat(60));
+        let msg = ChatMessage { role: "user".into(), content: json!(raw) };
+        let dehydrated = dehydrate_historical_turn(&msg);
+        let text = dehydrated.content.as_str().unwrap();
+        assert!(text.contains("处理状态未确认"));
+        assert!(text.contains("义务 unit") && text.contains("mvn test") && text.contains("No tests matching pattern"));
+        assert!(!text.contains("后续步骤已处理"));
+        assert!(!text.contains("请根据上述错误反思"));
+    }
+
+    #[test]
+    fn long_error_keeps_head_and_tail_with_explicit_omission() {
+        let raw = format!("【❌ 格式或执行错误】\nHEAD_冻结验证未通过\n{}\nTAIL_真实异常", "中间堆栈\n".repeat(1000));
+        let msg = ChatMessage { role: "user".into(), content: json!(raw) };
+        let dehydrated = dehydrate_historical_turn(&msg);
+        let text = dehydrated.content.as_str().unwrap();
+        assert!(text.contains("HEAD_冻结验证未通过"));
+        assert!(text.contains("TAIL_真实异常"));
+        assert!(text.contains("已省略中间内容"));
+        assert!(text.chars().count() < 1300);
+        assert_eq!(dehydrate_historical_turn(&dehydrated).content, dehydrated.content);
+    }
+
+    #[test]
+    fn host_notifications_and_daily_assembly_are_not_rewritten() {
+        let mut ctx = SandwichContext::new("sys".into(), "goal".into());
+        ctx.add_host_feedback("【✅ Scope 边界扩展已放行】src/test.rs");
+        let msg = ctx.turns_history[0].clone();
+        assert_eq!(dehydrate_historical_turn(&msg).content, msg.content);
+        let before = serde_json::to_string(&ctx.turns_history).unwrap();
+        ctx.assemble_messages();
+        ctx.assemble_messages();
+        assert_eq!(serde_json::to_string(&ctx.turns_history).unwrap(), before);
+        assert!(!msg.content.as_str().unwrap().contains("格式或执行错误"));
+    }
+
+    #[test]
+    fn host_feedback_stays_bounded_without_claiming_json_error() {
+        let mut ctx = SandwichContext::new("sys".into(), "goal".into());
+        ctx.add_host_feedback(&format!("HEAD_验证输出\n{}\nTAIL_错误原因", "诊断".repeat(5000)));
+        let text = ctx.turns_history[0].content.as_str().unwrap();
+        assert!(text.contains("HEAD_验证输出") && text.contains("TAIL_错误原因"));
+        assert!(text.contains("已截断中间"));
+        assert!(text.chars().count() < 7200);
+        assert!(!text.contains("纯 JSON"));
     }
 }

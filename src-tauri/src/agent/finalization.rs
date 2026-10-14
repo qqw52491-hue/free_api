@@ -227,7 +227,7 @@ pub async fn evaluate_prepare_finish(
             obligation_results
                 .iter()
                 .filter(|r| !r.passed)
-                .map(|r| format!("义务 [{}] 验证失败（退出码 {}）", r.obligation_id, r.exit_code)),
+                .map(crate::agent::host_verify::format_obligation_failure),
         );
 
         if gate_blockers.is_empty() {
@@ -504,6 +504,21 @@ mod tests {
     use rusqlite::Connection;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn detailed_verification_failure_remains_blocking_and_keeps_command_directory_output() {
+        let result = crate::agent::host_verify::ObligationVerifyResult {
+            obligation_id: "unit".into(), command: "mvn test".into(),
+            working_dir: "/tmp/ws".into(), exit_code: "1".into(),
+            output_tail: "[ERROR] No tests matching pattern".into(), passed: false,
+        };
+        let mut r = receipt("hash", 0, "fp");
+        r.blockers.push(crate::agent::host_verify::format_obligation_failure(&result));
+        assert!(!r.is_ready());
+        let text = &r.blockers[0];
+        assert!(text.contains("mvn test") && text.contains("/tmp/ws"));
+        assert!(text.contains("退出码 1") && text.contains("No tests matching pattern"));
+    }
 
     fn test_db() -> DbState {
         let conn = Connection::open_in_memory().unwrap();
