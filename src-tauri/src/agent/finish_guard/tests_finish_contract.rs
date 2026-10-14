@@ -36,10 +36,10 @@ mod tests_inner {
     }
 
     #[test]
-    fn a_reviewed_finish_or_failed_finish_is_not_challenged_again() {
+    fn reviewed_flag_does_not_replace_an_acceptance_result() {
         let todos = vec![todo(1, "pending", "尚未核验")];
 
-        assert!(!should_challenge_finish(true, true, true, &todos));
+        assert!(should_challenge_finish(true, true, true, &todos));
         assert!(!should_challenge_finish(true, false, false, &todos));
         assert!(!should_challenge_finish(false, true, false, &todos));
     }
@@ -51,13 +51,24 @@ mod tests_inner {
         assert!(should_challenge_finish_with_unresolved(
             true, true, true, 1, &blockers, true
         ));
-        // 达到上限（count = 2）硬性熔断放行，绝不无限循环
-        assert!(!should_challenge_finish_with_unresolved(
+        // 次数只用于诊断，不将未满足的事实变成通过。
+        assert!(should_challenge_finish_with_unresolved(
             true, true, true, 2, &blockers, true
         ));
-        assert!(!should_challenge_finish_with_unresolved(
+        assert!(should_challenge_finish_with_unresolved(
             true, true, true, 0, &blockers, false
         ));
+        let pending_verification = finish_blockers(&[], None, false, 39, None);
+        for attempts in [0, 1, 2, 100] {
+            assert!(should_challenge_finish_with_unresolved(
+                true,
+                true,
+                true,
+                attempts,
+                &pending_verification,
+                false
+            ));
+        }
         assert!(!should_challenge_finish_with_unresolved(
             true, false, true, 0, &blockers, true
         ));

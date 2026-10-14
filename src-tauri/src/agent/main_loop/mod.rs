@@ -38,11 +38,11 @@ use crate::agent::finish_guard::{
 use crate::agent::workspace_lock::{acquire_workspace_lock, ChildWorkspaceGuard};
 
 mod auto_verify;
+mod entry;
+mod finalize;
+mod helpers;
 mod post_step;
 mod precheck;
-mod finalize;
-mod entry;
-mod helpers;
 
 pub(crate) use auto_verify::*;
 pub use entry::*;
@@ -122,18 +122,14 @@ async fn run_agent_main_loop_in_workspace_inner(
                 .unwrap_or(900);
             loop {
                 tokio::time::sleep(Duration::from_secs(30)).await;
-                let status: Option<String> = w_db
-                    .0
-                    .lock()
+                let status: Option<String> = w_db.0.lock().ok().and_then(|conn| {
+                    conn.query_row(
+                        "SELECT status FROM agent_run_traces WHERE id=?1",
+                        rusqlite::params![w_run],
+                        |r| r.get(0),
+                    )
                     .ok()
-                    .and_then(|conn| {
-                        conn.query_row(
-                            "SELECT status FROM agent_run_traces WHERE id=?1",
-                            rusqlite::params![w_run],
-                            |r| r.get(0),
-                        )
-                        .ok()
-                    });
+                });
                 match status.as_deref() {
                     Some("running") | Some("waiting_human") => {}
                     // 已到终态（含无行）：看门狗使命结束
@@ -206,18 +202,15 @@ async fn run_agent_main_loop_in_workspace_inner(
     // 行表回填：恢复的历史步（来自 steps_json 列的旧格式）补进 agent_run_steps，
     // 使行表自启动起即为完整事实源；INSERT OR REPLACE 幂等，崩溃重跑安全。
     for (i, step) in run_trace_steps.iter().enumerate() {
-        let _ = crate::agent::run_trace::append_step(
-            state.inner(),
-            &run_id,
-            i as i64,
-            step,
-        );
+        let _ = crate::agent::run_trace::append_step(state.inner(), &run_id, i as i64, step);
     }
     let (project_workspace, project_resources) = if workspace_override.is_none() {
         let conn = state.0.lock().map_err(|error| error.to_string())?;
-        let ws = crate::commands::projects::project_workspace_for_session(&conn, &final_session_id)?;
+        let ws =
+            crate::commands::projects::project_workspace_for_session(&conn, &final_session_id)?;
         let res = if ws.is_some() {
-            crate::commands::projects::project_resources_for_session(&conn, &final_session_id).unwrap_or_default()
+            crate::commands::projects::project_resources_for_session(&conn, &final_session_id)
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -239,7 +232,12 @@ async fn run_agent_main_loop_in_workspace_inner(
     // 捕获任务起点 Git 基准快照（用于 finish 时进行精准增量 Diff 审查）。
     {
         let conn = state.0.lock().map_err(|e| e.to_string())?;
-        crate::commands::projects::directories::bind_session_directories(&conn, &final_session_id, &workspace_dir, is_project_session)?;
+        crate::commands::projects::directories::bind_session_directories(
+            &conn,
+            &final_session_id,
+            &workspace_dir,
+            is_project_session,
+        )?;
     }
     // 自由会话（未选项目）的 workspace_dir 是会话产物目录而非真实工程——
     // 证据域缺失 → 降级为非 git 基线，审查改靠副作用台账/产物链。
@@ -382,11 +380,7 @@ async fn run_agent_main_loop_in_workspace_inner(
             mcp_lines.join("\n")
         };
         let builtin_list = crate::agent::prompt_assembly::build_builtin_tools_compact_list();
-        let compact = format!(
-            "- 原生内置: {}\n- MCP 插件:\n{}",
-            builtin_list,
-            mcp_part
-        );
+        let compact = format!("- 原生内置: {}\n- MCP 插件:\n{}", builtin_list, mcp_part);
         (registry.format_tools_menu(), compact)
     };
 
@@ -431,10 +425,14 @@ async fn run_agent_main_loop_in_workspace_inner(
     // 每轮都是独立 Agent 运行，但同一 session_id 始终归属同一个长期对话。
     // 崩溃恢复会沿用既有 checkpoint，不能重复追加用户消息；只有新轮次才写入消息历史。
     let existing_checkpoint = load_checkpoint(state.inner(), &final_session_id)?;
-    let is_resuming_existing =
-        !crate::agent::conversation::should_start_new_turn(existing_checkpoint.as_ref(), task_start_mode)?;
+    let is_resuming_existing = !crate::agent::conversation::should_start_new_turn(
+        existing_checkpoint.as_ref(),
+        task_start_mode,
+    )?;
     let resume_from_failed = is_resuming_existing
-        && existing_checkpoint.as_ref().is_some_and(|cp| cp.phase == AgentPhase::Failed);
+        && existing_checkpoint
+            .as_ref()
+            .is_some_and(|cp| cp.phase == AgentPhase::Failed);
     if !is_resuming_existing {
         crate::agent::conversation::begin_turn(
             state.inner(),
@@ -482,9 +480,15 @@ async fn run_agent_main_loop_in_workspace_inner(
             // 资源清单有界：登记量大时尾部状态卡不逐条全列（该卡每轮重发），
             // 完整清单经 `project_resources.list_resources()` 按需分页取回。
             const MAX_MANIFEST_RESOURCES: usize = 20;
-            manifest_text.push_str(&format!("- 本项目已登记受管数据文件（共 {} 个，已建立资源句柄可直接读取分析{}）：\n",
+            manifest_text.push_str(&format!(
+                "- 本项目已登记受管数据文件（共 {} 个，已建立资源句柄可直接读取分析{}）：\n",
                 project_resources.len(),
-                if project_resources.len() > MAX_MANIFEST_RESOURCES { "，下列仅前 20 个" } else { "" }));
+                if project_resources.len() > MAX_MANIFEST_RESOURCES {
+                    "，下列仅前 20 个"
+                } else {
+                    ""
+                }
+            ));
             for r in project_resources.iter().take(MAX_MANIFEST_RESOURCES) {
                 let size_kb = (r.size_bytes as f64) / 1024.0;
                 manifest_text.push_str(&format!(
@@ -539,12 +543,18 @@ async fn run_agent_main_loop_in_workspace_inner(
     };
     // 状态卡携带量独立覆盖：显式指定时压过预算模式自带的档位
     match model_routing.state_card_level.as_str() {
-        "off" => context.budget_config.state_card_level =
-            crate::agent::context::budget::StateCardLevel::Off,
-        "minimal" => context.budget_config.state_card_level =
-            crate::agent::context::budget::StateCardLevel::Minimal,
-        "full" => context.budget_config.state_card_level =
-            crate::agent::context::budget::StateCardLevel::Full,
+        "off" => {
+            context.budget_config.state_card_level =
+                crate::agent::context::budget::StateCardLevel::Off
+        }
+        "minimal" => {
+            context.budget_config.state_card_level =
+                crate::agent::context::budget::StateCardLevel::Minimal
+        }
+        "full" => {
+            context.budget_config.state_card_level =
+                crate::agent::context::budget::StateCardLevel::Full
+        }
         _ => {}
     }
     context.turns_history =
@@ -599,7 +609,8 @@ async fn run_agent_main_loop_in_workspace_inner(
     let task_started_at = *checkpoint.task_started_at.get_or_insert_with(|| {
         if is_resuming_existing {
             chrono::DateTime::parse_from_rfc3339(&checkpoint.created_at)
-                .map(|t| t.with_timezone(&chrono::Utc)).unwrap_or(run_started_at)
+                .map(|t| t.with_timezone(&chrono::Utc))
+                .unwrap_or(run_started_at)
         } else {
             run_started_at
         }
@@ -833,7 +844,10 @@ async fn run_agent_main_loop_in_workspace_inner(
                 if let Some(ref data_url) = att.image_data_url {
                     if !data_url.is_empty() {
                         context.add_image_feedback(
-                            &format!("【用户已附加图片: `{}`】(文件路径: {}, 大小: {} 字节)", att.file_name, att.file_path, att.size_bytes),
+                            &format!(
+                                "【用户已附加图片: `{}`】(文件路径: {}, 大小: {} 字节)",
+                                att.file_name, att.file_path, att.size_bytes
+                            ),
                             data_url,
                         );
                         injected_image_paths.insert(att.file_path.clone());
@@ -846,7 +860,9 @@ async fn run_agent_main_loop_in_workspace_inner(
                     let mime = if att.content_type.is_empty() || att.content_type == "file" {
                         if att.file_name.ends_with(".png") || att.file_path.ends_with(".png") {
                             "image/png"
-                        } else if att.file_name.ends_with(".webp") || att.file_path.ends_with(".webp") {
+                        } else if att.file_name.ends_with(".webp")
+                            || att.file_path.ends_with(".webp")
+                        {
                             "image/webp"
                         } else {
                             "image/jpeg"
@@ -856,7 +872,10 @@ async fn run_agent_main_loop_in_workspace_inner(
                     };
                     let data_url = format!("data:{};base64,{}", mime, b64);
                     context.add_image_feedback(
-                        &format!("【用户已附加图片: `{}`】(文件路径: {}, 大小: {} 字节)", att.file_name, att.file_path, att.size_bytes),
+                        &format!(
+                            "【用户已附加图片: `{}`】(文件路径: {}, 大小: {} 字节)",
+                            att.file_name, att.file_path, att.size_bytes
+                        ),
                         &data_url,
                     );
                     injected_image_paths.insert(att.file_path.clone());
@@ -875,7 +894,8 @@ async fn run_agent_main_loop_in_workspace_inner(
                 let sandbox_path_str = format!("tmp/{}", att.file_name);
                 let actual_file_path = target_file;
 
-                let can_inline = inlined_attachment_bytes + (att.size_bytes as usize) <= crate::agent::file_parser::INLINE_TOTAL_BUDGET;
+                let can_inline = inlined_attachment_bytes + (att.size_bytes as usize)
+                    <= crate::agent::file_parser::INLINE_TOTAL_BUDGET;
                 let parsed_content = if actual_file_path.exists() {
                     crate::agent::file_parser::parse_file(&actual_file_path, None).ok()
                 } else if src_path.exists() {
@@ -885,25 +905,31 @@ async fn run_agent_main_loop_in_workspace_inner(
                 };
 
                 let prompt_text = if let Some(ref content) = parsed_content {
-                    let (rendered, newly_inlined) = crate::agent::file_parser::format_for_prompt_with_sandbox(
-                        content,
-                        &att.file_name,
-                        Some(&sandbox_path_str),
-                        can_inline,
-                    );
+                    let (rendered, newly_inlined) =
+                        crate::agent::file_parser::format_for_prompt_with_sandbox(
+                            content,
+                            &att.file_name,
+                            Some(&sandbox_path_str),
+                            can_inline,
+                        );
                     inlined_attachment_bytes += newly_inlined;
                     rendered
                 } else if !att.prompt_text.is_empty() {
                     att.prompt_text.clone()
                 } else {
-                    format!("📎【用户已挂载本地文件】`{}` (沙箱路径: `{}`)\n", att.file_name, sandbox_path_str)
+                    format!(
+                        "📎【用户已挂载本地文件】`{}` (沙箱路径: `{}`)\n",
+                        att.file_name, sandbox_path_str
+                    )
                 };
 
                 if !prompt_text.is_empty() {
-                    context.turns_history.push(crate::agent::context::ChatMessage {
-                        role: "user".to_string(),
-                        content: serde_json::json!(prompt_text),
-                    });
+                    context
+                        .turns_history
+                        .push(crate::agent::context::ChatMessage {
+                            role: "user".to_string(),
+                            content: serde_json::json!(prompt_text),
+                        });
                 }
             }
         }
@@ -946,42 +972,60 @@ async fn run_agent_main_loop_in_workspace_inner(
                             if is_image {
                                 if let Ok(bytes) = std::fs::read(p) {
                                     use base64::Engine;
-                                    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                                    let mime = if file_name.ends_with(".png") || file_path.ends_with(".png") {
+                                    let b64 =
+                                        base64::engine::general_purpose::STANDARD.encode(&bytes);
+                                    let mime = if file_name.ends_with(".png")
+                                        || file_path.ends_with(".png")
+                                    {
                                         "image/png"
-                                    } else if file_name.ends_with(".webp") || file_path.ends_with(".webp") {
+                                    } else if file_name.ends_with(".webp")
+                                        || file_path.ends_with(".webp")
+                                    {
                                         "image/webp"
                                     } else {
                                         "image/jpeg"
                                     };
                                     let data_url = format!("data:{};base64,{}", mime, b64);
                                     context.add_image_feedback(
-                                        &format!("【用户已附加图片: `{}`】(文件路径: {}, 大小: {} 字节)", file_name, file_path, bytes.len()),
+                                        &format!(
+                                            "【用户已附加图片: `{}`】(文件路径: {}, 大小: {} 字节)",
+                                            file_name,
+                                            file_path,
+                                            bytes.len()
+                                        ),
                                         &data_url,
                                     );
                                     injected_image_paths.insert(file_path.to_string());
                                 }
-                            } else if let Ok(extracted) = crate::agent::file_parser::parse_file(p, None) {
+                            } else if let Ok(extracted) =
+                                crate::agent::file_parser::parse_file(p, None)
+                            {
                                 // 同样自动拷贝到会话 tmp/ 沙箱目录并生成分层提示词！
-                                let tmp_dir = crate::agent::path_guard::get_session_tmp_dir(&final_session_id);
+                                let tmp_dir = crate::agent::path_guard::get_session_tmp_dir(
+                                    &final_session_id,
+                                );
                                 let _ = std::fs::create_dir_all(&tmp_dir);
                                 let target_file = tmp_dir.join(file_name);
                                 if p != target_file {
                                     let _ = std::fs::copy(p, &target_file);
                                 }
                                 let sandbox_path_str = format!("tmp/{}", file_name);
-                                let can_inline = inlined_attachment_bytes <= crate::agent::file_parser::INLINE_TOTAL_BUDGET;
-                                let (prompt_text, newly_inlined) = crate::agent::file_parser::format_for_prompt_with_sandbox(
-                                    &extracted,
-                                    file_name,
-                                    Some(&sandbox_path_str),
-                                    can_inline,
-                                );
+                                let can_inline = inlined_attachment_bytes
+                                    <= crate::agent::file_parser::INLINE_TOTAL_BUDGET;
+                                let (prompt_text, newly_inlined) =
+                                    crate::agent::file_parser::format_for_prompt_with_sandbox(
+                                        &extracted,
+                                        file_name,
+                                        Some(&sandbox_path_str),
+                                        can_inline,
+                                    );
                                 inlined_attachment_bytes += newly_inlined;
-                                context.turns_history.push(crate::agent::context::ChatMessage {
-                                    role: "user".to_string(),
-                                    content: serde_json::json!(prompt_text),
-                                });
+                                context
+                                    .turns_history
+                                    .push(crate::agent::context::ChatMessage {
+                                        role: "user".to_string(),
+                                        content: serde_json::json!(prompt_text),
+                                    });
                             }
                         }
                     }
@@ -1105,18 +1149,31 @@ async fn run_agent_main_loop_in_workspace_inner(
     }
 
     // 🧹 会话启动时，自动收敛历史由于断电或异常退出的孤儿后台任务与子审查任务
-    let _ = crate::agent::job_engine::recover_orphaned_jobs_on_session_start(state.inner(), &final_session_id);
-    let _ = crate::agent::child_reviewer::recover_orphaned_child_runs_on_session_start(state.inner(), &final_session_id);
+    let _ = crate::agent::job_engine::recover_orphaned_jobs_on_session_start(
+        state.inner(),
+        &final_session_id,
+    );
+    let _ = crate::agent::child_reviewer::recover_orphaned_child_runs_on_session_start(
+        state.inner(),
+        &final_session_id,
+    );
 
     // durable cursor 是调度权威：每个普通步骤提交后推进 step_id；恢复时也从这里继续。
     // 不再使用启动瞬间捕获范围的 for-loop，避免 checkpoint 更新后调度器仍沿旧游标运行。
     // 失败后的显式续跑获得本次运行的有限预算，但保留任务步骤游标，不能立即再次触顶。
-    let max_steps = effective_retry_step_limit(run_budget.as_ref(), checkpoint.step_id, resume_from_failed);
+    let max_steps =
+        effective_retry_step_limit(run_budget.as_ref(), checkpoint.step_id, resume_from_failed);
     let mut spent_prompt_tokens: i64 = 0;
     let mut budget_stop_reason: Option<String> = None;
     while checkpoint.step_id < max_steps {
-        if crate::agent::workspace_access::sync_context(&final_session_id, &workspace_dir, &mut context) {
-            context.add_error_feedback("【目录权限更新】使用当前权限表；原任务、方案和审查状态保持不变。");
+        if crate::agent::workspace_access::sync_context(
+            &final_session_id,
+            &workspace_dir,
+            &mut context,
+        ) {
+            context.add_error_feedback(
+                "【目录权限更新】使用当前权限表；原任务、方案和审查状态保持不变。",
+            );
         }
         // 心跳：每轮步边界刷新——停滞看门狗据此区分"慢"与"死"
         stall_probe.store(
@@ -1154,8 +1211,11 @@ async fn run_agent_main_loop_in_workspace_inner(
                 interrupt_rx.clone(),
             )
             .await;
-            let feedback =
-                crate::agent::retriage::apply_retriage_revision(&mut context, &mut checkpoint, &revision);
+            let feedback = crate::agent::retriage::apply_retriage_revision(
+                &mut context,
+                &mut checkpoint,
+                &revision,
+            );
             context.add_error_feedback(&feedback);
             crate::agent::telemetry::record_gate_fire(
                 state.inner(),
@@ -1169,7 +1229,10 @@ async fn run_agent_main_loop_in_workspace_inner(
             );
             let _ = app.emit(
                 &format!("agent-log-{}", final_session_id),
-                format!("🧭 分流复核(里程点): {} — {}", revision.decision, revision.reason),
+                format!(
+                    "🧭 分流复核(里程点): {} — {}",
+                    revision.decision, revision.reason
+                ),
             );
         }
         let step_id = checkpoint.step_id;
@@ -1195,7 +1258,11 @@ async fn run_agent_main_loop_in_workspace_inner(
             std::collections::HashSet::new();
 
         // 🔄 异步子任务结果轮询（审查/工兵/侦察）：自动注入父 Agent 上下文
-        if let Ok(completed) = crate::agent::child_reviewer::poll_completed_delivery_receipts(state.inner(), &run_id, None) {
+        if let Ok(completed) = crate::agent::child_reviewer::poll_completed_delivery_receipts(
+            state.inner(),
+            &run_id,
+            None,
+        ) {
             if !completed.is_empty() {
                 let mut injection = String::new();
                 for receipt in completed {
@@ -1219,17 +1286,15 @@ async fn run_agent_main_loop_in_workspace_inner(
                     });
                     injection.push_str(&format!("\n{}\n", effects.model_text));
                     for notice in &effects.ui_notices {
-                        let _ = app.emit(
-                            &format!("agent-log-{}", final_session_id),
-                            notice.clone(),
-                        );
+                        let _ =
+                            app.emit(&format!("agent-log-{}", final_session_id), notice.clone());
                     }
                 }
                 if !injection.is_empty() {
                     context.add_error_feedback(&injection);
                     let _ = app.emit(
                         &format!("agent-log-{}", final_session_id),
-                        "🔄 子任务成果（含实时冲突检测）已注入父 Agent 上下文".to_string()
+                        "🔄 子任务成果（含实时冲突检测）已注入父 Agent 上下文".to_string(),
                     );
                 }
             }
@@ -1264,10 +1329,8 @@ async fn run_agent_main_loop_in_workspace_inner(
                         });
                         job_injection.push_str(&format!("\n{}\n", effects.model_text));
                         for notice in &effects.ui_notices {
-                            let _ = app.emit(
-                                &format!("agent-log-{}", final_session_id),
-                                notice.clone(),
-                            );
+                            let _ = app
+                                .emit(&format!("agent-log-{}", final_session_id), notice.clone());
                         }
                         continue;
                     }
@@ -1288,7 +1351,7 @@ async fn run_agent_main_loop_in_workspace_inner(
                     context.add_error_feedback(&job_injection);
                     let _ = app.emit(
                         &format!("agent-log-{}", final_session_id),
-                        "⚡ 后台异步任务结果已注入父 Agent 上下文".to_string()
+                        "⚡ 后台异步任务结果已注入父 Agent 上下文".to_string(),
                     );
                 }
             }
@@ -1313,8 +1376,19 @@ async fn run_agent_main_loop_in_workspace_inner(
         }
 
         if let Some(reason) = checkpoint.pending_task_failure.clone() {
-            crate::agent::failure::finish_failed_run(&app, state.inner(), &final_session_id, &run_id,
-                &goal, &run_trace_steps, &mut checkpoint, &context, &mut run_machine, reason.clone()).await?;
+            crate::agent::failure::finish_failed_run(
+                &app,
+                state.inner(),
+                &final_session_id,
+                &run_id,
+                &goal,
+                &run_trace_steps,
+                &mut checkpoint,
+                &context,
+                &mut run_machine,
+                reason.clone(),
+            )
+            .await?;
             return Err(reason);
         }
 
@@ -1436,25 +1510,51 @@ async fn run_agent_main_loop_in_workspace_inner(
                 res
             }
             Err(error) => {
-                crate::agent::failure::finish_failed_run(&app, state.inner(), &final_session_id, &run_id,
-                    &goal, &run_trace_steps, &mut checkpoint, &context, &mut run_machine,
-                    format!("任务执行失败: {}", error)).await?;
+                crate::agent::failure::finish_failed_run(
+                    &app,
+                    state.inner(),
+                    &final_session_id,
+                    &run_id,
+                    &goal,
+                    &run_trace_steps,
+                    &mut checkpoint,
+                    &context,
+                    &mut run_machine,
+                    format!("任务执行失败: {}", error),
+                )
+                .await?;
                 return Err(error);
             }
         };
         let (mut instruction, mut result) = (outcome.instruction, outcome.result);
         // wait_jobs 消费失败回执、或明确 fail_task：不再经过成功 finish / 状态更新段。
         if let Some(reason) = checkpoint.pending_task_failure.clone() {
-            run_trace_steps.push(json!({"id": step_id, "instruction": instruction, "status":"failed",
-                "route":result.route, "output":reason}));
-            crate::agent::failure::finish_failed_run(&app, state.inner(), &final_session_id, &run_id,
-                &goal, &run_trace_steps, &mut checkpoint, &context, &mut run_machine, reason.clone()).await?;
+            run_trace_steps.push(
+                json!({"id": step_id, "instruction": instruction, "status":"failed",
+                "route":result.route, "output":reason}),
+            );
+            crate::agent::failure::finish_failed_run(
+                &app,
+                state.inner(),
+                &final_session_id,
+                &run_id,
+                &goal,
+                &run_trace_steps,
+                &mut checkpoint,
+                &context,
+                &mut run_machine,
+                reason.clone(),
+            )
+            .await?;
             return Err(reason);
         }
         // 无效失败请求是参数错误；不得顺带核销 TODO/契约或执行混发内容。
         if instruction.fail_task.is_some() || instruction.get_tool() == "fail_task" {
-            instruction = AgentInstruction { description: instruction.description.clone(),
-                tool: Some("fail_task".into()), ..Default::default() };
+            instruction = AgentInstruction {
+                description: instruction.description.clone(),
+                tool: Some("fail_task".into()),
+                ..Default::default()
+            };
         }
         // 结构化路由信号：按真实 DispatchResult 记录成功/失败（替代对反馈文本 ❌ 的脆弱匹配）
         context.record_step_outcome(result.success);
@@ -1477,7 +1577,8 @@ async fn run_agent_main_loop_in_workspace_inner(
                     result.route,
                 );
                 println!("🛑 [GateDeadlock] {}", reason);
-                result = DispatchResult { view: None,
+                result = DispatchResult {
+                    view: None,
                     success: true,
                     stdout: reason,
                     stderr: String::new(),
@@ -1548,41 +1649,11 @@ async fn run_agent_main_loop_in_workspace_inner(
             action_history.clear(); // 阻断后清空历史，重新积累
         }
 
-        // --- 更新任务规划 + 核心记忆 ---
-        // 两类责任账本独立更新，避免审查契约的拒绝路径吞掉写入验证更新。
-        // 契约更新被拒时，原因原本只回传给模型，界面/记录都看不到：先干跑一次拿到拒绝原因，再可见化。
-        let contract_update_rejection = instruction.review_contract_update.as_ref().and_then(|u| {
-            let mut probe = context.review_contract.clone();
-            apply_review_contract_update(&mut probe, u.clone()).err()
-        });
-        let review_contract_started_this_turn =
-            apply_instruction_state_updates(&mut context, &instruction, step_id);
-        if let Some(err) = contract_update_rejection {
-            let short: String = err.chars().take(100).collect();
-            let _ = app.emit(
-                &format!("agent-log-{}", final_session_id),
-                format!("⚠️ 审查契约更新未被采纳：{}", short),
-            );
-            crate::agent::telemetry::record_gate_fire(
-                state.inner(),
-                &crate::agent::telemetry::GateFireRecord {
-                    run_id: &run_id,
-                    session_id: &final_session_id,
-                    step_id: step_id as i64,
-                    gate: "contract",
-                    route: &format!("contract:update_rejected:{}", short),
-                },
-            );
-        } else if let Some(update) = instruction.review_contract_update.as_ref() {
-            let _ = app.emit(
-                &format!("agent-log-{}", final_session_id),
-                format!("审查契约申报已保存（{} 项）；未提交项保留，不代表验收通过", update.obligations.len()),
-            );
-        }
-
         // --- 阶段级写入审查（双触发：todo 阶段推进 / 累计写入文件数兜底）---
         // 首次评估先建立覆盖基线（存量副作用不计入"未覆盖写入"）
-        if checkpoint.stage_review_baseline_side_effects == 0 && checkpoint.stage_review_budget_used == 0 {
+        if checkpoint.stage_review_baseline_side_effects == 0
+            && checkpoint.stage_review_budget_used == 0
+        {
             checkpoint.stage_review_baseline_side_effects = context.side_effects.len() as u32;
         }
         // 【shell 批改探针·后】步骤结束时取差值入账（覆盖单发/批量/重试所有执行路径）
@@ -1629,19 +1700,14 @@ async fn run_agent_main_loop_in_workspace_inner(
                             (Some(a), Some(b)) => a != b,
                             _ => false,
                         };
-                        let stash_grew = match (
-                            context.shell_probe_pre_stash_count,
-                            post_stash,
-                        ) {
+                        let stash_grew = match (context.shell_probe_pre_stash_count, post_stash) {
                             (Some(a), Some(b)) => b > a,
                             _ => false,
                         };
                         for p in &lost {
                             let mine = context.written_file_digests.get(p).cloned();
-                            let head_has = crate::agent::review_tools::git_head_blob(
-                                &workspace_dir,
-                                p,
-                            );
+                            let head_has =
+                                crate::agent::review_tools::git_head_blob(&workspace_dir, p);
                             let (tag, loud) = match mine {
                                 // 我写的消失了：HEAD 持有同指纹 = 被提交（合法，
                                 // 内容可从 HEAD 取回）；否则 = 被删/被还原（蒸发）
@@ -1653,9 +1719,9 @@ async fn run_agent_main_loop_in_workspace_inner(
                                 None if stash_grew => ("stashed".to_string(), false),
                                 None => ("destroyed_foreign".to_string(), true),
                             };
-                            context.git_dirty_lost.push(format!(
-                                "step{step_id} [{tool}] {p} -> {tag}"
-                            ));
+                            context
+                                .git_dirty_lost
+                                .push(format!("step{step_id} [{tool}] {p} -> {tag}"));
                             if loud {
                                 app.emit(
                                     &format!("agent-log-{}", final_session_id),
@@ -1678,7 +1744,9 @@ async fn run_agent_main_loop_in_workspace_inner(
                     }
                 }
                 // 非 git 环境：按本步骤是否为写类指令保守计 1（但排除 session_tmp 草稿写入）
-                (None, _) if crate::agent::dispatcher::is_write_or_side_effect_tool(&instruction) => {
+                (None, _)
+                    if crate::agent::dispatcher::is_write_or_side_effect_tool(&instruction) =>
+                {
                     let is_tmp_write = instruction.get_tool().eq_ignore_ascii_case("local_file")
                         && crate::agent::tools::local_file::is_dispatch_result_tmp(&result);
                     if !is_tmp_write {
@@ -1691,6 +1759,56 @@ async fn run_agent_main_loop_in_workspace_inner(
             context.shell_probe_pre_dirty = None;
             context.shell_probe_pre_dirty_paths = None;
         }
+        let side_effects_before = context.side_effects.len();
+        post_step::record_side_effect_or_verify(
+            &mut context,
+            step_id,
+            &instruction,
+            &result,
+            &app,
+            &final_session_id,
+            &workspace_dir,
+        );
+        if context.side_effects.len() != side_effects_before {
+            checkpoint.finish_reviewed = false;
+            checkpoint.finish_challenge_count = 0;
+            checkpoint.pending_finalization = None;
+        }
+        // --- 更新任务规划 + 核心记忆 ---
+        // 两类责任账本独立更新，避免审查契约的拒绝路径吞掉写入验证更新。
+        // 契约更新被拒时，原因原本只回传给模型，界面/记录都看不到：先干跑一次拿到拒绝原因，再可见化。
+        let contract_update_rejection = instruction.review_contract_update.as_ref().and_then(|u| {
+            let mut probe = context.review_contract.clone();
+            apply_review_contract_update(&mut probe, u.clone()).err()
+        });
+        let review_contract_started_this_turn =
+            apply_instruction_state_updates(&mut context, &instruction, step_id);
+        if let Some(err) = contract_update_rejection {
+            let short: String = err.chars().take(100).collect();
+            let _ = app.emit(
+                &format!("agent-log-{}", final_session_id),
+                format!("⚠️ 审查契约更新未被采纳：{}", short),
+            );
+            crate::agent::telemetry::record_gate_fire(
+                state.inner(),
+                &crate::agent::telemetry::GateFireRecord {
+                    run_id: &run_id,
+                    session_id: &final_session_id,
+                    step_id: step_id as i64,
+                    gate: "contract",
+                    route: &format!("contract:update_rejected:{}", short),
+                },
+            );
+        } else if let Some(update) = instruction.review_contract_update.as_ref() {
+            let _ = app.emit(
+                &format!("agent-log-{}", final_session_id),
+                format!(
+                    "审查契约申报已保存（{} 项）；未提交项保留，不代表验收通过",
+                    update.obligations.len()
+                ),
+            );
+        }
+
         println!(
             "【阶段审查诊断】step {} | phase={:?} | mode={:?} | uncovered={} | shell_baseline={} | budget={} | side_effects={}",
             step_id,
@@ -1701,7 +1819,13 @@ async fn run_agent_main_loop_in_workspace_inner(
             checkpoint.stage_review_budget_used,
             context.side_effects.len()
         );
-        if let Some(reason) = crate::agent::stage_review::should_fire(&checkpoint, state.inner(), &context, &instruction, &model_routing) {
+        if let Some(reason) = crate::agent::stage_review::should_fire(
+            &checkpoint,
+            state.inner(),
+            &context,
+            &instruction,
+            &model_routing,
+        ) {
             match crate::agent::stage_review::dispatch(
                 &app,
                 state.inner(),
@@ -1794,1061 +1918,17 @@ async fn run_agent_main_loop_in_workspace_inner(
         };
 
         let is_finish = is_finish_instruction(&instruction);
-        // prepare_finish：与 finish 同一套门禁评估，但只沉淀收据、不提交终态。
         let is_prepare_finish = instruction.prepare_finish.is_some();
         let finish_gate_requested = is_finish || is_prepare_finish;
-
-        // 🌟 纯静态资源自动豁免与无测试工具自适应跳过：
-        if finish_gate_requested && result.success && context.change_verification.is_none() {
-            let has_explicit_verify = context
-                .review_contract
-                .as_ref()
-                .map_or(false, |rc| rc.has_executable_verification());
-            if !has_explicit_verify {
-                if context.is_only_ui_or_doc_side_effects() {
-                    context.change_verification = Some(crate::agent::change_verification::ChangeVerification {
-                        status: "waived".to_string(),
-                        evidence_refs: Vec::new(),
-                        waived_reason: Some(
-                            "改动全部为纯静态资源（样式/图片/文档），系统自动豁免写入验证".to_string(),
-                        ),
-                    });
-                    let _ = app.emit(
-                        &format!("agent-log-{}", final_session_id),
-                        "🎨 系统自动感知：检测到本次改动全部为纯静态资源（样式/图片/文档），已自动豁免写入测试验证 (waived)".to_string(),
-                    );
-                } else if !context.has_inferrable_verification_command() {
-                    // 🌟 泛化降级策略：如果改动了代码文件，但当前工程未检测到任何自动化测试套件或类型检查工具，
-                    // 按照“如果一般都可以，这个如果没有就跳过”的原则，系统自适应跳过强制校验
-                    context.change_verification = Some(crate::agent::change_verification::ChangeVerification {
-                        status: "waived".to_string(),
-                        evidence_refs: Vec::new(),
-                        waived_reason: Some(
-                            "当前工程未检测到类型检查器或自动化测试配置，系统自适应跳过验证".to_string(),
-                        ),
-                    });
-                    let _ = app.emit(
-                        &format!("agent-log-{}", final_session_id),
-                        "☕ 系统自动感知：当前工程未检测到测试或类型检查工具，已自适应跳过验证 (waived)".to_string(),
-                    );
-                }
-            }
-        }
-
-        let side_effect_count = context
-            .side_effects
-            .len()
-            .saturating_sub(context.inherited_side_effects_count);
-
-        // 🧪 宿主权威验证兜底：finish/prepare_finish 时仍有挂账写入而验证未闭合，
-        // 且宿主能推断出验证命令 → 宿主亲自执行，真实退出码即判据。
-        // 成功 → 写入批次自动闭合 verified（宿主回执，非模型自述）；
-        // 红灯 → 直接打回且不消耗质询熔断额度——确定性失败绝不因"重试次数用尽"放行。
-        // 模型已显式 waived 的批次不重复执行（豁免理由的正确性由终审核对）。
-        if finish_gate_requested
-            && result.success
-            && side_effect_count > 0
-            && context
-                .change_verification
-                .as_ref()
-                .map_or(true, |v| !v.is_resolved())
-        {
-            if let Some(verify_cmd) = context.inferred_verification_command() {
-                let verify_timeout = crate::agent::channel::channel_config_shared()
-                    .read()
-                    .ok()
-                    .and_then(|c| c.verify_timeout_secs)
-                    .unwrap_or(120)
-                    .clamp(10, 600);
-                let verify_outcome = crate::agent::host_verify::run_command(
-                    &workspace_dir,
-                    &verify_cmd,
-                    verify_timeout,
-                )
-                .await;
-                if verify_outcome.passed {
-                    context.change_verification = Some(ChangeVerification {
-                        status: "verified".to_string(),
-                        evidence_refs: vec![format!(
-                            "host_verify:step_{} (`{}` → exit {})",
-                            step_id, verify_cmd, verify_outcome.exit_code
-                        )],
-                        waived_reason: None,
-                    });
-                    let _ = app.emit(
-                        &format!("agent-log-{}", final_session_id),
-                        format!(
-                            "🧪 宿主权威验证通过：`{}` → exit {}，写入批次自动闭合 verified",
-                            verify_cmd, verify_outcome.exit_code
-                        ),
-                    );
-                } else if verify_outcome.tool_unavailable() {
-                    // 检查工具自身崩溃/不存在（环境问题，非代码缺陷）：按"检查不适用"自动豁免，不打回。
-                    let brief: String = verify_outcome.output_tail.chars().take(160).collect();
-                    context.change_verification = Some(ChangeVerification {
-                        status: "waived".to_string(),
-                        evidence_refs: vec![],
-                        waived_reason: Some(format!(
-                            "宿主验证命令 `{}` 自身无法运行（退出码 {}，环境问题，非代码错误）：{}",
-                            verify_cmd, verify_outcome.exit_code, brief
-                        )),
-                    });
-                    let _ = app.emit(
-                        &format!("agent-log-{}", final_session_id),
-                        format!(
-                            "⚠️ 宿主验证工具自身无法运行（`{}` → {}），判为检查不适用已豁免，不阻塞 finish",
-                            verify_cmd, verify_outcome.exit_code
-                        ),
-                    );
-                } else if is_finish {
-                    let reject_msg = format!(
-                        "【🛑 宿主权威验证未通过，finish 未生效！】\n宿主亲自执行: `{}`\n退出码: {}\n输出尾部:\n{}\n\n该判定为宿主实测结果，不接受文本声明覆盖，也不消耗质询熔断额度。\n【必须采取的行动】：请依据上方真实输出修复后重试；若确认该检查不适用于本改动，可用 change_verification_update 提交 waived + waived_reason 显式豁免（终审将核对豁免理由）。",
-                        verify_cmd, verify_outcome.exit_code, verify_outcome.output_tail
-                    );
-                    context.add_error_feedback(&reject_msg);
-                    crate::agent::dispatcher::emit_tool_event(
-                        &app,
-                        &final_session_id,
-                        step_id,
-                        &instruction,
-                        "host_verify_challenged",
-                        Some("finish".to_string()),
-                        Some(false),
-                        &format!(
-                            "宿主权威验证未通过：`{}` → 退出码 {}",
-                            verify_cmd, verify_outcome.exit_code
-                        ),
-                        None,
-                        None,
-                    );
-                    context.record_step_outcome(false);
-                    checkpoint.finish_reviewed = true;
-                    persist_challenged_step(
-                        state.inner(),
-                        &mut run_trace_steps,
-                        &run_id,
-                        &final_session_id,
-                        step_id,
-                        &instruction,
-                        &context,
-                        "host_verify_challenged",
-                        &reject_msg,
-                        &result.view,
-                        step_metrics_json(outcome.token_usage.as_ref(), outcome.thinking_duration_ms, outcome.tool_duration_ms),
-                        &outcome.thinking_text,
-                    );
-                    let _ = save_checkpoint(state.inner(), &mut checkpoint);
-                    continue;
-                } else {
-                    // prepare_finish：预检不拦截，但把宿主实测失败如实反馈，
-                    // 收据中验证项保持未闭合状态
-                    context.add_error_feedback(&format!(
-                        "【宿主权威验证未通过（预检）】`{}` → 退出码 {}：{}",
-                        verify_cmd, verify_outcome.exit_code, verify_outcome.output_tail
-                    ));
-                }
-            }
-        }
-
-        let diff_context = if side_effect_count > 0 {
-            let affected_paths = context.new_affected_paths();
-            let raw_diff = git_baseline.collect_git_diff(&workspace_dir).map(|(d, _)| d);
-            Some(DiffContext::from_diff_and_paths(
-                raw_diff.as_deref(),
-                &affected_paths,
-            ))
-        } else {
-            None
-        };
-
-        // 诊断义务（triage 取证单下发的问题）与修复义务分流：
-        // 前者证据位于"读过的文件"，静态定位即可成立；
-        // 后者维持 diff 对账。判别锚点是宿主持久化的判决原单，模型改不了。
-        let diagnostic_questions: &[String] = checkpoint
-            .triage_verdict
-            .as_ref()
-            .map(|v| v.investigation_questions.as_slice())
-            .unwrap_or(&[]);
-        let mut open_todos = finish_blockers_with_diff(
-            &context.todo_list,
-            context.review_contract.as_ref(),
-            review_contract_started_this_turn,
-            side_effect_count,
-            context.change_verification.as_ref(),
-            diff_context.as_ref(),
-            Some(workspace_dir.as_path()),
-            diagnostic_questions,
-        );
-        let evidence_blockers = context
-            .review_contract
-            .as_ref()
-            .map(|c| {
-                review_contract_evidence_blockers(
-                    c,
-                    side_effect_count,
-                    diff_context.as_ref(),
-                    Some(workspace_dir.as_path()),
-                    diagnostic_questions,
-                )
-            })
-            .unwrap_or_default();
-        let contract_evidence_unresolved = !evidence_blockers.is_empty();
-        // 门禁触发遥测：义务证据二分法（diff 对账 / 诊断静态校验）的触发频率
-        if !evidence_blockers.is_empty() {
-            let route = if diff_context
-                .as_ref()
-                .map(|d| !d.changed_files.is_empty())
-                .unwrap_or(false)
-            {
-                "finish_obligation_evidence:diff_not_matched"
-            } else {
-                "finish_obligation_evidence:static_check_failed"
-            };
-            crate::agent::telemetry::record_gate_fire(
-                state.inner(),
-                &crate::agent::telemetry::GateFireRecord {
-                    run_id: &run_id,
-                    session_id: &final_session_id,
-                    step_id: step_id as i64,
-                    gate: "finish_obligation_evidence",
-                    route,
-                },
-            );
-        }
-        // 门禁适用域交接：义务证据全部为非代码形态（命令输出/退出码/运维状态）时，
-        // diff/静态定位对账无判据——机械门不适用，生成 Gate Notice 移交终审 + Skip 遥测。
-        // Skip 绝不静默：审计侧靠 finish_obligation_evidence:noncode_refs:not_applicable
-        // 的触发率发现"系统性钻空子"（如模型故意只填不可解析引用来逃对账）。
-        let mut gate_notices: Vec<String> = context
-            .review_contract
-            .as_ref()
-            .map(|c| {
-                crate::agent::finish_guard::noncode_evidence_skip_reasons(
-                    c,
-                    side_effect_count,
-                    diff_context.as_ref(),
-                    Some(workspace_dir.as_path()),
-                )
-                .into_iter()
-                .filter_map(|reason| {
-                    crate::agent::gate_applicability::GateApplicability::not_applicable_owned(reason)
-                        .handoff_notice("契约义务证据对账门")
-                })
-                .collect()
-            })
-            .unwrap_or_default();
-        if !gate_notices.is_empty() {
-            crate::agent::telemetry::record_gate_fire(
-                state.inner(),
-                &crate::agent::telemetry::GateFireRecord {
-                    run_id: &run_id,
-                    session_id: &final_session_id,
-                    step_id: step_id as i64,
-                    gate: "finish_obligation_evidence",
-                    route: "finish_obligation_evidence:noncode_refs:not_applicable",
-                },
-            );
-        }
-        // 「可定位但未落 diff」披露：证据客观存在但不在改动区间——可能是诊断义务
-        // （证据本就在只读文件）或陈旧行号。放行不拦截，移交终审做语义核验。
-        let undiffed_notices: Vec<String> = context
-            .review_contract
-            .as_ref()
-            .map(|c| {
-                crate::agent::finish_guard::undiffed_locatable_notices(
-                    c,
-                    diff_context.as_ref(),
-                    Some(workspace_dir.as_path()),
-                )
-                .into_iter()
-                .filter_map(|reason| {
-                    crate::agent::gate_applicability::GateApplicability::not_applicable_owned(reason)
-                        .handoff_notice("契约义务证据对账门")
-                })
-                .collect()
-            })
-            .unwrap_or_default();
-        if !undiffed_notices.is_empty() {
-            crate::agent::telemetry::record_gate_fire(
-                state.inner(),
-                &crate::agent::telemetry::GateFireRecord {
-                    run_id: &run_id,
-                    session_id: &final_session_id,
-                    step_id: step_id as i64,
-                    gate: "finish_obligation_evidence",
-                    route: "finish_obligation_evidence:undiffed_refs:not_applicable",
-                },
-            );
-            gate_notices.extend(undiffed_notices);
-        }
-        // 【廉价完成防线】评测 oracle 的判分进度是任务完成度的客观事实源：
-        // 模型自declared的审查契约/TODO 只覆盖它自己申报的范围（实测：1/24 交付被判
-        // succeeded）。oracle 未完成时把缺口作为持久 blocker——与契约证据未决同级，
-        // 不因 finish_reviewed 置位而失效；熔断上限（MAX_FINISH_CHALLENGES）仍是安全阀。
-        let mut oracle_progress_unresolved = false;
+        let completion_generation = *interrupt_rx.borrow();
+        let mut finish_challenged = false;
+        let mut reviewer_warnings_delivered = None;
         if finish_gate_requested && result.success {
-            if let Some((index, total, completed)) =
-                crate::agent::eval_oracle::query_active_progress().await
-            {
-                if !completed && index < total {
-                    oracle_progress_unresolved = true;
-                    open_todos.push(format!(
-                        "宿主判分进度 {}/{} 未完成：本任务以宿主逐阶段判分为唯一完成标准，禁止以部分阶段通过为由交卷；请读取 CURRENT_STAGE.md 继续实现下一阶段并用 npm test 送验",
-                        index, total
-                    ));
-                }
-            }
-        }
-        if finish_gate_requested && (crate::agent::child_reviewer::has_running_child_runs(state.inner(), &run_id) || crate::agent::job_engine::has_running_jobs(state.inner(), &run_id)) {
-            open_todos.push("仍有后台异步任务或持续监听正在执行中：后台任务请调用 wait_jobs 挂起等待并接收结论；持续监听（watch）请调用 watch_stop 显式释放后再提交 finish，或执行其他独立操作后重试".to_string());
-        }
-        if finish_gate_requested && checkpoint.stage_review_blockers_open > 0 {
-            open_todos.push(format!(
-                "阶段审查仍有 {} 条未解决的 blocking 缺陷：请先调用 resume_child 对质撤回，或调用 ask_human 申请人工仲裁放行",
-                checkpoint.stage_review_blockers_open
-            ));
-        }
-        let has_code_modification_intent = context.active_target_block().is_some()
-            || context.todo_list.iter().any(|t| {
-                let d = t.description.to_lowercase();
-                d.contains("修改")
-                    || d.contains("修复")
-                    || d.contains("编写")
-                    || d.contains("重构")
-                    || d.contains("实现")
-                    || d.contains("write")
-                    || d.contains("fix")
-                    || d.contains("refactor")
-            });
-        if finish_gate_requested
-            && has_code_modification_intent
-            && !checkpoint.plan_phase.is_approved()
-            && (checkpoint.last_review_scorecard.as_ref().map_or(false, |s| !s.passes_gate())
-                || checkpoint.last_review_blocking_count > 0)
-            && (context.side_effects.len() == context.inherited_side_effects_count)
-        {
-            open_todos.push(
-                "方案审查未达标且尚未写入任何代码：禁止直接提交 finish！请根据审查意见修正方案并重新审查，或调用 ask_human 呈报用户申请人工仲裁放行后写入代码".to_string(),
-            );
-        }
-        let finish_challenged = if is_prepare_finish {
-            // prepare_finish 只评估、不质询：blockers 沉淀进收据，
-            // finish_reviewed / challenge_count / 重试预算一律不动。
-            false
-        } else {
-            should_challenge_finish_with_unresolved(
-                is_finish,
-                result.success,
-                checkpoint.finish_reviewed,
-                checkpoint.finish_challenge_count,
-                &open_todos,
-                oracle_progress_unresolved || contract_evidence_unresolved,
-            )
-        };
-
-        let mut reviewer_challenged = false;
-        let mut reviewer_warnings_delivered: Option<crate::agent::reviewer_gatekeeper::ReviewResult> = None;
-
-        if finish_challenged {
-            checkpoint.finish_reviewed = true;
-            checkpoint.finish_challenge_count = checkpoint.finish_challenge_count.saturating_add(1);
-            let blocker_summary = open_todos
-                .iter()
-                .map(|todo| format!("- {todo}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            // 空转检测：同一组 blocker 连续未变 = 模型只重发 finish 不改证据。
-            // 第 3 次起升级指引——不再泛泛说"别草率结项"，直接点破两条出路。
-            let blocker_sig = {
-                use std::hash::{Hash, Hasher};
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                blocker_summary.hash(&mut h);
-                h.finish()
-            };
-            if checkpoint.last_finish_blocker_sig == Some(blocker_sig) {
-                checkpoint.repeated_blocker_count =
-                    checkpoint.repeated_blocker_count.saturating_add(1);
-            } else {
-                checkpoint.last_finish_blocker_sig = Some(blocker_sig);
-                checkpoint.repeated_blocker_count = 1;
-            }
-            let escalation = if checkpoint.repeated_blocker_count >= 3 {
-                format!(
-                    "\n\n【🚨 同一阻塞已连续 {} 次未变化——判定为空转】你此前的 finish 只是重发相同证据，契约义务里的 evidence_refs 根本没动。立即二选一，禁止再次原样重试：\n① 用 `review_contract_update` 把受阻义务的 evidence_refs 改为上方 diff 区间内的行号（注意是更新契约义务本身，不是改报告正文）；\n② 认为义务不适用或证据无法落入 diff → 调用 `ask_human` 向用户呈报阻塞清单申请人工仲裁。",
-                    checkpoint.repeated_blocker_count
-                )
-            } else {
-                String::new()
-            };
-            context.add_error_feedback(&format!(
-                "【⚠️ 交付门禁拦截打回：任务尚未满足结项标准，finish 未生效！】\n【未闭合项/证据缺失】：\n{}\n任务仍在运行中。请勿在未闭合上述事项时草率结项！\n【必须采取的行动】：\n- 若为写入操作，请执行测试验证并在 change_verification_update 中以 verified + evidence_refs 闭合；\n- 若某项不再适用，请在 review_contract_update 或 todo_update 中显式标为 waived / failed 并说明理由；\n- 状态更新并完成验证后，方可再次提交 finish 交付；本次改动过文件、或带审查义务的任务，请先单独一步输出 prepare_finish 做预检（summary 一句话即可）（不提交终态），就绪后再提交 finish。{}",
-                blocker_summary, escalation
-            ));
-            crate::agent::dispatcher::emit_tool_event(
-                &app,
-                &final_session_id,
-                step_id,
-                &instruction,
-                "finish_challenged",
-                Some("finish".to_string()),
-                Some(false),
-                &format!(
-                    "终态拦截：检测到 {} 项未闭合事项，请先行验证",
-                    open_todos.len()
-                ),
-                None,
-                None,
-            );
-            // 调优：finish 被质询 = 交付未达标，下一轮重写升维处理（规则模式直接升 Pro，
-            // 打分模式累加连续失败权重）。实测依据：Flash 档反复守不住交付披露纪律。
-            context.record_step_outcome(false);
-        } else if is_finish && result.success {
-            // 🧾 FinalizationReceipt 复用：prepare_finish 已就绪且 diff/scope/契约指纹未变 →
-            // 跳过义务验证、宿主验证与终审 LLM 调用，直接进入终态提交。
-            // 动态 blocker（新后台任务、新 Todo 等）已在上方 finish_challenged 判过，此处只省昂贵项。
-            let current_diff_hash = git_baseline
-                .collect_review_material(&workspace_dir, &context, task_started_at)
-                .map(|(_, hash)| hash)
-                .unwrap_or_default();
-            let contract_fp = crate::agent::finalization::contract_fingerprint(
-                context.review_contract.as_ref(),
-            );
-            let receipt_reusable = checkpoint
-                .pending_finalization
-                .as_ref()
-                .map(|receipt| {
-                    receipt.is_ready()
-                        && receipt.is_fresh(
-                            &current_diff_hash,
-                            context.resource_scope.revision,
-                            &contract_fp,
-                        )
-                })
-                .unwrap_or(false);
-            if receipt_reusable {
-                let receipt = checkpoint.pending_finalization.as_ref().unwrap();
-                let _ = app.emit(
-                    &format!("agent-log-{}", final_session_id),
-                    format!(
-                        "🧾 终态收据复用（{}）：diff/scope/契约未变，跳过重复的义务验证、宿主验证与终审。",
-                        receipt.receipt_id
-                    ),
-                );
-                // 与审查通过分支同款的提交侧状态复位
-                checkpoint.last_reviewed_diff_hash = None;
-                checkpoint.last_review_result = None;
-                if let Some(block) = context.active_target_block_mut() {
-                    block.reset_review_retries();
-                }
-                context.block_manager.advance_to_next();
-                crate::agent::telemetry::record_gate_fire(
-                    state.inner(),
-                    &crate::agent::telemetry::GateFireRecord {
-                        run_id: &run_id,
-                        session_id: &final_session_id,
-                        step_id: step_id as i64,
-                        gate: "finalization",
-                        route: "finalization:receipt_reused",
-                    },
-                );
-                crate::agent::dispatcher::emit_tool_event(
-                    &app,
-                    &final_session_id,
-                    step_id,
-                    &instruction,
-                    "succeeded",
-                    Some("finish".to_string()),
-                    Some(true),
-                    "终态收据复用：验证与终审结论在 diff 未变下仍有效，直接提交",
-                    None,
-                    None,
-                );
-            } else {
-            // Level 0 机械门禁：零 Token 快速拦截（Scope 边界越界等）
-            // 适用域：scope 预检的证据是 workspace 的 git diff——自由会话（未选项目）
-            // 的 workspace_dir 是会话产物目录而非真实工程，无 git 判据
-            // → 证据域缺失 → NotApplicable，移交终审语义判定。
-            let scope_violations = if is_explicit_workspace || auto_pilot {
-                crate::agent::reviewer_gatekeeper::mechanical_precheck_violations(
-                    &workspace_dir,
-                    context.active_target_block(),
-                )
-            } else {
-                if context.active_target_block().is_some() {
-                    if let Some(notice) =
-                        crate::agent::gate_applicability::GateApplicability::not_applicable(
-                            "自由会话未绑定真实工作区，scope 预检的 git diff 判据缺失",
-                        )
-                        .handoff_notice("Scope 边界预检门")
-                    {
-                        gate_notices.push(notice);
-                    }
-                    crate::agent::telemetry::record_gate_fire(
-                        state.inner(),
-                        &crate::agent::telemetry::GateFireRecord {
-                            run_id: &run_id,
-                            session_id: &final_session_id,
-                            step_id: step_id as i64,
-                            gate: "finish_review",
-                            route: "finish_review:scope_precheck:not_applicable",
-                        },
-                    );
-                }
-                Vec::new()
-            };
-            if !scope_violations.is_empty() {
-                checkpoint.finish_reviewed = true;
-                context.add_error_feedback(&format!(
-                    "【⚠️ 交付门禁拦截打回：代码改动超出目标块预定边界，finish 未生效！】\n{}\n（0 Token 消耗机械打回，范围不合规）。\n【必须采取的行动】：请还原无关文件的意外改动，或在方案中扩展该块的 scope 后重试。",
-                    scope_violations.join("\n")
-                ));
-                crate::agent::dispatcher::emit_tool_event(
-                    &app,
-                    &final_session_id,
-                    step_id,
-                    &instruction,
-                    "scope_challenged",
-                    Some("finish".to_string()),
-                    Some(false),
-                    &format!("机械拦截：改动超出目标块预定范围（{} 项越界）", scope_violations.len()),
-                    None,
-                    None,
-                );
-                context.record_step_outcome(false);
-            } else {
-                // 零改动短路（实弹实测教训：模型在零 diff 时调 finish，终审烧一整轮
-                // Reviewer 才返回"未提交任何代码变更"）：方案已声明 target_files 而当前
-                // diff 与其零交集 → 0 Token 机械打回，不进终审。
-                let plan_targets = checkpoint
-                    .submitted_plan
-                    .as_ref()
-                    .map(|p| p.target_files.as_slice())
-                    .filter(|t| !t.is_empty())
-                    .or(checkpoint.approved_target_files.as_deref());
-                // 适用域自证（applies_to）：声明目标里至少一个位于工作区内，
-                // diff/副作用对账才有判据；目标全部位于工作区外（运维/系统路径，
-                // 如 /usr/bin、/opt、~/.config）时 Git diff 物理上不可能命中 →
-                // 本门证据域不存在 → NotApplicable 跳过移交终审，
-                // 绝不把"前提不成立"硬当"违规"（实测教训：pacman 卸载被此门死锁打回）。
-                // 判据域与打回文案共用同一份 touched：真实 diff ∪ 副作用台账路径 ∪
-                // 会话 tmp 产物实物（非 git 写入同样构成"目标被动过"的物理事实）。
-                let session_tmp =
-                    crate::agent::path_guard::get_session_tmp_dir(&final_session_id);
-                let mut touched: Vec<String> = diff_context
-                    .as_ref()
-                    .map(|d| build_touched_set(d, &session_tmp))
-                    .unwrap_or_default();
-                // tmp/ 产物实物对账（scope 卡片承诺的直认通道）：tmp/ 写入按设计
-                // 不入副作用台账、也不在工作区 diff 内——不把目录实物桥接进对账集，
-                // 则声明 tmp/x 的任务结构性零交集 → finish 死锁。
-                extend_touched_with_session_tmp(&mut touched, &session_tmp);
-                let declared_but_untouched = plan_targets
-                    .map(|targets| {
-                        let has_ws_target = targets.iter().any(|t| {
-                            crate::agent::gate_applicability::is_workspace_target(
-                                t,
-                                &workspace_dir,
-                            )
-                        });
-                        if !has_ws_target {
-                            if let Some(notice) =
-                                crate::agent::gate_applicability::GateApplicability::not_applicable(
-                                    "方案声明目标全部位于工作区外（运维/系统路径），Git diff 对账无判据",
-                                )
-                                .handoff_notice("零交集对账门")
-                            {
-                                gate_notices.push(notice);
-                            }
-                            crate::agent::telemetry::record_gate_fire(
-                                state.inner(),
-                                &crate::agent::telemetry::GateFireRecord {
-                                    run_id: &run_id,
-                                    session_id: &final_session_id,
-                                    step_id: step_id as i64,
-                                    gate: "finish_review",
-                                    route: "finish_review:plan_target_mismatch:not_applicable",
-                                },
-                            );
-                            return false;
-                        }
-                        !targets.iter().any(|tf| {
-                            touched.iter().any(|p| {
-                                crate::agent::finish_guard::diff::file_paths_match(
-                                    &normalize_tmp_declared(tf, &session_tmp),
-                                    p,
-                                )
-                            }) || declared_target_touched_on_fs(
-                                tf,
-                                &session_tmp,
-                                &workspace_dir,
-                                run_started_at.timestamp_millis(),
-                            )
-                        })
-                    })
-                    .unwrap_or(false);
-                if declared_but_untouched {
-                    let targets_norm: Vec<String> = plan_targets
-                        .unwrap_or(&[])
-                        .iter()
-                        .map(|t| normalize_tmp_declared(t, &session_tmp))
-                        .collect();
-                    // 同名近失配：产物 basename 命中声明但路径层级不符——直接点名，
-                    // 一轮可修；不点名模型永远归因不到"写对了文件但放错了目录"
-                    //（实测：声明 tmp/p5js-test/sketch.html vs 产物 tmp/sketch.html
-                    // 连拦 13 次空转，文案谎称"零改动"）。
-                    let near_misses = tmp_target_near_misses(&targets_norm, &touched);
-                    let mut actual_display: Vec<String> = touched.clone();
-                    actual_display.sort();
-                    actual_display.dedup();
-                    let truncated = actual_display.len() > 12;
-                    let actual_str = if actual_display.is_empty() {
-                        "（无：工作区 diff、副作用台账与会话 tmp 产物均为空）".to_string()
-                    } else if truncated {
-                        format!("{} …等共 {} 项", actual_display[..12].join(", "), actual_display.len())
-                    } else {
-                        actual_display.join(", ")
-                    };
-                    let near_hint = if near_misses.is_empty() {
-                        String::new()
-                    } else {
-                        format!(
-                            "\n【⚠️ 疑似路径层级不符——同名文件但目录不同】{}\n若产物就是目标交付物：把文件写入/移动到声明的路径层级，或以 revision_reason 重新 submit_plan 修正 target_files 后再 finish。",
-                            near_misses.join("；")
-                        )
-                    };
-                    checkpoint.finish_reviewed = true;
-                    let reject_msg = format!(
-                        "【⚠️ 交付门禁拦截打回：方案声明的目标文件与实际改动零交集，finish 未生效！】\n方案声明目标：{}\n实际改动与产物：{}\n（0 Token 机械打回，终审无需介入）。{}\n【必须采取的行动】：①若尚未真正修改，请先完成对声明目标的实际改动并重跑验证；②若实现路径已变，请重新 submit_plan 更新 target_files（已批准方案须附 revision_reason 说明变更依据，将重开评审）后再 finish；③若本任务本就无需改这些文件，请用 ask_human 说明理由。",
-                        plan_targets.unwrap_or(&[]).join(", "),
-                        actual_str,
-                        near_hint,
-                    );
-                    context.add_error_feedback(&reject_msg);
-                    crate::agent::telemetry::record_gate_fire(
-                        state.inner(),
-                        &crate::agent::telemetry::GateFireRecord {
-                            run_id: &run_id,
-                            session_id: &final_session_id,
-                            step_id: step_id as i64,
-                            gate: "finish_review",
-                            route: "finish_review:plan_target_mismatch",
-                        },
-                    );
-                    crate::agent::dispatcher::emit_tool_event(
-                        &app,
-                        &final_session_id,
-                        step_id,
-                        &instruction,
-                        "plan_target_challenged",
-                        Some("finish".to_string()),
-                        Some(false),
-                        "机械拦截：方案声明目标与实际改动零交集",
-                        None,
-                        None,
-                    );
-                    context.record_step_outcome(false);
-                    persist_challenged_step(
-                        state.inner(),
-                        &mut run_trace_steps,
-                        &run_id,
-                        &final_session_id,
-                        step_id,
-                        &instruction,
-                        &context,
-                        "finish_challenged",
-                        &reject_msg,
-                        &result.view,
-                        step_metrics_json(outcome.token_usage.as_ref(), outcome.thinking_duration_ms, outcome.tool_duration_ms),
-                        &outcome.thinking_text,
-                    );
-                    // 跳过终审：机械事实已足够打回，省一次审查
-                    let _ = save_checkpoint(state.inner(), &mut checkpoint);
-                    continue;
-                }
-                // Level 1: 确定性门禁与机械门禁 100% 通过后，才调用 Reviewer 终审（带 Checklist 证据链严审）！
-                // 【B 路径执行器】契约义务绑定的冻结验证命令：宿主逐条执行，退出码即判定。
-                // 失败 = 0 token 机械拦截打回（验证器故障也判失败，绝不放行）。
-                let obligation_results = if context.side_effects.len() > context.inherited_side_effects_count {
-                    let obligations: Vec<crate::agent::review_contract::ReviewObligation> = context
-                        .review_contract
-                        .as_ref()
-                        .map(|c| c.obligations.clone())
-                        .unwrap_or_default();
-                    crate::agent::host_verify::run_obligation_verifications(&workspace_dir, &obligations)
-                        .await
-                } else {
-                    Vec::new()
-                };
-                let obligation_failures: Vec<String> = obligation_results
-                    .iter()
-                    .filter(|r| !r.passed)
-                    .map(crate::agent::host_verify::format_obligation_failure)
-                    .collect();
-                if !obligation_failures.is_empty() {
-                    checkpoint.finish_reviewed = true;
-                    let reject_msg = crate::agent::host_verify::obligation_failure_report(&obligation_failures);
-                    // 逐项注入，避免多个义务合并后被通用 3000 字符报错截断再次吞掉诊断。
-                    // 验证失败不是 JSON 格式错误，不要求模型修正合法指令的格式。
-                    for failure in &obligation_failures {
-                        context.add_host_feedback(&crate::agent::host_verify::obligation_failure_report(std::slice::from_ref(failure)));
-                    }
-                    crate::agent::dispatcher::emit_tool_event(
-                        &app,
-                        &final_session_id,
-                        step_id,
-                        &instruction,
-                        "obligation_verify_challenged",
-                        Some("finish".to_string()),
-                        Some(false),
-                        &format!("义务宿主验证失败 {} 项", obligation_failures.len()),
-                        None,
-                        None,
-                    );
-                    context.record_step_outcome(false);
-                    persist_challenged_step(
-                        state.inner(),
-                        &mut run_trace_steps,
-                        &run_id,
-                        &final_session_id,
-                        step_id,
-                        &instruction,
-                        &context,
-                        "finish_challenged",
-                        &reject_msg,
-                        &result.view,
-                        step_metrics_json(outcome.token_usage.as_ref(), outcome.thinking_duration_ms, outcome.tool_duration_ms),
-                        &outcome.thinking_text,
-                    );
-                    // 跳过终审：机械事实已足够打回，省一次审查
-                    let _ = save_checkpoint(state.inner(), &mut checkpoint);
-                    continue;
-                }
-                // 宿主执行验证：有真实写入且配置了验证命令时，宿主亲自跑一把，
-                // 真实退出码进 reviewer 证据包（堵"模型把失败当证据"的幻觉空子）
-                let host_verification = {
-                    let mut parts: Vec<String> = Vec::new();
-                    if context.side_effects.len() > context.inherited_side_effects_count {
-                        if let Some(hv) = crate::agent::host_verify::run(&workspace_dir).await {
-                            let _ = app.emit(
-                                &format!("agent-log-{}", final_session_id),
-                                format!("🧪 宿主执行验证完成:\n{}", hv),
-                            );
-                            parts.push(hv);
-                        }
-                    }
-                    if !obligation_results.is_empty() {
-                        let lines: Vec<String> = obligation_results
-                            .iter()
-                            .map(|r| {
-                                format!(
-                                    "- [{}] `{}` → 退出码 {}: {}",
-                                    r.obligation_id, r.command, r.exit_code, r.output_tail
-                                )
-                            })
-                            .collect();
-                        parts.push(format!("契约义务验证（冻结脚本）：\n{}", lines.join("\n")));
-                    }
-                    (!parts.is_empty()).then(|| parts.join("\n\n"))
-                };
-                let human_waivers = checkpoint.human_waiver_text();
-                let review_res = crate::agent::reviewer_gatekeeper::evaluate_finish_diff(
-                    &app,
-                    state.inner(),
-                    &context,
-                    &model_routing,
-                    step_id,
-                    &workspace_dir,
-                    &git_baseline,
-                    task_started_at,
-                    &final_session_id,
-                    &mut interrupt_rx,
-                    checkpoint.last_reviewed_diff_hash.as_deref(),
-                    checkpoint.last_review_result.as_ref(),
-                    &checkpoint.stage_review_final_only,
-                    host_verification.as_deref(),
-                    human_waivers.as_deref(),
-                    &gate_notices,
-                    checkpoint.approved_target_files.as_deref(),
-                    checkpoint.triage_verdict.as_ref(),
-                    Some(checkpoint.plan_mode),
-                    instruction
-                        .command
-                        .as_ref()
-                        .and_then(|c| c.get("summary"))
-                        .and_then(|s| s.as_str()),
-                )
-                .await;
-
-                if review_res.is_service_failure() {
-                    if let Some(reason) = take_pending_interrupt(&mut rx) {
-                        finish_interrupted_run(&app, state.inner(), &final_session_id, &run_id,
-                            &goal, &run_trace_steps, &mut checkpoint, &context, &mut run_machine, reason).await?;
-                        return Ok(());
-                    }
-                    let reason = review_res.summary.clone();
-                    crate::agent::failure::finish_failed_run(&app, state.inner(), &final_session_id, &run_id,
-                        &goal, &run_trace_steps, &mut checkpoint, &context, &mut run_machine, reason.clone()).await?;
-                    return Err(reason);
-                }
-
-                // 审查效能报告：撤回率是误报率的上界（含合理补救型撤回）
-                {
-                    let (tw, tm) = (checkpoint.review_total_withdrawn, checkpoint.review_total_maintained);
-                    if tw + tm > 0 {
-                        let rate = (tw as f64 / (tw + tm) as f64 * 100.0).round() as u32;
-                        let _ = app.emit(
-                            &format!("agent-log-{}", final_session_id),
-                            format!(
-                                "📊 审查效能: 异议撤回 {}/{}（约 {}%）——撤回率是误报率上界；>50% 提示该 reviewer 判定过松，建议调整角色卡或更换模型。",
-                                tw, tw + tm, rate
-                            ),
-                        );
-                    }
-                }
-
-                if !review_res.is_passed() {
-                // 存在阻塞性缺陷！
-                crate::agent::telemetry::record_gate_fire(
-                    state.inner(),
-                    &crate::agent::telemetry::GateFireRecord {
-                        run_id: &run_id,
-                        session_id: &final_session_id,
-                        step_id: step_id as i64,
-                        gate: "finish_review",
-                        route: "finish_review:blocking",
-                    },
-                );
-                if checkpoint.reviewer_retry_count < 3 {
-                    checkpoint.reviewer_retry_count += 1;
-                    checkpoint.last_reviewed_diff_hash = Some(review_res.diff_hash.clone());
-                    checkpoint.last_review_result = Some(review_res.clone());
-                    reviewer_challenged = true;
-
-                    // 目标块审查熔断联动：超限自动升维 Pro
-                    let breaker_alert = if let Some(block) = context.active_target_block_mut() {
-                        let tripped = block.record_review_failure();
-                        if tripped {
-                            Some(format!("\n\n【🚨 审查熔断告警】当前目标块 [{}] 连续 3 次未能通过审查，已触发死循环熔断！系统已强制将该块升维至主力强模型（Pro）接管执行，请利用强推理能力重构并彻底解决上述缺陷。", block.id))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
-
-                    let issues_text = review_res
-                        .blocking_issues
-                        .iter()
-                        .enumerate()
-                        .map(|(i, b)| {
-                            format!(
-                                "{}. 【{}】{}\n   👉 修复要求: {}",
-                                i + 1,
-                                b.file,
-                                b.issue,
-                                b.requirement
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-
-                    let nits_text = if !review_res.nit_issues.is_empty() {
-                        let nits = review_res
-                            .nit_issues
-                            .iter()
-                            .map(|n| format!("- [{}] {}", n.file, n.suggestion))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        format!("\n\n💡 次要建议（供参考，不阻碍交付）：\n{}", nits)
-                    } else {
-                        String::new()
-                    };
-
-                    context.add_error_feedback(&format!(
-                        "【⚠️ 终态审查未通过打回：检测到阻塞性缺陷，finish 未生效！（第 {}/3 次评审）】\n审查模型（{}）评分: {}/100\n审查评价: {}\n\n检测到以下阻塞性缺陷（Blocking Issues）：\n{}{}{}\n\n任务仍在运行中。请直接针对上述缺陷修改代码并运行测试验证，修复完成后再次调用 finish 交付。",
-                        checkpoint.reviewer_retry_count,
-                        review_res.model_id,
-                        review_res.score,
-                        review_res.summary,
-                        issues_text,
-                        nits_text,
-                        breaker_alert.as_deref().unwrap_or("")
-                    ));
-
-                    crate::agent::dispatcher::emit_tool_event(
-                        &app,
-                        &final_session_id,
-                        step_id,
-                        &instruction,
-                        "finish_challenged",
-                        Some("finish".to_string()),
-                        Some(false),
-                        &format!(
-                            "终态审查未通过（{}分）：发现 {} 项阻塞性缺陷，已打回自愈",
-                            review_res.score,
-                            review_res.blocking_issues.len()
-                        ),
-                        None,
-                        None,
-                    );
-                    context.record_step_outcome(false);
-                } else {
-                    // 达到 3 次熔断上限：一律转人工仲裁，不再按风险分级自动放行。
-                    // "低风险自动带警告交付"会把未修复的硬伤静默标成 succeeded——
-                    // 阻塞性缺陷未收敛时，成功交付的唯一合法路径是用户显式仲裁。
-                    let risk_flags =
-                        crate::agent::finalization::detect_risk_flags(&context.new_affected_paths());
-                    let human_waived = checkpoint
-                        .human_waiver_text()
-                        .map_or(false, |w| !w.trim().is_empty());
-                    if human_waived {
-                        reviewer_warnings_delivered = Some(review_res.clone());
-                        crate::agent::telemetry::record_gate_fire(
-                            state.inner(),
-                            &crate::agent::telemetry::GateFireRecord {
-                                run_id: &run_id,
-                                session_id: &final_session_id,
-                                step_id: step_id as i64,
-                                gate: "finish_review",
-                                route: "finish_review:human_arbitrated",
-                            },
-                        );
-                        crate::agent::dispatcher::emit_tool_event(
-                            &app,
-                            &final_session_id,
-                            step_id,
-                            &instruction,
-                            "succeeded",
-                            Some("finish".to_string()),
-                            Some(true),
-                            &format!(
-                                "终态审查经人工仲裁放行（重试已用尽）：仍有 {} 项未收敛缺陷，已随交付如实披露",
-                                review_res.blocking_issues.len()
-                            ),
-                            None,
-                            None,
-                        );
-                    } else {
-                        reviewer_challenged = true;
-                        checkpoint.finish_reviewed = true;
-                        crate::agent::telemetry::record_gate_fire(
-                            state.inner(),
-                            &crate::agent::telemetry::GateFireRecord {
-                                run_id: &run_id,
-                                session_id: &final_session_id,
-                                step_id: step_id as i64,
-                                gate: "finish_review",
-                                route: if risk_flags.is_empty() {
-                                    "finish_review:exhausted_escalated"
-                                } else {
-                                    "finish_review:high_risk_escalated"
-                                },
-                            },
-                        );
-                        let issues_text = review_res
-                            .blocking_issues
-                            .iter()
-                            .enumerate()
-                            .map(|(i, b)| {
-                                format!(
-                                    "{}. 【{}】{}\n   👉 修复要求: {}",
-                                    i + 1,
-                                    b.file,
-                                    b.issue,
-                                    b.requirement
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        context.add_error_feedback(&format!(
-                            "【⚠️ 终态审查连续 3 次未通过，已熔断升级人工仲裁，finish 未生效！】\n审查模型（{}）评分: {}/100\n审查评价: {}\n{}仍未解决的阻塞性缺陷：\n{}\n\n【必须采取的行动】：\n- 若缺陷属实：继续修复后重试 finish；\n- 若认为审查意见有误或风险可接受：调用 ask_human 向用户呈报缺陷清单申请人工仲裁（用户批准后重试 finish 即放行）；\n- 严禁未经人工仲裁反复提交 finish 消耗步骤预算。",
-                            review_res.model_id,
-                            review_res.score,
-                            review_res.summary,
-                            if risk_flags.is_empty() {
-                                String::new()
-                            } else {
-                                format!("\n检测到高风险改动信号：{}\n", risk_flags.join(", "))
-                            },
-                            issues_text
-                        ));
-                        crate::agent::dispatcher::emit_tool_event(
-                            &app,
-                            &final_session_id,
-                            step_id,
-                            &instruction,
-                            "finish_challenged",
-                            Some("finish".to_string()),
-                            Some(false),
-                            &format!(
-                                "终态审查连续 3 次未通过{}，已熔断升级人工仲裁",
-                                if risk_flags.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!("（{}）", risk_flags.join(", "))
-                                }
-                            ),
-                            None,
-                            None,
-                        );
-                        context.record_step_outcome(false);
-                    }
-                }
-            } else {
-                // 审查 100% 通过（或无代码修改 / 仅次要建议放行）
-                // 落盘通过态收据（观测向）：复用防敷衍逻辑要求"上次未通过"才复用
-                // （reviewer_gatekeeper 侧条件含 !last_res.is_passed()），
-                // 存 passed 结果不会误触发复用拦截。
-                checkpoint.last_reviewed_diff_hash = Some(review_res.diff_hash.clone());
-                checkpoint.last_review_result = Some(review_res.clone());
-                crate::agent::telemetry::record_gate_fire(
-                    state.inner(),
-                    &crate::agent::telemetry::GateFireRecord {
-                        run_id: &run_id,
-                        session_id: &final_session_id,
-                        step_id: step_id as i64,
-                        gate: "finish_review",
-                        route: "finish_review:passed",
-                    },
-                );
-                // 宿主状态机：复位重试计数并推进当前目标块至 Completed，激活下一块
-                if let Some(block) = context.active_target_block_mut() {
-                    block.reset_review_retries();
-                }
-                context.block_manager.advance_to_next();
-                // 审查服务自身故障被降级放行时必须明说，不能让用户误以为审过了
-                if review_res.verdict == "failed_open" {
-                    output_text.push_str(&format!(
-                        "\n\n⚠️ 终审未完成，产物未经审查：{}\n请你自行抽查产物；回复用户时必须如实说明「终审未成功」。",
-                        review_res.summary
-                    ));
-                    let _ = app.emit(
-                        &format!("agent-log-{}", final_session_id),
-                        format!("⚠️ {}", review_res.summary),
-                    );
-                }
-                crate::agent::dispatcher::emit_tool_event(
-                    &app,
-                    &final_session_id,
-                    step_id,
-                    &instruction,
-                    "succeeded",
-                    Some("finish".to_string()),
-                    Some(true),
-                    &output_text,
-                    None,
-                    None,
-                );
-            }
-            }
-            }
-        } else if is_prepare_finish && result.success {
-            // ── 终态预检：与 finish 同一套门禁，只沉淀收据、不提交终态 ──
-            // 就绪收据在 diff/scope/契约未变时被 finish 直接复用，不重复烧验证与终审。
-            output_text = precheck::run_prepare_finish_precheck(
+            let generation = *interrupt_rx.borrow();
+            let evaluation = crate::agent::finalization::evaluate_completion(
                 &app,
                 state.inner(),
-                &context,
+                &mut context,
                 &mut checkpoint,
                 &run_id,
                 &final_session_id,
@@ -2858,45 +1938,155 @@ async fn run_agent_main_loop_in_workspace_inner(
                 task_started_at,
                 &model_routing,
                 &mut interrupt_rx,
-                &open_todos,
-                &gate_notices,
                 &instruction,
+                if is_prepare_finish {
+                    crate::agent::finalization::CompletionMode::Prepare
+                } else {
+                    crate::agent::finalization::CompletionMode::Finish
+                },
+                is_explicit_workspace || auto_pilot,
+                review_contract_started_this_turn,
             )
             .await;
-            if let Some(notice) = instruction.ignored_mixed_entry_notice() {
-                output_text.push_str(&notice);
+            // 成功/失败两条审查返回路径都先尊重停止，不能只在审查服务失败时消费停止。
+            if let Some(reason) = take_pending_interrupt(&mut rx).or_else(|| {
+                crate::agent::finalization::interrupted_since(&interrupt_rx, generation)
+                    .then(|| "已收到停止或替换任务信号，交付未提交".to_string())
+            }) {
+                finish_interrupted_run(
+                    &app,
+                    state.inner(),
+                    &final_session_id,
+                    &run_id,
+                    &goal,
+                    &run_trace_steps,
+                    &mut checkpoint,
+                    &context,
+                    &mut run_machine,
+                    reason,
+                )
+                .await?;
+                return Ok(());
             }
-        } else if !is_finish {
-            // 只有当常规步骤产生了新的真实副作用写入时，才视为进入了新的交付周期，重置质询标记与计数；
-            // 纯只读或临时草稿写入（session_tmp）不重置 finish_reviewed / finish_challenge_count，防止草稿修改打乱交付周期。
-            if result.success && is_write_or_side_effect_tool(&instruction) {
-                let is_tmp_write = instruction.get_tool().eq_ignore_ascii_case("local_file")
-                    && crate::agent::tools::local_file::is_dispatch_result_tmp(&result);
-                if !is_tmp_write {
-                    checkpoint.finish_reviewed = false;
-                    checkpoint.finish_challenge_count = 0;
+            let mut receipt = evaluation.receipt;
+            if receipt.is_ready() {
+                let current_hash = git_baseline
+                    .collect_review_material(&workspace_dir, &context, task_started_at)
+                    .map(|(_, h)| h)
+                    .unwrap_or_default();
+                if !receipt.is_fresh(
+                    &current_hash,
+                    context.resource_scope.revision,
+                    &crate::agent::finalization::contract_fingerprint(
+                        context.review_contract.as_ref(),
+                    ),
+                ) {
+                    receipt
+                        .blockers
+                        .push("验收后交付内容已变化，本次未提交；请重新核验当前版本。".into());
                 }
+            }
+            checkpoint.pending_finalization = Some(receipt.clone());
+            if is_prepare_finish {
+                output_text = precheck::render_prepare_finish(&mut checkpoint, &context, &receipt);
+                if let Some(notice) = instruction.ignored_mixed_entry_notice() {
+                    output_text.push_str(&notice);
+                }
+            } else if !receipt.is_ready() {
+                finish_challenged = true;
+                checkpoint.finish_challenge_count =
+                    checkpoint.finish_challenge_count.saturating_add(1);
+                // 每项单独注入，保留命令/退出码/原始诊断；不是 JSON 错误，不追加格式纠正要求。
+                for blocker in &receipt.blockers {
+                    context.add_host_feedback(&format!("【交付未提交】{}", blocker));
+                }
+                output_text = format!("交付未提交：仍有 {} 项未满足的验收条件。\n{}\n请补正上列事项后重新 prepare_finish 或 finish；确实无法完成时可如实结束为未完成。",
+                    receipt.blockers.len(), receipt.blockers.iter().map(|b| format!("- {}", b)).collect::<Vec<_>>().join("\n"));
+                context.add_host_feedback("预检/交付使用同一检查结果；重试次数不会自动核销阻塞项。修正证据或完成验证后再提交，不必重复发送已保存的全部义务。");
+                context.record_step_outcome(false);
+            } else {
+                if matches!(
+                    receipt.review,
+                    crate::agent::finalization::ReceiptReview::DeliveredWithWarnings { .. }
+                ) {
+                    reviewer_warnings_delivered = evaluation.review_result;
+                }
+                if let crate::agent::finalization::ReceiptVerification::Waived { ref reason } =
+                    receipt.verification
+                {
+                    output_text.push_str(&format!("\n\n验证披露：{}", reason));
+                }
+            }
+            crate::agent::telemetry::record_gate_fire(
+                state.inner(),
+                &crate::agent::telemetry::GateFireRecord {
+                    run_id: &run_id,
+                    session_id: &final_session_id,
+                    step_id: step_id as i64,
+                    gate: "finalization",
+                    route: if receipt.is_ready() {
+                        "finalization:prepared_ready"
+                    } else {
+                        "finalization:prepared_blocked"
+                    },
+                },
+            );
+            if is_prepare_finish || !receipt.is_ready() {
+                crate::agent::dispatcher::emit_tool_event(
+                    &app,
+                    &final_session_id,
+                    step_id,
+                    &instruction,
+                    if is_prepare_finish || receipt.is_ready() {
+                        "succeeded"
+                    } else {
+                        "finish_challenged"
+                    },
+                    Some(if is_prepare_finish {
+                        "prepare_finish".into()
+                    } else {
+                        "finish".into()
+                    }),
+                    Some(receipt.is_ready()),
+                    &output_text,
+                    None,
+                    None,
+                );
             }
         }
         if let Some(reason) = checkpoint.pending_task_failure.clone() {
             if let Some(reason) = take_pending_interrupt(&mut rx) {
-                finish_interrupted_run(&app, state.inner(), &final_session_id, &run_id,
-                    &goal, &run_trace_steps, &mut checkpoint, &context, &mut run_machine, reason).await?;
+                finish_interrupted_run(
+                    &app,
+                    state.inner(),
+                    &final_session_id,
+                    &run_id,
+                    &goal,
+                    &run_trace_steps,
+                    &mut checkpoint,
+                    &context,
+                    &mut run_machine,
+                    reason,
+                )
+                .await?;
                 return Ok(());
             }
-            crate::agent::failure::finish_failed_run(&app, state.inner(), &final_session_id, &run_id,
-                &goal, &run_trace_steps, &mut checkpoint, &context, &mut run_machine, reason.clone()).await?;
+            crate::agent::failure::finish_failed_run(
+                &app,
+                state.inner(),
+                &final_session_id,
+                &run_id,
+                &goal,
+                &run_trace_steps,
+                &mut checkpoint,
+                &context,
+                &mut run_machine,
+                reason.clone(),
+            )
+            .await?;
             return Err(reason);
         }
-        let is_effectively_challenged = finish_challenged || reviewer_challenged;
-        if is_effectively_challenged {
-            let detail = context
-                .turns_history
-                .last()
-                .and_then(|m| m.content.as_str())
-                .unwrap_or("【⚠️ 交付门禁拦截打回】任务未满足验收条件，finish 未生效，请依据门禁提示完成修复后重试。");
-            output_text = detail.to_string();
-        }
+        let is_effectively_challenged = finish_challenged;
         let outcome_str = if is_effectively_challenged {
             "finish_challenged"
         } else if result.success {
@@ -2905,11 +2095,9 @@ async fn run_agent_main_loop_in_workspace_inner(
             "failed"
         };
         let model_output_text = output_text.clone();
-        let mcp_evidence =
-            crate::agent::dispatcher::take_mcp_durable_output(&mut result.view);
+        let mcp_evidence = crate::agent::dispatcher::take_mcp_durable_output(&mut result.view);
         let has_mcp_evidence = mcp_evidence.is_some();
-        let durable_output_text =
-            mcp_evidence.unwrap_or_else(|| model_output_text.clone());
+        let durable_output_text = mcp_evidence.unwrap_or_else(|| model_output_text.clone());
         let output_id = crate::agent::run_trace::save_step_output_with_meta(
             state.inner(),
             &final_session_id,
@@ -2988,31 +2176,25 @@ async fn run_agent_main_loop_in_workspace_inner(
             context.note_evidence_receipt(step_id, &instruction, &evidence_output_id);
         }
 
-            post_step::backfill_todo_evidence(&mut context, &mut instruction, &evidence_output_id);
+        post_step::backfill_todo_evidence(&mut context, &mut instruction, &evidence_output_id);
 
-            post_step::record_lesson_lineage(
-                state.inner(),
-                &final_session_id,
-                step_id,
-                &instruction,
-                &result,
-            );
+        post_step::record_lesson_lineage(
+            state.inner(),
+            &final_session_id,
+            step_id,
+            &instruction,
+            &result,
+        );
         // ──────────────────────────────────────────────────────────────────
-
-            post_step::record_side_effect_or_verify(
-                &mut context,
-                step_id,
-                &instruction,
-                &result,
-                &app,
-                &final_session_id,
-                &workspace_dir,
-            );
 
         context.current_observation = output_text.clone();
         // 复盘轨迹使用与 step_new 相同的语义字段，但与 Agent prompt/checkpoint 隔离。
         // 这使历史会话既能恢复思考、计划和工具调用，又不会放大运行时上下文。
-        let metrics_json = step_metrics_json(outcome.token_usage.as_ref(), outcome.thinking_duration_ms, outcome.tool_duration_ms);
+        let metrics_json = step_metrics_json(
+            outcome.token_usage.as_ref(),
+            outcome.thinking_duration_ms,
+            outcome.tool_duration_ms,
+        );
 
         run_trace_steps.push(json!({
             "id": step_id,
@@ -3057,13 +2239,34 @@ async fn run_agent_main_loop_in_workspace_inner(
         }
         // 工具结果已经进入可恢复上下文。先提交 durable phase/cursor，再通知前端；
         // 这样崩溃恢复不会把已经完成的普通步骤当作待执行，也不会把 finish 误续跑。
+        if is_finish && result.success && !is_effectively_challenged {
+            if let Some(reason) = take_pending_interrupt(&mut rx).or_else(|| {
+                crate::agent::finalization::interrupted_since(&interrupt_rx, completion_generation)
+                    .then(|| "已收到停止或替换任务信号，交付未提交".to_string())
+            }) {
+                finish_interrupted_run(
+                    &app,
+                    state.inner(),
+                    &final_session_id,
+                    &run_id,
+                    &goal,
+                    &run_trace_steps,
+                    &mut checkpoint,
+                    &context,
+                    &mut run_machine,
+                    reason,
+                )
+                .await?;
+                return Ok(());
+            }
+        }
         let is_actually_completed = is_finish && result.success && !is_effectively_challenged;
         let mut committed_emitted_finish: Option<serde_json::Value> = None;
         if is_actually_completed {
             committed_emitted_finish = Some(finalize::commit_completed_run(
                 state.inner(),
                 &mut checkpoint,
-                &context,
+                &mut context,
                 &run_id,
                 &final_session_id,
                 &goal,
@@ -3084,6 +2287,18 @@ async fn run_agent_main_loop_in_workspace_inner(
             .map_err(|e| e.to_string())?;
 
         if is_actually_completed {
+            crate::agent::dispatcher::emit_tool_event(
+                &app,
+                &final_session_id,
+                step_id,
+                &instruction,
+                "succeeded",
+                Some("finish".into()),
+                Some(true),
+                &output_text,
+                None,
+                None,
+            );
             advance_run_state(
                 &app,
                 &final_session_id,
@@ -3095,9 +2310,9 @@ async fn run_agent_main_loop_in_workspace_inner(
                 .unwrap_or_else(|| json!({ "summary": output_text }));
 
             let complete_msg = if reviewer_warnings_delivered.is_some() {
-                "任务已交付（审查达到重试上限，附带未收敛警告）"
+                "任务已交付（经人工仲裁放行，附带未收敛警告）"
             } else {
-                "任务已由 AI 标记完成"
+                "任务已通过验收并提交"
             };
 
             app.emit(
@@ -3169,8 +2384,19 @@ async fn run_agent_main_loop_in_workspace_inner(
     } else if !run_machine.state().is_terminal() {
         let terminal_error = budget_stop_reason
             .unwrap_or_else(|| format!("任务在达到最大步数 {} 后未完成", max_steps));
-        crate::agent::failure::finish_failed_run(&app, state.inner(), &final_session_id, &run_id,
-            &goal, &run_trace_steps, &mut checkpoint, &context, &mut run_machine, terminal_error.clone()).await?;
+        crate::agent::failure::finish_failed_run(
+            &app,
+            state.inner(),
+            &final_session_id,
+            &run_id,
+            &goal,
+            &run_trace_steps,
+            &mut checkpoint,
+            &context,
+            &mut run_machine,
+            terminal_error.clone(),
+        )
+        .await?;
         return Err(terminal_error);
     }
     {

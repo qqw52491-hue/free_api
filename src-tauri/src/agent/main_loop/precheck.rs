@@ -13,58 +13,13 @@ use std::path::Path;
 use tauri::AppHandle;
 use tokio::sync::watch;
 
-/// 返回渲染后的 output_text（就绪/未就绪说明），并把收据挂到 checkpoint.pending_finalization。
-pub(crate) async fn run_prepare_finish_precheck(
-    app: &AppHandle,
-    db: &DbState,
-    context: &SandwichContext,
+/// 只渲染共享评估链的收据，不再自己执行另一套门禁。
+pub(crate) fn render_prepare_finish(
     checkpoint: &mut AgentCheckpoint,
-    run_id: &str,
-    final_session_id: &str,
-    step_id: usize,
-    workspace_dir: &Path,
-    git_baseline: &GitBaseline,
-    run_started_at: DateTime<Utc>,
-    model_routing: &ModelRoutingConfig,
-    interrupt_rx: &mut watch::Receiver<u64>,
-    open_todos: &[String],
-    gate_notices: &[String],
-    instruction: &AgentInstruction,
+    context: &SandwichContext,
+    receipt: &crate::agent::finalization::FinalizationReceipt,
 ) -> String {
-    let receipt = crate::agent::finalization::evaluate_prepare_finish(
-        app,
-        db,
-        context,
-        checkpoint,
-        run_id,
-        final_session_id,
-        step_id,
-        workspace_dir,
-        git_baseline,
-        run_started_at,
-        model_routing,
-        interrupt_rx,
-        open_todos,
-        gate_notices,
-        instruction.prepare_finish.as_ref(),
-    )
-    .await;
-    checkpoint.pending_finalization = Some(receipt.clone());
-    crate::agent::telemetry::record_gate_fire(
-        db,
-        &crate::agent::telemetry::GateFireRecord {
-            run_id,
-            session_id: final_session_id,
-            step_id: step_id as i64,
-            gate: "finalization",
-            route: if receipt.is_ready() {
-                "finalization:prepared_ready"
-            } else {
-                "finalization:prepared_blocked"
-            },
-        },
-    );
-    // 空转检测（与 finish 质询共用计数字段）：同一组阻塞连续预检仍未变，说明模型在跑无关命令。
+    // 空转检测（与 finish 质询共用计数字段）：同一组阻塞连续预检未变化，只报告事实，不推断模型行为。
     // 只追加提示，不拦截、不动重试预算。
     let spin_hint = if receipt.is_ready() {
         checkpoint.last_finish_blocker_sig = None;
@@ -98,7 +53,7 @@ pub(crate) async fn run_prepare_finish_precheck(
     };
     let output_text = if receipt.is_ready() {
         format!(
-            "✅ 终态预检就绪（receipt {}）：所有门禁已通过且证据已冻结。\n现在调用 finish 将直接复用本收据完成提交——diff/scope/契约未变时不再重复验证与终审。",
+            "✅ 终态预检就绪（receipt {}）：当前版本验收已就绪。\n现在调用 finish 将直接复用本收据完成提交——交付内容、scope、契约和验收状态未变时不再重复验证与终审。",
             receipt.receipt_id
         )
     } else {
@@ -115,18 +70,6 @@ pub(crate) async fn run_prepare_finish_precheck(
             spin_hint
         )
     };
-    crate::agent::dispatcher::emit_tool_event(
-        app,
-        final_session_id,
-        step_id,
-        instruction,
-        "succeeded",
-        Some("prepare_finish".to_string()),
-        Some(receipt.is_ready()),
-        &output_text,
-        None,
-        None,
-    );
     output_text
 }
 
@@ -134,15 +77,18 @@ pub(crate) async fn run_prepare_finish_precheck(
 // 这里只影响提示计数，不改变收据阻塞项、验证结果或任何放行条件。
 fn prepare_blocker_signature(blockers: &[String]) -> u64 {
     use std::hash::{Hash, Hasher};
-    let keys: Vec<String> = blockers.iter().map(|blocker| {
-        if blocker.starts_with("义务 [") && blocker.contains("\n验证命令:") {
-            let first_line = blocker.lines().next().unwrap_or(blocker);
-            if let Some((prefix, _)) = first_line.split_once('；') {
-                return format!("{}）", prefix);
+    let keys: Vec<String> = blockers
+        .iter()
+        .map(|blocker| {
+            if blocker.starts_with("义务 [") && blocker.contains("\n验证命令:") {
+                let first_line = blocker.lines().next().unwrap_or(blocker);
+                if let Some((prefix, _)) = first_line.split_once('；') {
+                    return format!("{}）", prefix);
+                }
             }
-        }
-        blocker.clone()
-    }).collect();
+            blocker.clone()
+        })
+        .collect();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     keys.hash(&mut hasher);
     hasher.finish()
@@ -154,33 +100,45 @@ fn prepare_spin_hint(repeated: u32) -> String {
         return String::new();
     }
     format!(
-        "\n\n【🚨 同一组阻塞已连续 {} 次预检未变化】你两次预检之间执行的命令（echo、git diff --stat 等）不会改变阻塞项，请不要再用它们“同步/闭合”。对照上方阻塞项选一条：\n① 审查义务缺证据 → 用 `review_contract_update` 把该义务标为 evidenced 并填 evidence_refs（diff 区间内的 文件:行号 或输出 ID），或标 waived 并说明理由；\n② 变更验证缺失 → 用 `change_verification_update` 以 verified + evidence_refs 闭合；\n③ 确实无法闭合 → 调用 `ask_human` 向用户呈报阻塞清单。",
+        "\n\n【🚨 同一组阻塞已连续 {} 次预检未变化】上列验收条件仍未满足；重复预检本身不会改变验证结果。对照上方阻塞项选一条：\n① 审查义务缺证据 → 用 `review_contract_update` 把该义务标为 evidenced 并填 evidence_refs（可定位的 文件:行号 或真实步骤引用），或标 waived 并说明理由；\n② 变更验证缺失 → 用 `change_verification_update` 以 verified + evidence_refs 闭合；\n③ 确实无法闭合 → 调用 `ask_human` 向用户呈报阻塞清单。",
         repeated
     )
 }
 
 #[cfg(test)]
 mod spin_hint_tests {
-    use super::{prepare_spin_hint, prepare_blocker_signature};
+    use super::{prepare_blocker_signature, prepare_spin_hint};
 
     #[test]
     fn changing_diagnostics_keep_legacy_obligation_failure_signature() {
         let old = vec!["义务 [unit] 验证失败（退出码 1）".to_string()];
         let a = vec!["义务 [unit] 验证失败（退出码 1；验证命令已执行，未通过）\n验证命令: `mvn test`\n宿主启动目录: /tmp/ws\n耗时: 1s".to_string()];
         let b = vec!["义务 [unit] 验证失败（退出码 1；验证命令已执行，未通过）\n验证命令: `mvn test`\n宿主启动目录: /tmp/ws\n耗时: 2s\n不同下载进度".to_string()];
-        assert_eq!(prepare_blocker_signature(&a), prepare_blocker_signature(&old));
+        assert_eq!(
+            prepare_blocker_signature(&a),
+            prepare_blocker_signature(&old)
+        );
         assert_eq!(prepare_blocker_signature(&a), prepare_blocker_signature(&b));
-        assert_ne!(prepare_blocker_signature(&a), prepare_blocker_signature(&[b[0].replace("退出码 1", "退出码 2")]));
+        assert_ne!(
+            prepare_blocker_signature(&a),
+            prepare_blocker_signature(&[b[0].replace("退出码 1", "退出码 2")])
+        );
     }
 
     #[test]
     fn other_blockers_keep_existing_hash_behavior() {
         use std::hash::{Hash, Hasher};
-        let blockers = vec!["审查义务 x 尚未闭合".to_string(), "scope 越界：src/a.rs".to_string()];
+        let blockers = vec![
+            "审查义务 x 尚未闭合".to_string(),
+            "scope 越界：src/a.rs".to_string(),
+        ];
         let mut old = std::collections::hash_map::DefaultHasher::new();
         blockers.hash(&mut old);
         assert_eq!(prepare_blocker_signature(&blockers), old.finish());
-        assert_ne!(prepare_blocker_signature(&blockers), prepare_blocker_signature(&["审查义务 y 尚未闭合".to_string()]));
+        assert_ne!(
+            prepare_blocker_signature(&blockers),
+            prepare_blocker_signature(&["审查义务 y 尚未闭合".to_string()])
+        );
     }
 
     #[test]

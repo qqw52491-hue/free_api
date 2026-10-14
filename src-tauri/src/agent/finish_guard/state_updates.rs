@@ -19,7 +19,12 @@ pub(crate) fn apply_instruction_state_updates(
 
     let review_contract_was_present = context.review_contract.is_some();
     if let Some(update) = instruction.review_contract_update.clone() {
-        let ids = update.obligations.iter().map(|o| o.id.as_str()).collect::<Vec<_>>().join(", ");
+        let ids = update
+            .obligations
+            .iter()
+            .map(|o| o.id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
         match apply_review_contract_update(&mut context.review_contract, update) {
             Ok(()) => context.add_host_feedback(&format!(
                 "【审查契约申报已保存】本次更新义务：{}；未提交的义务保持原值。evidenced/waived 仅为完成/豁免申报，不代表验收通过；被打回的项可按 id 补正证据或退回 open。最终验收仍检查完整契约、当前改动和终审结果。",
@@ -38,15 +43,15 @@ pub(crate) fn apply_instruction_state_updates(
                 .iter()
                 .map(|r| r.step_id)
                 .max(),
-            current_step: current_step_id,
+            current_step: current_step_id.saturating_add(1),
         };
         if let Err(error) = apply_change_verification_update(
             &mut context.change_verification,
             update,
             &evidence_window,
         ) {
-            context.add_error_feedback(&format!(
-                "【写入验证更新未采纳】{}\n真实写入后，必须以 verified + 指向「写入之后新执行步骤」的 evidence_refs=[\"step_N\"] 闭合，或以 waived + waived_reason 豁免；早于最近一次写入的旧凭据不得重复引用。",
+            context.add_host_feedback(&format!(
+                "【写入验证更新未采纳】{}\n最近已记录副作用之后，可用 verified + evidence_refs=[\"step_N\"] 申报验证（本步工具已执行完，可引用本步），或用 waived + waived_reason 说明豁免；旧凭据不能覆盖新副作用。",
                 error
             ));
         }
@@ -137,7 +142,6 @@ pub(crate) fn apply_instruction_state_updates(
     !review_contract_was_present && context.review_contract.is_some()
 }
 
-
 /// 应用 todo_update 并执行监管继承守卫。
 /// [审查发现] 前缀的待办是审查环节的监管产出，不允许被 todo_update 静默剔除——
 /// 更新中未保留的发现按原样恢复为 pending 并附恢复告警；
@@ -175,7 +179,6 @@ pub(crate) fn apply_todo_update_guarded(
     context.todo_list = incoming;
 }
 
-
 #[cfg(test)]
 mod scope_feedback_tests {
     use super::*;
@@ -198,7 +201,11 @@ mod scope_feedback_tests {
     fn approved_scope_feedback_is_notification_not_format_error() {
         let mut ctx = context_with_block();
         apply_instruction_state_updates(&mut ctx, &instruction("必要的类型联动"), 3);
-        assert!(ctx.active_target_block().unwrap().scope.contains(&"src/b.rs".to_string()));
+        assert!(ctx
+            .active_target_block()
+            .unwrap()
+            .scope
+            .contains(&"src/b.rs".to_string()));
         let text = ctx.turns_history.last().unwrap().content.as_str().unwrap();
         assert!(text.contains("Scope 边界扩展已放行"));
         assert!(text.starts_with("【宿主反馈】"));
@@ -210,9 +217,40 @@ mod scope_feedback_tests {
     fn rejected_scope_stays_rejected_and_does_not_expand() {
         let mut ctx = context_with_block();
         apply_instruction_state_updates(&mut ctx, &instruction(""), 3);
-        assert!(!ctx.active_target_block().unwrap().scope.contains(&"src/b.rs".to_string()));
+        assert!(!ctx
+            .active_target_block()
+            .unwrap()
+            .scope
+            .contains(&"src/b.rs".to_string()));
         let text = ctx.turns_history.last().unwrap().content.as_str().unwrap();
         assert!(text.contains("Scope 扩展驳回"));
         assert!(text.contains("reason"));
+    }
+}
+
+#[cfg(test)]
+mod verification_order_tests {
+    use super::*;
+    use crate::agent::change_verification::ChangeVerification;
+    #[test]
+    fn completed_current_probe_is_valid_but_current_write_cannot_verify_itself() {
+        let instruction = AgentInstruction {
+            change_verification_update: Some(ChangeVerification {
+                status: "verified".into(),
+                evidence_refs: vec!["step_12".into()],
+                waived_reason: None,
+            }),
+            ..Default::default()
+        };
+        let mut context = context::SandwichContext::new("system".into(), "goal".into());
+        context.record_side_effect(10, "local_file".into(), "source write".into());
+        apply_instruction_state_updates(&mut context, &instruction, 12);
+        assert!(context
+            .change_verification
+            .as_ref()
+            .is_some_and(ChangeVerification::is_resolved));
+        context.record_side_effect(12, "local_file".into(), "later write".into());
+        apply_instruction_state_updates(&mut context, &instruction, 12);
+        assert!(context.change_verification.is_none());
     }
 }

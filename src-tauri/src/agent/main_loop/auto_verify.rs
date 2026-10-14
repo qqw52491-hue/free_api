@@ -14,12 +14,18 @@ use crate::agent::control::{
     take_pending_interrupt, HumanControl,
 };
 use crate::agent::dispatcher::{is_finish_instruction, is_write_or_side_effect_tool};
+use crate::agent::finish_guard::{
+    apply_instruction_state_updates, finish_blockers, finish_blockers_with_diff,
+    review_contract_evidence_blockers, should_challenge_finish,
+    should_challenge_finish_with_blockers, should_challenge_finish_with_unresolved, DiffContext,
+};
 use crate::agent::loop_runner::run_call_llm_and_run_tool_phases;
 use crate::agent::mcp::{McpClient, PluginRegistry};
 use crate::agent::review_contract::{apply_review_contract_update, ReviewContract};
 use crate::agent::run_state::{AgentRunEvent, AgentRunMachine, AgentRunState};
 use crate::agent::task_store;
 use crate::agent::types::{AgentInstruction, DispatchResult, TodoItem, RUN_INTERRUPTED_ROUTE};
+use crate::agent::workspace_lock::{acquire_workspace_lock, ChildWorkspaceGuard};
 use crate::db::DbState;
 use chrono::Utc;
 use serde_json::json;
@@ -27,12 +33,6 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, watch};
 use tokio::time::{sleep, Duration};
-use crate::agent::finish_guard::{
-    apply_instruction_state_updates, finish_blockers, finish_blockers_with_diff,
-    review_contract_evidence_blockers, should_challenge_finish,
-    should_challenge_finish_with_blockers, should_challenge_finish_with_unresolved, DiffContext,
-};
-use crate::agent::workspace_lock::{acquire_workspace_lock, ChildWorkspaceGuard};
 
 pub(crate) fn try_auto_verify_change(
     context: &mut context::SandwichContext,
@@ -41,12 +41,13 @@ pub(crate) fn try_auto_verify_change(
     app: &AppHandle,
     session_id: &str,
     command_succeeded: bool,
+    workspace: &std::path::Path,
 ) {
     if context.side_effects.len() <= context.inherited_side_effects_count
-        || context
-            .change_verification
-            .as_ref()
-            .map_or(false, crate::agent::change_verification::ChangeVerification::is_resolved)
+        || context.change_verification.as_ref().map_or(
+            false,
+            crate::agent::change_verification::ChangeVerification::is_resolved,
+        )
     {
         return;
     }
@@ -80,7 +81,11 @@ pub(crate) fn try_auto_verify_change(
         command_succeeded,
         &pending_refs,
         &contract_verify_commands,
-        context.inferred_verification_command().as_deref(),
+        crate::agent::change_verification::infer_adaptive_verification_command_in(
+            workspace,
+            &context.new_affected_paths(),
+        )
+        .as_deref(),
     );
 
     // 失败路径不自动闭合：非零退出是否达标取决于任务意图
@@ -135,5 +140,3 @@ pub(crate) fn try_auto_verify_change(
         );
     }
 }
-
-

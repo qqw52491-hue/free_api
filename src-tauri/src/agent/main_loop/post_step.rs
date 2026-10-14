@@ -93,25 +93,34 @@ pub(crate) fn record_side_effect_or_verify(
 ) {
     let is_tmp_write = instruction.get_tool().eq_ignore_ascii_case("local_file")
         && crate::agent::tools::local_file::is_dispatch_result_tmp(result);
-    // 纯验证/类型检查命令不算副作用——它们的退出码本身就是判据，不是待验证的写入。
-    // 若把 `npx vue-tsc` 记成一笔副作用，验证命令自己制造挂账，永远无法自动闭合。
-    // 复合命令（测试 + 其它动作拼接）仍按副作用入账，宁可保守也不漏记。
-    let is_verification_cmd = crate::agent::change_verification::extract_command_from_params(
-        &instruction.get_params(),
-    )
-    .map(|c| crate::agent::change_verification::is_test_or_verification_command(&c))
-    .unwrap_or(false);
-    // 无条件取走并清空——验证类/非记账步骤的陈旧差集不得被下一记账步冒领
-    let shell_touched = std::mem::take(&mut context.shell_touched_paths);
-    if result.success
-        && !is_tmp_write
-        && !is_verification_cmd
-        && crate::agent::context::AuditLedger::is_mutating_side_effect_with_action(
-            &instruction.get_tool(),
-            &instruction.get_action(),
+    let tool = instruction.get_tool();
+    let local_shell = tool
+        .rsplit('/')
+        .next()
+        .is_some_and(|t| t.eq_ignore_ascii_case("local_shell"))
+        || (tool.eq_ignore_ascii_case("mcp")
+            && instruction.get_action().eq_ignore_ascii_case("local_shell"));
+    let nonmutating_shell = local_shell
+        && crate::agent::change_verification::extract_command_from_params(
             &instruction.get_params(),
         )
-    {
+        .is_some_and(|c| {
+            crate::agent::change_verification::is_observation_or_validation_script(&c)
+        });
+    // 失败的 shell 也可能已经改了文件；实测差集不因非零退出而丢弃。
+    let shell_touched = std::mem::take(&mut context.shell_touched_paths);
+    let should_record = should_record_effect(
+        result.success,
+        is_tmp_write,
+        nonmutating_shell,
+        !shell_touched.is_empty(),
+        crate::agent::context::AuditLedger::is_mutating_side_effect_with_action(
+            &tool,
+            &instruction.get_action(),
+            &instruction.get_params(),
+        ),
+    );
+    if should_record {
         let safe_params = crate::agent::context::AuditLedger::format_side_effect_params(
             &instruction.get_params(),
         );
@@ -166,6 +175,31 @@ pub(crate) fn record_side_effect_or_verify(
             app,
             final_session_id,
             result.success,
+            workspace_dir,
         );
+    }
+}
+
+/// 记账与命令权限分离；只有确认为观察/验证的脚本免于重复制造验证批次。
+fn should_record_effect(
+    succeeded: bool,
+    temporary: bool,
+    nonmutating: bool,
+    observed_changes: bool,
+    mutating_tool: bool,
+) -> bool {
+    !temporary && (observed_changes || (succeeded && mutating_tool && !nonmutating))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn failed_shell_writes_are_not_lost_and_queries_do_not_reset_verification() {
+        assert!(should_record_effect(false, false, false, true, true));
+        assert!(!should_record_effect(true, false, true, false, true));
+        assert!(should_record_effect(true, false, true, true, true));
+        assert!(should_record_effect(true, false, false, false, true));
+        assert!(!should_record_effect(true, true, false, true, true));
     }
 }

@@ -43,10 +43,10 @@ pub struct AgentCheckpoint {
     pub prepared_instruction: Option<AgentInstruction>,
     pub step_id: usize,
     pub retry_count: u32,
-    /// 对显式未完成 Todo 的终态质询已经发出一次，避免一次质询变成无限循环。
+    /// 旧版质询标记（仅兼容历史快照）；是否允许交付由当前验收收据决定。
     #[serde(default)]
     pub finish_reviewed: bool,
-    /// 终态质询累计次数（达到上限后强制熔断放行，绝不允许死循环）
+    /// 终态质询累计次数（诊断统计，不作为自动放行依据）
     #[serde(default)]
     pub finish_challenge_count: u32,
     /// 终态代码审查重试次数（达到上限后熔断升级，防止死循环）

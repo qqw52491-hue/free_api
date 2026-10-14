@@ -1,5 +1,5 @@
 //! 终态提交：交付载荷构建、产物登记、checkpoint Done + run trace + 会话消息原子提交。
-//! 从 run_agent_main_loop_in_workspace_inner 抽出，逻辑不变。
+//! 只有当前版本的就绪验收收据可提交；先构造候选终态，短事务成功后再更新内存。
 
 use crate::agent::checkpoint::AgentCheckpoint;
 use crate::agent::context::types::SandwichContext;
@@ -14,7 +14,7 @@ use serde_json::json;
 pub(crate) fn commit_completed_run(
     db: &DbState,
     checkpoint: &mut AgentCheckpoint,
-    context: &SandwichContext,
+    context: &mut SandwichContext,
     run_id: &str,
     final_session_id: &str,
     goal: &str,
@@ -24,7 +24,33 @@ pub(crate) fn commit_completed_run(
     conversation_model_id: &str,
     reviewer_warnings_delivered: Option<&ReviewResult>,
 ) -> Result<serde_json::Value, String> {
-    checkpoint.mark_done(context);
+    let receipt = checkpoint
+        .pending_finalization
+        .as_ref()
+        .filter(|r| r.is_ready() && !r.acceptance_fingerprint.is_empty())
+        .ok_or_else(|| "交付未提交：缺少当前版本的就绪验收收据".to_string())?;
+    let summary = receipt
+        .finish_payload
+        .get("summary")
+        .and_then(serde_json::Value::as_str);
+    if receipt.acceptance_fingerprint
+        != crate::agent::finalization::acceptance_fingerprint(context, checkpoint, summary)
+    {
+        return Err("交付未提交：验收状态在预检后发生变化，请重新核验".into());
+    }
+    let verification_disclosure = match &receipt.verification {
+        crate::agent::finalization::ReceiptVerification::Waived { reason } => {
+            Some(format!("验证披露：{}", reason))
+        }
+        _ => None,
+    };
+    let mut candidate_context = context.clone();
+    let mut candidate = checkpoint.clone();
+    if let Some(block) = candidate_context.active_target_block_mut() {
+        block.reset_review_retries();
+    }
+    candidate_context.block_manager.advance_to_next();
+    candidate.mark_done(&candidate_context);
     // ── 交付载荷在提交前构建：指令 command 优先，收据预填载荷回填 ──
     let finish_payload = instruction
         .command
@@ -67,11 +93,19 @@ pub(crate) fn commit_completed_run(
             issue_lines
         ));
     }
+    if let Some(disclosure) = &verification_disclosure {
+        persisted_summary.push_str(&format!("\n\n{}", disclosure));
+    }
     // 完成区域展示模型自己的最终回复；若存在审查熔断遗留警告，注入到 emitted_finish
     let mut emitted_finish = match finish_payload {
         serde_json::Value::Object(object) => serde_json::Value::Object(object),
         _ => json!({ "summary": persisted_summary }),
     };
+    if verification_disclosure.is_some() {
+        if let serde_json::Value::Object(ref mut map) = emitted_finish {
+            map.insert("summary".into(), json!(persisted_summary));
+        }
+    }
     if let Some(warnings) = reviewer_warnings_delivered {
         if let serde_json::Value::Object(ref mut map) = emitted_finish {
             map.insert(
@@ -105,13 +139,12 @@ pub(crate) fn commit_completed_run(
                 for item in arr.iter() {
                     let raw_candidate = match item {
                         serde_json::Value::String(s) => Some(s.clone()),
-                        serde_json::Value::Object(obj) => {
-                            obj.get("canonical_path")
-                                .or_else(|| obj.get("local_path"))
-                                .or_else(|| obj.get("path"))
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string())
-                        }
+                        serde_json::Value::Object(obj) => obj
+                            .get("canonical_path")
+                            .or_else(|| obj.get("local_path"))
+                            .or_else(|| obj.get("path"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
                         _ => None,
                     };
                     if let Some(path_str) = raw_candidate {
@@ -145,7 +178,7 @@ pub(crate) fn commit_completed_run(
     // ── 终态短事务：checkpoint Done + run trace succeeded + 会话消息原子提交 ──
     crate::agent::finalization::commit_finalization(
         db,
-        checkpoint,
+        &mut candidate,
         run_id,
         final_session_id,
         goal,
@@ -154,5 +187,11 @@ pub(crate) fn commit_completed_run(
         &persisted_summary,
         conversation_model_id,
     )?;
+    *checkpoint = candidate;
+    *context = candidate_context;
     Ok(emitted_finish)
 }
+
+#[cfg(test)]
+#[path = "finalize_tests.rs"]
+mod tests;

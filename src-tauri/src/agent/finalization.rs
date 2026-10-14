@@ -7,7 +7,7 @@
 //!   会话 assistant 消息三者同生同灭，杜绝「checkpoint 已完成但 trace 仍 running」的半截态；
 //! - 事件通知与产物登记是提交后的可重放派生动作，不参与事务。
 //!
-//! 收据保鲜键：diff_hash + resource_scope.revision + 审查契约内容指纹。
+//! 收据保鲜键：diff_hash + resource_scope.revision + 契约内容 + 验收状态指纹。
 //! 任一变化即收据失效，finish 重新走完整门禁，绝不按旧结论放行。
 
 use crate::agent::checkpoint::AgentCheckpoint;
@@ -21,10 +21,17 @@ use std::path::Path;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::watch;
 
+mod evaluate;
+pub(crate) use evaluate::*;
+
 /// 收据中的验证结论。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ReceiptVerification {
+    /// 尚未执行或尚无可接受的验证回执。
+    Pending,
+    /// 验证确实执行失败，不能被重试计数消除。
+    Failed { details: String },
     /// 本轮没有需要宿主验证的新写入。
     NotRequired,
     /// 宿主已执行契约义务命令与自适应验证，全部通过。
@@ -37,6 +44,8 @@ pub enum ReceiptVerification {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ReceiptReview {
+    /// 尚未进入终审，不能当作无需终审。
+    Pending,
     /// 无审查材料（无 diff），终审跳过。
     NotRequired,
     /// 终审通过。
@@ -51,7 +60,7 @@ pub enum ReceiptReview {
         model_id: String,
         blocking_count: usize,
     },
-    /// 达到重试上限后带警告放行（仅低风险改动允许）。
+    /// 修复多次仍未收敛，经人工明确仲裁后带警告交付。
     DeliveredWithWarnings {
         score: u32,
         model_id: String,
@@ -81,6 +90,8 @@ pub struct FinalizationReceipt {
     pub scope_revision: u64,
     /// 审查契约义务指纹：契约变更后旧收据不得复用。
     pub contract_fingerprint: String,
+    #[serde(default)]
+    pub acceptance_fingerprint: String,
     pub step_id: usize,
     pub verification: ReceiptVerification,
     pub review: ReceiptReview,
@@ -97,11 +108,21 @@ pub struct FinalizationReceipt {
 impl FinalizationReceipt {
     /// 收据是否允许 finish 直接提交。
     pub fn is_ready(&self) -> bool {
-        self.blockers.is_empty() && self.review.is_accepted()
+        self.blockers.is_empty()
+            && self.review.is_accepted()
+            && !matches!(
+                self.verification,
+                ReceiptVerification::Pending | ReceiptVerification::Failed { .. }
+            )
     }
 
     /// 收据是否仍然新鲜：diff、scope 版本与契约指纹三者全等才可复用。
-    pub fn is_fresh(&self, diff_hash: &str, scope_revision: u64, contract_fingerprint: &str) -> bool {
+    pub fn is_fresh(
+        &self,
+        diff_hash: &str,
+        scope_revision: u64,
+        contract_fingerprint: &str,
+    ) -> bool {
         self.diff_hash == diff_hash
             && self.scope_revision == scope_revision
             && self.contract_fingerprint == contract_fingerprint
@@ -167,221 +188,89 @@ pub fn detect_risk_flags(paths: &[String]) -> Vec<String> {
     flags
 }
 
-/// 终态预检（prepare_finish）的门禁评估：与 finish 同一套检查链
-/// （open_todos → scope 机械门禁 → 契约义务命令 → 宿主验证 → 终审 LLM），
-/// 但只产出收据、不做任何终态提交，也不消耗 finish_challenge/reviewer_retry 预算。
-/// 终审失败结论会写入 checkpoint.last_review_* 缓存——同 diff 的下次评估 0 Token 复用拦截。
-#[allow(clippy::too_many_arguments)]
-pub async fn evaluate_prepare_finish(
-    app: &AppHandle,
-    db: &DbState,
-    context: &SandwichContext,
-    checkpoint: &mut AgentCheckpoint,
-    run_id: &str,
-    session_id: &str,
-    step_id: usize,
-    workspace: &Path,
-    baseline: &crate::agent::reviewer_gatekeeper::GitBaseline,
-    run_started_at: chrono::DateTime<Utc>,
-    model_routing: &crate::agent::router::ModelRoutingConfig,
-    interrupt_rx: &mut watch::Receiver<u64>,
-    open_todos: &[String],
-    gate_notices: &[String],
-    prepare_request: Option<&crate::agent::types::PrepareFinishRequest>,
-) -> FinalizationReceipt {
-    let current_diff_hash = baseline
-        .collect_review_material(workspace, context, run_started_at)
-        .map(|(_, hash)| hash)
-        .unwrap_or_default();
-    let contract_fp = contract_fingerprint(context.review_contract.as_ref());
-    let mut gate_blockers: Vec<String> = open_todos.to_vec();
-    let mut receipt_verification = ReceiptVerification::NotRequired;
-    let mut receipt_review = ReceiptReview::NotRequired;
-
-    // Level 0 机械门禁
-    let scope_violations = crate::agent::reviewer_gatekeeper::mechanical_precheck_violations(
-        workspace,
-        context.active_target_block(),
-    );
-    gate_blockers.extend(
-        scope_violations
-            .iter()
-            .map(|violation| format!("scope 越界：{}", violation)),
-    );
-
-    if gate_blockers.is_empty() {
-        // 契约义务验证（冻结命令，真实退出码）
-        let obligation_results =
-            if context.side_effects.len() > context.inherited_side_effects_count {
-                let obligations: Vec<crate::agent::review_contract::ReviewObligation> = context
-                    .review_contract
-                    .as_ref()
-                    .map(|c| c.obligations.clone())
-                    .unwrap_or_default();
-                crate::agent::host_verify::run_obligation_verifications(workspace, &obligations)
-                    .await
-            } else {
-                Vec::new()
-            };
-        gate_blockers.extend(
-            obligation_results
-                .iter()
-                .filter(|r| !r.passed)
-                .map(crate::agent::host_verify::format_obligation_failure),
-        );
-
-        if gate_blockers.is_empty() {
-            let host_verification = {
-                let mut parts: Vec<String> = Vec::new();
-                if context.side_effects.len() > context.inherited_side_effects_count {
-                    if let Some(hv) = crate::agent::host_verify::run(workspace).await {
-                        let _ = app.emit(
-                            &format!("agent-log-{}", session_id),
-                            format!("🧪 宿主执行验证完成:\n{}", hv),
-                        );
-                        parts.push(hv);
-                    }
-                }
-                if !obligation_results.is_empty() {
-                    let lines: Vec<String> = obligation_results
-                        .iter()
-                        .map(|r| {
-                            format!(
-                                "- [{}] `{}` → 退出码 {}: {}",
-                                r.obligation_id, r.command, r.exit_code, r.output_tail
-                            )
-                        })
-                        .collect();
-                    parts.push(format!("契约义务验证（冻结脚本）：\n{}", lines.join("\n")));
-                }
-                (!parts.is_empty()).then(|| parts.join("\n\n"))
-            };
-            receipt_verification = match context.change_verification.as_ref() {
-                Some(cv) if cv.status == "waived" => ReceiptVerification::Waived {
-                    reason: cv
-                        .waived_reason
-                        .clone()
-                        .unwrap_or_else(|| "系统豁免".to_string()),
-                },
-                Some(cv) if cv.status == "verified" => ReceiptVerification::Verified {
-                    evidence: cv.evidence_refs.join(", "),
-                },
-                _ => match host_verification {
-                    Some(ref hv) => ReceiptVerification::Verified {
-                        evidence: hv.clone(),
-                    },
-                    None => ReceiptVerification::NotRequired,
-                },
-            };
-
-            let human_waivers = checkpoint.human_waiver_text();
-            let review_res = crate::agent::reviewer_gatekeeper::evaluate_finish_diff(
-                app,
-                db,
-                context,
-                model_routing,
-                step_id,
-                workspace,
-                baseline,
-                run_started_at,
-                session_id,
-                interrupt_rx,
-                checkpoint.last_reviewed_diff_hash.as_deref(),
-                checkpoint.last_review_result.as_ref(),
-                &checkpoint.stage_review_final_only,
-                host_verification.as_deref(),
-                human_waivers.as_deref(),
-                gate_notices,
-                checkpoint.approved_target_files.as_deref(),
-                checkpoint.triage_verdict.as_ref(),
-                Some(checkpoint.plan_mode),
-                prepare_request.and_then(|r| r.summary.as_deref()),
-            )
-            .await;
-            if review_res.is_service_failure() {
-                checkpoint.pending_task_failure = Some(review_res.summary.clone());
-            }
-            if review_res.is_passed() {
-                receipt_review = ReceiptReview::Passed {
-                    score: review_res.score,
-                    model_id: review_res.model_id.clone(),
-                    summary: review_res.summary.clone(),
-                };
-            } else {
-                // 失败结论同样沉淀缓存：同 diff 的下次 finish 复用拦截、不再烧 LLM
-                checkpoint.last_reviewed_diff_hash = Some(review_res.diff_hash.clone());
-                checkpoint.last_review_result = Some(review_res.clone());
-                receipt_review = ReceiptReview::Failed {
-                    score: review_res.score,
-                    model_id: review_res.model_id.clone(),
-                    blocking_count: review_res.blocking_issues.len(),
-                };
-                gate_blockers.push(format!(
-                    "终审未通过（{}分）：{} 项阻塞缺陷待修复",
-                    review_res.score,
-                    review_res.blocking_issues.len()
-                ));
-            }
-        }
-    }
-
-    let finish_payload = prepare_request
-        .map(|req| {
-            let mut map = serde_json::Map::new();
-            if let Some(ref summary) = req.summary {
-                map.insert("summary".to_string(), json!(summary));
-            }
-            if let Some(ref details) = req.details {
-                map.insert("details".to_string(), json!(details));
-            }
-            Value::Object(map)
-        })
-        .unwrap_or(Value::Null);
-
-    FinalizationReceipt {
-        receipt_id: format!("fr_{}_s{}", &run_id[..run_id.len().min(8)], step_id),
-        diff_hash: current_diff_hash,
-        scope_revision: context.resource_scope.revision,
-        contract_fingerprint: contract_fp,
-        step_id,
-        verification: receipt_verification,
-        review: receipt_review,
-        blockers: gate_blockers,
-        risk_flags: detect_risk_flags(&context.new_affected_paths()),
-        finish_payload,
-        created_at: Utc::now().to_rfc3339(),
-    }
-}
-
 /// 终态短事务提交：checkpoint Done + run trace succeeded + 会话 assistant 消息。
 ///
 /// 复用 save_checkpoint / upsert_snapshot / append_message 的 SQL 语义，但收进同一
 /// transaction：任一写入失败整体回滚，不产生「一处已提交、一处还在 running」的半截态。
 /// checkpoint 沿用乐观锁版本谓词；冲突时回滚并返回错误，调用方下一步重试即可。
 pub fn commit_finalization(
-    db: &DbState, checkpoint: &mut AgentCheckpoint, run_id: &str, session_id: &str,
-    goal: &str, steps: &[Value], completion: &Value, assistant_message: &str, model_id: &str,
+    db: &DbState,
+    checkpoint: &mut AgentCheckpoint,
+    run_id: &str,
+    session_id: &str,
+    goal: &str,
+    steps: &[Value],
+    completion: &Value,
+    assistant_message: &str,
+    model_id: &str,
 ) -> Result<(), String> {
-    commit_terminal(db, checkpoint, run_id, session_id, goal, steps, completion, assistant_message, model_id, "succeeded")
+    commit_terminal(
+        db,
+        checkpoint,
+        run_id,
+        session_id,
+        goal,
+        steps,
+        completion,
+        assistant_message,
+        model_id,
+        "succeeded",
+    )
 }
 
 pub(crate) fn commit_failure(
-    db: &DbState, checkpoint: &mut AgentCheckpoint, run_id: &str, session_id: &str,
-    goal: &str, steps: &[Value], completion: &Value, assistant_message: &str,
+    db: &DbState,
+    checkpoint: &mut AgentCheckpoint,
+    run_id: &str,
+    session_id: &str,
+    goal: &str,
+    steps: &[Value],
+    completion: &Value,
+    assistant_message: &str,
 ) -> Result<(), String> {
     if checkpoint.phase != crate::agent::checkpoint::AgentPhase::Failed {
         return Err("失败提交要求 Failed 检查点，不得冒充成功交付".into());
     }
-    commit_terminal(db, checkpoint, run_id, session_id, goal, steps, completion, assistant_message, "", "failed")
+    commit_terminal(
+        db,
+        checkpoint,
+        run_id,
+        session_id,
+        goal,
+        steps,
+        completion,
+        assistant_message,
+        "",
+        "failed",
+    )
 }
 
 fn commit_terminal(
-    db: &DbState, checkpoint: &mut AgentCheckpoint, run_id: &str, session_id: &str,
-    goal: &str, steps: &[Value], completion: &Value, assistant_message: &str, model_id: &str, status: &str,
+    db: &DbState,
+    checkpoint: &mut AgentCheckpoint,
+    run_id: &str,
+    session_id: &str,
+    goal: &str,
+    steps: &[Value],
+    completion: &Value,
+    assistant_message: &str,
+    model_id: &str,
+    status: &str,
 ) -> Result<(), String> {
     // 任何 SQL 失败均保持调用方 version 不变，不仅仅处理乐观锁冲突。
     let mut candidate = checkpoint.clone();
-    commit_terminal_inner(db, &mut candidate, run_id, session_id, goal, steps, completion, assistant_message, model_id, status)?;
+    commit_terminal_inner(
+        db,
+        &mut candidate,
+        run_id,
+        session_id,
+        goal,
+        steps,
+        completion,
+        assistant_message,
+        model_id,
+        status,
+    )?;
     *checkpoint = candidate;
     Ok(())
 }
@@ -406,8 +295,7 @@ fn commit_terminal_inner(
     checkpoint.updated_at = now.clone();
     let previous_version = checkpoint.version;
     checkpoint.version += 1;
-    let snapshot_json =
-        serde_json::to_string(checkpoint).map_err(|error| error.to_string())?;
+    let snapshot_json = serde_json::to_string(checkpoint).map_err(|error| error.to_string())?;
     if previous_version == 0 {
         tx.execute(
             "INSERT INTO agent_checkpoints (run_id, phase, snapshot_json, version, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -437,16 +325,13 @@ fn commit_terminal_inner(
             .map_err(|error| error.to_string())?;
         if rows != 1 {
             checkpoint.version = previous_version;
-            return Err(
-                "checkpoint 乐观锁冲突：终态提交已整体回滚".to_string(),
-            );
+            return Err("checkpoint 乐观锁冲突：终态提交已整体回滚".to_string());
         }
     }
 
     // 2) run trace：与 upsert_snapshot 相同语义的终态 upsert
     let steps_json = serde_json::to_string(steps).map_err(|error| error.to_string())?;
-    let completion_json =
-        serde_json::to_string(completion).map_err(|error| error.to_string())?;
+    let completion_json = serde_json::to_string(completion).map_err(|error| error.to_string())?;
     tx.execute(
         "INSERT INTO agent_run_traces (id, session_id, goal, status, steps_json, completion_json, started_at, updated_at, completed_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, CASE WHEN ?4 IN ('succeeded', 'failed', 'cancelled') THEN ?7 ELSE NULL END)
@@ -508,12 +393,18 @@ mod tests {
     #[test]
     fn detailed_verification_failure_remains_blocking_and_keeps_command_directory_output() {
         let result = crate::agent::host_verify::ObligationVerifyResult {
-            obligation_id: "unit".into(), command: "mvn test".into(),
-            working_dir: "/tmp/ws".into(), exit_code: "1".into(),
-            output_tail: "[ERROR] No tests matching pattern".into(), passed: false,
+            obligation_id: "unit".into(),
+            command: "mvn test".into(),
+            working_dir: "/tmp/ws".into(),
+            exit_code: "1".into(),
+            output_tail: "[ERROR] No tests matching pattern".into(),
+            passed: false,
         };
         let mut r = receipt("hash", 0, "fp");
-        r.blockers.push(crate::agent::host_verify::format_obligation_failure(&result));
+        r.blockers
+            .push(crate::agent::host_verify::format_obligation_failure(
+                &result,
+            ));
         assert!(!r.is_ready());
         let text = &r.blockers[0];
         assert!(text.contains("mvn test") && text.contains("/tmp/ws"));
@@ -539,6 +430,7 @@ mod tests {
             diff_hash: diff_hash.to_string(),
             scope_revision: revision,
             contract_fingerprint: fingerprint.to_string(),
+            acceptance_fingerprint: "test-state".into(),
             step_id: 10,
             verification: ReceiptVerification::Verified {
                 evidence: "cargo test ok".to_string(),

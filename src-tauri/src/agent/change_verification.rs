@@ -44,7 +44,7 @@ impl ChangeVerification {
 pub struct EvidenceWindow {
     /// 当前挂账写入批次中最近一次副作用的 step_id；无挂账写入时为 None。
     pub last_write_step: Option<usize>,
-    /// 当前指令将占用的 step_id（证据只能指向 < 该值的已执行步骤）。
+    /// 第一个尚未完成的 step_id（执行后更新时为当前步 + 1）。
     pub current_step: usize,
 }
 
@@ -54,15 +54,6 @@ pub fn apply_change_verification_update(
     evidence_window: &EvidenceWindow,
 ) -> Result<(), String> {
     validate_change_verification(&update)?;
-
-    if let Some(existing) = current {
-        if existing != &update {
-            return Err(
-                "当前写入批次已有已闭合验证，不能静默改写。若又发生真实写入，宿主会自动清空旧验证并要求重新验证或豁免。".to_string(),
-            );
-        }
-        return Ok(());
-    }
 
     verify_evidence_freshness(&update, evidence_window)?;
     *current = Some(update);
@@ -98,7 +89,7 @@ fn verify_evidence_freshness(
     for n in step_refs {
         if n <= last_write {
             return Err(format!(
-                "证据引用 step_{} 早于最近一次真实写入 step_{}——该凭据已随写入作废。\
+                "证据引用 step_{} 不晚于最近一次已记录的副作用 step_{}——该凭据已随写入作废。\
                 请重新执行验证命令，并引用新步骤的 step_N 举证。",
                 n, last_write
             ));
@@ -149,7 +140,7 @@ pub fn change_verification_blocker(
     }
 
     Some(format!(
-        "本会话已记录 {} 次真实写入，但最近写入后尚无验证证据或明确豁免\
+        "本会话已记录 {} 次写入/可能产生副作用的操作，但最近操作后尚无验证证据或明确豁免\
         （运行与本次写入相关的验证命令/状态探针后，用 change_verification_update 以 \
         verified + 指向该步骤的 evidence_refs=[\"step_N\"] 闭合；存在性探针的非零退出\
         若是目标状态同样可用）",
@@ -349,9 +340,11 @@ pub fn is_state_probe_command(cmd: &str) -> bool {
 /// 纯字符串重合，不做语义猜测；判不出绑定即不自动闭合（由模型显式举证）。
 pub fn probe_binds_to_pending_writes(cmd: &str, pending_refs: &[String]) -> bool {
     let lower = cmd.to_lowercase();
-    cmd_meaningful_tokens(&lower)
-        .iter()
-        .any(|tok| pending_refs.iter().any(|text| text.to_lowercase().contains(tok.as_str())))
+    cmd_meaningful_tokens(&lower).iter().any(|tok| {
+        pending_refs
+            .iter()
+            .any(|text| text.to_lowercase().contains(tok.as_str()))
+    })
 }
 
 /// 从探针命令中提取"可绑定" token：跳过命令头、旗标、纯数字与通用噪声词，
@@ -359,35 +352,189 @@ pub fn probe_binds_to_pending_writes(cmd: &str, pending_refs: &[String]) -> bool
 fn cmd_meaningful_tokens(cmd_lower: &str) -> Vec<String> {
     // 探针/包装器命令名与通用动词——它们出现在两侧不证明相关性
     const NOISE: &[&str] = &[
-        "which", "command", "type", "whereis", "test", "stat", "ls", "cat", "find",
-        "pacman", "dpkg", "rpm", "apt", "brew", "snap", "flatpak", "pkg",
-        "systemctl", "service", "journalctl", "pgrep", "pidof", "ps", "ss",
-        "curl", "wget", "nc", "ping", "grep", "rg", "diff", "cmp", "jq",
-        "docker", "podman", "kubectl", "git", "cargo", "npm", "npx", "pnpm",
-        "pytest", "python", "python3", "go", "echo", "sudo", "doas", "pkexec",
-        "timeout", "nice", "nohup", "stdbuf", "time", "lsof", "netstat", "ip",
-        "tar", "unzip", "env", "bash", "sh", "zsh", "fish",
-        "status", "show", "list", "get", "info", "query", "check", "inspect",
-        "is-active", "is-enabled", "is-failed",
-        "http", "https", "localhost", "dev", "null", "json", "text", "html",
-        "true", "false", "error", "warn", "debug", "output",
+        "which",
+        "command",
+        "type",
+        "whereis",
+        "test",
+        "stat",
+        "ls",
+        "cat",
+        "find",
+        "pacman",
+        "dpkg",
+        "rpm",
+        "apt",
+        "brew",
+        "snap",
+        "flatpak",
+        "pkg",
+        "systemctl",
+        "service",
+        "journalctl",
+        "pgrep",
+        "pidof",
+        "ps",
+        "ss",
+        "curl",
+        "wget",
+        "nc",
+        "ping",
+        "grep",
+        "rg",
+        "diff",
+        "cmp",
+        "jq",
+        "docker",
+        "podman",
+        "kubectl",
+        "git",
+        "cargo",
+        "npm",
+        "npx",
+        "pnpm",
+        "pytest",
+        "python",
+        "python3",
+        "go",
+        "echo",
+        "sudo",
+        "doas",
+        "pkexec",
+        "timeout",
+        "nice",
+        "nohup",
+        "stdbuf",
+        "time",
+        "lsof",
+        "netstat",
+        "ip",
+        "tar",
+        "unzip",
+        "env",
+        "bash",
+        "sh",
+        "zsh",
+        "fish",
+        "status",
+        "show",
+        "list",
+        "get",
+        "info",
+        "query",
+        "check",
+        "inspect",
+        "is-active",
+        "is-enabled",
+        "is-failed",
+        "http",
+        "https",
+        "localhost",
+        "dev",
+        "null",
+        "json",
+        "text",
+        "html",
+        "true",
+        "false",
+        "error",
+        "warn",
+        "debug",
+        "output",
         // 文件系统结构段：`test -e /opt/x` 的 "opt" 子串命中 "options" 属假绑定——
         // 对象身份由文件名 token 承载，目录骨架词一律噪声化
-        "opt", "usr", "bin", "sbin", "etc", "var", "tmp", "home", "lib", "lib64",
-        "libexec", "share", "local", "root", "mnt", "media", "srv", "proc",
-        "sys", "run", "boot", "applications", "users", "volumes", "private",
-        "windows", "program", "files", "system32", "desktop", "documents",
+        "opt",
+        "usr",
+        "bin",
+        "sbin",
+        "etc",
+        "var",
+        "tmp",
+        "home",
+        "lib",
+        "lib64",
+        "libexec",
+        "share",
+        "local",
+        "root",
+        "mnt",
+        "media",
+        "srv",
+        "proc",
+        "sys",
+        "run",
+        "boot",
+        "applications",
+        "users",
+        "volumes",
+        "private",
+        "windows",
+        "program",
+        "files",
+        "system32",
+        "desktop",
+        "documents",
         "downloads",
         // 扩展名段：`.conf`/`.service` 的类型词不携带对象身份（"conf" ⊆ "config"
         // 会把 `/etc/random.conf` 绑到任意提及 config 的挂账写入）
-        "conf", "cfg", "ini", "log", "txt", "xml", "yaml", "yml", "toml",
-        "htm", "md", "rst", "csv", "tsv", "bash", "rb", "pl", "jsx", "tsx",
-        "java", "hpp", "cs", "exe", "dll", "dylib", "jar", "war", "bz2",
-        "xz", "7z", "rar", "deb", "rpm", "apk", "dmg", "iso", "img", "plist",
-        "service", "socket", "timer", "target", "mount", "automount", "slice",
-        "scope", "app", "bak",
+        "conf",
+        "cfg",
+        "ini",
+        "log",
+        "txt",
+        "xml",
+        "yaml",
+        "yml",
+        "toml",
+        "htm",
+        "md",
+        "rst",
+        "csv",
+        "tsv",
+        "bash",
+        "rb",
+        "pl",
+        "jsx",
+        "tsx",
+        "java",
+        "hpp",
+        "cs",
+        "exe",
+        "dll",
+        "dylib",
+        "jar",
+        "war",
+        "bz2",
+        "xz",
+        "7z",
+        "rar",
+        "deb",
+        "rpm",
+        "apk",
+        "dmg",
+        "iso",
+        "img",
+        "plist",
+        "service",
+        "socket",
+        "timer",
+        "target",
+        "mount",
+        "automount",
+        "slice",
+        "scope",
+        "app",
+        "bak",
         // 代码/归档扩展名同样只标类型不标对象
-        "py", "js", "ts", "rs", "cc", "hh", "zip", "gz", "so",
+        "py",
+        "js",
+        "ts",
+        "rs",
+        "cc",
+        "hh",
+        "zip",
+        "gz",
+        "so",
     ];
     let mut out = Vec::new();
     for (idx, raw_tok) in cmd_lower.split_whitespace().enumerate() {
@@ -395,8 +542,7 @@ fn cmd_meaningful_tokens(cmd_lower: &str) -> Vec<String> {
             continue; // 命令头本身不用于绑定
         }
         let tok = raw_tok.trim_matches(|c: char| {
-            !c.is_ascii_alphanumeric()
-                && c != '/' && c != '.' && c != '_' && c != '-' && c != ':'
+            !c.is_ascii_alphanumeric() && c != '/' && c != '.' && c != '_' && c != '-' && c != ':'
         });
         if tok.is_empty() || tok.starts_with('-') {
             continue;
@@ -535,7 +681,7 @@ pub fn decide_auto_verify(
     let is_inferred_cmd = inferred_cmd.map_or(false, |ic| {
         let lower_cmd = cmd.trim().to_lowercase();
         let lower_ic = ic.trim().to_lowercase();
-        !lower_ic.is_empty() && (lower_cmd.contains(&lower_ic) || lower_ic.contains(&lower_cmd))
+        !lower_ic.is_empty() && lower_cmd == lower_ic
     });
     let matches_contract = contract_verify_commands
         .iter()
@@ -546,11 +692,7 @@ pub fn decide_auto_verify(
         // 成功路径：生态测试命令、契约声明或宿主推断的验证命令无条件认账；
         // 通用状态探针需与待验证写入物理绑定——"发生了一次断言"不等于
         // "断言的是这次变更"。
-        if is_test_cmd
-            || (is_probe_cmd && probe_bound)
-            || matches_contract
-            || is_inferred_cmd
-        {
+        if is_test_cmd || (is_probe_cmd && probe_bound) || matches_contract || is_inferred_cmd {
             return AutoVerifyDecision::AutoVerify;
         }
         return AutoVerifyDecision::Skip;
@@ -563,47 +705,12 @@ pub fn decide_auto_verify(
     AutoVerifyDecision::Skip
 }
 
-/// 判断给定的 shell 命令是否包含明确的自动化测试、类型检查或构建验证特征
+mod shell_observation;
+pub(crate) use shell_observation::is_observation_or_validation_script;
+
+/// 识别退出状态能够直接代表本次验证结果的简单命令；不按子串认账。
 pub fn is_test_or_verification_command(cmd: &str) -> bool {
-    let lower = cmd.trim().to_lowercase();
-    if lower.is_empty() {
-        return false;
-    }
-    let test_patterns = [
-        "cargo test",
-        "cargo check",
-        "npm test",
-        "npm run test",
-        "npx vitest",
-        "npx jest",
-        "pnpm test",
-        "bun test",
-        "deno test",
-        "npx tsc",
-        "npx vue-tsc",
-        "tsc --noemit",
-        "vue-tsc --noemit",
-        "typecheck",
-        "type-check",
-        "npm run check",
-        "npm run build",
-        "cargo build",
-        "pytest",
-        "python -m unittest",
-        "go test",
-        "go vet",
-        "mvn test",
-        "gradle test",
-        "ctest",
-        "npm run lint",
-        "eslint",
-        "golangci-lint",
-        "mypy",
-        "flake8",
-        "ruff check",
-        "biome check",
-    ];
-    test_patterns.iter().any(|pattern| lower.contains(pattern))
+    shell_observation::is_simple_verification(cmd)
 }
 
 /// 判断文件路径是否为纯 UI 界面、样式、媒体或静态文档文件
@@ -657,10 +764,18 @@ pub fn is_pure_ui_or_doc_path(path_str: &str) -> bool {
 ///    - 若为 Go 项目（go.mod）且包含 .go 改动 -> go test ./...
 /// 4. 若无法推导任何可执行的类型检查或测试套件 -> 返回 None（由上层自适应跳过豁免）
 pub fn infer_adaptive_verification_command(affected_paths: &[String]) -> Option<String> {
+    let workspace = std::env::current_dir().ok()?;
+    infer_adaptive_verification_command_in(&workspace, affected_paths)
+}
+
+/// 推断与实际执行使用同一个任务工作区；不读取宿主进程所在的另一项目。
+pub fn infer_adaptive_verification_command_in(
+    workspace: &std::path::Path,
+    affected_paths: &[String],
+) -> Option<String> {
     if affected_paths.is_empty() {
         return None;
     }
-
     let has_web_files = affected_paths.iter().any(|p| {
         p.ends_with(".vue")
             || p.ends_with(".ts")
@@ -673,43 +788,44 @@ pub fn infer_adaptive_verification_command(affected_paths: &[String]) -> Option<
     let has_go_files = affected_paths.iter().any(|p| p.ends_with(".go"));
 
     let mut candidate_roots = Vec::new();
-    if let Ok(cwd) = std::env::current_dir() {
-        candidate_roots.push(cwd.clone());
-        if let Some(parent) = cwd.parent() {
-            candidate_roots.push(parent.to_path_buf());
+    for raw in affected_paths {
+        let path = std::path::Path::new(raw);
+        if path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            continue;
         }
-    }
-
-    for path_str in affected_paths {
-        let p = std::path::Path::new(path_str);
-        let mut starts = Vec::new();
-        if p.is_absolute() {
-            if let Some(parent) = p.parent() {
-                starts.push(parent.to_path_buf());
-            }
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
         } else {
-            for base in &candidate_roots.clone() {
-                starts.push(base.join(p));
+            workspace.join(path)
+        };
+        let mut dir = absolute.parent();
+        while let Some(root) = dir {
+            if !root.starts_with(workspace) {
+                break;
             }
-        }
-
-        for start in starts {
-            let mut curr = start.as_path();
-            while let Some(parent) = curr.parent() {
-                if parent.join("package.json").exists()
-                    || parent.join("Cargo.toml").exists()
-                    || parent.join("pyproject.toml").exists()
-                    || parent.join("go.mod").exists()
-                {
-                    if !candidate_roots.contains(&parent.to_path_buf()) {
-                        candidate_roots.push(parent.to_path_buf());
-                    }
-                }
-                curr = parent;
+            if !candidate_roots.contains(&root.to_path_buf()) {
+                candidate_roots.push(root.to_path_buf());
             }
+            if root == workspace {
+                break;
+            }
+            dir = root.parent();
         }
     }
-
+    fn qualify(root: &std::path::Path, workspace: &std::path::Path, command: &str) -> String {
+        if root == workspace {
+            command.into()
+        } else {
+            format!(
+                "cd '{}' && {}",
+                root.to_string_lossy().replace('\'', "'\"'\"'"),
+                command
+            )
+        }
+    }
     // 1. 如果包含 Web/TS/JS 文件，优先在所有候选根目录中寻找匹配 package.json
     if has_web_files {
         for root in &candidate_roots {
@@ -720,13 +836,13 @@ pub fn infer_adaptive_verification_command(affected_paths: &[String]) -> Option<
                         let scripts = json.get("scripts").and_then(|s| s.as_object());
                         if let Some(s) = scripts {
                             if s.contains_key("typecheck") {
-                                return Some("npm run typecheck".to_string());
+                                return Some(qualify(root, workspace, "npm run typecheck"));
                             }
                             if s.contains_key("type-check") {
-                                return Some("npm run type-check".to_string());
+                                return Some(qualify(root, workspace, "npm run type-check"));
                             }
                             if s.contains_key("check") {
-                                return Some("npm run check".to_string());
+                                return Some(qualify(root, workspace, "npm run check"));
                             }
                         }
 
@@ -740,10 +856,11 @@ pub fn infer_adaptive_verification_command(affected_paths: &[String]) -> Option<
                             };
 
                             if has_dep("vue") || has_dep("@vue/runtime-core") {
-                                return Some("npx vue-tsc --noEmit".to_string());
+                                return Some(qualify(root, workspace, "npx vue-tsc --noEmit"));
                             }
-                            if has_dep("react") || has_dep("@types/react") || has_dep("typescript") {
-                                return Some("npx tsc --noEmit".to_string());
+                            if has_dep("react") || has_dep("@types/react") || has_dep("typescript")
+                            {
+                                return Some(qualify(root, workspace, "npx tsc --noEmit"));
                             }
                         }
 
@@ -753,7 +870,7 @@ pub fn infer_adaptive_verification_command(affected_paths: &[String]) -> Option<
                                 if !test_lower.contains("no test specified")
                                     && !test_lower.contains("exit 1")
                                 {
-                                    return Some("npm test".to_string());
+                                    return Some(qualify(root, workspace, "npm test"));
                                 }
                             }
                         }
@@ -767,7 +884,7 @@ pub fn infer_adaptive_verification_command(affected_paths: &[String]) -> Option<
     if has_rs_files {
         for root in &candidate_roots {
             if root.join("Cargo.toml").exists() {
-                return Some("cargo check".to_string());
+                return Some(qualify(root, workspace, "cargo check"));
             }
         }
     }
@@ -776,7 +893,7 @@ pub fn infer_adaptive_verification_command(affected_paths: &[String]) -> Option<
     if has_py_files {
         for root in &candidate_roots {
             if root.join("pyproject.toml").exists() || root.join("requirements.txt").exists() {
-                return Some("pytest".to_string());
+                return Some(qualify(root, workspace, "pytest"));
             }
         }
     }
@@ -785,7 +902,7 @@ pub fn infer_adaptive_verification_command(affected_paths: &[String]) -> Option<
     if has_go_files {
         for root in &candidate_roots {
             if root.join("go.mod").exists() {
-                return Some("go test ./...".to_string());
+                return Some(qualify(root, workspace, "go test ./..."));
             }
         }
     }
@@ -873,10 +990,12 @@ mod tests {
 
     #[test]
     fn only_verified_or_waived_can_close_real_writes() {
-        assert!(
-            apply_change_verification_update(&mut None, verified(), &EvidenceWindow::default())
-                .is_ok()
-        );
+        assert!(apply_change_verification_update(
+            &mut None,
+            verified(),
+            &EvidenceWindow::default()
+        )
+        .is_ok());
 
         let waived = ChangeVerification {
             status: "waived".to_string(),
@@ -884,8 +1003,7 @@ mod tests {
             waived_reason: Some("用户明确要求只修改，不运行测试。".to_string()),
         };
         assert!(
-            apply_change_verification_update(&mut None, waived, &EvidenceWindow::default())
-                .is_ok()
+            apply_change_verification_update(&mut None, waived, &EvidenceWindow::default()).is_ok()
         );
 
         let invalid = ChangeVerification {
@@ -907,22 +1025,38 @@ mod tests {
     }
 
     #[test]
-    fn closed_verification_is_idempotent_but_cannot_be_rewritten() {
+    fn verification_claim_can_be_corrected_but_invalid_updates_are_atomic() {
         let mut current = Some(verified());
-        assert!(
-            apply_change_verification_update(&mut current, verified(), &EvidenceWindow::default())
-                .is_ok()
-        );
+        assert!(apply_change_verification_update(
+            &mut current,
+            verified(),
+            &EvidenceWindow::default()
+        )
+        .is_ok());
 
         let rewrite = ChangeVerification {
             status: "waived".to_string(),
             evidence_refs: Vec::new(),
             waived_reason: Some("改成豁免".to_string()),
         };
-        assert!(
-            apply_change_verification_update(&mut current, rewrite, &EvidenceWindow::default())
-                .is_err()
-        );
+        apply_change_verification_update(&mut current, rewrite.clone(), &EvidenceWindow::default())
+            .unwrap();
+        assert_eq!(current, Some(rewrite.clone()));
+        let invalid = ChangeVerification {
+            status: "verified".into(),
+            evidence_refs: vec!["step_4".into()],
+            waived_reason: None,
+        };
+        assert!(apply_change_verification_update(
+            &mut current,
+            invalid,
+            &EvidenceWindow {
+                last_write_step: Some(5),
+                current_step: 8
+            }
+        )
+        .is_err());
+        assert_eq!(current, Some(rewrite));
     }
 
     #[test]
@@ -1010,13 +1144,25 @@ mod tests {
         ];
         // 绑定：探针引用了副作用记录中的具体对象
         assert!(probe_binds_to_pending_writes("which workbuddy", &pending));
-        assert!(probe_binds_to_pending_writes("pacman -Qs workbuddy", &pending));
-        assert!(probe_binds_to_pending_writes("test -e /opt/WorkBuddy", &pending));
-        assert!(probe_binds_to_pending_writes("systemctl status workbuddy.service", &pending));
+        assert!(probe_binds_to_pending_writes(
+            "pacman -Qs workbuddy",
+            &pending
+        ));
+        assert!(probe_binds_to_pending_writes(
+            "test -e /opt/WorkBuddy",
+            &pending
+        ));
+        assert!(probe_binds_to_pending_writes(
+            "systemctl status workbuddy.service",
+            &pending
+        ));
         // 不绑定：无关探针——命令头同名不算绑定（pacman -Q 查别的包）
         assert!(!probe_binds_to_pending_writes("which python", &pending));
         assert!(!probe_binds_to_pending_writes("pacman -Q nginx", &pending));
-        assert!(!probe_binds_to_pending_writes("systemctl status sshd", &pending));
+        assert!(!probe_binds_to_pending_writes(
+            "systemctl status sshd",
+            &pending
+        ));
         // 空批次不绑定
         assert!(!probe_binds_to_pending_writes("which workbuddy", &[]));
     }
@@ -1049,20 +1195,27 @@ mod tests {
 
     #[test]
     fn test_infer_adaptive_verification_command() {
-        let rust_paths = vec!["src-tauri/src/main.rs".to_string()];
+        let root = std::env::temp_dir().join(format!("infer-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("src-tauri/src")).unwrap();
+        std::fs::write(
+            root.join("src-tauri/Cargo.toml"),
+            "[package]\nname='sample'\nversion='0.1.0'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"scripts":{"typecheck":"vue-tsc --noEmit"}}"#,
+        )
+        .unwrap();
+        let rust = infer_adaptive_verification_command_in(&root, &["src-tauri/src/main.rs".into()])
+            .unwrap();
+        assert!(rust.ends_with("/src-tauri' && cargo check"), "{rust}");
         assert_eq!(
-            infer_adaptive_verification_command(&rust_paths),
-            Some("cargo check".to_string())
+            infer_adaptive_verification_command_in(&root, &["src/components/App.vue".into()]),
+            Some("npm run typecheck".into())
         );
-
-        let vue_paths = vec!["src/components/agent/AgentChatStream.vue".to_string()];
-        assert_eq!(
-            infer_adaptive_verification_command(&vue_paths),
-            Some("npx vue-tsc --noEmit".to_string())
-        );
-
-        let empty_paths: Vec<String> = Vec::new();
-        assert_eq!(infer_adaptive_verification_command(&empty_paths), None);
+        assert_eq!(infer_adaptive_verification_command_in(&root, &[]), None);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn verified_with_refs(refs: &[&str]) -> ChangeVerification {
@@ -1097,7 +1250,8 @@ mod tests {
             last_write_step: Some(51),
             current_step: 55,
         };
-        let prose = verified_with_refs(&["output_id:61b39423-...", "npx vue-tsc --noEmit 成功退出 0"]);
+        let prose =
+            verified_with_refs(&["output_id:61b39423-...", "npx vue-tsc --noEmit 成功退出 0"]);
         assert!(apply_change_verification_update(&mut None, prose, &window).is_err());
 
         // 无挂账写入时验证无关紧要——保持原有宽松（fail-open）
