@@ -68,11 +68,15 @@ fn enforce_delivery_contract(db: &DbState, receipt: &mut DeliveryReceipt) {
             .flatten()
         });
     let Some(schema_json) = schema_json else { return };
-    let Ok(schema) =
+    let Ok(mut schema) =
         serde_json::from_str::<crate::agent::protocol::ContractSchema>(&schema_json)
     else {
         return;
     };
+    // 旧审查台账可能仍要求 consumer_verdicts；仅在内存中过滤这项已退出义务。
+    if matches!(receipt.kind.as_str(), "review" | "reviewer") {
+        crate::agent::child_reviewer::retire_consumer_schema(&mut schema);
+    }
     if schema.is_empty() {
         return;
     }
@@ -925,6 +929,47 @@ mod tests {
         let mut receipt2 = r2.clone();
         enforce_delivery_contract(&db, &mut receipt2);
         assert_eq!(receipt2.status, "succeeded", "合规交付不得降级");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn legacy_consumer_schema_is_ignored_at_receipt_but_other_requirements_remain() {
+        use crate::agent::protocol::{ContractFieldDef, ContractFieldType, ContractSchema};
+        let (base, db) = test_db("retired-consumer-schema");
+        let schema = ContractSchema::new([
+            ("consumer_verdicts", ContractFieldType::StringArray),
+            ("evidence_scope_verdicts", ContractFieldType::StringArray),
+            ("root_cause_verdict", ContractFieldType::String),
+        ].into_iter().map(|(name, field_type)| ContractFieldDef {
+            name: name.into(), field_type, description: name.into(), required: true, allowed_values: None,
+        }).collect());
+        let original = serde_json::to_string(&schema).unwrap();
+        let identity = crate::agent::child_reviewer::ChildRunIdentity {
+            contract_schema: Some(original.clone()),
+            ..crate::agent::child_reviewer::ChildRunIdentity::fresh("review")
+        };
+        let id = crate::agent::child_reviewer::begin_child_run_extended(
+            &db, "parent", "session", &base, "mock", 0, "review", None, None, None, &identity,
+        ).unwrap();
+        let payload = json!({"findings":[{"id":"F1","severity":"blocking","location":"src/a.rs:1",
+            "current":"旧调用","why":"参数不匹配","suggestion":"修复调用方","evidence_strength":"confirmed"}],
+            "confidence":"confirmed", "evidence_scope_verdicts":[], "root_cause_verdict":"explains"});
+        let mut accepted = receipt("review", &id, None, payload.clone());
+        enforce_delivery_contract(&db, &mut accepted);
+        assert_eq!(accepted.status, "succeeded", "缺少旧消费点字段不应拒收");
+        assert_eq!(accepted.findings().len(), 1, "真实 finding 保留");
+        for field in ["evidence_scope_verdicts", "root_cause_verdict"] {
+            let mut incomplete = payload.clone();
+            incomplete.as_object_mut().unwrap().remove(field);
+            let mut rejected = receipt("review", &id, None, incomplete);
+            enforce_delivery_contract(&db, &mut rejected);
+            assert_eq!(rejected.status, "invalid_output");
+            assert!(rejected.error_kind.unwrap().contains(field));
+        }
+        let stored: String = db.0.lock().unwrap().query_row(
+            "SELECT contract_schema FROM agent_child_runs WHERE id=?1", rusqlite::params![id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(stored, original, "不迁移或清理旧台账");
         let _ = std::fs::remove_dir_all(base);
     }
 

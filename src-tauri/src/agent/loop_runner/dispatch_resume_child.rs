@@ -109,6 +109,7 @@ pub(super) async fn dispatch_resume_child(
                             Some(raw) => serde_json::from_str(raw).unwrap_or_default(),
                             None => Vec::new(),
                         };
+                        crate::agent::child_reviewer::retire_consumer_history(&mut messages);
                         if messages.is_empty() {
                             DispatchResult { view: None,
                                 stdout: String::new(),
@@ -146,13 +147,17 @@ pub(super) async fn dispatch_resume_child(
 
                             // 对质目标是阶段审查任务时标记 rebuttal 用途；其余继承原任务用途
                             let is_rebuttal_target = ctx.checkpoint.is_stage_review_target(ctx.state.inner(), target_child_id);
-                            let resume_identity = crate::agent::child_reviewer::ChildRunIdentity::inherited(
+                            let mut resume_identity = crate::agent::child_reviewer::ChildRunIdentity::inherited(
                                 &prev_identity,
                                 if is_rebuttal_target {
                                     Some("rebuttal".to_string())
                                 } else {
                                     prev_identity.purpose.clone().or(Some("review".to_string()))
                                 },
+                            );
+
+                            crate::agent::child_reviewer::retire_consumer_schema_json(
+                                &mut resume_identity.contract_schema,
                             );
 
                             let new_child_run_id = match crate::agent::child_reviewer::begin_child_run_extended(

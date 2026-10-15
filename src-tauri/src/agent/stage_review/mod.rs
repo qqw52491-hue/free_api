@@ -353,25 +353,18 @@ pub async fn dispatch(
     // 新一轮阶段审查重置拦截状态（final_only 跨阶段累加 carry-over 到收尾审查，不可清空）
     checkpoint.stage_review_blockers_open = 0;
 
-    // ---- 影响面机械枚举：从累计 diff 提取改动符号 → 跨文件消费点 ----
-    // 阶段审查天然有真 diff，消费点枚举比方案期（按 target_files 推导）更准；
-    // refs 透传进 params，审查输出侧由 child_reviewer 强制逐条裁决。
-    let impact = if crate::agent::impact_pack::impact_pack_enabled() {
+    // 保留写方线索，不生成自动消费点清单或裁决 refs。
+    let write_context = if crate::agent::impact_pack::write_context_enabled() {
         crate::agent::reviewer_gatekeeper::GitBaseline::capture(workspace)
             .collect_git_diff(workspace)
-            .map(|(d, _)| crate::agent::impact_pack::build_from_diff(workspace, &d))
+            .map(|(d, _)| crate::agent::impact_pack::build_write_context_from_diff(workspace, &d))
             .unwrap_or_default()
     } else {
-        crate::agent::impact_pack::ImpactPack::default()
-    };
-    let impact_refs_json = if impact.refs.is_empty() {
-        serde_json::Value::Null
-    } else {
-        serde_json::json!(impact.refs)
+        String::new()
     };
     let mut extras = stage_extra_sections(db, session_id);
-    if !impact.section.is_empty() {
-        extras.push(impact.section.clone());
+    if !write_context.is_empty() {
+        extras.push(write_context.clone());
     }
 
     if role_cards.is_empty() {
@@ -398,7 +391,6 @@ pub async fn dispatch(
             "role_label": "🛡️ 阶段综合审查官",
             "question": question,
             "evidence_excerpt": evidence,
-            "impact_pack_refs": impact_refs_json,
         });
 
         let stage_batch_id = format!("stage-batch-{}-{}", checkpoint.step_id, uuid::Uuid::new_v4());
@@ -485,7 +477,6 @@ pub async fn dispatch(
             "role_label": card.label,
             "question": question,
             "evidence_excerpt": evidence,
-            "impact_pack_refs": impact_refs_json,
         });
 
         let mut envelope = crate::agent::protocol::DispatchEnvelope::reviewer(

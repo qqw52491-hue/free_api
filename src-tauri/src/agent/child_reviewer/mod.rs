@@ -14,11 +14,15 @@ use uuid::Uuid;
 
 
 mod lifecycle;
+mod legacy_impact;
+#[cfg(test)]
+pub(crate) mod retirement_tests;
 mod parse;
 mod poll;
 mod types;
 
 pub use lifecycle::*;
+pub(crate) use legacy_impact::{retire_consumer_history, retire_consumer_params, retire_consumer_schema, retire_consumer_schema_json};
 pub use parse::*;
 pub use poll::*;
 pub use types::*;
@@ -48,6 +52,9 @@ pub async fn spawn_child_reviewer(
     mut interrupt_rx: watch::Receiver<u64>,
     identity: &ChildRunIdentity,
 ) -> Result<String, String> {
+    // 旧 checkpoint/failover 快照仍可携带已退出的 refs 和材料，只清理本次调用副本。
+    let current_params = retire_consumer_params(params);
+    let params = &current_params;
     crate::agent::control::mark_stage(parent_session_id, "child_spawn:parse_request");
     let request = parse_child_review_request(params)?;
     crate::agent::control::mark_stage(parent_session_id, "child_spawn:evidence");
@@ -100,28 +107,6 @@ pub async fn spawn_child_reviewer(
     // reviewer 只读取证步数预算（0 = 瞎子模式）：解除信息同源瓶颈。
     // 默认 8 上限 30：取证环新增 run_command/python 后，产物深度检查会多耗几步。
     let reviewer_tool_steps = crate::agent::review_tools::forensic_budget();
-    // 影响面包裁决义务清单：派发方机械枚举的跨文件消费点 refs。
-    // 非空时审查输出必须含 consumer_verdicts 逐条覆盖（见下方校验）。
-    // 须在 system_prompt 之前提取：refs 非空时输出契约要把该字段显式授权为
-    // 必填项——否则它与第 7 条"禁止额外字段"直接冲突，模型会合理地不输出
-    // （实测 3.1-pro 两轮均因此 contract_violation）。
-    let impact_pack_refs: Vec<String> = params
-        .get("impact_pack_refs")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|x| x.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
-    let consumer_clause = if impact_pack_refs.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "\n        8. 【影响面消费点强制逐条裁决】证据包含【🧨 影响面机械枚举】清单（{} 个跨文件消费点）：输出必须额外包含 \"consumer_verdicts\": [\"<path:line> => HOLDS|BROKEN|NA: 一句话理由\", ...] 字段，逐条覆盖清单列出的每个消费点——确认无关可判 NA 但禁止漏项，缺项将按契约违例判无效重修。本字段经宿主显式授权，不受第 7 条\"禁止额外字段\"限制。",
-            impact_pack_refs.len()
-        )
-    };
     // 证据范围对账清单：方案引为证据但未列入拟修改目标的文件。
     // 「引用 ≠ 管辖」——被引用文件可能依赖被改对象的语义，差集迫使审查者
     // 逐项裁决其语义在新方案下是否仍成立，而非靠审查者碰巧注意到。
@@ -203,7 +188,7 @@ pub async fn spawn_child_reviewer(
         } else {
             "不得调用任何工具：只评估证据包内的事实，证据不足时在 missing_evidence 说明。".to_string()
         }
-    ) + &consumer_clause + &evidence_scope_clause + finalize_clause;
+    ) + &evidence_scope_clause + finalize_clause;
     let specialized_context = params
         .get("specialized_context")
         .and_then(|v| v.as_str())
@@ -241,6 +226,8 @@ pub async fn spawn_child_reviewer(
         }),
     ];
 
+    retire_consumer_history(&mut messages);
+
     let reasoning_effort = reasoning_effort.to_string();
     let workspace_root_owned = workspace_root.to_path_buf();
     // 会话产物物理根：tmp/ 前缀取证路径映射到这里；目录不存在时 canonicalize 自然拒绝
@@ -250,13 +237,16 @@ pub async fn spawn_child_reviewer(
     let session_id_clone = parent_session_id.to_string();
     let param_role = params.get("role").cloned();
     let param_role_label = params.get("role_label").cloned();
-    // 闭集契约兼容：strict_closed_set 的角色卡会把 consumer_verdicts / revised_* 当未
+    // 闭集契约兼容：strict_closed_set 的角色卡会把 evidence_scope_verdicts / revised_* 当未
     // 声明字段拒收，在场时向内存 schema 副本临时注入该字段定义（不改 DB 卡片本身）。
     // plan_review 场景即使无角色卡契约也要建最小非闭集契约：root_cause_verdict
     // 等宿主注入字段的 required 需要 validate_shape 兜底——否则自定义 schema 为
     // 空时校验整块跳过，「必填」在默认 system_reviewer 路径上只是提示词许愿
     // （实测 goal_anchor 场三次审查全缺席 root_cause_verdict）。
     let mut custom_schema = custom_schema;
+    if let Some(schema) = custom_schema.as_mut() {
+        retire_consumer_schema(schema);
+    }
     if is_plan_review && custom_schema.is_none() {
         custom_schema = Some(
             crate::agent::protocol::ContractSchema::new(Vec::new())
@@ -265,17 +255,6 @@ pub async fn spawn_child_reviewer(
     }
     if let Some(schema) = custom_schema.as_mut() {
         if schema.strict_closed_set {
-            if !impact_pack_refs.is_empty()
-                && !schema.fields.iter().any(|f| f.name == "consumer_verdicts")
-            {
-                schema.fields.push(crate::agent::protocol::ContractFieldDef {
-                    name: "consumer_verdicts".to_string(),
-                    field_type: crate::agent::protocol::ContractFieldType::StringArray,
-                    description: "影响面消费点逐条裁决：每个消费点一条 \"path:line => HOLDS|BROKEN|NA: 理由\"".to_string(),
-                    required: true,
-                    allowed_values: None,
-                });
-            }
             if !evidence_scope_refs.is_empty()
                 && !schema.fields.iter().any(|f| f.name == "evidence_scope_verdicts")
             {
@@ -318,16 +297,14 @@ pub async fn spawn_child_reviewer(
     // 读的是台账里的 schema——此前只存角色卡原始 custom_schema，宿主注入字段
     // 不在其中，回执侧 required 校验空转（goal_anchor 场实测字段缺席仍判成功）。
     if let Some(ref effective_schema) = custom_schema {
-        if !effective_schema.is_empty() {
-            if let Ok(conn) = db.0.lock() {
-                let _ = conn.execute(
-                    "UPDATE agent_child_runs SET contract_schema = ?1 WHERE id = ?2",
-                    rusqlite::params![
-                        serde_json::to_string(effective_schema).unwrap_or_default(),
-                        child_run_id
-                    ],
-                );
-            }
+        if let Ok(conn) = db.0.lock() {
+            let _ = conn.execute(
+                "UPDATE agent_child_runs SET contract_schema = ?1 WHERE id = ?2",
+                rusqlite::params![
+                    serde_json::to_string(effective_schema).unwrap_or_default(),
+                    child_run_id
+                ],
+            );
         }
     }
 
@@ -409,7 +386,6 @@ pub async fn spawn_child_reviewer(
         // 覆盖型契约违例的知情重试计数：缺项清单喂回重答，最多 2 次，
         // 超限后不再判死——带疤收敛（缺项写入 missing_evidence + 留痕标记）。
         let mut coverage_fix_attempts: u32 = 0;
-        let mut coverage_gap_note: Option<String> = None;
 
         let (duration_ms, completion_tokens, prompt_tokens, final_parsed, final_raw) = loop {
             llm_call_index += 1;
@@ -596,15 +572,7 @@ pub async fn spawn_child_reviewer(
                 let coverage_err = extract_json_object(&raw)
                     .and_then(|f| serde_json::from_str::<serde_json::Value>(f).ok())
                     .and_then(|v| {
-                        crate::agent::impact_pack::check_consumer_verdicts(&impact_pack_refs, &v)
-                            .err()
-                            .or_else(|| {
-                                crate::agent::impact_pack::check_evidence_scope_verdicts(
-                                    &evidence_scope_refs,
-                                    &v,
-                                )
-                                .err()
-                            })
+                        crate::agent::impact_pack::check_evidence_scope_verdicts(&evidence_scope_refs, &v).err()
                     });
                 match coverage_err {
                     Some(err) if coverage_fix_attempts < 2 => {
@@ -619,8 +587,7 @@ pub async fn spawn_child_reviewer(
                         }));
                         continue;
                     }
-                    Some(err) => {
-                        coverage_gap_note = Some(err);
+                    Some(_) => {
                         break (duration_ms, completion_tokens, prompt_tokens, parsed, raw);
                     }
                     None => {
@@ -828,42 +795,24 @@ pub async fn spawn_child_reviewer(
                 }
             }
         }
-        // 影响面/证据范围覆盖校验：环内已给过两次带缺项清单的知情重试，
-        // 仍缺项不再判死——带疤收敛（对齐 finish 通道的 consumer_coverage_incomplete
-        // 放行留痕）：缺项写入 missing_evidence + 覆盖缺口标记进 result_val，
-        // findings 照常入账、子任务保持可对质（succeeded）。
-        for (check_fn, refs, flag_key, label) in [
-            (
-                crate::agent::impact_pack::check_consumer_verdicts as fn(&[String], &Value) -> Result<(), String>,
-                &impact_pack_refs,
-                "consumer_coverage_incomplete",
-                "影响面消费点",
-            ),
-            (
-                crate::agent::impact_pack::check_evidence_scope_verdicts as fn(&[String], &Value) -> Result<(), String>,
-                &evidence_scope_refs,
-                "evidence_scope_coverage_incomplete",
-                "证据范围文件",
-            ),
-        ] {
-            if let Err(err) = check_fn(refs, &result_val) {
-                if let Some(map) = result_val.as_object_mut() {
-                    map.insert(flag_key.to_string(), json!(true));
-                    let scar = format!("覆盖缺口（知情重试后仍未补齐）：{}", err);
-                    match map.get_mut("missing_evidence").and_then(|m| m.as_array_mut()) {
-                        Some(arr) => arr.push(json!(scar)),
-                        None => {
-                            map.insert("missing_evidence".to_string(), json!([scar]));
-                        }
+        // 证据范围覆盖校验仍保留；知情重试后缺项留痕，findings 照常入账。
+        if let Err(err) = crate::agent::impact_pack::check_evidence_scope_verdicts(
+            &evidence_scope_refs, &result_val,
+        ) {
+            if let Some(map) = result_val.as_object_mut() {
+                map.insert("evidence_scope_coverage_incomplete".to_string(), json!(true));
+                let scar = format!("覆盖缺口（知情重试后仍未补齐）：{}", err);
+                match map.get_mut("missing_evidence").and_then(|m| m.as_array_mut()) {
+                    Some(arr) => arr.push(json!(scar)),
+                    None => {
+                        map.insert("missing_evidence".to_string(), json!([scar]));
                     }
-                    crate::agent::control::mark_stage(
-                        &stage_key,
-                        &format!("child_task:coverage_scar:{}", label),
-                    );
                 }
+                crate::agent::control::mark_stage(
+                    &stage_key, "child_task:coverage_scar:证据范围文件",
+                );
             }
         }
-        let _ = coverage_gap_note; // 缺项详情已由上方 check 重跑记入疤
 
         let result_json = serde_json::to_string(&result_val).ok();
         finish_child_run_with_history(
