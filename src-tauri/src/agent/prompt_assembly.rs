@@ -57,7 +57,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "finish",
-        summary: "终态交付：全流程完成后的收尾交卷指令。【交付前准备】代码类任务先完成真实测试验证，并闭合全部审查意见与待办，再交付；文件交付物把路径列表放进 artifacts（`tmp/xxx` 会话产物路径即可，交付门禁直接识别），系统会在界面底部自动生成下载与打开卡片。【两步交付范例】改动过文件、或带审查义务/待办的任务（含排查诊断类）分两步走——预检只给一句验收摘要，不写面向用户的长总结；就绪后保持 summary 不变，在 finish.details 补充完整交付说明。若报告正文就是交付物，先落盘并作为证据/产物纳入验收，不能只验一句摘要后新增未经核验的报告。第 N 步只输出预检：{\"prepare_finish\": {\"summary\": \"已完成X，验证Y通过\"}}；收到「✅ 终态预检就绪」后，第 N+1 步输出：{\"tool\": \"finish\", \"command\": {\"summary\": \"已完成X，验证Y通过\", \"details\": \"完整交付说明\", \"artifacts\": [\"tmp/report.md\"]}}，仅验收相关状态与摘要保持一致时复用预检收据，免重复验证与终审；收到「⚠️ 终态预检未就绪」则先逐项闭合，再重新预检。",
+        summary: "终态交付：全流程完成后的收尾交卷指令。summary 为简短结论，较长说明放在 command.details；两者正文均支持 Markdown，字符串按 JSON 规则转义。【交付前准备】代码类任务先完成真实测试验证，并闭合全部审查意见与待办，再交付；文件交付物把路径列表放进 artifacts（`tmp/xxx` 会话产物路径即可，交付门禁直接识别），系统会在界面底部自动生成下载与打开卡片。【两步交付范例】改动过文件、或带审查义务/待办的任务（含排查诊断类）分两步走——预检只给一句验收摘要，不写面向用户的长总结；就绪后保持 summary 不变，在 command.details 补充完整交付说明。若报告正文就是交付物，先落盘并作为证据/产物纳入验收，不能只验一句摘要后新增未经核验的报告。第 N 步只输出预检：{\"prepare_finish\": {\"summary\": \"已完成X，验证Y通过\"}}；收到「✅ 终态预检就绪」后，第 N+1 步输出：{\"tool\": \"finish\", \"command\": {\"summary\": \"已完成X，验证Y通过\", \"details\": \"完整交付说明\", \"artifacts\": [\"tmp/report.md\"]}}，仅验收相关状态与摘要保持一致时复用预检收据，免重复验证与终审；收到「⚠️ 终态预检未就绪」则先逐项闭合，再重新预检。",
         actions: &["finish(summary: string, details?: string, artifacts?: string[])"],
     },
     BuiltinToolSpec {
@@ -322,7 +322,7 @@ mod tests {
         let menu = build_local_tools_menu();
         assert!(menu.contains("预检只给一句验收摘要"));
         assert!(menu.contains("保持 summary 不变"));
-        assert!(menu.contains("finish.details"));
+        assert!(menu.contains("command.details"));
         assert!(menu.contains("作为证据/产物纳入验收"));
         assert!(menu.contains("仅验收相关状态与摘要保持一致时复用预检收据"));
         assert!(menu.contains("finish(summary: string, details?: string, artifacts?: string[])"));

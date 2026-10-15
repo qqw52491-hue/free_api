@@ -16,7 +16,7 @@ use tokio::sync::watch;
 
 // 将格式约束放在每次模型调用的最后一条消息，避免长系统契约被模型的临时计划文本淹没。
 // 它不改变工具参数、会话工作区或任务目标，仅要求最终外层输出可被宿主解析。
-const FINAL_JSON_OUTPUT_ANCHOR: &str = "【本轮最终输出】现在直接输出一个合法 JSON 对象。首字符必须是 `{`；禁止先输出‘计划：…｜工具：…｜动作：…’、解释文字、Markdown 或代码围栏。";
+const FINAL_JSON_OUTPUT_ANCHOR: &str = "【本轮最终输出】现在直接输出一个合法 JSON 对象。首字符必须是 `{`；JSON 外不得添加说明文字，也不得用代码围栏包裹整个对象。summary、details 等面向用户的字符串正文可以使用 Markdown（标题、加粗、列表、代码块等）；字符串中的换行、双引号与反斜杠须按 JSON 规则转义。";
 
 fn append_final_json_output_anchor(api_values: &mut Vec<serde_json::Value>) {
     api_values.push(json!({
