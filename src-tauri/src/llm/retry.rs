@@ -69,6 +69,51 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
     max_retries: u32,
     on_event: &mut F,
 ) -> Result<StreamResult, String> {
+    stream_with_attempt_budget(
+        config, messages, reasoning_effort, interrupt_rx,
+        AttemptBudget::KeyMinimum(max_retries), on_event,
+    ).await
+}
+
+/// 终审等已有明确预算的调用方使用精确上限，不再被 Key 数量或外层重试乘倍。
+/// 与普通调用共用原有 Key 轮换、退避、取消、总时限和熔断记账。
+pub(crate) async fn stream_with_attempt_limit<F: FnMut(StreamEvent) -> bool>(
+    config: &ModelConfig,
+    messages: &[serde_json::Value],
+    reasoning_effort: &str,
+    interrupt_rx: &mut watch::Receiver<u64>,
+    max_attempts: u32,
+    on_event: &mut F,
+) -> Result<StreamResult, String> {
+    stream_with_attempt_budget(
+        config, messages, reasoning_effort, interrupt_rx,
+        AttemptBudget::Exact(max_attempts), on_event,
+    ).await
+}
+
+#[derive(Clone, Copy)]
+enum AttemptBudget {
+    KeyMinimum(u32),
+    Exact(u32),
+}
+
+impl AttemptBudget {
+    fn attempts(self, key_count: usize) -> usize {
+        match self {
+            Self::KeyMinimum(n) => (n as usize).max(key_count * 2),
+            Self::Exact(n) => n.max(1) as usize,
+        }
+    }
+}
+
+async fn stream_with_attempt_budget<F: FnMut(StreamEvent) -> bool>(
+    config: &ModelConfig,
+    messages: &[serde_json::Value],
+    reasoning_effort: &str,
+    interrupt_rx: &mut watch::Receiver<u64>,
+    attempt_budget: AttemptBudget,
+    on_event: &mut F,
+) -> Result<StreamResult, String> {
     let slot = crate::llm_breaker::slot_key(&config.platform_name, &config.model_id);
     crate::llm_breaker::gate(&slot)?;
 
@@ -106,8 +151,9 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
         let mut current_key_idx = start_key_idx;
         let mut key_switch_count = 0usize;
 
-        // 总尝试次数计算：保证最少尝试 max_retries 次，且每个 Key 至少有尝试机会
-        let total_attempts_allowed = (max_retries as usize).max(total_keys * 2);
+        // 普通调用保留既有 Key 最小机会；终审精确预算则是硬上限。
+        let total_attempts_allowed = attempt_budget.attempts(total_keys);
+        let mut attempts_made = 0usize;
 
         for attempt_i in 0..total_attempts_allowed {
             let remaining_ms =
@@ -117,6 +163,7 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
             }
 
             let current_key = &available_keys[current_key_idx];
+            attempts_made += 1;
             let attempt = tokio::time::timeout(
                 tokio::time::Duration::from_millis(remaining_ms),
                 stream_once_with_key(config, current_key, messages, reasoning_effort, interrupt_rx, on_event),
@@ -147,7 +194,11 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
                     // 检查是否为限流/欠费/鉴权失效等可换 Key 错误
                     let rotatable = is_key_rotatable_error(None, &e);
 
-                    if rotatable && total_keys > 1 && key_switch_count < total_keys - 1 {
+                    if rotatable
+                        && total_keys > 1
+                        && key_switch_count < total_keys - 1
+                        && attempt_i + 1 < total_attempts_allowed
+                    {
                         let failed_key = current_key.clone();
                         current_key_idx = (current_key_idx + 1) % total_keys;
                         key_switch_count += 1;
@@ -222,17 +273,11 @@ pub async fn stream_with_retry<F: FnMut(StreamEvent) -> bool>(
             last_error = budget_exhausted();
         }
 
-        if total_keys > 1 && key_switch_count > 0 {
-            Err(format!(
-                "LLM 请求最终失败（平台 [{}] 尝试了全部 {} 个 API Key 均未成功）: {}",
-                config.platform_name, total_keys, last_error
-            ))
-        } else {
-            Err(format!(
-                "LLM 请求最终失败 ({}次尝试内): {}",
-                max_retries, last_error
-            ))
-        }
+        // 报实际发起的尝试，不把配置值或已轮换 Key 数冒充执行次数。
+        Err(format!(
+            "LLM 请求最终失败 (实际尝试 {} 次，平台 [{}]): {}",
+            attempts_made, config.platform_name, last_error
+        ))
     }
     .await;
 
@@ -323,4 +368,186 @@ pub async fn stream_with_resilient_retry<F: FnMut(StreamEvent) -> bool>(
         .await;
     }
     result
+}
+
+
+#[cfg(test)]
+mod exact_attempt_tests {
+    use super::*;
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::time::{timeout, Duration};
+
+    // Exercise the real HTTP/SSE path without calling a paid provider or touching the DB.
+    struct MockEndpoint {
+        config: ModelConfig,
+        requests: Arc<AtomicUsize>,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for MockEndpoint {
+        fn drop(&mut self) {
+            self.server.abort();
+        }
+    }
+
+    impl MockEndpoint {
+        async fn start(success_requests: Vec<usize>, failure_status: u16) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let requests = Arc::new(AtomicUsize::new(0));
+            let request_counter = requests.clone();
+            let server = tokio::spawn(async move {
+                loop {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    let mut buffer = [0u8; 2048];
+                    // Consume the complete request before replying, not just its headers.
+                    loop {
+                        let n = socket.read(&mut buffer).await.unwrap();
+                        if n == 0 { break; }
+                        request.extend_from_slice(&buffer[..n]);
+                        if let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let headers = String::from_utf8_lossy(&request[..header_end]);
+                            let content_length = headers.lines().find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            }).unwrap_or(0);
+                            if request.len() >= header_end + 4 + content_length { break; }
+                        }
+                        assert!(request.len() < 131_072, "unexpected mock request size");
+                    }
+                    let index = request_counter.fetch_add(1, Ordering::SeqCst) + 1;
+                    let (status, content_type, body) = if success_requests.contains(&index) {
+                        let chunk = json!({"choices": [{"delta": {"content": "{\"verdict\":\"approve\"}"}}]});
+                        ("200 OK".to_owned(), "text/event-stream", format!("data: {}\n\ndata: [DONE]\n\n", chunk))
+                    } else {
+                        let body = json!({"error": {"message": if failure_status == 403 {
+                            "upstream 403: WAF Block Page; retry after the block window"
+                        } else {
+                            "invalid request payload"
+                        }}}).to_string();
+                        (format!("{} {}", failure_status, if failure_status == 403 { "Forbidden" } else { "Bad Request" }), "application/json", body)
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        status, content_type, body.len(), body,
+                    );
+                    // Cancellation can legitimately close a connection before the reply.
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                }
+            });
+            Self {
+                config: ModelConfig {
+                    model_id: uuid::Uuid::new_v4().to_string(),
+                    platform_name: "retry-regression".into(),
+                    base_url: format!("http://{}/v1", address),
+                    api_key: "test-only-key".into(),
+                    model_name: "test-model".into(),
+                    max_tokens: 512,
+                    temperature: 0.7,
+                    is_ollama: false,
+                    is_lmstudio: false,
+                    context_window: 128_000,
+                    provider_capabilities: "{}".into(),
+                    timeout_secs: 10,
+                    requires_alternating_roles: 0,
+                },
+                requests,
+                server,
+            }
+        }
+
+        async fn call(&self, interrupt: &mut watch::Receiver<u64>, limit: u32) -> Result<StreamResult, String> {
+            let messages = vec![json!({"role": "user", "content": "review"})];
+            let mut on_event = |_: StreamEvent<'_>| true;
+            timeout(Duration::from_secs(60), stream_with_attempt_limit(
+                &self.config, &messages, "auto", interrupt, limit, &mut on_event,
+            )).await.expect("retry test exceeded its watchdog")
+        }
+
+        async fn wait_for_first_request(&self) {
+            timeout(Duration::from_secs(5), async {
+                while self.requests.load(Ordering::SeqCst) == 0 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }).await.expect("mock did not receive a request");
+        }
+    }
+
+    #[test]
+    fn exact_budget_does_not_change_legacy_key_minimum() {
+        assert_eq!(AttemptBudget::KeyMinimum(1).attempts(4), 8);
+        assert_eq!(AttemptBudget::Exact(6).attempts(4), 6);
+        assert_eq!(AttemptBudget::Exact(0).attempts(4), 1);
+    }
+
+    #[tokio::test]
+    async fn six_attempt_limit_survives_403_and_multiple_keys() {
+        let mut endpoint = MockEndpoint::start(vec![], 403).await;
+        endpoint.config.api_key = json!(["test-a", "test-b", "test-c", "test-d"]).to_string();
+        let (_sender, mut interrupt) = watch::channel(0u64);
+        let error = endpoint.call(&mut interrupt, 6).await.err().unwrap();
+        assert_eq!(endpoint.requests.load(Ordering::SeqCst), 6);
+        assert!(error.contains("实际尝试 6 次"), "{}", error);
+        assert!(error.contains("403 Forbidden") && error.contains("WAF Block Page"), "{}", error);
+    }
+
+    #[tokio::test]
+    async fn success_resets_the_next_requests_attempt_budget() {
+        let endpoint = MockEndpoint::start(vec![2, 8], 403).await;
+        let (_sender, mut interrupt) = watch::channel(0u64);
+        let first = endpoint.call(&mut interrupt, 6).await.unwrap();
+        assert_eq!(first.attempt_count, 2);
+        let second = endpoint.call(&mut interrupt, 6).await.unwrap();
+        assert_eq!(second.attempt_count, 6);
+        assert_eq!(endpoint.requests.load(Ordering::SeqCst), 8);
+        assert_eq!(second.full_response, "{\"verdict\":\"approve\"}");
+    }
+
+    #[tokio::test]
+    async fn disabled_retry_is_one_attempt_even_with_multiple_keys() {
+        let mut endpoint = MockEndpoint::start(vec![], 403).await;
+        endpoint.config.api_key = json!(["test-a", "test-b", "test-c", "test-d"]).to_string();
+        let (_sender, mut interrupt) = watch::channel(0u64);
+        let error = endpoint.call(&mut interrupt, 1).await.err().unwrap();
+        assert_eq!(endpoint.requests.load(Ordering::SeqCst), 1);
+        assert!(error.contains("实际尝试 1 次"), "{}", error);
+    }
+
+    #[tokio::test]
+    async fn cancellation_stops_retry_wait_without_another_request() {
+        let endpoint = MockEndpoint::start(vec![], 403).await;
+        let (sender, mut interrupt) = watch::channel(0u64);
+        let (result, ()) = tokio::join!(endpoint.call(&mut interrupt, 6), async {
+            endpoint.wait_for_first_request().await;
+            sender.send(1).unwrap();
+        });
+        assert_eq!(result.err().unwrap(), STREAM_INTERRUPTED_ERROR);
+        assert_eq!(endpoint.requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn dropped_interrupt_sender_does_not_hang_retry_wait() {
+        let endpoint = MockEndpoint::start(vec![], 403).await;
+        let (sender, mut interrupt) = watch::channel(0u64);
+        let (result, ()) = tokio::join!(endpoint.call(&mut interrupt, 6), async {
+            endpoint.wait_for_first_request().await;
+            drop(sender);
+        });
+        assert_eq!(result.err().unwrap(), STREAM_INTERRUPTED_ERROR);
+        assert_eq!(endpoint.requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_400_payload_keeps_existing_fast_failure_policy() {
+        let endpoint = MockEndpoint::start(vec![], 400).await;
+        let (_sender, mut interrupt) = watch::channel(0u64);
+        let error = endpoint.call(&mut interrupt, 6).await.err().unwrap();
+        assert_eq!(endpoint.requests.load(Ordering::SeqCst), 1);
+        assert!(error.contains("API 错误 400"), "{}", error);
+    }
 }

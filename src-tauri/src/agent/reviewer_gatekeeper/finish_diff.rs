@@ -17,6 +17,11 @@ use tokio::sync::watch;
 
 
 const MAX_FINISH_FORMAT_RETRIES: u32 = 5;
+const MAX_FINISH_REQUEST_RETRIES: u32 = 5;
+
+fn finish_request_attempt_limit(retry_enabled: bool) -> u32 {
+    if retry_enabled { MAX_FINISH_REQUEST_RETRIES + 1 } else { 1 }
+}
 
 /// 只计连续的非 JSON 输出；合法 JSON 会清零，不改变取证预算或判决校验。
 pub(crate) fn finish_format_retry_allowed(
@@ -615,20 +620,22 @@ async fn evaluate_finish_diff_once(
     let mut timeout_retried = false;
     let mut cur_timeout_secs = review_timeout_secs;
 
-    // 非超时调用报错仍只重试一次；非 JSON 输出独立计连续次数，最多纠正 5 次。
-    // 合法 JSON 会重置格式计数；耗尽纠正机会仍按审查通道失败退出，不放行交付。
-    let mut call_error_retried = false;
+    // 请求失败由传输层统一最多重试 5 次，不再叠加外层调用错误重试。
+    // 每轮取证/判决请求各自拥有预算，成功后自然重置；用户关闭重试时只尝试一次。
+    // 本次终审开始时快照开关，避免其他会话中途改变本轮请求预算。
+    let request_attempt_limit = finish_request_attempt_limit(review_retry_allowed());
+    // 非 JSON 输出独立计连续次数，最多纠正 5 次；合法 JSON 清零。
     let mut format_retries = 0u32;
 
     let mut ignore_stream = |_: llm::StreamEvent<'_>| true;
     let (response_text, duration_ms) = loop {
         llm_call_index += 1;
-        let call = llm::stream_with_retry(
+        let call = llm::stream_with_attempt_limit(
             &model_config,
             &messages,
             "auto",
             interrupt_rx,
-            1,
+            request_attempt_limit,
             &mut ignore_stream,
         );
 
@@ -691,11 +698,9 @@ async fn evaluate_finish_diff_once(
                     "request_error",
                     Some(&e),
                 );
-                if !call_error_retried && review_retry_allowed() {
-                    call_error_retried = true;
-                    continue;
-                }
-                return ReviewResult::failed_open(&format!("Reviewer 调用失败（重试后仍失败）: {}", e), &model_id, &review_fingerprint);
+                return ReviewResult::failed_open(
+                    &format!("Reviewer 调用失败: {}", e), &model_id, &review_fingerprint,
+                );
             }
         };
 
@@ -913,5 +918,17 @@ mod contract_handoff_tests {
         let mut absent = String::new();
         append_contract_claims(&mut absent, None);
         assert!(absent.is_empty());
+    }
+}
+
+
+#[cfg(test)]
+mod request_retry_policy_tests {
+    use super::finish_request_attempt_limit;
+
+    #[test]
+    fn enabled_means_initial_request_plus_five_retries() {
+        assert_eq!(finish_request_attempt_limit(true), 6);
+        assert_eq!(finish_request_attempt_limit(false), 1);
     }
 }
