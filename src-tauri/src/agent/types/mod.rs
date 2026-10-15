@@ -50,6 +50,23 @@ pub struct TodoItem {
     pub evidence_output_id: Option<String>,
 }
 
+impl TodoItem {
+    /// 实时指令用严格解析；旧检查点的缺省兼容仍留在 Deserialize 中。
+    pub(crate) fn parse_input_id(value: &serde_json::Value) -> Option<usize> {
+        match value {
+            serde_json::Value::Number(n) => n.as_u64().and_then(|n| usize::try_from(n).ok()),
+            serde_json::Value::String(s) => {
+                let digits = s.trim().strip_prefix('#').unwrap_or(s.trim()).trim();
+                if digits.is_empty() || !digits.bytes().all(|c| c.is_ascii_digit()) {
+                    return None;
+                }
+                digits.parse().ok()
+            }
+            _ => None,
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for TodoItem {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -74,15 +91,17 @@ impl<'de> Deserialize<'de> for TodoItem {
             #[serde(default)]
             name: Option<String>,
             #[serde(default)]
+            note: Option<String>,
+            #[serde(default)]
             evidence_output_id: Option<String>,
         }
 
         let raw = RawTodoItem::deserialize(deserializer)?;
-        let id = match raw.id {
-            Some(serde_json::Value::Number(n)) => n.as_u64().unwrap_or(0) as usize,
-            Some(serde_json::Value::String(s)) => s.parse::<usize>().unwrap_or(0),
-            _ => 0,
-        };
+        let id = raw
+            .id
+            .as_ref()
+            .and_then(Self::parse_input_id)
+            .unwrap_or_default();
         let description = raw
             .description
             .or(raw.task)
@@ -91,6 +110,11 @@ impl<'de> Deserialize<'de> for TodoItem {
             .or(raw.content)
             .or(raw.name)
             .unwrap_or_default();
+        let description = match raw.note.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(note) if description.is_empty() => note.to_string(),
+            Some(note) => format!("{description}\n处理说明：{note}"),
+            None => description,
+        };
         let status = raw.status.unwrap_or_else(|| "pending".to_string());
 
         Ok(Self {

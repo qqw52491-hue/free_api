@@ -407,12 +407,10 @@ pub fn normalize_raw_instruction_value(val: &mut serde_json::Value) {
             }
         }
 
-        // 3. 如果 todo_update 是字符串形式（如 "[]"），解析或转为空数组
+        // 3. 如果 todo_update 是 JSON 字符串（如 "[]"），解析；无法解析时保留原值供校验报错。
         if let Some(serde_json::Value::String(todo_str)) = map.get("todo_update") {
             if let Ok(parsed_todo) = serde_json::from_str::<serde_json::Value>(todo_str) {
                 map.insert("todo_update".to_string(), parsed_todo);
-            } else {
-                map.insert("todo_update".to_string(), serde_json::json!([]));
             }
         }
 

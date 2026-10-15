@@ -16,6 +16,8 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::watch;
 
 
+// 验收语义变更时升版：旧裁决不能在新规则下继续复用；Git 基线保持原样。
+const FINISH_REVIEW_RULES_VERSION: &str = "deliverable-boundary-v2";
 const MAX_FINISH_FORMAT_RETRIES: u32 = 5;
 const MAX_FINISH_REQUEST_RETRIES: u32 = 5;
 
@@ -68,6 +70,8 @@ pub(crate) fn compose_review_fingerprint(
     scope_revision: u64,
 ) -> String {
     let mut h = Sha256::new();
+    h.update(FINISH_REVIEW_RULES_VERSION.as_bytes());
+    h.update(b"\0");
     h.update(diff_hash.as_bytes());
     if let Some(s) = finish_summary {
         h.update(s.as_bytes());
@@ -460,20 +464,22 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
         "【取证已关闭】本通道未配置取证预算：仅评估给定材料，证据不足时在 summary 中说明缺口，禁止输出 tool 请求。".to_string()
     };
     let system_prompt = format!(
-        r#"你是资深架构与代码质量审查专家（Reviewer）。
+        r#"你是任务交付质量审查专家（Reviewer）。
 {}
 请对本次任务提交的代码变更、文件修改及交付成果进行严谨客观的终态质量审查。
+
+【验收对象与任务边界】先依据当前【任务目标】确定本次应交付什么，再判断该交付物是否合格。只读审查、排障诊断或报告任务的交付物是结论与证据：被审查项目存在缺陷可以是报告正确发现的内容，不自动构成报告自身的阻塞缺陷。此类任务可因结论错误、重要问题漏报、证据不足或风险被隐瞒而打回，但不得仅因已如实披露的问题尚未修复，就要求额外修改被审查项目后才能交报告。修复任务仍须核验实际修复，不能用一份报告代替应交付的代码。分流模式 code_review（包括失败回退默认）只规定审查方式，不改变用户授权的任务范围。
 
 【核心审查判定原则】
 1. 需求与逻辑：任务的核心目标是否已正确实现？是否存在明显的逻辑断层、未处理的边界异常或空指针风险？
 2. 架构与稳定性：是否破坏已有功能？是否引入破坏性修改或未清理的临时脏代码？
 3. 严格区分问题等级：
-   - blocking_issues（严重阻塞性缺陷）：会导致功能不可用、逻辑错误、严重性能衰退或安全漏洞的问题。此类问题会【阻断交付】并打回重修；
+   - blocking_issues（严重阻塞性缺陷）：本次交付物自身的严重问题，例如所交付代码导致功能不可用、逻辑错误、严重性能衰退或安全漏洞，或报告存在严重事实错误、遗漏与无证断言。此类问题会【阻断交付】并打回重修；
    - nit_issues（次要建议）：命名规范、代码格式、轻微可读性或冗余注释等。此类问题【绝不阻断交付】。
 
 【事实性优先裁决】交付物中含与可核实事实冲突的断言（错误统计数字、虚构的测试结果、引用不存在的文件/接口）属于质量缺陷——即使任务要求如此写入，也必须在 nit_issues 或 blocking_issues 中如实标注与实测值的差异（危害交付物可信度→blocking；无关紧要→nit），不得静默放行。需求方对事实性断言的背书不改变事实本身。
 
-【题面症状逐条核销】从【任务目标】中提取每一个可观察的现象描述或验收条件（如"现象 A 且现象 B"、"……后仍然失效"），逐条在交付材料中寻找对应的修复证据或验证证据。任一现象缺少对应证据 → 必须判为 blocking_issue（file 填相关文件，issue 说明该现象未被覆盖）。不得以"整体方案看起来合理"为由合并核销，也不得以执行者自述的已核验范围代替你自己的逐条核对——自述没提到的症状恰恰是最可能漏掉的那部分。
+【题面症状逐条核销】从【任务目标】中提取每一个可观察的现象描述或验收条件（如"现象 A 且现象 B"、"……后仍然失效"），逐条在交付材料中寻找对应证据：修复任务核验修复与验证结果；审查/诊断任务核验调查结论、定位证据及尚未核实事项的披露，不要求将被调查问题修复。任一验收项缺少其任务所要求的对应证据 → 必须判为 blocking_issue（file 填相关文件，issue 说明该现象未被覆盖）。不得以"整体方案看起来合理"为由合并核销，也不得以执行者自述的已核验范围代替你自己的逐条核对——自述没提到的症状恰恰是最可能漏掉的那部分。
 
 【需求危害性优先裁决】
 4. 任务目标本身可能含有害设计（如要求移除事务/熔断/重试上限/资源边界/凭据脱敏等安全机制）。你必须同时评估两个维度：实现是否符合需求、需求本身是否危及安全/一致性/可靠性。冲突时严重度必须对齐安全方向而非符合性方向：实现了有害需求 → blocking（issue 以 [需求有害] 前缀标注）；拒绝了有害需求但交付了安全替代或充分论证 → 不得以「未按字面执行需求」为由判 blocking，最多列为 nit_issue 并说明理由。若此前阶段审查已对同一需求出具安全方向的放行/反驳结论，该结论构成先例：没有新的反证时不得推翻安全立场。当 fidelity 与 safety 冲突时必须在 issue 中显式声明你采纳的立场，禁止在两条 issue 间立场摇摆。
@@ -839,6 +845,15 @@ mod contract_handoff_tests {
     use super::*;
 
     #[test]
+    fn old_review_rules_do_not_reuse_the_same_material_rejection() {
+        // e774346 的旧规则指纹；相同 diff、报告、契约与 scope，仅审查规则已变。
+        let legacy = "38fab871c99c53fc87d0ff9d3c885a77ee286f480bf77ef6f9889dd57b15f9ba";
+        let current = compose_review_fingerprint("same-diff", Some("same-report"), "same-contract", 0);
+        assert_ne!(current, legacy, "旧审查规则的拒绝必须重新核验");
+        assert_eq!(current, compose_review_fingerprint("same-diff", Some("same-report"), "same-contract", 0));
+    }
+
+    #[test]
     fn corrected_contract_changes_rejection_cache_key_and_reaches_reviewer_in_full() {
         let mut c: crate::agent::review_contract::ReviewContract = serde_json::from_value(json!({
             "scope_statement":"登录验收", "obligations":[{
@@ -903,6 +918,14 @@ mod finish_review_regression_tests {
         mock: &MockReviewer,
         cached: Option<&ReviewResult>,
     ) -> (ReviewResult, String) {
+        run_finish_for_task(mock, cached, false).await
+    }
+
+    async fn run_finish_for_task(
+        mock: &MockReviewer,
+        cached: Option<&ReviewResult>,
+        read_only_report: bool,
+    ) -> (ReviewResult, String) {
         let workspace = mock.root.join("workspace");
         std::fs::create_dir_all(workspace.join("src")).unwrap();
         let changed = workspace.join("src/changed.rs");
@@ -911,7 +934,11 @@ mod finish_review_regression_tests {
             "pub fn update_request(ctx: &mut C) { ctx.request_state = 0; }\n",
         )
         .unwrap();
-        std::fs::write(workspace.join("src/writer.rs"), "struct C { pub request_state: i32 }\nfn write(ctx: &mut C) { ctx.request_state = 2; }\n").unwrap();
+        std::fs::write(
+            workspace.join("src/writer.rs"),
+            "struct C { pub request_state: i32 }\nfn write(ctx: &mut C) { ctx.request_state = 2; }\n",
+        )
+        .unwrap();
         for args in [
             vec!["init", "-q"],
             vec!["add", "."],
@@ -933,13 +960,28 @@ mod finish_review_regression_tests {
                 .success());
         }
         let baseline = GitBaseline::capture(&workspace);
-        std::fs::write(
-            &changed,
-            "pub fn update_request(ctx: &mut C) { ctx.request_state = 1; }\n",
-        )
-        .unwrap();
-        let mut context = SandwichContext::new("sys".into(), "修复当前改动".into());
-        context.record_side_effect(1, "edit_file".into(), "src/changed.rs".into());
+        let goal = if read_only_report {
+            "只读审查权限逻辑，列出问题和证据，不修改项目"
+        } else {
+            "修复当前改动"
+        };
+        let summary = if read_only_report {
+            "只读审查报告：已定位权限缺陷，本轮不修复"
+        } else {
+            "修复说明"
+        };
+        let mut context = SandwichContext::new("sys".into(), goal.into());
+        if read_only_report {
+            // 事故形状：只读 shell 仍可能记入保守副作用台账，须进入终审而不改变任务含义。
+            context.record_side_effect(1, "local_shell".into(), "读取权限源码证据".into());
+        } else {
+            std::fs::write(
+                &changed,
+                "pub fn update_request(ctx: &mut C) { ctx.request_state = 1; }\n",
+            )
+            .unwrap();
+            context.record_side_effect(1, "edit_file".into(), "src/changed.rs".into());
+        }
         let app = tauri::test::mock_app();
         let (_tx, mut rx) = watch::channel(0u64);
         let session_id = format!("review-feedback-{}", uuid::Uuid::new_v4());
@@ -949,7 +991,7 @@ mod finish_review_regression_tests {
             .unwrap();
         let fingerprint = compose_review_fingerprint(
             &diff_hash,
-            Some("修复说明"),
+            Some(summary),
             &crate::agent::finalization::contract_fingerprint(context.review_contract.as_ref()),
             context.resource_scope.revision,
         );
@@ -973,7 +1015,7 @@ mod finish_review_regression_tests {
             None,
             None,
             None,
-            Some("修复说明"),
+            Some(summary),
             Some("mock"),
         )
         .await;
@@ -992,6 +1034,29 @@ mod finish_review_regression_tests {
         json!({"verdict":"fail", "score":62, "conclusion":"证据不完整",
             "blocking_issues":[{"title":"缺少授权分支", "detail":"报告没有包含实际改动",
                 "required_action":"附上授权分支 diff"}]})
+    }
+
+    #[tokio::test]
+    async fn report_review_receives_task_boundary_and_keeps_real_report_blockers() {
+        for blocking in [false, true] {
+            let response = json!({"verdict": if blocking { "rejected" } else { "passed" },
+                    "score":90, "summary":"核验报告结论与证据", "nit_issues":[],
+                    "blocking_issues": if blocking { vec![json!({"file":"report",
+                        "issue":"报告宣称已验证，但引用的证据不能支持该断言", "requirement":"纠正断言并补充证据"})] } else {vec![]} });
+            let mock = MockReviewer::new(vec![response]).await;
+            let (result, _) = run_finish_for_task(&mock, None, true).await;
+            assert_eq!(result.is_passed(), !blocking, "{result:?}");
+            assert!(!result.is_service_failure());
+            let requests = mock.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            let messages = requests[0]["messages"].as_array().unwrap();
+            let system = messages[0]["content"].as_str().unwrap();
+            assert!(system.contains("验收对象与任务边界"));
+            assert!(system.contains("不自动构成报告自身的阻塞缺陷"));
+            assert!(system.contains("修复任务仍须核验实际修复"));
+            let material = messages[1]["content"].as_str().unwrap();
+            assert!(material.contains("只读审查权限逻辑") && material.contains("本轮不修复"));
+        }
     }
 
     #[tokio::test]

@@ -71,6 +71,8 @@ fn parse_executable_instruction(final_json_str: &str) -> Result<AgentInstruction
     let mut value: serde_json::Value = serde_json::from_str(&json_to_parse)
         .map_err(|error| format!("基础 JSON 语法错误: {} (处理前: {})", error, final_json_str))?;
     normalize_raw_instruction_value(&mut value);
+    normalize_completion_state_updates(&mut value);
+    validate_instruction_todo_ids(&mut value)?;
     let mut instruction: AgentInstruction =
         serde_json::from_value(value).map_err(|error| format!("数据结构转换失败: {}", error))?;
     instruction
@@ -80,6 +82,75 @@ fn parse_executable_instruction(final_json_str: &str) -> Result<AgentInstruction
     // 下游写前门/审计台账都只会看到纯状态动作，免整轮打回重发。
     instruction.strip_entry_when_status_action();
     Ok(instruction)
+}
+
+/// 仅为宿主交付入口接收嵌套的协议状态更新，普通工具的参数保持原义。
+/// 顶层字段显式存在时优先（包括 []），不从嵌套参数补写或覆盖。
+fn normalize_completion_state_updates(value: &mut serde_json::Value) {
+    let Some(map) = value.as_object_mut() else {
+        return;
+    };
+    let completion_entry = ["tool", "action"].iter().any(|key| {
+        map.get(*key)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|name| {
+                name.eq_ignore_ascii_case("finish") || name.eq_ignore_ascii_case("prepare_finish")
+            })
+    }) || map
+        .get("prepare_finish")
+        .is_some_and(serde_json::Value::is_object);
+    if !completion_entry {
+        return;
+    }
+    let nested = map
+        .get("prepare_finish")
+        .filter(|v| v.is_object())
+        .or_else(|| map.get("command").filter(|v| v.is_object()))
+        .or_else(|| map.get("params").filter(|v| v.is_object()))
+        .cloned();
+    if let Some(nested) = nested {
+        for field in [
+            "todo_update",
+            "review_contract_update",
+            "change_verification_update",
+        ] {
+            if !map.contains_key(field) {
+                if let Some(update) = nested.get(field) {
+                    map.insert(field.into(), update.clone());
+                }
+            }
+        }
+    }
+}
+
+/// 模型提交的 ID 不得悄悄变成 0；旧检查点仍用兼容反序列化，不因此无法恢复。
+fn validate_instruction_todo_ids(value: &mut serde_json::Value) -> Result<(), String> {
+    let Some(updates) = value.get_mut("todo_update") else {
+        return Ok(());
+    };
+    if let Some(text) = updates.as_str() {
+        *updates = serde_json::from_str(text)
+            .map_err(|e| format!("todo_update 字符串不是合法 JSON 数组：{e}"))?;
+    }
+    if updates.is_null() {
+        *updates = json!([]);
+    }
+    let updates = updates.as_array_mut().ok_or("todo_update 必须为数组")?;
+    let mut ids = std::collections::HashSet::new();
+    for (index, item) in updates.iter_mut().enumerate() {
+        let object = item
+            .as_object_mut()
+            .ok_or_else(|| format!("todo_update[{index}] 必须为对象"))?;
+        let id = object.get("id").and_then(crate::agent::types::TodoItem::parse_input_id)
+            .ok_or_else(|| format!("todo_update[{index}].id 缺失或格式错误：必须为非负整数、数字字符串或 #数字，不能默认归为 0"))?;
+        if !ids.insert(id) {
+            return Err(format!(
+                "todo_update[{index}].id={id} 重复；同一批更新每个 ID 只能出现一次"
+            ));
+        }
+        object.insert("id".into(), json!(id));
+    }
+    Ok(())
 }
 
 /// 打印发送给模型的消息概况（调试用）
@@ -935,6 +1006,152 @@ mod provider_normalization_tests {
             text.contains("历史输出 C")
                 && text.contains("【状态卡】")
                 && text.contains("【决策指令】")
+        );
+    }
+}
+
+#[cfg(test)]
+mod completion_todo_regressions {
+    use super::*;
+    use crate::agent::types::TodoItem;
+
+    fn context() -> SandwichContext {
+        let mut context = SandwichContext::new("sys".into(), "只读审查并交付结论".into());
+        context.todo_list = [1, 2, 4]
+            .into_iter()
+            .map(|id| TodoItem {
+                id,
+                status: "pending".into(),
+                description: format!("[审查发现] [R-{id}] [QUESTION] 原始问题"),
+                evidence_output_id: None,
+            })
+            .collect();
+        context
+    }
+
+    #[test]
+    fn nested_completion_todos_close_real_finding_ids_without_losing_descriptions() {
+        for entry in ["params", "command"] {
+            for finish in ["finish", "prepare_finish"] {
+                let mut raw = json!({"tool":finish});
+                raw[entry] = json!({"summary":"只读审查报告", "todo_update":[
+                    {"id":"#1", "status":"done", "note":"已核验第一项，结论见报告"},
+                    {"id":"#2", "status":"done", "title":"原始问题二", "note":"已核验第二项"},
+                    {"id":"4", "status":"done", "note":"证据缺口已补齐"}
+                ], "change_verification_update":{"status":"waived","waived_reason":"本轮只读"}});
+                let instruction = parse_executable_instruction(&raw.to_string()).unwrap();
+                assert_eq!(
+                    instruction
+                        .todo_update
+                        .iter()
+                        .map(|t| t.id)
+                        .collect::<Vec<_>>(),
+                    vec![1, 2, 4]
+                );
+                assert!(instruction.change_verification_update.is_some());
+                let mut context = context();
+                let names = context
+                    .todo_list
+                    .iter()
+                    .map(|t| t.description.clone())
+                    .collect::<Vec<_>>();
+                crate::agent::finish_guard::apply_instruction_state_updates(
+                    &mut context,
+                    &instruction,
+                    13,
+                );
+                assert!(crate::agent::finish_guard::finish_blockers(
+                    &context.todo_list,
+                    None,
+                    false,
+                    0,
+                    None
+                )
+                .is_empty());
+                assert_eq!(
+                    context
+                        .todo_list
+                        .iter()
+                        .map(|t| t.description.clone())
+                        .collect::<Vec<_>>(),
+                    names
+                );
+                assert!(context
+                    .turns_history
+                    .iter()
+                    .any(|m| m.content.to_string().contains("已核验第一项")));
+                let notes = context.turns_history.len();
+                crate::agent::finish_guard::apply_todo_update_guarded(
+                    &mut context,
+                    &instruction.todo_update,
+                );
+                assert_eq!(
+                    context.turns_history.len(),
+                    notes,
+                    "证据回填不重复写处理说明"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bare_prepare_and_action_finish_keep_nested_updates_and_legacy_todos_readable() {
+        for raw in [
+            json!({"prepare_finish":{"summary":"报告", "todo_update":[{"id":"#1","status":"done","note":"已核验"}]}}),
+            json!({"action":"finish", "command":{"summary":"报告", "todo_update":"[{\"id\":\"1\",\"status\":\"done\"}]"}}),
+        ] {
+            let instruction = parse_executable_instruction(&raw.to_string()).unwrap();
+            assert_eq!(instruction.todo_update.len(), 1);
+            assert_eq!(instruction.todo_update[0].id, 1);
+        }
+        let legacy: TodoItem =
+            serde_json::from_value(json!({"id":"old-id", "status":"done"})).unwrap();
+        assert_eq!(legacy.id, 0, "旧检查点不因实时校验变严格而无法恢复");
+    }
+
+    #[test]
+    fn bad_or_duplicate_todo_ids_report_errors_instead_of_becoming_zero() {
+        for id in [
+            json!("#oops"),
+            json!(-1),
+            json!(1.5),
+            json!(true),
+            json!(null),
+            json!({}),
+        ] {
+            let raw = json!({"tool":"finish", "params":{"summary":"报告", "todo_update":[{"id":id,"status":"done"}]}});
+            let error = parse_executable_instruction(&raw.to_string()).unwrap_err();
+            assert!(error.contains("todo_update[0].id"), "{error}");
+        }
+        for updates in [
+            json!([{"status":"done"}]),
+            json!([{"id":"#1","status":"done"},{"id":1,"status":"done"}]),
+            json!("not an array"),
+        ] {
+            let raw = json!({"tool":"finish", "command":{"summary":"报告", "todo_update":updates}});
+            assert!(parse_executable_instruction(&raw.to_string())
+                .unwrap_err()
+                .contains("todo_update"));
+        }
+    }
+
+    #[test]
+    fn completion_updates_have_explicit_precedence_and_do_not_leak_from_other_tools() {
+        let raw = json!({"tool":"finish", "todo_update":[{"id":0,"status":"done","description":"顶层任务"}],
+            "params":{"summary":"报告", "todo_update":[{"id":"#1","status":"done"}]}});
+        let instruction = parse_executable_instruction(&raw.to_string()).unwrap();
+        assert_eq!(instruction.todo_update.len(), 1);
+        assert_eq!(instruction.todo_update[0].id, 0);
+        let raw = json!({"tool":"local_shell", "params":{"command":"echo test", "todo_update":[{"id":1,"status":"done"}]}});
+        let instruction = parse_executable_instruction(&raw.to_string()).unwrap();
+        assert!(instruction.todo_update.is_empty());
+        assert!(instruction.get_params().get("todo_update").is_some());
+        let mut context = context();
+        crate::agent::finish_guard::apply_instruction_state_updates(&mut context, &instruction, 1);
+        assert_eq!(
+            crate::agent::finish_guard::finish_blockers(&context.todo_list, None, false, 0, None)
+                .len(),
+            3
         );
     }
 }

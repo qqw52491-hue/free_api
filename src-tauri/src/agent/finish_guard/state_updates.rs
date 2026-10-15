@@ -156,6 +156,36 @@ pub(crate) fn apply_todo_update_guarded(
         return; // 空更新 = 未尝试管理待办，保持原状
     }
     let mut incoming = todo_update.to_vec();
+    // 按已有 ID 核销时，处理说明不是新的任务身份。保留原审查问题，说明单独持久在上下文。
+    let mut notes = Vec::new();
+    for item in &mut incoming {
+        if let Some(existing) = context
+            .todo_list
+            .iter()
+            .find(|old| old.id == item.id && old.description.starts_with("[审查发现]"))
+        {
+            if item.description != existing.description {
+                if !item.description.trim().is_empty() {
+                    notes.push(format!(
+                        "【待办处理说明已记录 #{}】{}",
+                        item.id, item.description
+                    ));
+                }
+                item.description = existing.description.clone();
+            }
+        }
+    }
+    for note in notes {
+        // 状态应用与证据回填会各调用一次；同一说明只记一次。
+        let recorded = format!("【宿主反馈】\n{note}");
+        if !context
+            .turns_history
+            .iter()
+            .any(|turn| turn.content.as_str() == Some(recorded.as_str()))
+        {
+            context.add_host_feedback(&note);
+        }
+    }
     // 先收集被剔除的审查发现（不可变借用），再统一恢复（可变借用）
     let mut dropped_findings = Vec::new();
     for existing in &context.todo_list {
