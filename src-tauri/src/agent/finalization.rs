@@ -24,6 +24,31 @@ use tokio::sync::watch;
 mod evaluate;
 pub(crate) use evaluate::*;
 
+/// 恢复已知的残缺 finish 外壳：仅当补回固定外层后可严格解析，才读取正文。
+/// 不执行其中指令、不提升其他字段，也不截取普通文本/代码示例。
+pub(crate) fn finish_summary_text(raw: &str) -> String {
+    let text = raw.trim();
+    let recover = || -> Option<String> {
+        if !text.starts_with("plan-") {
+            return None;
+        }
+        let value: Value = serde_json::from_str(&format!("{{\"plan_id\":\"{text}}}")).ok()?;
+        let plan = value.get("plan_id")?.as_str()?.strip_prefix("plan-")?;
+        if plan.is_empty() || !plan.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        if value.get("tool")?.as_str()? != "finish" || !value.get("plan_title")?.is_string() {
+            return None;
+        }
+        value
+            .get("command")?
+            .get("summary")?
+            .as_str()
+            .map(str::to_owned)
+    };
+    recover().unwrap_or_else(|| raw.to_owned())
+}
+
 /// 收据中的验证结论。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]

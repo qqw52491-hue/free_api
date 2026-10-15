@@ -1,0 +1,37 @@
+[
+  {
+    "name": "stored_finish_fragment",
+    "raw": "plan-1\",\"plan_title\":\"检查代码\",\"session_title\":null,\"new_plan\":null,\"applied_lessons\":null,\"tool\":\"finish\",\"action\":null,\"command\":{\"summary\":\"# 检查报告\\n证据 output_id:proof-123；引用 step_7。\\n字符串保留 C:\\\\new\\\\file 与字面量 \\\\n。\\n```json\\n{\\\"todo_update\\\":[],\\\"review_contract_update\\\":{\\\"open\\\":true}}\\n```\\n原文结尾：}]\"},\"params\":null,\"url\":null,\"text\":null,\"id\":null",
+    "expected": "# 检查报告\n证据 output_id:proof-123；引用 step_7。\n字符串保留 C:\\new\\file 与字面量 \\n。\n```json\n{\"todo_update\":[],\"review_contract_update\":{\"open\":true}}\n```\n原文结尾：}]"
+  },
+  {
+    "name": "ordinary_report_keeps_evidence_and_code",
+    "raw": "# 检查报告\n证据 output_id:proof-123；引用 step_7。\n字符串保留 C:\\new\\file 与字面量 \\n。\n```json\n{\"todo_update\":[],\"review_contract_update\":{\"open\":true}}\n```\n原文结尾：}]",
+    "expected": "# 检查报告\n证据 output_id:proof-123；引用 step_7。\n字符串保留 C:\\new\\file 与字面量 \\n。\n```json\n{\"todo_update\":[],\"review_contract_update\":{\"open\":true}}\n```\n原文结尾：}]"
+  },
+  {
+    "name": "valid_json_document_is_content",
+    "raw": "{\"plan_id\":\"plan-1\",\"plan_title\":\"检查代码\",\"session_title\":null,\"new_plan\":null,\"applied_lessons\":null,\"tool\":\"finish\",\"action\":null,\"command\":{\"summary\":\"# 检查报告\\n证据 output_id:proof-123；引用 step_7。\\n字符串保留 C:\\\\new\\\\file 与字面量 \\\\n。\\n```json\\n{\\\"todo_update\\\":[],\\\"review_contract_update\\\":{\\\"open\\\":true}}\\n```\\n原文结尾：}]\"},\"params\":null,\"url\":null,\"text\":null,\"id\":null}",
+    "expected": "{\"plan_id\":\"plan-1\",\"plan_title\":\"检查代码\",\"session_title\":null,\"new_plan\":null,\"applied_lessons\":null,\"tool\":\"finish\",\"action\":null,\"command\":{\"summary\":\"# 检查报告\\n证据 output_id:proof-123；引用 step_7。\\n字符串保留 C:\\\\new\\\\file 与字面量 \\\\n。\\n```json\\n{\\\"todo_update\\\":[],\\\"review_contract_update\\\":{\\\"open\\\":true}}\\n```\\n原文结尾：}]\"},\"params\":null,\"url\":null,\"text\":null,\"id\":null}"
+  },
+  {
+    "name": "code_fence_is_content",
+    "raw": "```json\n{\"plan_id\":\"plan-1\",\"plan_title\":\"检查代码\",\"session_title\":null,\"new_plan\":null,\"applied_lessons\":null,\"tool\":\"finish\",\"action\":null,\"command\":{\"summary\":\"# 检查报告\\n证据 output_id:proof-123；引用 step_7。\\n字符串保留 C:\\\\new\\\\file 与字面量 \\\\n。\\n```json\\n{\\\"todo_update\\\":[],\\\"review_contract_update\\\":{\\\"open\\\":true}}\\n```\\n原文结尾：}]\"},\"params\":null,\"url\":null,\"text\":null,\"id\":null}\n```",
+    "expected": "```json\n{\"plan_id\":\"plan-1\",\"plan_title\":\"检查代码\",\"session_title\":null,\"new_plan\":null,\"applied_lessons\":null,\"tool\":\"finish\",\"action\":null,\"command\":{\"summary\":\"# 检查报告\\n证据 output_id:proof-123；引用 step_7。\\n字符串保留 C:\\\\new\\\\file 与字面量 \\\\n。\\n```json\\n{\\\"todo_update\\\":[],\\\"review_contract_update\\\":{\\\"open\\\":true}}\\n```\\n原文结尾：}]\"},\"params\":null,\"url\":null,\"text\":null,\"id\":null}\n```"
+  },
+  {
+    "name": "packet_inside_prose_is_content",
+    "raw": "协议示例：\nplan-1\",\"plan_title\":\"检查代码\",\"session_title\":null,\"new_plan\":null,\"applied_lessons\":null,\"tool\":\"finish\",\"action\":null,\"command\":{\"summary\":\"# 检查报告\\n证据 output_id:proof-123；引用 step_7。\\n字符串保留 C:\\\\new\\\\file 与字面量 \\\\n。\\n```json\\n{\\\"todo_update\\\":[],\\\"review_contract_update\\\":{\\\"open\\\":true}}\\n```\\n原文结尾：}]\"},\"params\":null,\"url\":null,\"text\":null,\"id\":null",
+    "expected": "协议示例：\nplan-1\",\"plan_title\":\"检查代码\",\"session_title\":null,\"new_plan\":null,\"applied_lessons\":null,\"tool\":\"finish\",\"action\":null,\"command\":{\"summary\":\"# 检查报告\\n证据 output_id:proof-123；引用 step_7。\\n字符串保留 C:\\\\new\\\\file 与字面量 \\\\n。\\n```json\\n{\\\"todo_update\\\":[],\\\"review_contract_update\\\":{\\\"open\\\":true}}\\n```\\n原文结尾：}]\"},\"params\":null,\"url\":null,\"text\":null,\"id\":null"
+  },
+  {
+    "name": "non_finish_packet_is_not_converted",
+    "raw": "plan-1\",\"plan_title\":\"检查代码\",\"session_title\":null,\"new_plan\":null,\"applied_lessons\":null,\"tool\":\"local_shell\",\"action\":null,\"command\":{\"summary\":\"# 检查报告\\n证据 output_id:proof-123；引用 step_7。\\n字符串保留 C:\\\\new\\\\file 与字面量 \\\\n。\\n```json\\n{\\\"todo_update\\\":[],\\\"review_contract_update\\\":{\\\"open\\\":true}}\\n```\\n原文结尾：}]\"},\"params\":null,\"url\":null,\"text\":null,\"id\":null",
+    "expected": "plan-1\",\"plan_title\":\"检查代码\",\"session_title\":null,\"new_plan\":null,\"applied_lessons\":null,\"tool\":\"local_shell\",\"action\":null,\"command\":{\"summary\":\"# 检查报告\\n证据 output_id:proof-123；引用 step_7。\\n字符串保留 C:\\\\new\\\\file 与字面量 \\\\n。\\n```json\\n{\\\"todo_update\\\":[],\\\"review_contract_update\\\":{\\\"open\\\":true}}\\n```\\n原文结尾：}]\"},\"params\":null,\"url\":null,\"text\":null,\"id\":null"
+  },
+  {
+    "name": "unparseable_fragment_stays_intact",
+    "raw": "plan-1\",\"plan_title\":\"检查代码\",\"session_title\":null,\"new_plan\":null,\"applied_lessons\":null,\"tool\":\"finish\",\"action\":null,\"command\":{\"summary\":\"# 检查报告\\n证据 output_id:proof-123；引用 step_7。\\n字符串保留 C:\\\\new\\\\file 与字面量 \\\\n。\\n```json\\n{\\\"todo_update\\\":[],\\\"review_contract_update\\\":{\\\"open\\\":true}}\\n```\\n原文结尾：}]\"},\"params\":null,\"url\":null,\"text\":null,",
+    "expected": "plan-1\",\"plan_title\":\"检查代码\",\"session_title\":null,\"new_plan\":null,\"applied_lessons\":null,\"tool\":\"finish\",\"action\":null,\"command\":{\"summary\":\"# 检查报告\\n证据 output_id:proof-123；引用 step_7。\\n字符串保留 C:\\\\new\\\\file 与字面量 \\\\n。\\n```json\\n{\\\"todo_update\\\":[],\\\"review_contract_update\\\":{\\\"open\\\":true}}\\n```\\n原文结尾：}]\"},\"params\":null,\"url\":null,\"text\":null,"
+  }
+]

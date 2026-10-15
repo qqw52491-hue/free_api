@@ -76,7 +76,7 @@ pub(crate) fn interrupted_since(receiver: &watch::Receiver<u64>, generation: u64
 }
 
 fn payload(instruction: &AgentInstruction) -> Value {
-    if let Some(request) = instruction.prepare_finish.as_ref() {
+    let mut value = if let Some(request) = instruction.prepare_finish.as_ref() {
         let mut map = serde_json::Map::new();
         if let Some(s) = &request.summary {
             map.insert("summary".into(), json!(s));
@@ -87,7 +87,16 @@ fn payload(instruction: &AgentInstruction) -> Value {
         Value::Object(map)
     } else {
         instruction.command.clone().unwrap_or(Value::Null)
+    };
+    // 评估、指纹与正式提交使用同一份正文，不能验收一份再展示另一份。
+    if let Some(object) = value.as_object_mut() {
+        for key in ["summary", "details"] {
+            if let Some(Value::String(text)) = object.get_mut(key) {
+                *text = finish_summary_text(text);
+            }
+        }
     }
+    value
 }
 
 /// 所有未闭合项使用同一份清单；动态检查每次重跑，昂贵验证/审查仅复用新鲜就绪收据。

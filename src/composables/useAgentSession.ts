@@ -5,6 +5,7 @@ import { useAgentTaskResources } from "./useAgentTaskResources";
 import { usePersistedAgentConversation, type PersistedConversationMessage } from "./usePersistedAgentConversation";
 import type { ArtifactDescriptor, AgentArtifactInput } from "../types/artifact";
 import { normalizeArtifact, normalizeArtifactList } from "../utils/artifact";
+import { finishSummaryText } from "../utils/agentCompletionText";
 
 export interface AgentHistoryTurn {
     id: string;
@@ -507,37 +508,17 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         };
     });
 
-    function cleanUserFacingSummary(rawText: string): string {
-        if (!rawText) return "";
-        return rawText
-            .replace(/\\n/g, "\n")
-            // 过滤系统协议字段：带引号的 JSON key 格式（模型泄漏到 summary 时）
-            .replace(/,?\s*"todo_update"\s*:\s*\[[\s\S]*?\]/gi, "")
-            .replace(/,?\s*"review_contract_update"\s*:\s*\{[\s\S]*?\}/gi, "")
-            .replace(/,?\s*"change_verification_update"\s*:\s*\{[\s\S]*?\}/gi, "")
-            .replace(/,?\s*"memories_update"\s*:\s*\[[\s\S]*?\]/gi, "")
-            .replace(/,?\s*"progress_summary"\s*:\s*"[^"]*"/gi, "")
-            // 过滤不带引号的格式（旧版泄漏格式）
-            .replace(/change_verification_update\s*:\s*\{[\s\S]*?\}/gi, "")
-            .replace(/review_contract_update\s*:\s*\{[\s\S]*?\}/gi, "")
-            .replace(/output_id\s*:\s*[a-zA-Z0-9_-]+/gi, "")
-            // 清理尾部残留的多余括号和逗号
-            .replace(/[,\s]*[}\]]+\s*$/, "")
-            .replace(/\n{3,}/g, "\n\n")
-            .trim();
-    }
-
     const finalSummary = computed(() => {
         const output = finishOutput.value || {};
-        const summary = toText(output.summary || output.message || output.result || output.content || "");
-        const details = toText(output.details || "");
+        const summary = finishSummaryText(toText(output.summary || output.message || output.result || output.content || ""));
+        const details = finishSummaryText(toText(output.details || ""));
         let combined = summary;
         if (summary && details && summary !== details) {
             combined = `${summary}\n\n${details}`;
         } else if (!summary && details) {
             combined = details;
         }
-        return cleanUserFacingSummary(combined);
+        return combined;
     });
     // 流式 finish 只是候选草稿；最终正文仅来自 complete 事件中的已提交结果。
     // 只向界面投影布尔状态，长草稿逐块增长不触发最终 Markdown 重算/渲染。
@@ -671,8 +652,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             status: toText(trace.status) || "running",
             steps,
             summary: (() => {
-                const s = toText(completion.summary || completion.message || completion.result || completion.content);
-                const d = toText(completion.details || "");
+                const s = finishSummaryText(toText(completion.summary || completion.message || completion.result || completion.content));
+                const d = finishSummaryText(toText(completion.details || ""));
                 if (s && d && s !== d) return `${s}\n\n${d}`;
                 return s || d || "";
             })(),
@@ -705,7 +686,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             if (!isMessageInsideRun(message, run)) return false;
             const content = message.content.trim();
             if (message.role === "user" && content === normalizedGoal) return false;
-            if (message.role !== "user" && normalizedSummary && content === normalizedSummary) return false;
+            if (message.role !== "user" && normalizedSummary && finishSummaryText(content).trim() === normalizedSummary) return false;
             return true;
         });
     }
@@ -713,7 +694,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         const assistantMessages = conversationMessages.value.filter((message) =>
             message.role !== "user" && isMessageInsideRun(message, run) && Boolean(message.content.trim()),
         );
-        return assistantMessages.length ? assistantMessages[assistantMessages.length - 1].content.trim() : "";
+        return assistantMessages.length ? finishSummaryText(assistantMessages[assistantMessages.length - 1].content.trim()) : "";
     }
     function dedupeHistoryRuns(runs: HistoryRunSnapshot[]): HistoryRunSnapshot[] {
         const byId = new Map<string, HistoryRunSnapshot>();

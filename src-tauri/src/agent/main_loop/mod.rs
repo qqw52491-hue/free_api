@@ -2270,7 +2270,6 @@ async fn run_agent_main_loop_in_workspace_inner(
                 &final_session_id,
                 &goal,
                 &run_trace_steps,
-                &instruction,
                 &output_text,
                 &conversation_model_id,
                 reviewer_warnings_delivered.as_ref(),

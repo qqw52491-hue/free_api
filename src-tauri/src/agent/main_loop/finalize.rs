@@ -4,11 +4,10 @@
 use crate::agent::checkpoint::AgentCheckpoint;
 use crate::agent::context::types::SandwichContext;
 use crate::agent::reviewer_gatekeeper::ReviewResult;
-use crate::agent::types::AgentInstruction;
 use crate::db::DbState;
 use serde_json::json;
 
-/// finish 确认提交：mark_done → 构建交付载荷（指令 command 优先，收据预填载荷回填）
+/// finish 确认提交：mark_done → 使用评估器已规范化并核验的交付载荷
 /// → 规范化本轮 finish 附带的产物路径为受管交付物 → 终态短事务原子提交。
 /// 返回结构化 emitted_finish 供前端通知使用。
 pub(crate) fn commit_completed_run(
@@ -19,7 +18,6 @@ pub(crate) fn commit_completed_run(
     final_session_id: &str,
     goal: &str,
     run_trace_steps: &[serde_json::Value],
-    instruction: &AgentInstruction,
     output_text: &str,
     conversation_model_id: &str,
     reviewer_warnings_delivered: Option<&ReviewResult>,
@@ -51,19 +49,8 @@ pub(crate) fn commit_completed_run(
     }
     candidate_context.block_manager.advance_to_next();
     candidate.mark_done(&candidate_context);
-    // ── 交付载荷在提交前构建：指令 command 优先，收据预填载荷回填 ──
-    let finish_payload = instruction
-        .command
-        .clone()
-        .filter(|value| value.is_object())
-        .or_else(|| {
-            checkpoint
-                .pending_finalization
-                .as_ref()
-                .map(|receipt| receipt.finish_payload.clone())
-                .filter(|value| value.is_object())
-        })
-        .unwrap_or(serde_json::Value::Null);
+    // 当前收据来自本轮评估；不能再用指令里的未规范化副本覆盖已验收正文。
+    let finish_payload = receipt.finish_payload.clone();
 
     let mut persisted_summary = finish_payload
         .get("summary")

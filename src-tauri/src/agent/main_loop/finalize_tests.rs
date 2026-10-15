@@ -51,7 +51,6 @@ fn commit(
         "s",
         "goal",
         &[],
-        &AgentInstruction::default(),
         "done",
         "m",
         None,
@@ -112,6 +111,60 @@ fn production_commit_refuses_missing_blocked_old_and_stale_receipts_without_mark
     assert_eq!(cp.phase, phase);
     no_terminal_rows(&db);
 }
+
+#[test]
+fn production_commit_uses_the_reviewed_body_in_event_trace_and_message() {
+    let fixtures: Vec<serde_json::Value> = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test/fixtures/finish-summary-fragments.json"
+    )))
+    .unwrap();
+    for fixture in fixtures {
+        let db = db();
+        let mut c = context();
+        let mut cp = AgentCheckpoint::new("s".into(), &c);
+        let raw = fixture["raw"].as_str().unwrap();
+        let expected = fixture["expected"].as_str().unwrap();
+        let mut receipt = ready(&c, &cp);
+        receipt.finish_payload = json!({"summary": expected});
+        receipt.acceptance_fingerprint =
+            crate::agent::finalization::acceptance_fingerprint(&c, &cp, Some(expected));
+        cp.pending_finalization = Some(receipt);
+        let emitted = commit_completed_run(
+            &db,
+            &mut cp,
+            &mut c,
+            "run",
+            "s",
+            "goal",
+            &[],
+            raw,
+            "m",
+            None,
+        )
+        .unwrap();
+        assert_eq!(emitted["summary"], expected, "{}", fixture["name"]);
+        let conn = db.0.lock().unwrap();
+        let completion: String = conn
+            .query_row(
+                "SELECT completion_json FROM agent_run_traces WHERE id='run'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let completion: serde_json::Value = serde_json::from_str(&completion).unwrap();
+        assert_eq!(completion["summary"], expected);
+        let message: String = conn
+            .query_row(
+                "SELECT content FROM chat_messages WHERE role='assistant'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(message, expected);
+    }
+}
+
 #[test]
 fn production_commit_preserves_memory_and_database_when_transaction_conflicts() {
     use crate::agent::target_block::TargetBlock;

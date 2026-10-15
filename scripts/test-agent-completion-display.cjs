@@ -41,6 +41,20 @@ async function start() {
 }
 function draft(text) { progress({type:'summary_stream', content:text}); }
 async function main() {
+    const fixtures = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../test/fixtures/finish-summary-fragments.json'), 'utf8'));
+    for (const fixture of fixtures) {
+        let s = await start();
+        progress({type:'complete',success:true,finish:{summary:fixture.raw}});
+        assert.equal(s.finalSummary.value, fixture.expected, `live: ${fixture.name}`);
+        s = await session('succeeded', {
+            traces: [{id:'saved-run',goal:'review',status:'succeeded',started_at:'2026-10-13T08:00:00Z',
+                completed_at:'2026-10-13T08:01:00Z',steps:[],completion:{summary:fixture.raw}}],
+            messages: [{id:'saved-message',role:'assistant',content:fixture.raw,created_at:'2026-10-13T08:01:00Z'}],
+        });
+        assert.equal(s.historyTurns.value[0].summary, fixture.expected, `history: ${fixture.name}`);
+        assert.equal(s.historyTurns.value[0].messages.length, 0, 'saved final message must not be displayed twice');
+        assert.equal(s.conversationMessages.value[0].content, fixture.raw, 'raw conversation record remains unchanged');
+    }
     let s = await start();
     let entries = timeline(s);
     assert.equal(entries().length, 0);

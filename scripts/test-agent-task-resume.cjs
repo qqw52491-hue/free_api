@@ -8,6 +8,7 @@ const vue = require('vue');
 const root = path.resolve(__dirname, '..');
 const cache = new Map();
 let mounted = [], requests = [], traceStatus = 'cancelled', creations = [], failCreation = false;
+let traceFixtures, messageFixtures = [];
 const storage = new Map();
 const handlers = new Map();
 global.localStorage = { getItem: k => storage.get(k) ?? null, setItem: (k,v) => storage.set(k,v) };
@@ -25,7 +26,7 @@ async function invoke(name, args) {
         if (failCreation) throw Error('cannot create session');
         return { id: 'saved-session' };
     }
-    if (name === 'get_session_run_traces') return [{
+    if (name === 'get_session_run_traces') return traceFixtures ?? [{
         id: 'previous-run', goal: 'original complex task', status: traceStatus,
         started_at: '2026-10-13T08:00:00Z', updated_at: '2026-10-13T08:01:00Z', steps: [],
     }];
@@ -46,7 +47,7 @@ function load(filename) {
         if (id === '@tauri-apps/api/event') return { listen: async (channel, fn) => { handlers.set(channel, fn); return () => { if (handlers.get(channel) === fn) handlers.delete(channel); }; } };
         if (id.endsWith('/format')) return format;
         if (id.endsWith('/usePersistedAgentConversation')) return {
-            usePersistedAgentConversation: () => ({ conversationMessages: vue.ref([]), isConversationLoading: vue.ref(false), loadConversation: async () => {} }),
+            usePersistedAgentConversation: () => ({ conversationMessages: vue.ref(messageFixtures), isConversationLoading: vue.ref(false), loadConversation: async () => {} }),
         };
         if (id.endsWith('/useAgentTaskResources')) return {
             useAgentTaskResources: () => new Proxy({}, { get: (_o, k) =>
@@ -64,8 +65,10 @@ function load(filename) {
     return m.exports;
 }
 const { useAgentSession } = load(path.join(root, 'src/composables/useAgentSession.ts'));
-async function session(status) {
+async function session(status, fixtures = {}) {
     traceStatus = status; mounted = []; requests = []; storage.clear();
+    traceFixtures = fixtures.traces;
+    messageFixtures = fixtures.messages ?? [];
     const s = useAgentSession('existing-session');
     s.modelRouting.value.pro = 'pro-model';
     for (const fn of mounted) await fn();

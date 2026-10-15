@@ -194,6 +194,31 @@ fn frozen_suite_success_saves_real_receipt_without_model_recopy_and_failure_does
     assert!(c.change_verification.is_none());
 }
 
+#[test]
+fn evaluation_payload_recovers_only_the_known_finish_frame_and_preserves_the_instruction() {
+    let fixtures: Vec<Value> = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test/fixtures/finish-summary-fragments.json"
+    )))
+    .unwrap();
+    for fixture in fixtures {
+        let raw = fixture["raw"].as_str().unwrap();
+        let expected = fixture["expected"].as_str().unwrap();
+        for prepare in [false, true] {
+            let instruction: AgentInstruction = serde_json::from_value(if prepare {
+                json!({"prepare_finish":{"summary":raw}})
+            } else {
+                json!({"tool":"finish","command":{"summary":raw}})
+            })
+            .unwrap();
+            let original = serde_json::to_value(&instruction).unwrap();
+            let result = payload(&instruction);
+            assert_eq!(result["summary"], expected, "{}", fixture["name"]);
+            assert_eq!(serde_json::to_value(&instruction).unwrap(), original);
+        }
+    }
+}
+
 #[tokio::test]
 async fn completed_report_todos_do_not_infer_a_requirement_to_write_code() {
     use crate::agent::child_reviewer::{retirement_tests::MockReviewer, ReviewScorecard};
