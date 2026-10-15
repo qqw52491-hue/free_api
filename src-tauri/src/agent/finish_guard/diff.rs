@@ -254,18 +254,7 @@ pub fn parse_file_line_ref(raw: &str) -> Option<(String, u32, u32)> {
     }
 }
 
-/// 核对审查契约中声称 `evidenced` 的义务证据是否真实成立。
-///
-/// 以**客观物理事实（工作区有无真实代码改动 diff）**分流，解耦"有副作用"与"必改代码"：
-/// 1. 有真实 diff → 严格对账：证据行号必须落入本次修改（防虚假交付，原逻辑不变）；
-/// 2. 无真实 diff（排查/测试/运维类任务的命令副作用）→ 证据降级为"静态可定位"校验：
-///    引用的 file:line 在当前工作区源码中客观存在即可，绝不要求落入不存在的 diff；
-/// 3. 义务带宿主可执行验证命令 (verify_command) 的，交由宿主执行器判定，此处不核对；
-/// 4. 纯只读任务（side_effect_count == 0）不进入本门禁。
-/// 诊断义务判别：义务的 question 与分流判决（triage）下发的
-/// investigation_questions 规范化一致即为诊断义务——其证据天然位于
-/// "读过的文件"而非 diff 内，走静态定位校验而非 diff 对账。
-/// 判别依据是宿主侧持久化的 triage 原单，模型无法伪造归属。
+/// 识别历史诊断问题，只用于引用定位失败时的说明，不决定证据是否充分。
 pub(crate) fn obligation_is_diagnostic(question: &str, diagnostic_questions: &[String]) -> bool {
     let norm = |s: &str| {
         s.split_whitespace()
@@ -278,6 +267,9 @@ pub(crate) fn obligation_is_diagnostic(question: &str, diagnostic_questions: &[S
     !q.is_empty() && diagnostic_questions.iter().any(|d| norm(d) == q)
 }
 
+/// 校验已申报义务中可机械核对的引用：代码位置可在 diff 或磁盘上定位。
+/// 带验证命令的义务由宿主执行器处理；其他引用移交终审，不按命令名或文字外观裁决。
+/// 纯只读且无副作用的任务不进入本门。
 pub(crate) fn review_contract_evidence_blockers(
     contract: &ReviewContract,
     side_effect_count: usize,
@@ -298,32 +290,6 @@ pub(crate) fn review_contract_evidence_blockers(
         return diagnostic_static_evidence_blockers(contract, ctx, workspace_root);
     }
 
-    // 当前 diff 覆盖地图：编辑会导致行号漂移，模型引用的证据行号极易变陈旧——
-    // 驳回时直接给出真实可用的 file:[起-止] 区间，让模型照图选行号，斩断"陈旧证据→驳回→原样重试"循环
-    let diff_map = format!(
-        "【当前 diff 实际覆盖区间（证据行号必须从此图中选取）】{}\n",
-        {
-            let mut parts: Vec<String> = ctx
-                .changed_files
-                .iter()
-                .map(|(f, hs)| {
-                    if hs.is_empty() {
-                        f.clone()
-                    } else {
-                        let ranges = hs
-                            .iter()
-                            .map(|(a, b)| format!("{}-{}", a, b))
-                            .collect::<Vec<_>>()
-                            .join(",");
-                        format!("{} [{}]", f, ranges)
-                    }
-                })
-                .collect();
-            parts.sort();
-            parts.join("; ")
-        }
-    );
-
     let mut blockers = Vec::new();
 
     for obligation in &contract.obligations {
@@ -336,9 +302,7 @@ pub(crate) fn review_contract_evidence_blockers(
             continue;
         }
 
-        // 诊断义务（triage 取证单下发的问题）的证据天然位于"读过的文件"，
-        // 强行要求落入 diff 属于门型错配——只要引用客观存在于工作区即可成立，
-        // 语义成立性由终审逐条核销。修复义务维持 diff 对账。
+        // 历史诊断问题的身份只影响定位失败时的错误说明。
         let is_diagnostic = obligation_is_diagnostic(&obligation.question, diagnostic_questions);
 
         let mut has_valid_evidence = false;
@@ -381,7 +345,7 @@ pub(crate) fn review_contract_evidence_blockers(
                     has_valid_evidence = true;
                     break;
                 }
-                // 形似代码位置声明但磁盘上根本不存在 → 伪造证据，仍然拦截
+                // 代码位置无法定位，报告该事实；不据此推断主观造假。
                 failed_refs.push(ref_str.trim().to_string());
             }
             // 非代码证据（命令输出/退出码/API 响应/运维状态）不参与 diff 对账：
@@ -391,10 +355,9 @@ pub(crate) fn review_contract_evidence_blockers(
         if !has_valid_evidence {
             if obligation.evidence_refs.is_empty() {
                 blockers.push(format!(
-                    "审查义务 [{}]（{}）声称已证实 (evidenced)，但未提供任何 evidence_refs 证据引用。请提供落入本次 diff 的代码行号证据，或将状态改为 waived 并说明理由。\n{}",
+                    "审查义务 [{}]（{}）声称已证实 (evidenced)，但未提供任何 evidence_refs 证据引用。请附现有源码位置、工具回执或其他取证引用；不适用时可标 waived 并说明理由。",
                     obligation.id,
                     obligation.question.trim(),
-                    diff_map
                 ));
             } else if !failed_refs.is_empty() && is_diagnostic {
                 blockers.push(format!(
@@ -412,25 +375,8 @@ pub(crate) fn review_contract_evidence_blockers(
                     obligation.question.trim(),
                     failed_refs.join(", "),
                 ));
-            } else if !obligation
-                .evidence_refs
-                .iter()
-                .any(|r| looks_like_operational_evidence(r))
-            {
-                // 既非代码位置也非可核验观测（裸结论如"已完成优化"）→ 证据不成立，仍然拦截
-                blockers.push(format!(
-                    "审查义务 [{}]（{}）声称已证实 (evidenced)，但引用的证据 `{}` 缺少具体代码行号，且不构成可核验的观测记录（需 file:line 代码域引用，或指向真实观测的命令/输出句柄/退出码/返回结果形态）。三条出路任选：①补充落入 diff 的行号证据；②引用真实发生的命令观测（形如 `命令 → 结果` 或 output_id 句柄），或挂 `verify_command` 由宿主判分；③改 waived 并说明理由。",
-                    obligation.id,
-                    obligation.question.trim(),
-                    obligation
-                        .evidence_refs
-                        .iter()
-                        .map(|r| r.trim())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
             }
-            // 其余情况：证据全部为非代码形态且含真实观测 → 本门证据域不存在，
+            // 其余情况：没有可机械核验的代码位置 → 本门不判定证据是否成立，
             // 不适用而不拦截：由 Gate Notice 移交终审做语义核验
         }
     }
@@ -621,25 +567,8 @@ fn diagnostic_static_evidence_blockers(
                     obligation.question.trim(),
                     failed_refs.join(", ")
                 ));
-            } else if !obligation
-                .evidence_refs
-                .iter()
-                .any(|r| looks_like_operational_evidence(r))
-            {
-                // 既非代码位置也非可核验观测（裸结论）→ 证据不成立，仍然拦截
-                blockers.push(format!(
-                    "审查义务 [{}]（{}）声称已证实 (evidenced)，但引用的证据 `{}` 不构成可核验形态（非 file:line 代码域引用，亦非指向真实观测的命令/输出句柄/退出码/返回结果）。请引用真实发生的命令观测或代码位置，或将状态改为 waived 并说明理由。",
-                    obligation.id,
-                    obligation.question.trim(),
-                    obligation
-                        .evidence_refs
-                        .iter()
-                        .map(|r| r.trim())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
             }
-            // 其余情况：全部为非代码且含真实观测 → 本门不适用，不拦截
+            // 其余情况：没有可机械核验的代码位置 → 移交终审，不凭文字外观拦截
         }
     }
 
@@ -732,65 +661,9 @@ fn head_has_path_shape(head: &str, workspace_root: Option<&std::path::Path>) -> 
     false
 }
 
-/// 非代码证据的"可观测形态"判定：引用必须指向一次真实发生的观测——
-/// 要么以已知命令/探针二进制开头（可与 side_effects 台账对账），
-/// 要么显式携带指向具体对象的句柄（output_id:值 / step_N / 结果词+数字）。
-/// 裸结论（"已完成优化"/"验证通过"/"返回正常"）没有可核验对象，不算证据。
-fn looks_like_operational_evidence(raw: &str) -> bool {
-    let s = raw.trim();
-    if s.is_empty() {
-        return false;
-    }
-    let lower = s.to_lowercase();
-    // ① 命令形态：首个 token 是已知命令/探针二进制（可与 side_effects 台账核验）
-    const CMD_HEADS: &[&str] = &[
-        "which", "test", "stat", "pacman", "dpkg", "rpm", "apt", "apt-get", "apt-cache",
-        "brew", "snap", "flatpak", "pkg", "systemctl", "service", "journalctl",
-        "hostnamectl", "timedatectl", "localectl", "loginctl", "resolvectl",
-        "pgrep", "pidof", "ps", "curl", "wget", "nc", "ping", "grep", "rg", "diff",
-        "cmp", "jq", "docker", "podman", "kubectl", "git", "cargo", "npm", "pnpm",
-        "npx", "pytest", "python", "python3", "go", "cat", "ls", "find", "ss",
-        "netstat", "lsof", "ip", "md5sum", "sha1sum", "sha256sum", "tar", "unzip",
-        "zipinfo", "sed", "awk", "echo", "openssl", "ssh", "scp",
-    ];
-    let head = s.split_whitespace().next().unwrap_or("");
-    let base = head.rsplit('/').next().unwrap_or(head);
-    let base = base.trim_end_matches(|c: char| !c.is_ascii_alphanumeric());
-    if CMD_HEADS.contains(&base) {
-        return true;
-    }
-    // ② 句柄形态：必须指向具体对象——句柄词 + 紧跟的值/数字才算"有观测对象"
-    let has_digit = lower.chars().any(|c| c.is_ascii_digit());
-    // output_id:<值> / output_id=<值> / output_id <值>
-    if let Some(pos) = lower.find("output_id") {
-        let rest = lower[pos + "output_id".len()..].trim_start_matches([':', '=', '：']);
-        if !rest.trim().is_empty() {
-            return true;
-        }
-    }
-    // step_<数字>（指向具体步骤）
-    if let Some(pos) = lower.find("step_") {
-        if lower[pos + "step_".len()..]
-            .chars()
-            .next()
-            .map_or(false, |c| c.is_ascii_digit())
-        {
-            return true;
-        }
-    }
-    // 结果词 + 数字：退出码 0 / exit code 1 / HTTP 200 / 状态码 204 / 返回 200 / → 0
-    const RESULT_WORDS: &[&str] = &[
-        "退出码", "exit", "http", "状态码", "返回", "→", "->", "=>", "stdout", "stderr",
-    ];
-    if has_digit && RESULT_WORDS.iter().any(|w| lower.contains(w)) {
-        return true;
-    }
-    false
-}
-
-/// 义务的证据引用是否全部为非代码形态且至少一条指向真实观测（命令/句柄/结果）。
+/// 义务引用中没有可解析的代码位置时，宿主不判断自由文本是否构成证据。
 /// 此时 diff 对账与静态定位均无判据——机械证据门不适用，移交终审语义核验。
-fn obligation_evidence_is_operational_only(
+fn obligation_evidence_is_noncode_only(
     obligation: &ReviewObligation,
     workspace_root: Option<&std::path::Path>,
 ) -> bool {
@@ -799,14 +672,10 @@ fn obligation_evidence_is_operational_only(
             .evidence_refs
             .iter()
             .all(|r| parse_file_line_ref(r).is_none() && !looks_like_file_ref(r, workspace_root))
-        && obligation
-            .evidence_refs
-            .iter()
-            .any(|r| looks_like_operational_evidence(r))
 }
 
 /// 机械证据门的 NotApplicable 交接：返回每条被跳过义务的跳过原因（含义务 id 与证据形态）。
-/// 与 review_contract_evidence_blockers 共用同一套判定谓词（obligation_evidence_is_operational_only），
+/// 与 review_contract_evidence_blockers 共用同一套判定谓词（obligation_evidence_is_noncode_only），
 /// 保证"机械门跳过的项"与"终审交接的项"严格一致——Skip 绝不静默。
 pub(crate) fn noncode_evidence_skip_reasons(
     contract: &ReviewContract,
@@ -822,7 +691,7 @@ pub(crate) fn noncode_evidence_skip_reasons(
         .iter()
         .filter(|o| o.status.trim().eq_ignore_ascii_case("evidenced"))
         .filter(|o| o.verify_command.is_none() && o.verify_script.is_none())
-        .filter(|o| obligation_evidence_is_operational_only(o, workspace_root))
+        .filter(|o| obligation_evidence_is_noncode_only(o, workspace_root))
         .map(|o| {
             let refs = o
                 .evidence_refs
@@ -831,7 +700,7 @@ pub(crate) fn noncode_evidence_skip_reasons(
                 .collect::<Vec<_>>()
                 .join("`, `");
             format!(
-                "契约义务 [{}]（{}）的证据引用为非代码形态（`{}`），diff/静态定位对账无判据",
+                "契约义务 [{}]（{}）的证据引用为非代码形态（`{}`），diff/静态定位对账无判据；引用本身不证明观测已发生或义务已成立，移交终审核验",
                 o.id,
                 o.question.trim(),
                 refs

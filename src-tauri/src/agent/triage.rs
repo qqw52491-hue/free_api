@@ -71,12 +71,10 @@ pub struct TriageVerdict {
     /// 判决自报的升级触发条件（观测用，门禁侧另有机械地板兜底）
     #[serde(default)]
     pub escalation_triggers: Vec<String>,
-    /// 取证任务单：Pro 档分流给出的调查问题清单（探索期注入主 Agent 上下文，
-    /// 让执行模型按单取证而非自由漫游；仅方案路由任务有意义）
+    /// 入口模型建议的调查问题；作为探索与审查参考，可被后续证据修正。
     #[serde(default)]
     pub investigation_questions: Vec<String>,
-    /// 取证任务单：方案成立前必须拿到的证据类型（同时并入审查输入，
-    /// 供 Tech Lead 核对取证覆盖度）
+    /// 入口模型建议关注的证据类型；保留历史字段名，不自动并入硬约束。
     #[serde(default)]
     pub required_evidence: Vec<String>,
     /// Skill 路由：triage 从宿主提供的 Skill 目录中选出应预载的手册（0~2 个，
@@ -198,7 +196,7 @@ impl TriageVerdict {
         self.route.trim().eq_ignore_ascii_case("user_clarification")
     }
 
-    /// 取证任务单文本（探索期注入执行模型上下文）：Pro 定调查方向、Flash 按单取证。
+    /// 探索期与子任务共享的调查参考，不构成新增验收条件。
     /// 无内容返回 None；条数与单条长度均有上限，防判决膨胀污染 prompt。
     pub fn investigation_brief_text(&self) -> Option<String> {
         let cap_items = |items: &[String], n: usize, w: usize| -> Vec<String> {
@@ -218,7 +216,7 @@ impl TriageVerdict {
         let mut parts = Vec::new();
         if !questions.is_empty() {
             parts.push(format!(
-                "必须回答的调查问题：\n{}",
+                "建议调查的问题：\n{}",
                 questions
                     .iter()
                     .enumerate()
@@ -229,7 +227,7 @@ impl TriageVerdict {
         }
         if !evidence.is_empty() {
             parts.push(format!(
-                "方案成立前必须拿到的证据：\n{}",
+                "建议关注的证据：\n{}",
                 evidence
                     .iter()
                     .map(|e| format!("- {}", e))
@@ -237,7 +235,10 @@ impl TriageVerdict {
                     .join("\n")
             ));
         }
-        Some(parts.join("\n"))
+        Some(format!(
+            "入口模型的调查参考（可随后续证据修正，不构成新增验收条件）：\n{}",
+            parts.join("\n")
+        ))
     }
 
     /// 失败降级判决：等价于「维持现状行为」——方案门照开、阶段审查保留、
@@ -317,15 +318,9 @@ pub fn merge_brief_into_inputs(
         .collect();
     append_items(&mut obj, "hard_constraints", triggers);
 
-    // 取证任务单的"必备证据"并入硬约束：Tech Lead 评审时据此核对取证覆盖度，
-    // 方案漏取关键证据本身就构成审查意见。
-    let required: Vec<String> = verdict
-        .required_evidence
-        .iter()
-        .map(|e| format!("必备证据：{}", e.trim()))
-        .filter(|e| e.len() > 5)
-        .collect();
-    append_items(&mut obj, "hard_constraints", required);
+    if let Some(brief) = verdict.investigation_brief_text() {
+        append_items(&mut obj, "investigation_reference", vec![brief]);
+    }
 
     serde_json::Value::Object(obj)
 }
@@ -426,8 +421,8 @@ pub async fn run_triage<R: tauri::Runtime>(
   "confidence": 0.85,
   "reason": "一句话判决理由",
   "escalation_triggers": ["会把本任务升级回重路径的触发条件"],
-  "investigation_questions": ["仅 technical_plan/expert_panel 路由填写：取证时必须回答的调查问题，1~6 条；每条须是可独立查证、互不依赖的具体问题（便于并行派给只读探针）"],
-  "required_evidence": ["仅 technical_plan/expert_panel 路由填写：方案成立前必须拿到的证据类型，1~6 条"],
+  "investigation_questions": ["仅 technical_plan/expert_panel 路由填写：建议关注的调查问题，1~6 条（可被后续证据修正，不构成新增验收条件）；每条须是可独立查证、互不依赖的具体问题（便于并行派给只读探针）"],
+  "required_evidence": ["仅 technical_plan/expert_panel 路由填写：建议关注的证据类型，1~6 条（调查参考）"],
   "skill_recommendations": [{"name": "目录中列出的 Skill 名", "reason": "基于任务/对话事实的推荐理由"}]
 }
 
@@ -445,7 +440,7 @@ pub async fn run_triage<R: tauri::Runtime>(
 - stage_review_mode：none=中段无需阶段审查；milestone=按里程碑/写入阈值做阶段审查。
 - final_review_mode：mechanical_only=机械校验即可交付（简单产物）；artifact_quality=非代码产物按产物质量标准终审（需求覆盖/结构完整/可用性）；code_review=代码级终审；operational_verification=须运行验证证据的终审；panel=多专家终审。route 为 technical_plan/expert_panel 时，这两项只是临时默认，规划阶段提交方案时会由方案制定者按真实产物重新确定。
 - evidence_policy：none=方案不需证据引用；source_refs=资料/需求来源即可；code_refs=须引用已读代码证据；operational_probes=须命令输出/探针证据。
-- investigation_questions / required_evidence：仅当 route 为 technical_plan/expert_panel 时填写，其他路由留空数组——你负责定调查方向，规划阶段的主 Agent 会先摸底，再把互相独立的问题派给只读探针并行取证，收齐后提交方案，Tech Lead 据此核对覆盖度。
+- investigation_questions / required_evidence：仅当 route 为 technical_plan/expert_panel 时填写，其他路由留空数组——你负责定调查方向，规划阶段的主 Agent 会先摸底，按需要把互相独立的问题派给只读探针并行取证，再依据实际发现提交方案；此清单是调查先验，不是必须逐条核销的验收清单。
   问题须对任务类型通用，围绕“要做出什么、拿什么当素材/数据、环境里有什么能力、怎样算做对”：例如视频/PPT/表格类产物应覆盖产出规格（时长/页数/列含义/格式）、可用素材与数据来源、本机可用的工具与依赖、逐条可核对的验收标准；代码类则覆盖相关调用链与影响面。
 - skill_recommendations（Skill 路由，0~2 个）：
   - 只能从下方【可选 Skill 目录】中按名称选择；name 必须与目录条目完全一致；
@@ -742,7 +737,7 @@ mod tests {
         let brief = v.investigation_brief_text().expect("有内容必须产出任务单");
         assert!(brief.contains("workspace_dir 在哪创建"));
         assert!(brief.contains("path_guard 谁消费"));
-        assert!(brief.contains("必备") || brief.contains("必须拿到的证据"));
+        assert!(brief.contains("建议关注的证据") && brief.contains("不构成新增验收条件"));
         // 空串项已被 normalize 过滤
         assert!(!brief.contains("3. \n"), "空问题不得进入任务单");
     }
@@ -755,22 +750,33 @@ mod tests {
         assert!(v.required_evidence.is_empty());
     }
 
-    #[test]
-    fn merge_brief_appends_required_evidence_to_hard_constraints() {
-        let v = parse(
+    #[tokio::test]
+    async fn investigation_reference_survives_child_rendering_without_becoming_a_hard_constraint() {
+        let verdict = parse(
             r#"{
-            "route": "technical_plan",
-            "required_evidence": ["path_guard 分类逻辑"]
+            "route":"technical_plan",
+            "investigation_questions":["入口假设是否成立"],
+            "required_evidence":["入口推测的证据类型"]
         }"#,
         );
-        let merged = merge_brief_into_inputs(None, &v);
-        let constraints = merged
-            .get("hard_constraints")
-            .and_then(|c| c.as_array())
-            .expect("必备证据必须并入 hard_constraints");
-        assert!(constraints
-            .iter()
-            .any(|c| c.as_str().map_or(false, |s| s.contains("path_guard 分类逻辑"))));
+        let merged = merge_brief_into_inputs(None, &verdict);
+        assert!(merged.get("hard_constraints").is_none());
+        let inputs =
+            json!({"hard_constraints":["用户明确禁止删除文件"],"definition_of_done":["交付检查报告"]});
+        let merged = merge_brief_into_inputs(Some(&inputs), &verdict);
+        assert_eq!(merged["hard_constraints"], inputs["hard_constraints"]);
+        assert_eq!(merged["definition_of_done"], inputs["definition_of_done"]);
+        let rendered = crate::agent::context_collector::assemble_focus_context(
+            &[],
+            std::path::Path::new("."),
+            None,
+            Some(&merged),
+        )
+        .await
+        .unwrap();
+        assert!(rendered.contains("入口假设是否成立") && rendered.contains("入口推测的证据类型"));
+        assert!(rendered.contains("用户明确禁止删除文件") && rendered.contains("交付检查报告"));
+        assert!(rendered.contains("不构成新增验收条件"));
     }
 
     #[test]

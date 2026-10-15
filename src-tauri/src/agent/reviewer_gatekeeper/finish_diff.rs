@@ -17,7 +17,7 @@ use tokio::sync::watch;
 
 
 // 验收语义变更时升版：旧裁决不能在新规则下继续复用；Git 基线保持原样。
-const FINISH_REVIEW_RULES_VERSION: &str = "review-material-v3";
+const FINISH_REVIEW_RULES_VERSION: &str = "review-reference-v4";
 const MAX_FINISH_FORMAT_RETRIES: u32 = 5;
 const MAX_FINISH_REQUEST_RETRIES: u32 = 5;
 
@@ -560,14 +560,9 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
         }
     }
 
-    // 入口分流预判的问题清单贯穿到终审：triage 在任务入口已把题面转成
-    // 调查问题与证据要求（Pro 判决产物），执行模型可能没按单取证——
-    // 终审拿这份单子逐条核销，不依赖执行者自己记得覆盖了哪些症状。
+    // 入口模型的调查先验只供定位，不自动生成新的逐项验收义务。
     if let Some(brief) = triage.and_then(|v| v.investigation_brief_text()) {
-        block_sections.push(format!(
-            "【入口分流预判的问题与证据清单（Pro 判决产物）】\n{}\n👉 审查强制要求：上述每一条都必须能在交付材料或已核实的代码路径中找到对应证据；任一条无证据支持 → 判为 blocking_issue（issue 注明该问题未被覆盖）。不得因整体方案合理而合并核销——这份清单早于执行产生，恰是执行者最可能漏掉的那部分。",
-            brief
-        ));
+        block_sections.push(format!("【入口调查参考】\n{}", brief));
     }
 
     // 分流判决 artifact_quality：交付物为非代码产物，按产物质量标准审，不要求代码 diff 证据
@@ -944,6 +939,13 @@ mod finish_review_regression_tests {
         mock: &MockReviewer, cached: Option<&ReviewResult>, read_only_report: bool,
         summary_override: Option<&str>,
     ) -> (ReviewResult, String) {
+        run_finish_with_triage(mock, cached, read_only_report, summary_override, None).await
+    }
+
+    async fn run_finish_with_triage(
+        mock: &MockReviewer, cached: Option<&ReviewResult>, read_only_report: bool,
+        summary_override: Option<&str>, triage: Option<&crate::agent::triage::TriageVerdict>,
+    ) -> (ReviewResult, String) {
         let workspace = mock.root.join("workspace");
         std::fs::create_dir_all(workspace.join("src")).unwrap();
         let changed = workspace.join("src/changed.rs");
@@ -1049,7 +1051,7 @@ mod finish_review_regression_tests {
             None,
             &[],
             None,
-            None,
+            triage,
             None,
             Some(summary),
             Some("mock"),
@@ -1092,6 +1094,32 @@ mod finish_review_regression_tests {
             assert!(system.contains("修复任务仍须核验实际修复"));
             let material = messages[1]["content"].as_str().unwrap();
             assert!(material.contains("只读审查权限逻辑") && material.contains("本轮不修复"));
+        }
+    }
+
+    #[tokio::test]
+    async fn investigation_reference_is_optional_but_actual_report_findings_still_block() {
+        let mut triage = crate::agent::triage::TriageVerdict::fallback("test");
+        triage.investigation_questions = vec!["EARLY_HYPOTHESIS_NOT_CONFIRMED".into()];
+        triage.required_evidence = vec!["EARLY_SUGGESTED_EVIDENCE".into()];
+        for blocking in [false, true] {
+            let response = json!({"verdict":if blocking { "rejected" } else { "passed" },"score":85,"summary":"核验当前报告",
+                "blocking_issues":if blocking { vec![json!({"file":"report.md","issue":"报告将未取证的结论写成确定事实","requirement":"补证或明确标记未核实"})] } else { vec![] },"nit_issues":[]});
+            let mock = MockReviewer::new(vec![response]).await;
+            let (result, _) = run_finish_with_triage(&mock, None, true, None, Some(&triage)).await;
+            assert_eq!(result.is_passed(), !blocking, "{result:?}");
+            let requests = mock.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            let prompt = requests[0]["messages"][1]["content"].as_str().unwrap();
+            assert!(
+                prompt.contains("EARLY_HYPOTHESIS_NOT_CONFIRMED")
+                    && prompt.contains("EARLY_SUGGESTED_EVIDENCE")
+            );
+            assert!(prompt.contains("入口调查参考") && prompt.contains("不构成新增验收条件"));
+            assert!(!prompt.contains("上述每一条都必须") && !prompt.contains("任一条无证据支持"));
+            if blocking {
+                assert!(result.blocking_issues[0].issue.contains("未取证"));
+            }
         }
     }
 

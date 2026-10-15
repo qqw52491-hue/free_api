@@ -266,8 +266,8 @@ index 123..456 100644
     }
 
     #[test]
-    fn test_missing_line_evidence_in_write_task_is_blocked() {
-        // 场景：在写操作任务中，义务声称 evidenced 但没有给出形如 file:line 的证据
+    fn test_prose_evidence_in_write_task_is_left_for_reviewer() {
+        // 写任务中的自由文本交由终审核验，不凭文字外观判定成立或失败。
         let raw_diff = r#"diff --git a/src/views/ChatView.vue b/src/views/ChatView.vue
 @@ -440,6 +445,10 @@
 +new
@@ -310,8 +310,7 @@ index 123..456 100644
             None,
             &[]        );
 
-        assert_eq!(blockers.len(), 1);
-        assert!(blockers[0].contains("缺少具体代码行号"));
+        assert!(blockers.is_empty(), "自由文本证据不由宿主判定充分性: {blockers:?}");
     }
 
     #[test]
@@ -683,9 +682,36 @@ index 123..456 100644
     }
 
     #[test]
-    fn bare_claim_without_observation_is_blocked_not_skipped() {
-        // 三分法的第三条腿："已完成优化"这类裸结论既非代码位置也非观测记录，
-        // 不能伪装成"非代码证据"逃过机械门——证据不成立仍拦截，且不产生 skip 交接
+    fn unfamiliar_or_prose_evidence_is_handed_off_without_a_text_shape_verdict() {
+        let raw_diff = "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        for diff in [None, Some(raw_diff)] {
+            let ctx = DiffContext::from_diff_and_paths(diff, &[]);
+            for reference in [
+                "dotnet test --filter Permissions",
+                "浏览器观测记录见所附截图",
+                "已完成优化",
+                "自定义工具审计记录",
+            ] {
+                let contract = diagnostic_contract_with_refs(&[reference]);
+                let blockers = review_contract_evidence_blockers(&contract, 1, Some(&ctx), None, &[]);
+                assert!(
+                    blockers.is_empty(),
+                    "不能凭证据文字外观否决: {reference}: {blockers:?}"
+                );
+                let notices = noncode_evidence_skip_reasons(&contract, 1, Some(&ctx), None);
+                assert_eq!(
+                    notices.len(),
+                    1,
+                    "未知形态须移交，不能伪称证据已验证: {reference}"
+                );
+                assert!(notices[0].contains(reference));
+            }
+        }
+    }
+
+    #[test]
+    fn prose_claims_are_disclosed_without_host_acceptance() {
+        // 宿主不靠字面判断证据充分性；把原始申报移交终审，不冒充已证实。
         let ctx = DiffContext::from_diff_and_paths(None, &[]);
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let contract = diagnostic_contract_with_refs(&["已完成优化", "验证一切正常"]);
@@ -695,15 +721,15 @@ index 123..456 100644
             Some(&ctx),
             Some(root),
             &[]        );
-        assert!(!blockers.is_empty(), "裸结论不是证据，必须拦截");
-        assert!(blockers[0].contains("不构成可核验"));
+        assert!(blockers.is_empty(), "语义判断移交终审: {blockers:?}");
         let skips = crate::agent::finish_guard::noncode_evidence_skip_reasons(
             &contract,
             1,
             Some(&ctx),
             Some(root),
         );
-        assert!(skips.is_empty(), "裸结论不生成 skip 交接");
+        assert_eq!(skips.len(), 1);
+        assert!(skips[0].contains("不证明观测已发生或义务已成立"));
     }
 
 

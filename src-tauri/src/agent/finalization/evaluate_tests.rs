@@ -193,3 +193,62 @@ fn frozen_suite_success_saves_real_receipt_without_model_recopy_and_failure_does
     c.record_side_effect(44, "local_file".into(), "new write".into());
     assert!(c.change_verification.is_none());
 }
+
+#[tokio::test]
+async fn completed_report_todos_do_not_infer_a_requirement_to_write_code() {
+    use crate::agent::child_reviewer::{retirement_tests::MockReviewer, ReviewScorecard};
+    use crate::agent::types::TodoItem;
+    let mock = MockReviewer::new(vec![json!({})]).await;
+    for description in [
+        "检查修复方案，不修改项目",
+        "解释实现原理",
+        "review fix proposal",
+        "compare refactor options",
+    ] {
+        let mut c = context();
+        c.todo_list.push(TodoItem {
+            id: 1,
+            status: "done".into(),
+            description: description.into(),
+            evidence_output_id: None,
+        });
+        let mut cp = checkpoint(&c);
+        cp.plan_phase = crate::agent::checkpoint::PlanPhase::Reviewing;
+        cp.last_review_scorecard = Some(ReviewScorecard::new(80, 48, 85, Some(75)));
+        let baseline = GitBaseline::capture(&mock.root);
+        let (blockers, _, _) = collect_checks(
+            &mock.db,
+            &c,
+            &cp,
+            "report-run",
+            "report-session",
+            1,
+            &mock.root,
+            &baseline,
+            Utc::now(),
+            false,
+            false,
+        )
+        .await;
+        assert!(blockers.is_empty(), "{description}: {blockers:?}");
+        cp.stage_review_blockers_open = 1;
+        let (blockers, _, _) = collect_checks(
+            &mock.db,
+            &c,
+            &cp,
+            "report-run",
+            "report-session",
+            1,
+            &mock.root,
+            &baseline,
+            Utc::now(),
+            false,
+            false,
+        )
+        .await;
+        assert!(
+            blockers.iter().any(|b| b.contains("阶段审查仍有 1 条")),
+            "真实阶段缺陷仍应阻塞: {blockers:?}"
+        );
+    }
+}

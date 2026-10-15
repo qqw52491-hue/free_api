@@ -740,14 +740,13 @@ async fn run_agent_main_loop_in_workspace_inner(
                 )),
             });
         }
-        // 取证任务单：方案路由任务把 Pro 分流的调查方向注入探索期上下文——
-        // 执行模型按单取证而不是自由漫游；非方案路由（direct 等）不注入。
+        // 入口调查参考：供执行模型定位，后续证据可修正；非方案路由不注入。
         if verdict.requires_plan_gate() {
             if let Some(brief) = verdict.investigation_brief_text() {
                 context.turns_history.push(crate::agent::context::ChatMessage {
                     role: "user".to_string(),
                     content: json!(format!(
-                        "【🧭 取证任务单（入口分流给出）】\n{}\n请先自行摸底几步（看清环境、素材、可用工具），再把互相独立的取证问题用 child_worker 的 dispatches 并行派给只读探针取证（探针默认用 Flash，结论经 wait_jobs/信箱回收），你自己专注推理与定稿。【规划阶段分工】你是最贵的推理档，职责是做大方向判断：先判断要搞清哪些问题，再给探针写清楚排查方向和具体内容（查什么、看哪里、要回什么结论），分配后基于探针结论定稿。耗时、机械、重复的排查和试跑（如安装依赖、渲染、冒烟测试）优先派给探针；你自己只在必要时做少量关键验证。创意类细节不明确时不要 ask_human，把假设写进方案（可返工）。证据成熟后输出 submit_plan 提交调查结论与详细方案——Tech Lead 评审时有权直接修订定稿，以定稿版本为执行依据。\n【审查方式随方案确定】submit_plan 里额外填 final_review_mode（mechanical_only|artifact_quality|code_review|operational_verification|panel）与 stage_review_mode（none|milestone），按你摸底后确定的真实产物来选：视频/动画/PPT/页面/报表等成品用 artifact_quality（终审员可对视频抽帧、对页面/PPT 截图核对内容）；仅“可解析即正确”的纯结构产物才用 mechanical_only。\n【非代码产物（视频/PPT/表格/报告等）的方案要求】target_files 填真实产出文件的路径（不要留空）；方案须写明产物规格、分步清单、每步可核对的验证方式与关键假设；验证以真实打开/渲染/检查产物内容为准，不要只确认文件存在。",
+                        "【🧭 入口调查参考（入口分流给出）】\n{}\n请先自行摸底几步（看清环境、素材、可用工具），再把互相独立的取证问题用 child_worker 的 dispatches 并行派给只读探针取证（探针默认用 Flash，结论经 wait_jobs/信箱回收），你自己专注推理与定稿。【规划阶段分工】你是最贵的推理档，职责是做大方向判断：先判断要搞清哪些问题，再给探针写清楚排查方向和具体内容（查什么、看哪里、要回什么结论），分配后基于探针结论定稿。耗时、机械、重复的排查和试跑（如安装依赖、渲染、冒烟测试）优先派给探针；你自己只在必要时做少量关键验证。创意类细节不明确时不要 ask_human，把假设写进方案（可返工）。证据成熟后输出 submit_plan 提交调查结论与详细方案——Tech Lead 评审时有权直接修订定稿，以定稿版本为执行依据。\n【审查方式随方案确定】submit_plan 里额外填 final_review_mode（mechanical_only|artifact_quality|code_review|operational_verification|panel）与 stage_review_mode（none|milestone），按你摸底后确定的真实产物来选：视频/动画/PPT/页面/报表等成品用 artifact_quality（终审员可对视频抽帧、对页面/PPT 截图核对内容）；仅“可解析即正确”的纯结构产物才用 mechanical_only。\n【非代码产物（视频/PPT/表格/报告等）的方案要求】target_files 填真实产出文件的路径（不要留空）；方案须写明产物规格、分步清单、每步可核对的验证方式与关键假设；验证以真实打开/渲染/检查产物内容为准，不要只确认文件存在。",
                         brief
                     )),
                 });

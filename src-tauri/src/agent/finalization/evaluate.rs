@@ -114,7 +114,6 @@ pub(crate) async fn evaluate_completion(
     let request_payload = payload(instruction);
     let summary = request_payload.get("summary").and_then(Value::as_str);
     let (mut blockers, mut notices, diff_context) = collect_checks(
-        app,
         db,
         context,
         checkpoint,
@@ -472,7 +471,6 @@ fn review_failure_report(result: &ReviewResult, retries: u32) -> String {
 
 #[allow(clippy::too_many_arguments)]
 async fn collect_checks(
-    _app: &AppHandle,
     db: &DbState,
     context: &SandwichContext,
     checkpoint: &AgentCheckpoint,
@@ -652,31 +650,6 @@ async fn collect_checks(
         "阶段审查仍有 {} 条未解决的 blocking 缺陷：请先调用 resume_child 对质撤回，或调用 ask_human 申请人工仲裁放行",
         checkpoint.stage_review_blockers_open
     ));
-    }
-    let has_code_modification_intent = context.active_target_block().is_some()
-        || context.todo_list.iter().any(|t| {
-            let d = t.description.to_lowercase();
-            d.contains("修改")
-                || d.contains("修复")
-                || d.contains("编写")
-                || d.contains("重构")
-                || d.contains("实现")
-                || d.contains("write")
-                || d.contains("fix")
-                || d.contains("refactor")
-        });
-    if has_code_modification_intent
-        && !checkpoint.plan_phase.is_approved()
-        && (checkpoint
-            .last_review_scorecard
-            .as_ref()
-            .map_or(false, |s| !s.passes_gate())
-            || checkpoint.last_review_blocking_count > 0)
-        && (context.side_effects.len() == context.inherited_side_effects_count)
-    {
-        open_todos.push(
-        "方案审查未达标且尚未写入任何代码：禁止直接提交 finish！请根据审查意见修正方案并重新审查，或调用 ask_human 呈报用户申请人工仲裁放行后写入代码".to_string(),
-    );
     }
     collect_scope_and_targets(
         context,
