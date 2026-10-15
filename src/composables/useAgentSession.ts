@@ -536,10 +536,17 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             combined = `${summary}\n\n${details}`;
         } else if (!summary && details) {
             combined = details;
-        } else if (!combined) {
-            combined = streamingSummary.value || "";
         }
         return cleanUserFacingSummary(combined);
+    });
+    // 流式 finish 只是候选草稿；最终正文仅来自 complete 事件中的已提交结果。
+    // 只向界面投影布尔状态，长草稿逐块增长不触发最终 Markdown 重算/渲染。
+    const completionPending = computed(() => {
+        if (!isRunning.value || completionMessage.value) return false;
+        const lastStep = steps.value[steps.value.length - 1];
+        return streamingSummary.value.length > 0 || Boolean(
+            lastStep?.tool === "finish" && !["failed", "challenged"].includes(lastStep.status)
+        );
     });
     const currentRunArtifacts = ref<ArtifactDescriptor[]>([]);
 
@@ -795,6 +802,10 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             runTerminal.value = true;
             isRunning.value = false;
             if (nextState !== "succeeded") {
+                streamingSummary.value = "";
+                finishOutput.value = null;
+                completionMessage.value ||= description?.trim()
+                    || (nextState === "cancelled" ? "任务已手动停止，尚未交付。" : "任务未能完成。");
                 for (const worker of teamWorkers.value) {
                     if (["running", "pending"].includes(worker.status)) {
                         worker.status = "failed";
@@ -1067,10 +1078,12 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             contextUsagePercent,
         };
 
-        const finish = asRecord(payload.finish);
+        // 失败事件中的 finish/output 可能仍是未验收的尝试，不冒充已交付正文。
+        finishOutput.value = null;
+        const finish = succeeded ? asRecord(payload.finish) : {};
         if (Object.keys(finish).length) {
             finishOutput.value = { ...finish, screenshot: payload.screenshot };
-        } else if (payload.output) {
+        } else if (succeeded && payload.output) {
             const output = toText(payload.output);
             try {
                 const parsed = JSON.parse(output);
@@ -1079,6 +1092,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 finishOutput.value = { summary: output };
             }
         }
+        streamingSummary.value = "";
         scheduleResourceRefresh();
         setRunState(succeeded ? "succeeded" : "failed", message);
         appendLog(`[任务结束] ${succeeded ? "✅ 成功" : "❌ 失败"}: ${message}`);
@@ -1729,6 +1743,9 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                     currentGoal.value = payload.goal;
                 }
                 runTerminal.value = false;
+                completionMessage.value = "";
+                streamingSummary.value = "";
+                finishOutput.value = null;
                 isRunning.value = true;
                 isThinking.value = true;
                 // 新代任务起跑：上一轮挂起步骤快照随之作废
@@ -2163,6 +2180,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         sessionTelemetry,
         completionMessage,
         streamingSummary,
+        completionPending,
         liveShellOutput,
         conversationMessages,
         isConversationLoading,

@@ -113,6 +113,7 @@
                         :run-state="session.runState.value"
                         :is-running="session.isRunning.value"
                         :completion-message="session.completionMessage.value"
+                        :completion-pending="session.completionPending.value"
                         :final-summary="session.finalSummary.value"
                         :final-artifacts="session.finalArtifacts.value"
                         :has-error="session.hasError.value"

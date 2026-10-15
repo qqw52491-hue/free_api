@@ -3888,3 +3888,12 @@ article:hover .msg-header-actions .msg-fork-btn:disabled {
     color: #f87171;
     border-color: rgba(239, 68, 68, 0.25);
 }
+
+/* 候选交付仅显示稳定状态，不渲染仍可能被打回的长总结。 */
+.completion-pending {
+    margin: 12px 0;
+    padding: 10px 14px;
+    color: var(--text-secondary, #9ca3af);
+    font-size: 13px;
+    line-height: 1.6;
+}

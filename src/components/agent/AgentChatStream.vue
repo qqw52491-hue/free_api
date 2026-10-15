@@ -1227,12 +1227,11 @@
                     class="saved-message from-agent final-response"
                     :class="{
                         failed: entry.failed,
-                        'is-streaming': isRunning && entry.id === 'live-completion'
+                        'is-streaming': isStreamingCompletion(entry)
                     }"
                 >
                     <div class="agent-msg-header">
-                        <span class="agent-logo-pill" :class="{ 'is-shimmering': isRunning && entry.id === 'live-completion' }">
-                            <span v-if="isRunning && entry.id === 'live-completion'" class="agent-pulse-dot"></span>
+                        <span class="agent-logo-pill">
                             ⚡ Free API
                         </span>
                         <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
@@ -1285,6 +1284,10 @@
                     </div>
                 </article>
             </template>
+
+            <p v-if="completionPending && isRunning && !completionMessage" class="completion-pending" role="status">
+                ⏳ 正在准备交付与验收，尚未正式交付。
+            </p>
 
             <!-- 人工干预/交互选择卡片 (单选/多选/确认/传文件/补充输入) -->
             <AgentHumanInterventionCard
@@ -1585,6 +1588,7 @@ const props = withDefaults(
         runState?: AgentRunState;
         isRunning: boolean;
         completionMessage: string;
+        completionPending?: boolean;
         finalSummary: string;
         finalArtifacts: AgentArtifactInput[];
         hasError: boolean;
@@ -1597,6 +1601,7 @@ const props = withDefaults(
     }>(),
     {
         humanForm: null,
+        completionPending: false,
         pauseReason: "",
         isWaitingForHuman: false,
         isSendingHuman: false,
@@ -1868,9 +1873,7 @@ function updateSmoothStream(id: string, targetText: string) {
         if (remaining <= 0) {
             typewriterTexts[id] = target;
             typewriterAnimFrames.delete(id);
-            if (!props.isRunning) {
-                typewriterDoneIds.add(id);
-            }
+            typewriterDoneIds.add(id);
             return;
         }
 
@@ -1891,7 +1894,7 @@ function updateSmoothStream(id: string, targetText: string) {
         const nextLen = Math.min(target.length, current.length + step);
         typewriterTexts[id] = target.slice(0, nextLen);
 
-        if (nextLen < target.length || props.isRunning) {
+        if (nextLen < target.length) {
             const handle = requestAnimationFrame(tick);
             typewriterAnimFrames.set(id, handle);
         } else {
@@ -1917,7 +1920,7 @@ function getCompletionDisplayText(entry: { id: string; summary?: string; title?:
         return fullText;
     }
 
-    // 运行中（live-completion）或刚完成的回合，走帧级平滑自适应推进
+    // 已提交的新回答保留渐显效果；不是尚在生成/验收的草稿流。
     updateSmoothStream(entry.id, fullText);
     return typewriterTexts[entry.id] || fullText.slice(0, 1);
 }
@@ -1926,10 +1929,8 @@ function isStreamingCompletion(entry: { id: string; summary?: string; title?: st
     if (typewriterDoneIds.has(entry.id)) return false;
     const target = typewriterTargets.get(entry.id) || entry.summary || entry.title || '';
     const current = typewriterTexts[entry.id] || '';
-    // runState=finalizing 时模型已交付、后端在做校验/落库收尾——
-    // 文本不会再长，摘掉流式外观，否则尾部淡字+光标看起来像"卡死"
-    const liveStillGenerating = props.isRunning && entry.id === 'live-completion' && props.runState !== 'finalizing';
-    return liveStillGenerating || current.length < target.length;
+    // 这里的文本已经提交；仅渐显尚未追上正文时使用光标，不依赖运行/验收状态。
+    return current.length < target.length;
 }
 
 function finishTypewriterInstantly(id: string, fullText?: string) {
@@ -3209,7 +3210,7 @@ function getStepMetricsTooltip(step: AgentStepItem): string {
 // isStreamingSummary 已移除：解耦光标与富文本内容，避免末尾方块符号与二次全量重绘卡顿
 
 watch(
-    () => [props.steps.length, props.isRunning, props.finalSummary, props.thought],
+    () => [props.steps.length, props.isRunning, props.completionPending, props.finalSummary, props.thought],
     () => {
         if (props.isRunning) {
             // 思考窗格始终自追尾——外层向上翻历史不该把它钉在第一行
@@ -3221,7 +3222,7 @@ watch(
 
 function isPlanRunning(entry: PlanEntry): boolean {
     if (!props.isRunning) return false;
-    // 如果已经开始输出最终总结报告，则所有阶段工具调用均已收敛完成，立即停止流光与 spinner
+    // 只有已提交的最终结果才停止阶段运行态；生成候选总结不等于验收完成。
     if (props.finalSummary && props.finalSummary.trim().length > 0) return false;
     if (props.completionMessage && props.completionMessage.trim().length > 0) return false;
     if (!entry) return false;
@@ -3416,12 +3417,9 @@ function currentTimeline(): TimelineEntry[] {
     if ((props.isThinking || Boolean(props.thought) || props.isRunning) && !plans.length) {
         timeline.push({ id: "active-thought", type: "active-thought", timestamp: activeThoughtStartedAt.value || Date.now() });
     }
-    const isCompletedOrSettled = !props.isRunning || Boolean(props.completionMessage);
-    // 真流式：finish 的 summary 边生成边推流，一有水就挂 live-completion
-    // 边生成边渲染——不必等回合收尾才整段出现
-    const summaryStreamingIn = props.isRunning && Boolean(props.finalSummary?.trim());
-    if ((isCompletedOrSettled || summaryStreamingIn) && (props.completionMessage || props.finalSummary || props.finalArtifacts.length)) {
-        timeline.push({ id: "live-completion", type: "completion", timestamp: Date.now(), title: props.completionMessage || (props.hasError ? "任务未能完成" : "任务已完成"), summary: props.finalSummary || props.completionMessage, artifacts: props.finalArtifacts, failed: props.hasError });
+    // 仅完成/失败通知可以发布终态正文。停止运行、流式草稿和产物存在均不代表交付。
+    if (props.completionMessage) {
+        timeline.push({ id: "live-completion", type: "completion", timestamp: Date.now(), title: props.completionMessage, summary: props.finalSummary || props.completionMessage, artifacts: props.finalArtifacts, failed: props.hasError || props.runState === "failed" || props.runState === "cancelled" });
     }
     return timeline;
 }
