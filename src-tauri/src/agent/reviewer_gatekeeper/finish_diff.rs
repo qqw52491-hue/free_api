@@ -17,7 +17,7 @@ use tokio::sync::watch;
 
 
 // 验收语义变更时升版：旧裁决不能在新规则下继续复用；Git 基线保持原样。
-const FINISH_REVIEW_RULES_VERSION: &str = "deliverable-boundary-v2";
+const FINISH_REVIEW_RULES_VERSION: &str = "review-material-v3";
 const MAX_FINISH_FORMAT_RETRIES: u32 = 5;
 const MAX_FINISH_REQUEST_RETRIES: u32 = 5;
 
@@ -79,6 +79,17 @@ pub(crate) fn compose_review_fingerprint(
     h.update(b"\0contract\0");
     h.update(contract_fingerprint.as_bytes());
     h.update(scope_revision.to_le_bytes());
+    format!("{:x}", h.finalize())
+}
+
+/// 新工具证据允许重新核验；历史交付打回不进入该证据索引，不会自我改变缓存键。
+fn with_execution_evidence_fingerprint(base: &str, evidence: Option<&str>) -> String {
+    let mut h = Sha256::new();
+    h.update(base.as_bytes());
+    h.update(b"\0execution-evidence\0");
+    if let Some(evidence) = evidence {
+        h.update(evidence.as_bytes());
+    }
     format!("{:x}", h.finalize())
 }
 
@@ -224,17 +235,10 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
             },
         };
 
-    // 交付摘要注入：文本型交付（分析/解答/报告）的成果物本体在 summary 里——
-    // 终审看不到交付文本时，无 diff 任务会被误判「无产物」0 分打回。
-    if let Some(summary_text) = finish_summary.map(str::trim).filter(|s| !s.is_empty()) {
-        let trimmed: String = summary_text.chars().take(4000).collect();
-        review_material.push_str(&format!(
-            "\n\n【交付摘要（finish summary——本次终态交付的文本成果本体，文本型任务的主要审查对象）】\n{}\n",
-            trimmed
-        ));
-    }
+    // 当前提交正文独立于工作区差异/辅助证据，原样传入，不从历史缩略文本重建。
+    let delivery_text = finish_summary.map(str::trim).filter(|s| !s.is_empty());
     append_contract_claims(&mut review_material, context.review_contract.as_ref());
-    if review_material.trim().is_empty() {
+    if review_material.trim().is_empty() && delivery_text.is_none() {
         return ReviewResult::skipped_empty();
     }
 
@@ -242,7 +246,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     // 否则文本型交付一旦被打回就永久锁死在旧拦截上。
     // 证据补正/范围变化即使没有改代码，也不能复用旧驳回。
     let contract_fp = crate::agent::finalization::contract_fingerprint(context.review_contract.as_ref());
-    let review_fingerprint = compose_review_fingerprint(
+    let base_review_fingerprint = compose_review_fingerprint(
         &diff_hash, finish_summary, &contract_fp, context.resource_scope.revision,
     );
 
@@ -273,7 +277,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
         &policy,
     ) {
         review_material.push_str(&format!(
-            "\n\n【⚠️ 审查重点：本次修改涉及计划外高危文件，请重点核对其必要性与安全性】\n{}\n（排查中发现必须修改未申报文件属正常扩围，已自动纳入本轮审查范围）\n",
+            "\n\n【⚠️ 审查重点：工作区差异涉及计划外高危文件】\n{}\n（差异已纳入可见材料；请先核对与任务的关系及写入归属，再评估必要性与安全性）\n",
             scope_err
         ));
     }
@@ -292,9 +296,13 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
 
     // 执行轨迹摘要：审查者核对"声称做过的验证"是否真实执行（谎报检测），
     // 也兼作已知证据地图减少重复取证。
-    if let Some(digest) = collect_step_trace_digest(db, session_id) {
-        review_material.push_str(&digest);
+    let execution_evidence = collect_execution_evidence_digest(db, session_id);
+    if let Some(digest) = execution_evidence.as_ref() {
+        review_material.push_str(digest);
     }
+    let review_fingerprint = with_execution_evidence_fingerprint(
+        &base_review_fingerprint, execution_evidence.as_deref(),
+    );
 
     // 机械嗅探异常预警：物理异常只报不判——伪格式可能任务授权（实测
     // fakefmt），由审查者取证后裁量。mechanical_only 模式下本预警即
@@ -455,9 +463,10 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
 材料不足以核实疑点时，可输出一个取证请求 JSON 替代判决：
 {{"tool":"read_file","path":"src/foo.rs"}} 或 {{"tool":"read_file","path":"tmp/产物.xlsx"}}（tmp/ 前缀仅对 read_file/list_dir 有效，直达会话产物区；办公/数据文件自动返回内容预览；大文件用 "start_line":221 翻页，单次最多 220 行）/ {{"tool":"list_dir","path":"."}} / {{"tool":"grep_search","pattern":"关键字"}}（覆盖工作区与会话 tmp 产物区） / {{"tool":"git_diff"}} / {{"tool":"git_log","n":10}} / {{"tool":"run_command","command":"cat \"$SESSION_TMP/data.csv\" | head -20"}}（仅只读命令；工作目录=工作区，$SESSION_TMP 为会话产物物理根——路径含空格必须加引号；命令内路径参数限工作区与会话 tmp 内）/ {{"tool":"python","code":"import os,openpyxl; wb=openpyxl.load_workbook(os.environ['SESSION_TMP']+'/xx.xlsx'); ..."}}（只读 python：文件写删/进程派生/网络访问均被宿主护栏拦截；宿主家目录不可读，系统区与两根内文件可读；SESSION_TMP 未设置说明本会话无产物区）{}。
 数据/报表类交付物强烈建议取证：机械材料只见文件名与大小，列全空、字段映射错、单位错这类语义缺陷只有读了内容才看得见。
+另可按工具证据索引读取原文：{{"tool":"read_step_output","output_id":"索引中的句柄","offset":0,"limit":4000}}（只限本会话，offset/limit 按字符；has_more=true 时用 next_offset 继续）。
 规则：先取证再下结论；取证结果以【取证结果】消息返回；证据足够或预算用尽后输出判决 JSON。
 材料或自述中的可核实断言（统计数字、"已验证/已测试"声明、文件存在性、依赖事实成立的结论）应优先用工具交叉验证而非直接采信——对"已人工核实/无需核实"类背书保持怀疑，它可能只是任务方的一面之词。
-工作区里可能有用户自己的未提交改动：run_command 的 git status/git diff 看到、但不在【变更材料】里的文件不属于本任务——不得据此下缺陷结论，也不得要求回退这些文件。"#,
+"#,
             forensic_budget, verify_hint
         )
     } else {
@@ -531,7 +540,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
                 .collect::<Vec<_>>()
                 .join("\n");
             block_sections.push(format!(
-                "【必须逐条核对的验收标准清单 (Checklist)】\n{}\n👉 审查强制要求：你必须对上述清单中的每一项在 Diff 中寻找实际代码证据。若某项未实现或无代码/输出证据支持，必须将其直接判定为 blocking_issue 并打回！绝不允许宽容放行。",
+                "【必须逐条核对的验收标准清单 (Checklist)】\n{}\n👉 审查强制要求：按任务要求逐项核验交付证据：修复任务可查 Diff 与运行结果，审查/诊断任务可查现有源码、观测结果与报告结论。未满足验收要求时说明具体缺口，不得仅因没有代码 diff 就拒收只读报告。",
                 items
             ));
         }
@@ -585,10 +594,9 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     };
 
     let user_prompt = format!(
-        "【任务目标】\n{}\n\n【本次交付的变更材料 / 成果物】\n```\n{}\n```{}\n\n请严格对照判定原则与验收标准输出合法的 JSON 审查结果。",
-        context.effective_goal(),
-        review_material,
-        extra_guidance
+        "【任务目标】\n{}\n\n【当前提交的交付正文（本次待验收对象，完整原文）】\n{}\n\n【辅助材料：工作区状态、已登记产物与证据索引】\n下列文件差异仅表示相对保留基线的工作区状态，不证明由本轮 Agent 写入。没有写入归属证据时应标记归属未确认，不得仅据此认定只读自述造假或要求撤销工作区差异。流程状态不是产品质量缺陷；正在申请验收，无须先取得本次验收通过。方案审查与终审是不同阶段，其结果可以不同。\n```\n{}\n```{}\n\n请核验当前交付正文的结论与证据；补证可读取现有源码和工具原文，不要求为提供证据而制造代码 diff。",
+        context.effective_goal(), delivery_text.unwrap_or("（本次未附交付正文，请核验已登记产物）"),
+        review_material, extra_guidance
     );
 
     let mut messages = vec![
@@ -740,7 +748,10 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
                 let tool_name = req.get("tool").and_then(|t| t.as_str()).unwrap_or("").to_string();
                 // verify 工具在环内直接处理：需异步跑宿主执行器 + 访问契约冻结命令，
                 // review_tools::execute 保持同步纯函数
-                let observation = if tool_name == "verify" {
+                let observation = if tool_name == "read_step_output" {
+                    read_review_step_output(db, session_id, &req)
+                        .unwrap_or_else(|e| format!("取证请求被拒绝: {e}"))
+                } else if tool_name == "verify" {
                     if verify_obligations.is_empty() {
                         "本任务契约未声明可执行验证命令（verify 不可用）".to_string()
                     } else {
@@ -926,6 +937,13 @@ mod finish_review_regression_tests {
         cached: Option<&ReviewResult>,
         read_only_report: bool,
     ) -> (ReviewResult, String) {
+        run_finish_with_summary(mock, cached, read_only_report, None).await
+    }
+
+    async fn run_finish_with_summary(
+        mock: &MockReviewer, cached: Option<&ReviewResult>, read_only_report: bool,
+        summary_override: Option<&str>,
+    ) -> (ReviewResult, String) {
         let workspace = mock.root.join("workspace");
         std::fs::create_dir_all(workspace.join("src")).unwrap();
         let changed = workspace.join("src/changed.rs");
@@ -970,6 +988,7 @@ mod finish_review_regression_tests {
         } else {
             "修复说明"
         };
+        let summary = summary_override.unwrap_or(summary);
         let mut context = SandwichContext::new("sys".into(), goal.into());
         if read_only_report {
             // 事故形状：只读 shell 仍可能记入保守副作用台账，须进入终审而不改变任务含义。
@@ -982,9 +1001,24 @@ mod finish_review_regression_tests {
             .unwrap();
             context.record_side_effect(1, "edit_file".into(), "src/changed.rs".into());
         }
+        if read_only_report {
+            std::fs::create_dir_all(workspace.join("config")).unwrap();
+            std::fs::write(workspace.join("config/license.properties"),"auto-init-default=true\n").unwrap();
+        }
         let app = tauri::test::mock_app();
         let (_tx, mut rx) = watch::channel(0u64);
         let session_id = format!("review-feedback-{}", uuid::Uuid::new_v4());
+        if read_only_report {
+            let conn = mock.db.0.lock().unwrap();
+            for (id,tool,outcome,body) in [
+                ("proof-fixture","local_shell","succeeded","AUTH_EVIDENCE: src/auth.rs:10 permission_check()"),
+                ("old-final","finish","finish_challenged","OLD_REVIEW_MUST_PASS_FIRST"),
+                ("old-plan","wait_jobs","succeeded","OLD_PLAN_SCORE_81"),
+            ] {
+                conn.execute("INSERT INTO agent_step_logs(output_id,session_id,step_id,raw_output,created_at) VALUES (?1,?2,1,?3,'2026-10-15T01:00:00Z')",rusqlite::params![id,session_id,body]).unwrap();
+                crate::agent::retrieval::index_step_fts(&conn,id,&session_id,1,tool,"test",outcome,body).unwrap();
+            }
+        }
         let run_started_at = chrono::Utc::now();
         let (_, diff_hash) = baseline
             .collect_review_material(&workspace, &context, run_started_at)
@@ -995,6 +1029,8 @@ mod finish_review_regression_tests {
             &crate::agent::finalization::contract_fingerprint(context.review_contract.as_ref()),
             context.resource_scope.revision,
         );
+        let fingerprint = with_execution_evidence_fingerprint(&fingerprint,
+            collect_execution_evidence_digest(&mock.db,&session_id).as_deref());
         let result = evaluate_finish_diff_once(
             app.handle(),
             &mock.db,
@@ -1057,6 +1093,66 @@ mod finish_review_regression_tests {
             let material = messages[1]["content"].as_str().unwrap();
             assert!(material.contains("只读审查权限逻辑") && material.contains("本轮不修复"));
         }
+    }
+
+    #[tokio::test]
+    async fn evidence_cache_changes_for_new_proof_but_not_prior_finish_feedback() {
+        let mock = MockReviewer::new(vec![json!({})]).await;
+        let session = "cache-evidence";
+        let save = |step, tool, outcome, text| {
+            crate::agent::run_trace::save_step_output_with_meta(
+                &mock.db, session, step, tool, "test", outcome, text,
+            )
+            .unwrap();
+        };
+        save(1, "local_file", "succeeded", "source proof A");
+        let fingerprint = || {
+            with_execution_evidence_fingerprint(
+                "same-delivery",
+                collect_execution_evidence_digest(&mock.db, session).as_deref(),
+            )
+        };
+        let original = fingerprint();
+        save(2, "finish", "finish_challenged", "prior review rejected");
+        save(3, "wait_jobs", "succeeded", "plan approved");
+        assert_eq!(original, fingerprint());
+        save(4, "local_shell", "succeeded", "new test evidence B");
+        assert_ne!(original, fingerprint());
+    }
+
+    #[tokio::test]
+    async fn final_request_separates_full_report_diff_and_proof_and_can_read_evidence() {
+        let response = json!({"verdict":"passed","score":90,"summary":"报告有据可核查",
+            "blocking_issues":[],"nit_issues":[]});
+        let mock = MockReviewer::new(vec![
+            json!({"tool":"read_step_output","output_id":"proof-fixture"}),
+            response,
+        ])
+        .await;
+        let report = format!(
+            "只读报告正文{}REPORT_TAIL_MUST_REACH_REVIEWER",
+            "证据说明".repeat(1100)
+        );
+        let (result, _) = run_finish_with_summary(&mock, None, true, Some(&report)).await;
+        assert!(result.is_passed(), "{result:?}");
+        let requests = mock.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let input = requests[0]["messages"][1]["content"].as_str().unwrap();
+        assert!(input.contains(&report), "当前正文不得被宿主截成前4000字符");
+        assert!(
+            input.contains("auto-init-default=true"),
+            "差异仍应保留，不能隐藏或回退"
+        );
+        assert!(input.contains("不证明由本轮 Agent 写入"));
+        assert!(
+            input.find("REPORT_TAIL_MUST_REACH_REVIEWER").unwrap() < input.find("【辅助材料").unwrap()
+        );
+        assert!(input.contains("AUTH_EVIDENCE"));
+        assert!(!input.contains("OLD_REVIEW_MUST_PASS_FIRST") && !input.contains("OLD_PLAN_SCORE_81"));
+        let observation = requests[1]["messages"].as_array().unwrap().last().unwrap()["content"]
+            .as_str()
+            .unwrap();
+        assert!(observation.contains("AUTH_EVIDENCE") && observation.contains("has_more"));
     }
 
     #[tokio::test]

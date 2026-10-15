@@ -230,51 +230,107 @@ pub(crate) fn sniff_session_tmp_anomalies(session_id: &str) -> Vec<String> {
     anomalies
 }
 
-/// 执行轨迹摘要：agent_step_logs 本会话最近 15 步输出的首行（各 ~100 字符）。
-/// 审查者据此核对"执行者声称做过的验证"是否真的跑过——自述与轨迹不一致
-/// （如声称跑过测试但轨迹无对应步）是最典型的谎报信号；对取证环也是
-/// 免费的"已知证据地图"：轨迹里跑过的命令审查者无需重复执行。
-/// 阶段审查复用（中途核查"该阶段声称做过的事"同一诉求）。
+/// 流程审计用的最近记录：包含历史审批/交付状态，供分流复核等场景追溯。
 pub(crate) fn collect_step_trace_digest(db: &DbState, session_id: &str) -> Option<String> {
-    let conn = db.0.lock().ok()?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT step_id, raw_output FROM agent_step_logs \
-             WHERE session_id = ?1 ORDER BY step_id DESC LIMIT 15",
-        )
-        .ok()?;
-    let mut items: Vec<(i64, String)> = stmt
-        .query_map(rusqlite::params![session_id], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-        })
-        .ok()?
-        .flatten()
-        .collect();
-    if items.is_empty() {
-        return None;
-    }
-    items.reverse(); // 恢复时间升序
+    collect_trace_digest(db, session_id, false)
+}
+
+/// 终审只把工具调用回执作为证据索引，不把历史终审判决再当成本轮验收证据。
+pub(crate) fn collect_execution_evidence_digest(db: &DbState, session_id: &str) -> Option<String> {
+    collect_trace_digest(db, session_id, true)
+}
+
+fn collect_trace_digest(db: &DbState, session_id: &str, execution_only: bool) -> Option<String> {
+    // 分类依据是宿主保存的 tool/outcome，不根据输出正文里的词语猜测。
+    // 先排除流程回执再取窗口，连续 finish 不会挤走取证/验证回执。
+    let mut items = {
+        let conn = db.reader().ok()?;
+        let mut stmt = conn.prepare(
+            "SELECT l.step_id,l.output_id,l.created_at,l.raw_output,f.tool,f.outcome \
+             FROM agent_step_logs l LEFT JOIN agent_step_logs_fts f \
+             ON f.output_id=l.output_id AND f.session_id=l.session_id \
+             WHERE l.session_id=?1 AND (?2=0 OR ( \
+               lower(trim(COALESCE(f.tool,''))) NOT IN \
+                 ('','core','finish','prepare_finish','submit_plan','fail_task','ask_human','wait_jobs','resume_child') \
+               AND lower(COALESCE(f.outcome,''))!='finish_challenged')) \
+             ORDER BY julianday(l.created_at) DESC,l.rowid DESC LIMIT 16"
+        ).ok()?;
+        let rows = stmt
+            .query_map(rusqlite::params![session_id, execution_only], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                ))
+            })
+            .ok()?;
+        rows.collect::<Result<Vec<_>, _>>().ok()?
+    }; // 读取正文/溢出文件前释放数据库连接。
+    let has_more = items.len() > 15;
+    items.truncate(15);
+    items.reverse();
     let mut lines = Vec::new();
-    for (step_id, raw) in items {
-        // 摘要提取按输出形态分派：
-        // - JSON 回执（write/list/search 等）→ 抓 message/command/path 字段值，
-        //   否则首行永远是 "{" 毫无信息量；
-        // - shell 输出 → 状态行 + "$ cmd" 回显行（审查者要看见的是跑了什么命令）；
-        // - 其他 → 前两非空行。
-        let snippet = step_trace_snippet(&raw);
-        if snippet.is_empty() {
-            continue;
+    for (step_id, output_id, at, raw, tool, outcome) in items {
+        let snippet = crate::agent::run_trace::resolve_raw_output(&raw)
+            .map(|text| step_trace_snippet(&text))
+            .unwrap_or_else(|| {
+                "正文暂不可读取，请按 output_id 核查存储；不能据此判断该操作未执行".into()
+            });
+        lines.push(format!(
+            "- step {step_id} | {at} | tool={} | status={} | output_id={output_id}: {snippet}",
+            tool.as_deref().unwrap_or("unknown"),
+            outcome.as_deref().unwrap_or("unknown")
+        ));
+    }
+    if execution_only {
+        Some(format!(
+            "\n\n【工具回执证据索引（{} 条，has_more={}）】\n仅列可归类的工具调用回执；流程回执不在此索引。索引缺项不代表此前未取证，失败回执也不代表命令已执行。可按 output_id 用 read_step_output 分页取原文。\n{}",
+            lines.len(), has_more, if lines.is_empty() { "尚无可索引的工具回执".into() } else { lines.join("\n") }
+        ))
+    } else if lines.is_empty() {
+        None
+    } else {
+        Some(format!("\n\n【流程审计记录（{} 条，has_more={}；包括历史审批/交付回执，不是本次验收结论）】\n{}", lines.len(), has_more, lines.join("\n")))
+    }
+}
+
+/// 审查者读取本会话的持久化工具原文，沿用 output_id 的会话归属校验。
+pub(crate) fn read_review_step_output(
+    db: &DbState,
+    session_id: &str,
+    request: &serde_json::Value,
+) -> Result<String, String> {
+    let output_id = request
+        .get("output_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .ok_or("read_step_output.output_id 缺失或不是非空字符串")?;
+    let number = |key: &str, default: usize| -> Result<usize, String> {
+        match request.get(key) {
+            None => Ok(default),
+            Some(v) => v
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or_else(|| format!("read_step_output.{key} 必须为非负整数")),
         }
-        lines.push(format!("- step {}: {}", step_id, snippet));
+    };
+    let offset = number("offset", 0)?;
+    let limit = number("limit", 4000)?;
+    if !(1..=16000).contains(&limit) {
+        return Err("read_step_output.limit 必须在 1..16000 之间（按字符）".into());
     }
-    if lines.is_empty() {
-        return None;
-    }
-    Some(format!(
-        "\n\n【执行轨迹摘要（执行者实际工具输出摘要，最近 {} 步——可用于交叉核对自述中声称做过的验证是否真实执行）】\n{}",
-        lines.len(),
-        lines.join("\n")
-    ))
+    let raw = crate::agent::run_trace::get_step_output(db, session_id, output_id)?;
+    let total_chars = raw.chars().count();
+    let content: String = raw.chars().skip(offset).take(limit).collect();
+    let end_offset = offset.saturating_add(content.chars().count());
+    Ok(
+        json!({"output_id":output_id,"offset":offset,"next_offset":end_offset,
+        "total_chars":total_chars,"has_more":end_offset<total_chars,"content":content})
+        .to_string(),
+    )
 }
 
 /// 单步输出的摘要提取：JSON 回执抓关键字段，shell 输出抓状态行+命令回显。
@@ -738,5 +794,199 @@ mod evidence_ref_tests {
         assert!(out.contains("2: two") && out.contains("3: three") && !out.contains("4: four"));
         assert!(!out.contains("localhost"), "工作区外文件不得读取");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod review_material_regressions {
+    use super::*;
+    use crate::agent::child_reviewer::retirement_tests::MockReviewer;
+
+    fn put(
+        db: &DbState,
+        session: &str,
+        step: i64,
+        time: &str,
+        tool: Option<&str>,
+        outcome: &str,
+        raw: &str,
+    ) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        let conn = db.0.lock().unwrap();
+        conn.execute("INSERT INTO agent_step_logs(output_id,session_id,step_id,raw_output,created_at) VALUES (?1,?2,?3,?4,?5)",
+            rusqlite::params![id,session,step,raw,time]).unwrap();
+        if let Some(tool) = tool {
+            crate::agent::retrieval::index_step_fts(
+                &conn,
+                &id,
+                session,
+                step as usize,
+                tool,
+                "test",
+                outcome,
+                raw,
+            )
+            .unwrap();
+        }
+        id
+    }
+
+    #[tokio::test]
+    async fn finish_trace_is_not_a_list_of_its_own_prior_rejections() {
+        let mock = MockReviewer::new(vec![json!({})]).await;
+        let proof = put(
+            &mock.db,
+            "s",
+            1,
+            "2026-10-15T01:00:00Z",
+            Some("local_shell"),
+            "succeeded",
+            "$ rg permission src\nsrc/auth.rs:10: permission_check()",
+        );
+        for step in 2..=22 {
+            put(
+                &mock.db,
+                "s",
+                step,
+                "2026-10-15T02:00:00Z",
+                Some("finish"),
+                "finish_challenged",
+                "HISTORIC_REJECTION: 必须先通过终审才能提交",
+            );
+        }
+        put(
+            &mock.db,
+            "s",
+            23,
+            "2026-10-15T03:00:00Z",
+            Some("wait_jobs"),
+            "succeeded",
+            "PLAN_SCORE_81",
+        );
+        put(
+            &mock.db,
+            "s",
+            24,
+            "2026-10-15T04:00:00Z",
+            None,
+            "failed",
+            "UNCLASSIFIED_CONTROL",
+        );
+        let digest = collect_execution_evidence_digest(&mock.db, "s").unwrap();
+        assert!(
+            digest.contains("permission_check") && digest.contains(&proof),
+            "{digest}"
+        );
+        assert!(!digest.contains("HISTORIC_REJECTION") && !digest.contains("PLAN_SCORE_81"));
+        assert!(!digest.contains("UNCLASSIFIED_CONTROL"));
+        assert!(digest.contains("不代表此前未取证"));
+        assert!(
+            collect_step_trace_digest(&mock.db, "s")
+                .unwrap()
+                .contains("HISTORIC_REJECTION"),
+            "原始审计用途仍可查询历史流程"
+        );
+    }
+
+    #[tokio::test]
+    async fn evidence_restores_spilled_body_and_pages_only_owned_outputs() {
+        let mock = MockReviewer::new(vec![json!({})]).await;
+        let body = mock.root.join("synthetic-output.log");
+        std::fs::write(&body, "CODE_PROOF: permission_check()\nTAIL_EVIDENCE").unwrap();
+        let marker = format!("[[spilled_to_disk:{}]]", body.display());
+        let id = put(
+            &mock.db,
+            "s",
+            1,
+            "2026-10-15T01:00:00Z",
+            Some("local_shell"),
+            "succeeded",
+            &marker,
+        );
+        let digest = collect_execution_evidence_digest(&mock.db, "s").unwrap();
+        assert!(digest.contains("CODE_PROOF") && !digest.contains("spilled_to_disk"));
+        let page: serde_json::Value = serde_json::from_str(
+            &read_review_step_output(
+                &mock.db,
+                "s",
+                &json!({"output_id":id,"offset":0,"limit":10}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(page["content"], "CODE_PROOF");
+        assert_eq!(page["has_more"], true);
+        let page: serde_json::Value = serde_json::from_str(
+            &read_review_step_output(
+                &mock.db,
+                "s",
+                &json!({"output_id":id,"offset":10,"limit":100}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(page["content"].as_str().unwrap().contains("TAIL_EVIDENCE"));
+        assert_eq!(page["has_more"], false);
+        assert!(
+            read_review_step_output(&mock.db, "other-session", &json!({"output_id":id})).is_err()
+        );
+        assert!(
+            read_review_step_output(&mock.db, "s", &json!({"output_id":id,"offset":"wrong"}))
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn evidence_window_reports_older_records_without_showing_broken_blob_markers() {
+        let mock = MockReviewer::new(vec![json!({})]).await;
+        for step in 0..17 {
+            put(
+                &mock.db,
+                "s",
+                step,
+                "2026-10-15T01:00:00Z",
+                Some("local_file"),
+                "succeeded",
+                "[[cas_blob:invalid-fixture-marker]]",
+            );
+        }
+        let digest = collect_execution_evidence_digest(&mock.db, "s").unwrap();
+        assert!(digest.contains("has_more=true") && digest.contains("正文暂不可读取"));
+        assert!(!digest.contains("[[cas_blob:"));
+    }
+
+    #[tokio::test]
+    async fn trace_uses_timestamps_and_keeps_failed_commands_and_source_text() {
+        let mock = MockReviewer::new(vec![json!({})]).await;
+        put(
+            &mock.db,
+            "s",
+            99,
+            "2026-10-15T01:00:00Z",
+            Some("read_file"),
+            "succeeded",
+            "OLDER_PROOF",
+        );
+        put(
+            &mock.db,
+            "s",
+            1,
+            "2026-10-15T02:00:00Z",
+            Some("local_shell"),
+            "failed",
+            "NEW_COMPILE_FAILURE: rustc error",
+        );
+        put(
+            &mock.db,
+            "s",
+            2,
+            "2026-10-15T03:00:00Z",
+            Some("local_file"),
+            "succeeded",
+            "SOURCE_TEXT: 此函数返回‘终审未通过’，不是流程回执",
+        );
+        let digest = collect_execution_evidence_digest(&mock.db, "s").unwrap();
+        assert!(digest.find("OLDER_PROOF").unwrap() < digest.find("NEW_COMPILE_FAILURE").unwrap());
+        assert!(digest.contains("failed") && digest.contains("SOURCE_TEXT"));
     }
 }
