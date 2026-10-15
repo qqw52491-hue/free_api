@@ -94,10 +94,13 @@ pub(crate) fn validate_native(tool: &str, action: &str, params: &Value) -> Resul
             } else {
                 act
             };
+            if act == "read" && write_shaped {
+                return Err("❌ local_file 的有效 action 为 'read'（省略动作时默认 read），但参数含 content/target_content/replacement_content 写入字段。本次参数预检拒绝，文件未修改；请显式指定 action='write' 或 action='edit' 及对应参数。".to_string());
+            }
             match act {
                 "read" | "write" | "edit" => text(&tool, params, &["path"], false)?,
                 "list" => optional(&tool, params, "path", "string")?,
-                _ => return Ok(()), // 未知动作由原执行层报错，不改变既有动作容错。
+                _ => return Err(format!("❌ [非法动作] local_file 收到 action='{act}'；允许 read、write、edit、list。本次参数预检拒绝，文件未修改；若需读取用 action='read'，写入用 action='write'+content，替换用 action='edit'+target_content+replacement_content。")),
             }
             if act == "read" {
                 super::local_file::validate_read_range(params)?;
@@ -133,7 +136,7 @@ pub(crate) fn validate_native(tool: &str, action: &str, params: &Value) -> Resul
                     params,
                     &["content", "content_markdown", "markdown", "code", "html"],
                     true,
-                )?;
+                ).map_err(|error| format!("{error}\nartifact_manager 省略 action 时默认 create_document；若需登记已有文件，请显式指定 action='register_file' 并提供 path。本次参数预检拒绝，未创建或登记产物。"))?;
             }
         }
         "wait_jobs" => {

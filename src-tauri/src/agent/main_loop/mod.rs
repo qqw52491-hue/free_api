@@ -723,8 +723,8 @@ async fn run_agent_main_loop_in_workspace_inner(
         );
         let log_line = if let Some(ref fb) = verdict.fallback {
             format!(
-                "🧭 任务分流: {} — {}（分流调用降级: {}）",
-                verdict.route, verdict.reason, fb
+                "🧭 任务分流未完成: {}（原因: {}；字段使用兼容默认，不代表模型判决）",
+                verdict.reason, fb
             )
         } else {
             format!("🧭 任务分流: {} — {}", verdict.route, verdict.reason)
@@ -2205,6 +2205,7 @@ async fn run_agent_main_loop_in_workspace_inner(
             "thinking": crate::agent::run_trace::clip_thinking_for_trace(&outcome.thinking_text),
             "tool": instruction.get_tool(),
             "action": instruction.get_action(),
+            "declared_action": instruction.declared_action(),
             "command": instruction.get_params(),
             "params": instruction.get_params(),
             "plan_id": context.active_plan_id().unwrap_or_default(),

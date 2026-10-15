@@ -757,24 +757,35 @@ impl AgentInstruction {
         if !self.commands.is_empty() {
             return "pipeline".to_string();
         }
-        if let Some(ref a) = self.action {
-            return a.to_string();
+        if let Some(action) = self.declared_action() {
+            return action;
+        }
+        // 多动作工具的缺省值来自执行契约，不能把工具名冒充为模型提供的动作。
+        match self.tool.as_deref().unwrap_or("").to_ascii_lowercase().as_str() {
+            "local_file" => "read".to_string(),
+            "artifact_manager" | "artifact_store" => "create_document".to_string(),
+            _ => self.tool.clone().unwrap_or_default(),
+        }
+    }
+
+    /// 仅返回输入中显式提供的动作；不填默认值，便于区分输入与宿主归一结果。
+    pub(crate) fn declared_action(&self) -> Option<String> {
+        if let Some(a) = self.action.as_ref().filter(|a| !a.trim().is_empty()) {
+            return Some(a.clone());
         }
         if let Some(ref cmd) = self.command {
-            if let Some(cmd_obj) = cmd.as_object() {
-                if let Some(action_val) = cmd_obj.get("action") {
-                    if let Some(action_str) = action_val.as_str() {
-                        return action_str.to_string();
-                    }
-                }
-            } else if let Some(cmd_str) = cmd.as_str() {
+            if let Some(cmd_str) = cmd.as_str() {
                 // 如果 command 本身就是个单纯的字符串动词
-                if !cmd_str.contains(' ') {
-                    return cmd_str.to_string();
+                if !cmd_str.is_empty() && !cmd_str.contains(' ') {
+                    return Some(cmd_str.to_string());
                 }
             }
         }
-        self.tool.clone().unwrap_or_default()
+        self.get_params()
+            .get("action")
+            .and_then(serde_json::Value::as_str)
+            .filter(|action| !action.trim().is_empty())
+            .map(str::to_owned)
     }
 
     /// 提取下一轮需要预加载的工具或 Skill 列表（支持逗号分隔、分号分隔或数组多选；未设置时回退至当前 action）

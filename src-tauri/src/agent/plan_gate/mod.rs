@@ -12,6 +12,37 @@ use crate::db::DbState;
 const PLAN_DECISION_MARKER_PREFIX: &str = "<!--plan-decision:";
 const PLAN_DECISION_MARKER_SUFFIX: &str = "-->";
 
+/// 分流失败不是复杂度判决。只在 auto 模式下，按物理边界豁免本会话 tmp 写入。
+/// 有效判决、工作区写入、显式审批及阶段 blocker 仍走既有规则。
+pub(crate) fn pre_write_plan_required(
+    checkpoint: &AgentCheckpoint,
+    context: &crate::agent::context::SandwichContext,
+    inst: &crate::agent::types::AgentInstruction,
+    session_id: &str,
+    workspace: &std::path::Path,
+) -> bool {
+    if checkpoint.plan_mode == PlanExecutionMode::PlanApproval
+        || (checkpoint.triage_verdict.is_some()
+            && crate::agent::triage::write_floor_violation(inst, context, session_id).is_some())
+    {
+        return true;
+    }
+    match checkpoint.triage_verdict.as_ref() {
+        Some(v) if v.fallback.is_some() => {
+            checkpoint.plan_mode != PlanExecutionMode::Auto
+                || !crate::agent::path_guard::is_confined_session_tmp_write(
+                    inst, session_id, workspace,
+                )
+        }
+        Some(v) => v.requires_plan_gate(),
+        None => !crate::agent::path_guard::is_plan_gate_exempt_write(
+            inst,
+            Some(session_id),
+            workspace,
+            &context.new_affected_paths(),
+        ),
+    }
+}
 
 /// submit_plan 适用性预检（纯 checkpoint 判定，不含 DB 在途行检查）。
 /// 返回 Some(reason) 表示当前状态不可用提交；None 放行。

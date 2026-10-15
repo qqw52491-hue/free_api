@@ -241,8 +241,8 @@ impl TriageVerdict {
         ))
     }
 
-    /// 失败降级判决：等价于「维持现状行为」——方案门照开、阶段审查保留、
-    /// 证据要求不放宽。fallback 记录降级原因供审计。
+    /// 失败兜底：字段为兼容默认，不代表模型确认了任务复杂度。
+    /// 保留阶段/终审核验；写前方案门须区分 fallback，按实际操作边界判定适用性。
     pub fn fallback(reason: &str) -> Self {
         Self {
             quality_complexity: "medium".to_string(),
@@ -257,7 +257,7 @@ impl TriageVerdict {
             final_review_roles: Vec::new(),
             evidence_policy: "code_refs".to_string(),
             confidence: 0.0,
-            reason: "分流调用失败，已按保守默认降级".to_string(),
+            reason: "分流调用失败，任务复杂度未判定；审查保留，写前方案门按实际操作边界判定".to_string(),
             escalation_triggers: Vec::new(),
             investigation_questions: Vec::new(),
             required_evidence: Vec::new(),

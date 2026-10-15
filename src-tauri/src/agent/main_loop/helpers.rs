@@ -141,6 +141,7 @@ pub(crate) fn persist_challenged_step(
         "thinking": crate::agent::run_trace::clip_thinking_for_trace(thinking_text),
         "tool": instruction.get_tool(),
         "action": instruction.get_action(),
+        "declared_action": instruction.declared_action(),
         "command": instruction.get_params(),
         "params": instruction.get_params(),
         "plan_id": context.active_plan_id().unwrap_or_default(),

@@ -14,6 +14,85 @@ pub fn get_session_tmp_dir(session_id: &str) -> PathBuf {
     base.join("free-api-chat").join("tmp").join(session_id)
 }
 
+/// 仅用于方案门适用性：确认 local_file 写入仍在本会话 tmp 内，不创建目录。
+/// 不使用全局 tmp 前缀；拒绝穿越、其他会话与指向工作区的链接。
+pub(crate) fn is_confined_session_tmp_write(
+    inst: &crate::agent::types::AgentInstruction,
+    session_id: &str,
+    workspace: &Path,
+) -> bool {
+    if !inst.get_tool().eq_ignore_ascii_case("local_file")
+        || !matches!(
+            inst.get_action().to_ascii_lowercase().as_str(),
+            "write" | "edit"
+        )
+    {
+        return false;
+    }
+    let params = inst.get_params();
+    let Some(raw) = params.get("path").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    let raw = raw.trim();
+    let root = get_session_tmp_dir(session_id);
+    let tmp_relative = raw
+        .strip_prefix("./tmp/")
+        .or_else(|| raw.strip_prefix("tmp/"))
+        .or_else(|| {
+            raw.strip_prefix("session-tmp://")
+                .map(|p| p.trim_start_matches('/'))
+        });
+    if raw.is_empty()
+        || Path::new(raw)
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+    {
+        return false;
+    }
+    let target = if let Some(relative) = tmp_relative {
+        if relative.is_empty() {
+            return false;
+        }
+        root.join(relative)
+    } else if let Some(relative) = raw.strip_prefix("workspace://") {
+        workspace.join(relative.trim_start_matches('/'))
+    } else if Path::new(raw).is_absolute() {
+        PathBuf::from(raw)
+    } else {
+        workspace.join(raw)
+    };
+    if target
+        .components()
+        .any(|c| c == std::path::Component::ParentDir)
+    {
+        return false;
+    }
+    fn candidate(path: &Path) -> Option<PathBuf> {
+        let mut cursor = path;
+        let mut missing = Vec::new();
+        loop {
+            match std::fs::symlink_metadata(cursor) {
+                Ok(_) => {
+                    let mut resolved = cursor.canonicalize().ok()?;
+                    for part in missing.into_iter().rev() {
+                        resolved.push(part);
+                    }
+                    return Some(resolved);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    missing.push(cursor.file_name()?.to_os_string());
+                    cursor = cursor.parent()?;
+                }
+                Err(_) => return None,
+            }
+        }
+    }
+    match (candidate(&root), candidate(&target)) {
+        (Some(root), Some(target)) => target != root && target.starts_with(root),
+        _ => false,
+    }
+}
+
 /// 判定给定路径是否物理位于当前会话临时目录或全局会话临时根目录下，或是 tmp/ 相对快捷路径
 pub fn is_path_in_session_tmp(raw_path: &str, session_id: Option<&str>) -> bool {
     let trimmed = raw_path.trim();

@@ -249,7 +249,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "artifact_manager",
-        summary: "生成独立受管交付产物（Markdown分析报告、网页看板、数据导出）并登记持久化账本供用户预览/导出",
+        summary: "生成独立受管交付产物（Markdown分析报告、网页看板、数据导出）并登记持久化账本供用户预览/导出；省略 action 默认 create_document，登记已有文件须显式指定 action=register_file",
         actions: &[
             "create_document(title: string, content: string, format: md|html|json|csv|txt)",
             "register_file(path: string) — 将已生成的产物文件登记入产物账本（会话 tmp/ 目录与工作区内文件均可，tmp/ 为推荐落点；如 Excel/PDF），任务完成时自动回推给用户",

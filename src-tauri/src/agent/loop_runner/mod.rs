@@ -451,29 +451,16 @@ pub async fn run_tool_phase(
             }
         }
         // 🧭 任务入口分流驱动的方案门判定（TriageVerdict 已在 main_loop 落 checkpoint）：
-        // 有判决 → route 决定是否需要方案门，但机械安全地板（删改名动作、多文件扩散、
+        // 有效判决 → route 决定是否需要方案门；失败兜底仅豁免 auto 模式下的本会话 tmp 写入。
+        // 机械安全地板（删改名动作、多文件扩散、
         // 用户显式选择的方案审批模式）不被判决推翻；
         // 无判决（分流未执行的旧 checkpoint 恢复）→ 退回机械兜底辅助：
         // 零爆炸半径小活（tmp/ 产物、全新文件、小编辑）仍放行，其余维持方案门。
         let floor_reason =
             crate::agent::triage::write_floor_violation(inst, context, final_session_id);
-        let plan_needed = match &checkpoint.triage_verdict {
-            Some(v) => {
-                v.requires_plan_gate()
-                    || floor_reason.is_some()
-                    || checkpoint.plan_mode
-                        == crate::agent::checkpoint::PlanExecutionMode::PlanApproval
-            }
-            None => {
-                checkpoint.plan_mode == crate::agent::checkpoint::PlanExecutionMode::PlanApproval
-                    || !crate::agent::path_guard::is_plan_gate_exempt_write(
-                        inst,
-                        Some(final_session_id),
-                        workspace_dir,
-                        &context.new_affected_paths(),
-                    )
-            }
-        };
+        let plan_needed = crate::agent::plan_gate::pre_write_plan_required(
+            checkpoint, context, inst, final_session_id, workspace_dir,
+        );
         // 判决被机械地板推翻 = 升级信号，记遥测供观测误分流率（每次命中都记）
         if let Some(reason) = floor_reason {
             if checkpoint
@@ -535,11 +522,11 @@ pub async fn run_tool_phase(
             let route = checkpoint
                 .triage_verdict
                 .as_ref()
-                .map(|v| v.route.as_str())
+                .map(|v| if v.fallback.is_some() { "fallback_session_tmp" } else { v.route.as_str() })
                 .unwrap_or("mechanical_fallback");
             let _ = app.emit(
                 &format!("agent-log-{}", final_session_id),
-                format!("🧭 分流放行：本任务 route={}，写入不触发方案门", route),
+                format!("🧭 本次写入不触发方案门：适用路径={}；后续操作仍逐步判定", route),
             );
         }
     }

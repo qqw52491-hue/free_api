@@ -48,6 +48,9 @@ pub fn dispatch(
     params: &serde_json::Value,
     workspace_root: Option<&Path>,
 ) -> DispatchResult {
+    if let Some(result) = crate::agent::tools::input_validation::native_rejection("local_file", action, params) {
+        return result;
+    }
     let ws_root = match workspace_root {
         Some(p) => p,
         None => {
@@ -90,7 +93,7 @@ pub fn dispatch(
                 execute_read(ws_root, session_id, params)
             } else {
                 let hint = if unknown == "local_file" {
-                    "（你把工具名填进了 action。若意图是读取：action='read'；写入：action='write'+content；替换：action='edit'+target_content+replacement_content；列目录：action='list'）"
+                    "（收到的 action 与工具名相同，本次未执行。若需读取：action='read'；写入：action='write'+content；替换：action='edit'+target_content+replacement_content；列目录：action='list'）"
                 } else {
                     ""
                 };

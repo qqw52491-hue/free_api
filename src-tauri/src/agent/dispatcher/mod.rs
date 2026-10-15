@@ -82,6 +82,9 @@ mod tool_events;
 mod project_dispatch;
 mod command_exec;
 
+#[cfg(test)]
+mod action_contract_tests;
+
 pub(crate) use shell_safety::*;
 pub(crate) use tool_events::*;
 pub(crate) use project_dispatch::*;
