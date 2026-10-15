@@ -17,7 +17,7 @@ use tokio::sync::watch;
 
 
 // 验收语义变更时升版：旧裁决不能在新规则下继续复用；Git 基线保持原样。
-const FINISH_REVIEW_RULES_VERSION: &str = "review-reference-v4";
+const FINISH_REVIEW_RULES_VERSION: &str = "review-search-v5";
 const MAX_FINISH_FORMAT_RETRIES: u32 = 5;
 const MAX_FINISH_REQUEST_RETRIES: u32 = 5;
 
@@ -461,7 +461,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
         format!(
             r#"【只读取证工具（可选，预算 {} 步，用尽后必须输出判决 JSON）】
 材料不足以核实疑点时，可输出一个取证请求 JSON 替代判决：
-{{"tool":"read_file","path":"src/foo.rs"}} 或 {{"tool":"read_file","path":"tmp/产物.xlsx"}}（tmp/ 前缀仅对 read_file/list_dir 有效，直达会话产物区；办公/数据文件自动返回内容预览；大文件用 "start_line":221 翻页，单次最多 220 行）/ {{"tool":"list_dir","path":"."}} / {{"tool":"grep_search","pattern":"关键字"}}（覆盖工作区与会话 tmp 产物区） / {{"tool":"git_diff"}} / {{"tool":"git_log","n":10}} / {{"tool":"run_command","command":"cat \"$SESSION_TMP/data.csv\" | head -20"}}（仅只读命令；工作目录=工作区，$SESSION_TMP 为会话产物物理根——路径含空格必须加引号；命令内路径参数限工作区与会话 tmp 内）/ {{"tool":"python","code":"import os,openpyxl; wb=openpyxl.load_workbook(os.environ['SESSION_TMP']+'/xx.xlsx'); ..."}}（只读 python：文件写删/进程派生/网络访问均被宿主护栏拦截；宿主家目录不可读，系统区与两根内文件可读；SESSION_TMP 未设置说明本会话无产物区）{}。
+{{"tool":"read_file","path":"src/foo.rs"}} 或 {{"tool":"read_file","path":"tmp/产物.xlsx"}}（tmp/ 前缀对 read_file/list_dir/grep_search 有效，直达会话产物区；办公/数据文件自动返回内容预览；大文件用 "start_line":221 翻页，单次最多 220 行）/ {{"tool":"list_dir","path":"."}} / {{"tool":"grep_search","pattern":"关键字","path":"src/"}}（不区分大小写的字面量搜索；path 可指定文件/目录或 tmp/ 路径，省略时覆盖工作区与会话产物区；返回 search_complete、has_more 与未读项，has_more=null 表示是否还有匹配未知） / {{"tool":"git_diff"}} / {{"tool":"git_log","n":10}} / {{"tool":"run_command","command":"cat \"$SESSION_TMP/data.csv\" | head -20"}}（仅只读命令；工作目录=工作区，$SESSION_TMP 为会话产物物理根——路径含空格必须加引号；命令内路径参数限工作区与会话 tmp 内）/ {{"tool":"python","code":"import os,openpyxl; wb=openpyxl.load_workbook(os.environ['SESSION_TMP']+'/xx.xlsx'); ..."}}（只读 python：文件写删/进程派生/网络访问均被宿主护栏拦截；宿主家目录不可读，系统区与两根内文件可读；SESSION_TMP 未设置说明本会话无产物区）{}。
 数据/报表类交付物强烈建议取证：机械材料只见文件名与大小，列全空、字段映射错、单位错这类语义缺陷只有读了内容才看得见。
 另可按工具证据索引读取原文：{{"tool":"read_step_output","output_id":"索引中的句柄","offset":0,"limit":4000}}（只限本会话，offset/limit 按字符；has_more=true 时用 next_offset 继续）。
 规则：先取证再下结论；取证结果以【取证结果】消息返回；证据足够或预算用尽后输出判决 JSON。
@@ -1095,6 +1095,30 @@ mod finish_review_regression_tests {
             let material = messages[1]["content"].as_str().unwrap();
             assert!(material.contains("只读审查权限逻辑") && material.contains("本轮不修复"));
         }
+    }
+
+    #[tokio::test]
+    async fn reviewer_grep_request_respects_the_file_scope_and_returns_search_metadata() {
+        let mock = MockReviewer::new(vec![
+            json!({"tool":"grep_search","pattern":"request_state","path":"src/changed.rs"}),
+            json!({"verdict":"passed","score":90,"summary":"取证后核验通过","blocking_issues":[],"nit_issues":[]}),
+        ]).await;
+        let (result, _) = run_finish(&mock).await;
+        assert!(result.is_passed(), "{result:?}");
+        let requests = mock.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let text = requests[1]["messages"].as_array().unwrap().last().unwrap()["content"]
+            .as_str()
+            .unwrap();
+        let output: serde_json::Value = serde_json::from_str(text.lines().nth(1).unwrap()).unwrap();
+        assert_eq!(output["returned_matches"], 1);
+        assert_eq!(output["search_complete"], true);
+        assert_eq!(output["has_more"], false);
+        assert!(output["matches"][0]
+            .as_str()
+            .unwrap()
+            .contains("changed.rs:1"));
+        assert!(!text.contains("writer.rs"));
     }
 
     #[tokio::test]

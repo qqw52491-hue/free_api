@@ -4,7 +4,7 @@
 //! 代码路径它永远不知道存在（相关盲区），跨家族模型收益被吃掉大半。本模块给
 //! reviewer 一个最小只读白名单（read_file/grep_search/git_diff/git_log/list_dir/
 //! run_command/python），让它拿着 findings 疑点自己去仓库核实。禁写、路径围栏
-//! （read_file/list_dir 走 contained_multi；run_command 的词元级路径审计与
+//! （read_file/list_dir/grep_search 走 contained_multi；run_command 的词元级路径审计与
 //! python 的解释器内护栏同口径限定工作区+会话 tmp 两根）、输出截断。
 
 use serde_json::Value;
@@ -16,7 +16,9 @@ const MAX_GREP_MATCHES: usize = 30;
 const MAX_READ_LINES: usize = 220;
 /// read_file 单页字符预算：220 行代码约 12~16k 字符；6000 会把一页砍到百行内且不提示。
 const MAX_READ_CHARS: usize = 16_000;
-const MAX_WALK_DEPTH: usize = 6;
+// 限制工作量而非目录层数；达到上限必须披露搜索未完成。
+const MAX_GREP_ENTRIES: usize = 50_000;
+const MAX_GREP_FILE_BYTES: u64 = 512 * 1024;
 const SKIP_DIRS: [&str; 6] = [".git", "target", "node_modules", "dist", ".writer-tmp", "build"];
 /// 取证预算默认值与硬上限：每一步都是一次带完整历史的 LLM 调用，
 /// 不设帽时失控配置会把单次审查成本放大到不可接受。
@@ -359,41 +361,171 @@ fn is_source_text(path: &Path) -> bool {
     }
 }
 
-fn walk_match(
-    root: &Path,
-    pattern: &str,
-    matches: &mut Vec<String>,
-    depth: usize,
-) {
-    if depth > MAX_WALK_DEPTH || matches.len() >= MAX_GREP_MATCHES {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(root) else { return };
-    for entry in entries.flatten() {
-        if matches.len() >= MAX_GREP_MATCHES {
-            return;
+#[derive(Default)]
+struct GrepScan {
+    matches: Vec<String>,
+    files_searched: usize,
+    entries_visited: usize,
+    excluded_directories: usize,
+    excluded_files: usize,
+    skipped_symlinks: usize,
+    oversized_files: usize,
+    non_utf8_files: usize,
+    read_errors: usize,
+    unread_samples: Vec<String>,
+    more_matches: bool,
+    stop_reason: Option<&'static str>,
+}
+
+impl GrepScan {
+    fn record_unread(&mut self, path: &Path, reason: &str) {
+        if self.unread_samples.len() < 3 {
+            self.unread_samples
+                .push(format!("{}: {reason}", path.display()));
         }
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-        if path.is_dir() {
-            if SKIP_DIRS.contains(&name.as_str()) || name.starts_with(".writer-") {
+    }
+}
+
+/// 不限制源码包层级；不跟随遍历中的链接，避免跨根读取和链接环。
+fn walk_match(roots: &[PathBuf], pattern: &str, entry_limit: usize) -> GrepScan {
+    let mut scan = GrepScan::default();
+    let mut pending: Vec<PathBuf> = roots.iter().rev().cloned().collect();
+    let mut visited_dirs = std::collections::HashSet::new();
+    let needle = pattern.to_lowercase();
+    'walk: while let Some(path) = pending.pop() {
+        if scan.entries_visited >= entry_limit {
+            scan.stop_reason.get_or_insert("entry_limit");
+            break;
+        }
+        scan.entries_visited += 1;
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                scan.read_errors += 1;
+                scan.record_unread(&path, "metadata_error");
                 continue;
             }
-            walk_match(&path, pattern, matches, depth + 1);
-        } else if is_source_text(&path)
-            && path.metadata().map(|m| m.len() < 512 * 1024).unwrap_or(false)
-        {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                let lower_pattern = pattern.to_lowercase();
-                for (idx, line) in content.lines().enumerate() {
-                    if line.to_lowercase().contains(&lower_pattern) {
-                        matches.push(format!("{}:{}: {}", path.display(), idx + 1, line.trim()));
-                        if matches.len() >= MAX_GREP_MATCHES {
-                            return;
+        };
+        if metadata.file_type().is_symlink() {
+            scan.skipped_symlinks += 1;
+            continue;
+        }
+        if metadata.is_dir() {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !roots.contains(&path) && (SKIP_DIRS.contains(&name) || name.starts_with(".writer-"))
+            {
+                scan.excluded_directories += 1;
+                continue;
+            }
+            if !visited_dirs.insert(path.clone()) {
+                continue;
+            }
+            match std::fs::read_dir(&path) {
+                Ok(entries) => {
+                    for entry in entries {
+                        if scan.entries_visited + pending.len() >= entry_limit {
+                            scan.stop_reason.get_or_insert("entry_limit");
+                            break;
+                        }
+                        match entry {
+                            Ok(entry) => pending.push(entry.path()),
+                            Err(_) => {
+                                scan.read_errors += 1;
+                                scan.record_unread(&path, "directory_entry_error");
+                            }
                         }
                     }
                 }
+                Err(_) => {
+                    scan.read_errors += 1;
+                    scan.record_unread(&path, "directory_read_error");
+                }
             }
+        } else if !metadata.is_file() || !is_source_text(&path) {
+            scan.excluded_files += 1;
+        } else if metadata.len() >= MAX_GREP_FILE_BYTES {
+            scan.oversized_files += 1;
+            scan.record_unread(&path, "file_size_limit");
+        } else {
+            match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    scan.files_searched += 1;
+                    for (idx, line) in content.lines().enumerate() {
+                        if line.to_lowercase().contains(&needle) {
+                            // 第 31 条只作哨兵：30 条恰好是全集时不能谎报还有更多。
+                            if scan.matches.len() == MAX_GREP_MATCHES {
+                                scan.more_matches = true;
+                                scan.stop_reason = Some("match_limit");
+                                break 'walk;
+                            }
+                            scan.matches.push(format!(
+                                "{}:{}: {}",
+                                path.display(),
+                                idx + 1,
+                                line.trim()
+                            ));
+                        }
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                    scan.non_utf8_files += 1;
+                    scan.record_unread(&path, "non_utf8");
+                }
+                Err(_) => {
+                    scan.read_errors += 1;
+                    scan.record_unread(&path, "file_read_error");
+                }
+            }
+        }
+    }
+    scan
+}
+
+fn render_grep_scan(mut scan: GrepScan, roots: &[PathBuf]) -> Result<String, String> {
+    let complete = scan.stop_reason.is_none()
+        && scan.read_errors == 0
+        && scan.oversized_files == 0
+        && scan.non_utf8_files == 0;
+    let matched_at_least = scan.matches.len() + usize::from(scan.more_matches);
+    let mut output_truncated = false;
+    loop {
+        // null = 存在未扫描内容，不能判定是否还有匹配；不冒充 false。
+        let has_more = if scan.more_matches || output_truncated {
+            Some(true)
+        } else if complete {
+            Some(false)
+        } else {
+            None
+        };
+        let result = serde_json::json!({
+            "scope": {"roots": roots, "mode":"case_insensitive_literal", "excluded_directory_names":SKIP_DIRS,
+                "excluded_directory_prefixes":[".writer-"],
+                "excluded_file_types":"known_binary_extensions_and_lock", "follow_symlinks":false,
+                "max_file_bytes_exclusive":MAX_GREP_FILE_BYTES},
+            "returned_matches":scan.matches.len(), "matched_at_least":matched_at_least,
+            "has_more":has_more, "search_complete":complete, "output_truncated":output_truncated,
+            "stop_reason":scan.stop_reason, "files_searched":scan.files_searched,
+            "unread_samples":scan.unread_samples,
+            "skipped":{"directories":scan.excluded_directories,"file_types_or_special":scan.excluded_files,
+                "symlinks":scan.skipped_symlinks,"oversized_files":scan.oversized_files,
+                "non_utf8_files":scan.non_utf8_files,"read_errors":scan.read_errors},
+            "matches":scan.matches,
+        }).to_string();
+        if result.chars().count() <= MAX_TOOL_OUTPUT_CHARS {
+            return Ok(result);
+        }
+        output_truncated = true;
+        if scan.matches.len() > 1 {
+            scan.matches.pop();
+        } else if let Some(line) = scan.matches.last_mut() {
+            let len = line.chars().count();
+            if len > 80 {
+                *line = line.chars().take(len / 2).collect();
+            } else {
+                scan.matches.pop();
+            }
+        } else {
+            return Err("搜索范围元数据超过输出上限，请用 path 指定较小的目录或文件".into());
         }
     }
 }
@@ -509,25 +641,19 @@ pub fn execute(
         }
         "grep_search" => {
             let pattern = get_str("pattern");
-            if pattern.is_empty() {
-                return Err("grep_search 需要 pattern 参数".to_string());
+            if pattern.trim().is_empty() {
+                return Err("grep_search 需要非空 pattern 参数".to_string());
             }
-            let mut matches = Vec::new();
-            walk_match(workspace, &pattern, &mut matches, 0);
-            // 会话 tmp 产物区同权可搜——tmp 里的文本产物（脚本/报告/CSV）
-            // 此前对 grep 不可见，审查者只能逐个 read_file 猜内容。
-            if let Some(tmp) = session_tmp {
-                walk_match(tmp, &pattern, &mut matches, 0);
-            }
-            if matches.is_empty() {
-                Ok(format!("无匹配: {}", pattern))
-            } else {
-                Ok(cap(format!(
-                    "匹配 {} 处:\n{}",
-                    matches.len(),
-                    matches.join("\n")
-                )))
-            }
+            let roots = match args.get("path") {
+                None => allowed_roots(workspace, session_tmp),
+                Some(Value::String(path)) if !path.trim().is_empty() => vec![
+                    contained_multi(workspace, session_tmp, Path::new(path))
+                        .ok_or_else(|| format!("搜索路径不存在、不可访问或超出工作区/会话 tmp 范围: {path}"))?
+                ],
+                _ => return Err("grep_search.path 必须为非空字符串；省略时搜索工作区与会话 tmp".into()),
+            };
+            if roots.is_empty() { return Err("没有可访问的搜索根目录".into()); }
+            render_grep_scan(walk_match(&roots, &pattern, MAX_GREP_ENTRIES), &roots)
         }
         "git_diff" => {
             let diff = git_args(workspace, &["diff", "HEAD"])
@@ -715,6 +841,225 @@ fn run_captured(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    struct GrepFixture(PathBuf);
+
+    impl GrepFixture {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("review-search-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for GrepFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn grep_deep_java_source_is_searchable_from_root_and_subdirectory() {
+        let fixture = GrepFixture::new();
+        let relative = "adp-iam/src/main/java/cn/com/example/iam/security/AuthInterceptor.java";
+        let file = fixture.0.join(relative);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &file,
+            "public class AuthInterceptor {\n boolean preHandle() { return true; }\n}\n",
+        )
+        .unwrap();
+        for path in [None, Some("adp-iam/src/main/java"), Some(relative)] {
+            let mut args = json!({"pattern":"preHandle"});
+            if let Some(path) = path {
+                args["path"] = json!(path);
+            }
+            let out = execute(&fixture.0, None, "grep_search", &args).unwrap();
+            assert!(out.contains("AuthInterceptor.java:2"), "{path:?}: {out}");
+        }
+    }
+
+    #[test]
+    fn grep_path_restricts_matches_instead_of_searching_the_whole_workspace() {
+        let fixture = GrepFixture::new();
+        std::fs::create_dir_all(fixture.0.join("selected")).unwrap();
+        std::fs::write(fixture.0.join("selected/in.java"), "SCOPE_NEEDLE\n").unwrap();
+        std::fs::write(fixture.0.join("outside.java"), "SCOPE_NEEDLE\n").unwrap();
+        let out = execute(
+            &fixture.0,
+            None,
+            "grep_search",
+            &json!({"pattern":"SCOPE_NEEDLE","path":"selected"}),
+        )
+        .unwrap();
+        assert!(
+            out.contains("in.java:1") && !out.contains("outside.java"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn grep_defaults_to_both_roots_but_explicit_paths_select_one_scope() {
+        let workspace = GrepFixture::new();
+        let tmp = GrepFixture::new();
+        let outside = GrepFixture::new();
+        std::fs::write(workspace.0.join("ws.txt"), "shared-needle\n").unwrap();
+        std::fs::write(tmp.0.join("report.md"), "shared-needle\n").unwrap();
+        std::fs::write(outside.0.join("secret.txt"), "shared-needle\n").unwrap();
+        for (path, count) in [
+            (None, 2),
+            (Some("."), 1),
+            (Some("tmp"), 1),
+            (Some("tmp/report.md"), 1),
+        ] {
+            let mut args = json!({"pattern":"SHARED-NEEDLE"});
+            if let Some(path) = path {
+                args["path"] = json!(path);
+            }
+            let out: Value = serde_json::from_str(
+                &execute(&workspace.0, Some(&tmp.0), "grep_search", &args).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(out["returned_matches"], count, "{out}");
+            assert_eq!(out["search_complete"], true, "{out}");
+        }
+        for path in [
+            outside.0.join("secret.txt").to_string_lossy().to_string(),
+            "tmp/../secret.txt".into(),
+            "missing".into(),
+        ] {
+            assert!(execute(
+                &workspace.0,
+                Some(&tmp.0),
+                "grep_search",
+                &json!({"pattern":"needle","path":path})
+            )
+            .is_err());
+        }
+        for args in [
+            json!({"pattern":" "}),
+            json!({"pattern":"x","path":null}),
+            json!({"pattern":"x","path":1}),
+        ] {
+            assert!(execute(&workspace.0, Some(&tmp.0), "grep_search", &args).is_err());
+        }
+    }
+
+    #[test]
+    fn grep_uses_an_extra_match_to_distinguish_exact_limit_from_truncation() {
+        let fixture = GrepFixture::new();
+        for count in [0, MAX_GREP_MATCHES, MAX_GREP_MATCHES + 1] {
+            std::fs::write(fixture.0.join("hits.txt"), "needle\n".repeat(count)).unwrap();
+            let out = execute(
+                &fixture.0,
+                None,
+                "grep_search",
+                &json!({"pattern":"needle"}),
+            )
+            .unwrap();
+            assert!(out.chars().count() <= MAX_TOOL_OUTPUT_CHARS);
+            let out: Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(out["returned_matches"], count.min(MAX_GREP_MATCHES));
+            assert_eq!(out["matched_at_least"], count);
+            assert_eq!(out["has_more"], count > MAX_GREP_MATCHES);
+            assert_eq!(out["search_complete"], count <= MAX_GREP_MATCHES);
+        }
+    }
+
+    #[test]
+    fn grep_output_cap_keeps_valid_metadata_and_a_locatable_match() {
+        let fixture = GrepFixture::new();
+        std::fs::write(
+            fixture.0.join("long.java"),
+            format!("needle {}\n", "汉字".repeat(8000)),
+        )
+        .unwrap();
+        let raw = execute(
+            &fixture.0,
+            None,
+            "grep_search",
+            &json!({"pattern":"needle"}),
+        )
+        .unwrap();
+        assert!(raw.chars().count() <= MAX_TOOL_OUTPUT_CHARS);
+        let out: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(out["matched_at_least"], 1);
+        assert_eq!(out["output_truncated"], true);
+        assert_eq!(out["has_more"], true);
+        assert!(out["matches"][0].as_str().unwrap().contains("long.java:1"));
+    }
+
+    #[test]
+    fn grep_reports_unread_text_and_resource_limits_instead_of_complete_absence() {
+        let fixture = GrepFixture::new();
+        std::fs::write(fixture.0.join("encoded.java"), [0xff, 0xfe]).unwrap();
+        std::fs::write(
+            fixture.0.join("large.java"),
+            vec![b'x'; MAX_GREP_FILE_BYTES as usize],
+        )
+        .unwrap();
+        let raw = execute(
+            &fixture.0,
+            None,
+            "grep_search",
+            &json!({"pattern":"needle"}),
+        )
+        .unwrap();
+        let out: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(out["returned_matches"], 0);
+        assert_eq!(out["search_complete"], false);
+        assert!(out["has_more"].is_null());
+        assert_eq!(out["skipped"]["non_utf8_files"], 1);
+        assert_eq!(out["skipped"]["oversized_files"], 1);
+        assert!(out["unread_samples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s.as_str().unwrap().contains("encoded.java")));
+        assert!(out["unread_samples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s.as_str().unwrap().contains("large.java")));
+        let roots = vec![fixture.0.clone()];
+        let out: Value =
+            serde_json::from_str(&render_grep_scan(walk_match(&roots, "needle", 1), &roots).unwrap())
+                .unwrap();
+        assert_eq!(out["stop_reason"], "entry_limit");
+        assert_eq!(out["search_complete"], false);
+        assert!(out["has_more"].is_null());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grep_never_follows_discovered_symlinks_outside_roots_or_into_cycles() {
+        let fixture = GrepFixture::new();
+        let outside = GrepFixture::new();
+        std::fs::write(fixture.0.join("inside.txt"), "needle-inside\n").unwrap();
+        std::fs::write(outside.0.join("secret.txt"), "needle-outside\n").unwrap();
+        std::os::unix::fs::symlink(&outside.0, fixture.0.join("outside-dir")).unwrap();
+        std::os::unix::fs::symlink(outside.0.join("secret.txt"), fixture.0.join("outside-file"))
+            .unwrap();
+        std::os::unix::fs::symlink(".", fixture.0.join("cycle")).unwrap();
+        let raw = execute(
+            &fixture.0,
+            None,
+            "grep_search",
+            &json!({"pattern":"needle"}),
+        )
+        .unwrap();
+        let out: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(out["returned_matches"], 1);
+        assert_eq!(out["skipped"]["symlinks"], 3);
+        assert!(!raw.contains("needle-outside"));
+        assert!(execute(
+            &fixture.0,
+            None,
+            "grep_search",
+            &json!({"pattern":"needle","path":"outside-dir"})
+        )
+        .is_err());
+    }
 
     #[test]
     fn read_file_is_fenced_and_capped() {
