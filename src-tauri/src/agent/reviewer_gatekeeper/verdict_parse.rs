@@ -16,57 +16,147 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::watch;
 
 
-/// 稳健解析 Reviewer 返回的 JSON
+/// 只做字段类型/非空校验和明确别名转换，不判断缺陷语义。
+/// 禁止把解析失败的缺陷列表当成 []，或把未知字段对象当成空白缺陷。
 pub(crate) fn parse_reviewer_json(
     raw_text: &str,
     model_id: &str,
     diff_hash: &str,
     duration_ms: u64,
-) -> ReviewResult {
-    let clean = extract_json_str(raw_text);
-    if let Ok(mut parsed) = serde_json::from_str::<ReviewResult>(&clean) {
-        parsed.duration_ms = duration_ms;
-        parsed.model_id = model_id.to_string();
-        parsed.diff_hash = diff_hash.to_string();
-        // 依据契约以 blocking_issues 为唯一定论
-        if parsed.blocking_issues.is_empty() {
-            parsed.verdict = "passed".to_string();
-        } else {
-            parsed.verdict = "rejected".to_string();
+) -> Result<ReviewResult, String> {
+    use serde_json::Value;
+    let value: Value = serde_json::from_str(&extract_json_str(raw_text))
+        .map_err(|e| format!("JSON 语法错误：{e}"))?;
+    if !value.is_object() {
+        return Err("终审判决必须是 JSON 对象".into());
+    }
+    let verdict = review_text(&value, &["verdict"], "verdict")?;
+    if !matches!(
+        verdict.as_str(),
+        "passed" | "rejected" | "reject" | "fail" | "blocking"
+    ) {
+        return Err("verdict 必须为 passed 或 rejected".into());
+    }
+    let score = value
+        .get("score")
+        .and_then(Value::as_u64)
+        .filter(|s| *s <= 100)
+        .ok_or("score 缺失或类型/范围错误：必须为 0..100 的整数")? as u32;
+    let summary = review_text(
+        &value,
+        &["summary", "conclusion", "verdict_reason", "decision_basis"],
+        "summary",
+    )?;
+    let items = value
+        .get("blocking_issues")
+        .and_then(Value::as_array)
+        .ok_or("blocking_issues 缺失或类型错误：必须显式提供数组，无缺陷时为 []")?;
+    let mut blocking_issues = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        let path = format!("blocking_issues[{index}]");
+        if !item.is_object() {
+            return Err(format!("{path} 必须为对象"));
         }
-        return parsed;
+        let mut issue = review_text(
+            item,
+            &["issue", "detail", "description", "title"],
+            &format!("{path}.issue"),
+        )?;
+        // 标题和正文往往分列，保留补充说明，避免转换时只剩一个标题。
+        for key in [
+            "title",
+            "detail",
+            "description",
+            "analysis",
+            "why_blocking",
+            "impact",
+        ] {
+            if let Some(text) = item.get(key).and_then(Value::as_str) {
+                if !text.trim().is_empty() && !issue.contains(text) {
+                    issue.push_str(&format!("\n{key}: {text}"));
+                }
+            }
+        }
+        let requirement = review_text(
+            item,
+            &[
+                "requirement",
+                "required_fix",
+                "required_action",
+                "required_evidence",
+            ],
+            &format!("{path}.requirement"),
+        )?;
+        let file = review_file(item, &path)?;
+        blocking_issues.push(BlockingIssue {
+            file,
+            issue,
+            requirement,
+        });
     }
-
-    // 尝试轻量容错提取
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&clean) {
-        let score = v.get("score").and_then(|s| s.as_u64()).unwrap_or(80) as u32;
-        let summary = v.get("summary").and_then(|s| s.as_str()).unwrap_or("审查完成").to_string();
-        let blocking_issues = v.get("blocking_issues")
-            .and_then(|b| serde_json::from_value::<Vec<BlockingIssue>>(b.clone()).ok())
-            .unwrap_or_default();
-        let nit_issues = v.get("nit_issues")
-            .and_then(|n| serde_json::from_value::<Vec<NitIssue>>(n.clone()).ok())
-            .unwrap_or_default();
-        let missing_evidence = v.get("missing_evidence")
-            .and_then(|m| serde_json::from_value::<Vec<String>>(m.clone()).ok())
-            .unwrap_or_default();
-
-        let verdict = if blocking_issues.is_empty() { "passed" } else { "rejected" }.to_string();
-        return ReviewResult {
-            verdict,
-            score,
-            blocking_issues,
-            nit_issues,
-            summary,
-            duration_ms,
-            model_id: model_id.to_string(),
-            diff_hash: diff_hash.to_string(),
-            missing_evidence,
-        };
+    if verdict != "passed" && blocking_issues.is_empty() {
+        return Err("verdict 表示拒绝，但 blocking_issues 为空：请提供缺陷或纠正 verdict".into());
     }
+    let mut nit_issues = Vec::new();
+    if let Some(items) = value.get("nit_issues") {
+        let items = items.as_array().ok_or("nit_issues 类型错误：必须为数组")?;
+        for (index, item) in items.iter().enumerate() {
+            let path = format!("nit_issues[{index}]");
+            let suggestion = review_text(item, &["suggestion"], &format!("{path}.suggestion"))?;
+            nit_issues.push(NitIssue {
+                file: review_file(item, &path)?,
+                suggestion,
+            });
+        }
+    }
+    let missing_evidence = match value.get("missing_evidence") {
+        Some(v) => serde_json::from_value::<Vec<String>>(v.clone())
+            .map_err(|e| format!("missing_evidence 类型错误：必须为字符串数组（{e}）"))?,
+        None => Vec::new(),
+    };
+    Ok(ReviewResult {
+        // 有有效阻塞项时仍以阻塞项为准，不能因 verdict=passed 放行。
+        verdict: if blocking_issues.is_empty() {
+            "passed"
+        } else {
+            "rejected"
+        }
+        .into(),
+        score,
+        blocking_issues,
+        nit_issues,
+        summary,
+        duration_ms,
+        model_id: model_id.into(),
+        diff_hash: diff_hash.into(),
+        missing_evidence,
+    })
+}
 
-    // JSON 解析彻底失败：Fail-Open 避免卡死
-    ReviewResult::failed_open("Reviewer 输出非标准 JSON，未获得有效审查结论", model_id, diff_hash)
+fn review_text(value: &serde_json::Value, keys: &[&str], path: &str) -> Result<String, String> {
+    for key in keys {
+        if let Some(v) = value.get(key) {
+            return v
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| format!("{path}（字段 {key}）必须为非空字符串"));
+        }
+    }
+    Err(format!("{path} 缺失；可用字段：{}", keys.join(" / ")))
+}
+
+fn review_file(item: &serde_json::Value, path: &str) -> Result<String, String> {
+    // 全局/报告级缺陷允许不指定文件；显式给出的文件必须是字符串。
+    for key in ["file", "path", "location"] {
+        if let Some(value) = item.get(key) {
+            return value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| format!("{path}.file（字段 {key}）必须为字符串"));
+        }
+    }
+    Ok(String::new())
 }
 
 pub(crate) fn extract_json_str(text: &str) -> String {
@@ -117,3 +207,63 @@ pub fn mechanical_precheck_violations(
     violations
 }
 
+#[cfg(test)]
+mod feedback_preservation_tests {
+    use super::*;
+
+    #[test]
+    fn historical_aliases_preserve_blocking_feedback() {
+        for key in ["required_fix", "required_action", "required_evidence"] {
+            let mut item = json!({"title":"证据缺失", "detail":"报告缺少授权分支 diff"});
+            item[key] = json!("附上 diff 和行号");
+            let raw = json!({"verdict":"fail", "score":62,
+                "conclusion":"当前证据不足", "blocking_issues":[item]});
+            let result = parse_reviewer_json(&raw.to_string(), "mock", "hash", 12).unwrap();
+            assert!(!result.is_passed());
+            assert!(result.blocking_issues[0].issue.contains("证据缺失"));
+            assert!(result.blocking_issues[0]
+                .issue
+                .contains("报告缺少授权分支 diff"));
+            assert_eq!(result.blocking_issues[0].requirement, "附上 diff 和行号");
+            assert_eq!(result.summary, "当前证据不足");
+            assert_eq!(result.score, 62);
+        }
+    }
+
+    #[test]
+    fn malformed_verdicts_cannot_become_empty_blockers_or_success() {
+        for (patch, field) in [
+            (
+                json!({"blocking_issues":[{"title":"报告有问题"}]}),
+                "blocking_issues[0].requirement",
+            ),
+            (json!({"blocking_issues":[{}]}), "blocking_issues[0].issue"),
+            (json!({"blocking_issues":"并非数组"}), "blocking_issues"),
+            (json!({"blocking_issues":null}), "blocking_issues"),
+            (
+                json!({"blocking_issues":[{"issue":42,"requirement":"修正"}]}),
+                "blocking_issues[0].issue",
+            ),
+            (json!({"score":null}), "score"),
+            (json!({"score":101}), "score"),
+            (json!({"summary":null}), "summary"),
+            (json!({"nit_issues":[{}]}), "nit_issues[0].suggestion"),
+            (json!({"missing_evidence":{}}), "missing_evidence"),
+            (json!({"verdict":null}), "verdict"),
+        ] {
+            let mut raw = json!({"verdict":"passed", "score":90, "summary":"完成",
+                "blocking_issues":[], "nit_issues":[]});
+            raw.as_object_mut()
+                .unwrap()
+                .extend(patch.as_object().unwrap().clone());
+            let error = parse_reviewer_json(&raw.to_string(), "mock", "hash", 0).unwrap_err();
+            assert!(error.contains(field), "{error}");
+        }
+        for raw in [
+            r#"{"verdict":"reject","blocking_issues":[]}"#,
+            r#"{"score":90,"summary":"完成"}"#,
+        ] {
+            assert!(parse_reviewer_json(raw, "mock", "hash", 0).is_err());
+        }
+    }
+}

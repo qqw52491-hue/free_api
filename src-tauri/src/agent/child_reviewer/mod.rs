@@ -387,7 +387,7 @@ pub async fn spawn_child_reviewer(
         // 超限后不再判死——带疤收敛（缺项写入 missing_evidence + 留痕标记）。
         let mut coverage_fix_attempts: u32 = 0;
 
-        let (duration_ms, completion_tokens, prompt_tokens, final_parsed, final_raw) = loop {
+        let (duration_ms, completion_tokens, prompt_tokens, mut result_val) = loop {
             llm_call_index += 1;
             think_chars.store(0, std::sync::atomic::Ordering::Relaxed);
             crate::agent::control::mark_stage(
@@ -502,16 +502,6 @@ pub async fn spawn_child_reviewer(
                     return;
                 }
                 Ok(Ok(result)) => {
-                    crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
-                        &session_id_clone,
-                        &child_log_suffix,
-                        llm_call_index,
-                        &config,
-                        &messages,
-                        Some(&result),
-                        "success",
-                        None,
-                    );
                     // 本棒成功：恢复基础超时（重试只救当前一棒，不传染后续轮次）
                     timeout_retried = false;
                     cur_timeout_secs = child_timeout_secs(&config.model_name);
@@ -528,10 +518,14 @@ pub async fn spawn_child_reviewer(
                 .usage
                 .map(|usage| usage.prompt_tokens)
                 .unwrap_or_default();
-            let raw = stream_result.full_response;
+            let raw = stream_result.full_response.clone();
 
             // 思考超限被切断且没有任何正文：第一次追加“立刻结论”指令并降强度重试，第二次判超时
             if think_chars.load(std::sync::atomic::Ordering::Relaxed) > think_cap && raw.trim().is_empty() {
+                crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
+                    &session_id_clone, &child_log_suffix, llm_call_index, &config, &messages,
+                    Some(&stream_result), "parse_error", Some("思考内容超限且未返回正文"),
+                );
                 think_overflows += 1;
                 if think_overflows >= 2 {
                     let duration_ms = started_at.elapsed().as_millis() as u64;
@@ -563,10 +557,110 @@ pub async fn spawn_child_reviewer(
                 continue;
             }
 
-            // 1. 最终审查 JSON（含 findings 键）→ 收敛。
-            //    收敛前先做覆盖型契约校验：缺项时把【具体缺哪些点】喂回模型
-            //    重答（实测：缺项错误只落库、子任务至死不知道漏了啥）。
-            let parsed_output = parse_controlled_output(&raw, &allowed_refs);
+            // 1. 先构造实际交付负载并校验基础结构与完整契约。
+            // 必填字段/类型/闭集错误与语法错误共用现有纠正循环，避免末尾才拒收。
+            let tool_request = serde_json::from_str::<serde_json::Value>(&raw)
+                .ok()
+                .or_else(|| {
+                    extract_json_object(&raw).and_then(|fragment| serde_json::from_str(fragment).ok())
+                })
+                .filter(|v| v.get("tool").is_some());
+            let parsed_output = parse_controlled_output(&raw, &allowed_refs).and_then(|parsed| {
+                let (
+                    findings,
+                    confidence,
+                    evidence_refs,
+                    missing_evidence,
+                    routing,
+                    scorecard,
+                    objection_verdicts,
+                    withdrawn_findings,
+                ) = parsed;
+
+                // 契约驱动机械判定：若任务契约未绑定自动化验证义务，机械置 test_coverage 为 None (N/A)
+                let scorecard = scorecard.map(|mut sc| {
+                    if !has_verify_obligation {
+                        sc.test_coverage = None;
+                        if sc.null_reason.is_none() {
+                            sc.null_reason = Some("任务契约未绑定可执行验证义务".to_string());
+                        }
+                    }
+                    sc
+                });
+
+                let result = ChildReviewResult {
+                    child_run_id: child_run_id_clone.clone(),
+                    status: "succeeded".to_string(),
+                    findings,
+                    confidence,
+                    evidence_refs,
+                    missing_evidence,
+                    duration_ms,
+                    completion_tokens,
+                    prompt_tokens,
+                    error_kind: None,
+                    raw_result_json: None,
+                    kind: None,
+                    routing: Some(routing),
+                    withdrawn_findings,
+                    objection_verdicts,
+                    scorecard,
+                    task_id: None,
+                    attempt_id: None,
+                };
+                // 动态合并 LLM 产物中的扩展字段（如 cve_refs, risk_level 等），确保强类型外产物不丢失
+                let mut result_val = serde_json::to_value(&result).unwrap_or_default();
+                if let Some(parsed_val) = serde_json::from_str::<serde_json::Value>(&raw)
+                    .ok()
+                    .or_else(|| extract_json_object(&raw).and_then(|f| serde_json::from_str(f).ok()))
+                {
+                    if let Some(map) = parsed_val.as_object() {
+                        if let Some(res_map) = result_val.as_object_mut() {
+                            for (k, v) in map {
+                                if !res_map.contains_key(k) {
+                                    res_map.insert(k.clone(), v.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(res_map) = result_val.as_object_mut() {
+                    if let Some(role) = param_role.as_ref() {
+                        res_map.insert("role".to_string(), role.clone());
+                    }
+                    if let Some(role_label) = param_role_label.as_ref() {
+                        res_map.insert("role_label".to_string(), role_label.clone());
+                    }
+                }
+
+                // 所有必填/类型/闭集错误都回到原有纠正循环；通过后才允许交付。
+                if let Some(schema) = custom_schema.as_ref() {
+                    schema
+                        .validate_shape(&result_val)
+                        .map_err(|error| format!("child_reviewer 契约校验失败：{error}"))?;
+                }
+                Ok(result_val)
+            });
+
+            let submission_error = if tool_request.is_some() {
+                None
+            } else {
+                parsed_output.as_ref().err().map(String::as_str)
+            };
+            crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
+                &session_id_clone,
+                &child_log_suffix,
+                llm_call_index,
+                &config,
+                &messages,
+                Some(&stream_result),
+                if submission_error.is_some() {
+                    "parse_error"
+                } else {
+                    "success"
+                },
+                submission_error,
+            );
             let mut rejection_reason = parsed_output.as_ref().err().cloned().unwrap_or_default();
             if let Ok(parsed) = parsed_output {
                 let coverage_err = extract_json_object(&raw)
@@ -588,22 +682,16 @@ pub async fn spawn_child_reviewer(
                         continue;
                     }
                     Some(_) => {
-                        break (duration_ms, completion_tokens, prompt_tokens, parsed, raw);
+                        break (duration_ms, completion_tokens, prompt_tokens, parsed);
                     }
                     None => {
-                        break (duration_ms, completion_tokens, prompt_tokens, parsed, raw);
+                        break (duration_ms, completion_tokens, prompt_tokens, parsed);
                     }
                 }
             }
 
             // 2. 取证请求（含 "tool" 键，宽松提取）：预算未尽永远执行——合规进展
             //    顺带清零非合规计数（模型偶发抽风不该连累后续合法取证）。
-            let tool_request = serde_json::from_str::<serde_json::Value>(&raw)
-                .ok()
-                .or_else(|| {
-                    extract_json_object(&raw).and_then(|fragment| serde_json::from_str(fragment).ok())
-                })
-                .filter(|v| v.get("tool").is_some());
             if let Some(req) = tool_request {
                 if tool_steps_used < reviewer_tool_steps {
                     let tool_name = req.get("tool").and_then(|t| t.as_str()).unwrap_or("").to_string();
@@ -718,83 +806,6 @@ pub async fn spawn_child_reviewer(
         };
 
         crate::agent::control::mark_stage(&stage_key, "child_task:reduce");
-        let (findings, confidence, evidence_refs, missing_evidence, routing, scorecard, objection_verdicts, withdrawn_findings) = final_parsed;
-
-        // 契约驱动机械判定：若任务契约未绑定自动化验证义务，机械置 test_coverage 为 None (N/A)
-        let scorecard = scorecard.map(|mut sc| {
-            if !has_verify_obligation {
-                sc.test_coverage = None;
-                if sc.null_reason.is_none() {
-                    sc.null_reason = Some("任务契约未绑定可执行验证义务".to_string());
-                }
-            }
-            sc
-        });
-
-        let result = ChildReviewResult {
-            child_run_id: child_run_id_clone.clone(),
-            status: "succeeded".to_string(),
-            findings,
-            confidence,
-            evidence_refs,
-            missing_evidence,
-            duration_ms,
-            completion_tokens,
-            prompt_tokens,
-            error_kind: None,
-            raw_result_json: None,
-            kind: None,
-            routing: Some(routing),
-            withdrawn_findings,
-            objection_verdicts,
-            scorecard,
-            task_id: None,
-            attempt_id: None,
-        };
-        // 动态合并 LLM 产物中的扩展字段（如 cve_refs, risk_level 等），确保强类型外产物不丢失
-        let mut result_val = serde_json::to_value(&result).unwrap_or_default();
-        if let Some(parsed_val) = serde_json::from_str::<serde_json::Value>(&final_raw)
-            .ok()
-            .or_else(|| extract_json_object(&final_raw).and_then(|f| serde_json::from_str(f).ok()))
-        {
-            if let Some(map) = parsed_val.as_object() {
-                if let Some(res_map) = result_val.as_object_mut() {
-                    for (k, v) in map {
-                        if !res_map.contains_key(k) {
-                            res_map.insert(k.clone(), v.clone());
-                        }
-                    }
-                }
-            }
-        }
-        if let Some(res_map) = result_val.as_object_mut() {
-            if let Some(role) = param_role {
-                res_map.insert("role".to_string(), role);
-            }
-            if let Some(role_label) = param_role_label {
-                res_map.insert("role_label".to_string(), role_label);
-            }
-        }
-        // 若挂载了特化契约，做严格闭集与必填校验；若违规，则标记为 invalid_output (contract_violation)
-        if let Some(ref schema) = custom_schema {
-            if !schema.is_empty() {
-                if let Err(err) = schema.validate_shape(&result_val) {
-                    let result_json = serde_json::to_string(&result_val).ok();
-                    finish_child_run_with_history(
-                        &db_clone,
-                        &child_run_id_clone,
-                        "invalid_output",
-                        duration_ms,
-                        completion_tokens,
-                        prompt_tokens,
-                        Some(ChildErrorKind::ContractViolation(err)),
-                        result_json.as_deref(),
-                        serde_json::to_string(&messages).ok().as_deref(),
-                    );
-                    return;
-                }
-            }
-        }
         // 证据范围覆盖校验仍保留；知情重试后缺项留痕，findings 照常入账。
         if let Err(err) = crate::agent::impact_pack::check_evidence_scope_verdicts(
             &evidence_scope_refs, &result_val,

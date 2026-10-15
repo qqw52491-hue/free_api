@@ -1583,3 +1583,48 @@ fn reviewer_thinking_cap_preserves_explicit_override_and_bounds() {
         assert_eq!(super::reviewer_thinking_cap(Some(value)), expected);
     }
 }
+
+#[test]
+fn child_submission_preserves_incident_finding_aliases() {
+    let raw = json!({"confidence":"supported", "findings":[{
+        "id":"F1", "severity":"blocking", "file":"src/http.js:10",
+        "title":"授权处理错误", "description":"授权失效不应被当作会话失效",
+        "recommendation":"分别处理授权状态和登录状态"}]});
+    let (findings, _, _, _, _, _, _, _) = parse_controlled_output(&raw.to_string(), &[]).unwrap();
+    assert_eq!(findings[0].location, "src/http.js:10");
+    assert_eq!(findings[0].severity, "blocking");
+    assert!(findings[0].why.contains("授权处理错误"));
+    assert!(findings[0].why.contains("授权失效不应被当作会话失效"));
+    assert_eq!(findings[0].suggestion, "分别处理授权状态和登录状态");
+    let (resumed_findings, _, _, _, _, _, _) =
+        parse_child_review_rebuttal_output(&raw.to_string()).unwrap();
+    assert_eq!(resumed_findings[0], findings[0], "对质入口共用字段解析");
+
+}
+
+#[test]
+fn child_submission_reports_unknown_severity_and_empty_findings() {
+    for (finding, field) in [
+        (
+            json!({"severity":"medium", "description":"实际缺陷"}),
+            "findings[0].severity",
+        ),
+        (
+            json!({"severity":"high", "description":"实际缺陷"}),
+            "findings[0].severity",
+        ),
+        (
+            json!({"severity":"blocking", "location":"a.rs:1"}),
+            "findings[0]",
+        ),
+        (json!({}), "findings[0].severity"),
+        (
+            json!({"description":"有正文但未分类"}),
+            "findings[0].severity",
+        ),
+    ] {
+        let raw = json!({"confidence":"supported", "findings":[finding]});
+        let error = parse_controlled_output(&raw.to_string(), &[]).unwrap_err();
+        assert!(error.contains(field), "{error}");
+    }
+}

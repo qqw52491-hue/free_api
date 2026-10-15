@@ -101,7 +101,7 @@ index 789..abc 100644
             "summary": "存在一处潜在 panic 隐患"
         }"#;
 
-        let res = parse_reviewer_json(json_input, "test-model", "hash123", 500);
+        let res = parse_reviewer_json(json_input, "test-model", "hash123", 500).unwrap();
         assert_eq!(res.verdict, "rejected");
         assert_eq!(res.blocking_issues.len(), 1);
         assert_eq!(res.nit_issues.len(), 1);
@@ -114,7 +114,7 @@ index 789..abc 100644
             "nit_issues": [],
             "summary": "代码修改完善"
         }"#;
-        let res2 = parse_reviewer_json(clean_json, "test-model", "hash123", 300);
+        let res2 = parse_reviewer_json(clean_json, "test-model", "hash123", 300).unwrap();
         assert_eq!(res2.verdict, "passed");
         assert!(res2.is_passed());
     }
@@ -331,7 +331,7 @@ index 789..abc 100644
             assert_eq!(retries, if idx == 1 { 0 } else { 1 });
         }
         // 不新增 DSML 兼容，更不能把不可解析的输出伪造为审查通过。
-        assert!(parse_reviewer_json(dsml, "model", "diff", 0).is_service_failure());
+        assert!(parse_reviewer_json(dsml, "model", "diff", 0).is_err());
         for _ in 1..5 {
             assert!(finish_format_retry_allowed(false, &mut retries, true));
         }
@@ -353,13 +353,13 @@ index 789..abc 100644
 
     #[test]
     fn finish_format_retry_feedback_matches_remaining_tool_budget() {
-        let feedback = finish_format_retry_feedback(1, 1, 8, false);
+        let feedback = finish_format_retry_feedback(1, 1, 8, false, "JSON 语法错误");
         assert!(feedback.contains("连续格式纠正 1/5"));
         assert!(feedback.contains("未执行其中的工具调用"));
         assert!(feedback.contains("可以输出工具请求 JSON"));
         assert!(feedback.contains(r#"{"tool":"read_file","path":"文件路径"}"#));
         for (used, budget, forced) in [(8, 8, false), (0, 0, false), (1, 8, true)] {
-            let feedback = finish_format_retry_feedback(5, used, budget, forced);
+            let feedback = finish_format_retry_feedback(5, used, budget, forced, "JSON 语法错误");
             assert!(feedback.contains("连续格式纠正 5/5"));
             assert!(feedback.contains("当前不再允许请求取证工具"));
             assert!(!feedback.contains("可以输出工具请求 JSON"));

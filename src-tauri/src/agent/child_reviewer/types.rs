@@ -687,13 +687,15 @@ pub(crate) struct RawReviewFinding {
     pub id: Option<String>,
     #[serde(default)]
     pub severity: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "file")]
     pub location: Option<String>,
     #[serde(default)]
     pub current: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "description")]
     pub why: Option<String>,
     #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default, alias = "recommendation")]
     pub suggestion: Option<String>,
     #[serde(default)]
     pub evidence_strength: Option<String>,

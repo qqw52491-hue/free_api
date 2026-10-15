@@ -23,13 +23,13 @@ fn finish_request_attempt_limit(retry_enabled: bool) -> u32 {
     if retry_enabled { MAX_FINISH_REQUEST_RETRIES + 1 } else { 1 }
 }
 
-/// 只计连续的非 JSON 输出；合法 JSON 会清零，不改变取证预算或判决校验。
+/// 连续的语法/判决结构错误共用原有纠正预算；有效判决或工具请求清零。
 pub(crate) fn finish_format_retry_allowed(
-    valid_json: bool,
+    valid_output: bool,
     retries: &mut u32,
     retry_enabled: bool,
 ) -> bool {
-    if valid_json {
+    if valid_output {
         *retries = 0;
         return false;
     }
@@ -45,6 +45,7 @@ pub(crate) fn finish_format_retry_feedback(
     tool_steps_used: u32,
     forensic_budget: u32,
     forced_final: bool,
+    error: &str,
 ) -> String {
     let next_action = if !forced_final && tool_steps_used < forensic_budget {
         r#"取证预算未尽：可以输出工具请求 JSON（例如 {"tool":"read_file","path":"文件路径"}），也可以输出最终判决 JSON（含 verdict 键）。"#
@@ -52,7 +53,7 @@ pub(crate) fn finish_format_retry_feedback(
         "当前不再允许请求取证工具，请基于已有证据输出最终判决 JSON（含 verdict 键）；未核实事项写入 missing_evidence。"
     };
     format!(
-        "【系统】终审输出格式解析失败：上一条输出不是合法 JSON，未执行其中的工具调用，也未获得有效审查结论。连续格式纠正 {}/{}。{}请只输出一个 JSON 对象，不要附加解释文字、Markdown 或 DSML 标签。",
+        "【系统】终审输出格式解析失败：{error}。未执行其中的工具调用，也未获得有效审查结论。连续格式纠正 {}/{}。{}请按原约定提供 verdict、score、summary、blocking_issues；每项缺陷提供 issue 和 requirement。请只输出一个 JSON 对象，不要附加解释文字、Markdown 或 DSML 标签。",
         retry, MAX_FINISH_FORMAT_RETRIES, next_action
     )
 }
@@ -367,7 +368,18 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     // 且期间未发生人类人工仲裁特赦（无 human_waivers 介入），直接复用上次拦截结果，避免浪费 Token 重跑
     if let (Some(last_hash), Some(last_res)) = (last_reviewed_hash, last_review_result) {
         let has_active_waiver = human_waivers.map_or(false, |w| !w.trim().is_empty());
-        if !last_hash.is_empty() && last_hash == review_fingerprint && !last_res.is_passed() && !last_res.is_service_failure() && !has_active_waiver {
+        // 旧版本可能把未知字段解成空白缺陷；这不是可复用的有效判决。
+        let has_complete_blockers = !last_res.blocking_issues.is_empty()
+            && last_res.blocking_issues.iter().all(|issue| {
+                !issue.issue.trim().is_empty() && !issue.requirement.trim().is_empty()
+            });
+        if !last_hash.is_empty()
+            && last_hash == review_fingerprint
+            && !last_res.is_passed()
+            && !last_res.is_service_failure()
+            && !has_active_waiver
+            && has_complete_blockers
+        {
             let mut reused = last_res.clone();
             reused.summary = format!("【复用上次拦截 (交付材料未变)】{}", last_res.summary);
             reused.duration_ms = 0;
@@ -606,11 +618,11 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     // 每轮取证/判决请求各自拥有预算，成功后自然重置；用户关闭重试时只尝试一次。
     // 本次终审开始时快照开关，避免其他会话中途改变本轮请求预算。
     let request_attempt_limit = finish_request_attempt_limit(review_retry_allowed());
-    // 非 JSON 输出独立计连续次数，最多纠正 5 次；合法 JSON 清零。
+    // 语法/结构错误共用格式纠正预算，最多连续纠正 5 次。
     let mut format_retries = 0u32;
 
     let mut ignore_stream = |_: llm::StreamEvent<'_>| true;
-    let (response_text, duration_ms) = loop {
+    loop {
         llm_call_index += 1;
         let call = llm::stream_with_attempt_limit(
             &model_config,
@@ -655,20 +667,8 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
         cur_timeout_secs = review_timeout_secs;
 
         let duration_ms = started_at.elapsed().as_millis() as u64;
-        let raw = match stream_result {
-            Ok(output) => {
-                crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
-                    session_id,
-                    "finish-review",
-                    llm_call_index,
-                    &model_config,
-                    &messages,
-                    Some(&output),
-                    "success",
-                    None,
-                );
-                output.full_response
-            }
+        let output = match stream_result {
+            Ok(output) => output,
             Err(e) => {
                 crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
                     session_id,
@@ -681,23 +681,44 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
                     Some(&e),
                 );
                 return ReviewResult::failed_open(
-                    &format!("Reviewer 调用失败: {}", e), &model_id, &review_fingerprint,
+                    &format!("Reviewer 调用失败: {}", e),
+                    &model_id,
+                    &review_fingerprint,
                 );
             }
         };
 
-        // a. 判决 JSON（含 verdict 键）→ 收敛，交给下游统一解析
-        let clean = extract_json_str(&raw);
-        let as_value = serde_json::from_str::<serde_json::Value>(&clean).ok();
-        let retry_format = finish_format_retry_allowed(
-            as_value.is_some(),
-            &mut format_retries,
-            review_retry_allowed(),
-        );
+        let raw = output.full_response.clone();
+        let as_value = serde_json::from_str::<serde_json::Value>(&extract_json_str(&raw)).ok();
         let is_tool_request = as_value
             .as_ref()
             .map(|v| v.get("tool").is_some() && v.get("verdict").is_none())
             .unwrap_or(false);
+        let parsed = parse_reviewer_json(&raw, &model_id, &review_fingerprint, duration_ms);
+        let format_error = if is_tool_request {
+            None
+        } else {
+            parsed.as_ref().err().map(String::as_str)
+        };
+        crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
+            session_id,
+            "finish-review",
+            llm_call_index,
+            &model_config,
+            &messages,
+            Some(&output),
+            if format_error.is_some() {
+                "parse_error"
+            } else {
+                "success"
+            },
+            format_error,
+        );
+        let retry_format = finish_format_retry_allowed(
+            format_error.is_none(),
+            &mut format_retries,
+            review_retry_allowed(),
+        );
 
         // b. 取证请求：预算内执行并回灌；预算外强制收敛；强制后仍请求 → 判不合规（fail-open）
         if is_tool_request {
@@ -791,34 +812,25 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
             continue;
         }
 
-        // b2. 非 JSON 输出最多连续纠正 5 次；合法 JSON 已在上方清零计数。
-        // 格式错误不消耗取证预算，也不表示代码被判不合格。
-        if retry_format {
-            messages.push(json!({"role": "assistant", "content": raw}));
-            messages.push(json!({
-                "role": "user",
-                "content": finish_format_retry_feedback(
-                    format_retries, tool_steps_used, forensic_budget, forced_final,
-                )
-            }));
-            continue;
+        // 格式纠正只回到审查员，不将协议错误伪装为代码缺陷。
+        match parsed {
+            Ok(result) => return result,
+            Err(error) => {
+                if retry_format {
+                    messages.push(json!({"role": "assistant", "content": raw}));
+                    messages.push(json!({
+                        "role": "user",
+                        "content": finish_format_retry_feedback(
+                            format_retries, tool_steps_used, forensic_budget, forced_final, &error,
+                        )
+                    }));
+                    continue;
+                }
+                let reason = format!("Reviewer 判决格式错误：{error}；已连续纠正 {format_retries} 次，未获得有效审查结论");
+                return ReviewResult::failed_open(&reason, &model_id, &review_fingerprint);
+            }
         }
-        if as_value.is_none() && format_retries >= MAX_FINISH_FORMAT_RETRIES {
-            return ReviewResult::failed_open(
-                &format!(
-                    "Reviewer 输出不是合法 JSON；已连续纠正 {} 次仍未获得有效审查结论",
-                    MAX_FINISH_FORMAT_RETRIES
-                ),
-                &model_id,
-                &review_fingerprint,
-            );
-        }
-
-        break (raw, duration_ms);
-    };
-
-    // 5. 解析 LLM 输出的 JSON
-    parse_reviewer_json(&response_text, &model_id, &review_fingerprint, duration_ms)
+    }
 }
 
 
@@ -879,9 +891,228 @@ mod request_retry_policy_tests {
 }
 
 #[cfg(test)]
-mod consumer_retirement_tests {
+mod finish_review_regression_tests {
     use super::*;
     use crate::agent::child_reviewer::retirement_tests::MockReviewer;
+
+    async fn run_finish(mock: &MockReviewer) -> (ReviewResult, String) {
+        run_finish_with_cache(mock, None).await
+    }
+
+    async fn run_finish_with_cache(
+        mock: &MockReviewer,
+        cached: Option<&ReviewResult>,
+    ) -> (ReviewResult, String) {
+        let workspace = mock.root.join("workspace");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        let changed = workspace.join("src/changed.rs");
+        std::fs::write(
+            &changed,
+            "pub fn update_request(ctx: &mut C) { ctx.request_state = 0; }\n",
+        )
+        .unwrap();
+        std::fs::write(workspace.join("src/writer.rs"), "struct C { pub request_state: i32 }\nfn write(ctx: &mut C) { ctx.request_state = 2; }\n").unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-qm",
+                "base",
+            ],
+        ] {
+            assert!(Command::new("git")
+                .current_dir(&workspace)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let baseline = GitBaseline::capture(&workspace);
+        std::fs::write(
+            &changed,
+            "pub fn update_request(ctx: &mut C) { ctx.request_state = 1; }\n",
+        )
+        .unwrap();
+        let mut context = SandwichContext::new("sys".into(), "修复当前改动".into());
+        context.record_side_effect(1, "edit_file".into(), "src/changed.rs".into());
+        let app = tauri::test::mock_app();
+        let (_tx, mut rx) = watch::channel(0u64);
+        let session_id = format!("review-feedback-{}", uuid::Uuid::new_v4());
+        let run_started_at = chrono::Utc::now();
+        let (_, diff_hash) = baseline
+            .collect_review_material(&workspace, &context, run_started_at)
+            .unwrap();
+        let fingerprint = compose_review_fingerprint(
+            &diff_hash,
+            Some("修复说明"),
+            &crate::agent::finalization::contract_fingerprint(context.review_contract.as_ref()),
+            context.resource_scope.revision,
+        );
+        let result = evaluate_finish_diff_once(
+            app.handle(),
+            &mock.db,
+            &context,
+            &ModelRoutingConfig::default(),
+            1,
+            &workspace,
+            &baseline,
+            run_started_at,
+            &session_id,
+            &mut rx,
+            cached.map(|_| fingerprint.as_str()),
+            cached,
+            &[],
+            None,
+            None,
+            &[],
+            None,
+            None,
+            None,
+            Some("修复说明"),
+            Some("mock"),
+        )
+        .await;
+        (result, session_id)
+    }
+
+    fn read_exchange_log(session_id: &str) -> serde_json::Value {
+        let path = std::env::current_dir()
+            .unwrap()
+            .join("agent_logs")
+            .join(format!("{session_id}__finish-review.json"));
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    fn rejected_alias_response() -> serde_json::Value {
+        json!({"verdict":"fail", "score":62, "conclusion":"证据不完整",
+            "blocking_issues":[{"title":"缺少授权分支", "detail":"报告没有包含实际改动",
+                "required_action":"附上授权分支 diff"}]})
+    }
+
+    #[tokio::test]
+    async fn legacy_blank_blockers_are_not_reused_but_valid_rejections_still_are() {
+        for blank in [true, false] {
+            let cached = ReviewResult {
+                verdict: "rejected".into(),
+                score: 80,
+                summary: "历史结论".into(),
+                blocking_issues: vec![BlockingIssue {
+                    file: String::new(),
+                    issue: if blank { "" } else { "旧缺陷" }.into(),
+                    requirement: if blank { "" } else { "修复旧缺陷" }.into(),
+                }],
+                nit_issues: vec![],
+                missing_evidence: vec![],
+                duration_ms: 0,
+                model_id: "mock".into(),
+                diff_hash: String::new(),
+            };
+            let mock = MockReviewer::new(vec![rejected_alias_response()]).await;
+            let (result, _) = run_finish_with_cache(&mock, Some(&cached)).await;
+            assert!(!result.is_passed() && !result.is_service_failure());
+            assert_eq!(mock.requests.lock().unwrap().len(), usize::from(blank));
+            if blank {
+                assert_eq!(result.blocking_issues[0].requirement, "附上授权分支 diff");
+            } else {
+                assert_eq!(result.blocking_issues[0].issue, "旧缺陷");
+                assert!(result.summary.contains("复用上次拦截"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_final_is_corrected_with_field_error_and_original_response() {
+        let mut invalid = rejected_alias_response();
+        invalid["blocking_issues"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("required_action");
+        let mock = MockReviewer::new(vec![invalid.clone(), rejected_alias_response()]).await;
+        let (result, session_id) = run_finish(&mock).await;
+        assert!(
+            !result.is_passed() && !result.is_service_failure(),
+            "{result:?}"
+        );
+        assert!(result.blocking_issues[0]
+            .issue
+            .contains("报告没有包含实际改动"));
+        assert_eq!(result.blocking_issues[0].requirement, "附上授权分支 diff");
+        let requests = mock.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let messages = requests[1]["messages"].as_array().unwrap();
+        assert_eq!(messages[messages.len() - 2]["content"], invalid.to_string());
+        let feedback = messages.last().unwrap()["content"].as_str().unwrap();
+        assert!(feedback.contains("blocking_issues[0].requirement"));
+        assert!(feedback.contains("连续格式纠正 1/5"));
+        let logs = read_exchange_log(&session_id);
+        assert_eq!(logs[0]["parse_status"], "parse_error");
+        assert_eq!(logs[0]["raw_response"], invalid.to_string());
+        assert!(logs[0]["parse_error"]
+            .as_str()
+            .unwrap()
+            .contains("blocking_issues[0].requirement"));
+        assert_eq!(logs[1]["parse_status"], "success");
+    }
+
+    #[tokio::test]
+    async fn structurally_invalid_json_exhausts_existing_format_budget() {
+        let invalid = json!({"verdict":"reject", "score":45, "summary":"仍有问题",
+            "blocking_issues":[{"title":"缺少证据", "description":"没有对应 diff"}]});
+        let mock = MockReviewer::new(vec![invalid.clone()]).await;
+        let (result, session_id) = run_finish(&mock).await;
+        assert!(
+            result.is_service_failure() && !result.is_passed(),
+            "{result:?}"
+        );
+        assert!(
+            result.blocking_issues.is_empty(),
+            "协议失败不能变成空白代码缺陷"
+        );
+        assert!(result.summary.contains("blocking_issues[0].requirement"));
+        assert!(result.summary.contains("已连续纠正 5 次"));
+        let requests = mock.requests.lock().unwrap();
+        assert_eq!(requests.len(), 6, "首轮 + 原有五次格式纠正");
+        for (index, request) in requests.iter().enumerate().skip(1) {
+            let feedback = request["messages"].as_array().unwrap().last().unwrap()["content"]
+                .as_str()
+                .unwrap();
+            assert!(feedback.contains(&format!("连续格式纠正 {index}/5")));
+        }
+        let logs = read_exchange_log(&session_id);
+        assert_eq!(logs.as_array().unwrap().len(), 6);
+        assert!(logs
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["parse_status"] == "parse_error"
+                && entry["raw_response"] == invalid.to_string()));
+    }
+
+    #[tokio::test]
+    async fn format_correction_keeps_forensic_tools_available() {
+        let mock = MockReviewer::new(vec![
+            json!({"verdict":"reject"}),
+            json!({"tool":"read_file", "path":"src/writer.rs"}),
+            rejected_alias_response(),
+        ])
+        .await;
+        let (result, _) = run_finish(&mock).await;
+        assert!(
+            !result.is_service_failure() && !result.is_passed(),
+            "{result:?}"
+        );
+        let requests = mock.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        let messages = requests[2]["messages"].as_array().unwrap();
+        let observation = messages.last().unwrap()["content"].as_str().unwrap();
+        assert!(observation.contains("取证结果 step 1/"));
+        assert!(observation.contains("ctx.request_state = 2"));
+    }
 
     #[tokio::test]
     async fn finish_review_keeps_write_context_and_real_blockers_without_consumer_retries() {
@@ -891,32 +1122,16 @@ mod consumer_retirement_tests {
                 "blocking_issues": if blocking { vec![json!({"file":"src/changed.rs",
                     "issue":"新写方破坏字段约束", "requirement":"修复赋值"})] } else { vec![] }});
             let mock = MockReviewer::new(vec![output]).await;
-            let workspace = mock.root.join("workspace");
-            std::fs::create_dir_all(workspace.join("src")).unwrap();
-            let changed = workspace.join("src/changed.rs");
-            std::fs::write(&changed, "pub fn update_request(ctx: &mut C) { ctx.request_state = 0; }\n").unwrap();
-            std::fs::write(workspace.join("src/writer.rs"), "struct C { pub request_state: i32 }\nfn write(ctx: &mut C) { ctx.request_state = 2; }\n").unwrap();
-            for args in [vec!["init", "-q"], vec!["add", "."],
-                vec!["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base"]] {
-                assert!(Command::new("git").current_dir(&workspace).args(args).status().unwrap().success());
-            }
-            let baseline = GitBaseline::capture(&workspace);
-            std::fs::write(&changed, "pub fn update_request(ctx: &mut C) { ctx.request_state = 1; }\n").unwrap();
-            let mut context = SandwichContext::new("sys".into(), "修复当前改动".into());
-            context.record_side_effect(1, "edit_file".into(), "src/changed.rs".into());
-            let app = tauri::test::mock_app();
-            let (_tx, mut rx) = watch::channel(0u64);
-            let result = evaluate_finish_diff_once(app.handle(), &mock.db, &context,
-                &ModelRoutingConfig::default(), 1, &workspace, &baseline, chrono::Utc::now(),
-                &format!("retired-finish-{}", uuid::Uuid::new_v4()), &mut rx, None, None,
-                &[], None, None, &[], None, None, None, Some("修复说明"), Some("mock")).await;
+            let (result, _) = run_finish(&mock).await;
             let requests = mock.requests.lock().unwrap();
             assert_eq!(requests.len(), 1, "没有 consumer_verdicts 不应要求补答");
             let material = requests[0]["messages"].to_string();
             assert!(material.contains("写方契约情报"));
             assert!(material.contains("src/writer.rs"));
             assert!(material.contains("任务目标") && material.contains("修复说明"));
-            assert!(!material.contains("consumer_verdicts") && !material.contains("影响面机械枚举"));
+            assert!(
+                !material.contains("consumer_verdicts") && !material.contains("影响面机械枚举")
+            );
             assert_eq!(result.blocking_issues.len(), usize::from(blocking));
             assert_eq!(result.is_passed(), !blocking, "{result:?}");
         }

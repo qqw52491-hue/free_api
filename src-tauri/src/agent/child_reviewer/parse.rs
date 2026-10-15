@@ -261,9 +261,13 @@ pub(crate) fn parse_controlled_output(
                 let id = s.id.unwrap_or_else(|| default_id.clone());
                 let id = if id.trim().is_empty() { default_id.clone() } else { id.trim().to_string() };
                 let location = s.location.unwrap_or_default().trim().to_string();
-                let mut severity = s.severity.unwrap_or_else(|| "suggestion".to_string()).to_lowercase();
+                let mut severity = s.severity.ok_or_else(|| format!(
+                    "child_reviewer.findings[{idx}].severity 缺失，必须明确提供 blocking、suggestion 或 question。"
+                ))?.trim().to_lowercase();
                 if !matches!(severity.as_str(), "blocking" | "suggestion" | "question") {
-                    severity = "suggestion".to_string();
+                    return Err(format!(
+                        "child_reviewer.findings[{idx}].severity 实际为 {severity:?}，允许值是 blocking、suggestion 或 question；请由审查员明确分类，不会自动转换风险等级。"
+                    ));
                 }
                 // blocking 终态相关性：regardless（中间态即错）| final_only（仅最终交付前必须解决）
                 let finality = s
@@ -283,7 +287,22 @@ pub(crate) fn parse_controlled_output(
                     has_blocking = true;
                 }
                 let current = s.current.unwrap_or_default().trim().to_string();
-                let why = s.why.unwrap_or_default().trim().to_string();
+                let mut why = s.why.unwrap_or_default().trim().to_string();
+                if why.is_empty() {
+                    why = current.clone();
+                }
+                if let Some(title) = s.title.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    if why.is_empty() {
+                        why = title.to_string();
+                    } else if !why.contains(title) {
+                        why = format!("{title}\n{why}");
+                    }
+                }
+                if why.is_empty() {
+                    return Err(format!(
+                        "child_reviewer.findings[{idx}] 缺少缺陷说明：why/description、current 或 title 至少提供一项非空文本。"
+                    ));
+                }
                 let suggestion = s.suggestion.unwrap_or_default().trim().to_string();
                 let evidence_strength = s.evidence_strength.unwrap_or_else(|| output.confidence.clone());
                 ReviewFinding {
@@ -292,7 +311,7 @@ pub(crate) fn parse_controlled_output(
                     finality,
                     location,
                     current: current.clone(),
-                    why: if why.is_empty() { current } else { why },
+                    why,
                     suggestion,
                     evidence_strength,
                 }

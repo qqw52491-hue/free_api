@@ -63,6 +63,12 @@ impl MockReviewer {
     }
 
     async fn wait_child(&self, id: &str) -> Value {
+        let (status, result) = self.wait_terminal(id).await;
+        assert_eq!(status, "succeeded", "{result:?}");
+        result
+    }
+
+    async fn wait_terminal(&self, id: &str) -> (String, Value) {
         tokio::time::timeout(Duration::from_secs(15), async {
             loop {
                 let (status, result): (String, Option<String>) = self
@@ -77,8 +83,7 @@ impl MockReviewer {
                     )
                     .unwrap();
                 if status != "running" {
-                    assert_eq!(status, "succeeded", "{result:?}");
-                    return serde_json::from_str(&result.unwrap()).unwrap();
+                    return (status, serde_json::from_str(&result.unwrap()).unwrap());
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -206,4 +211,237 @@ async fn explicit_evidence_scope_still_requires_coverage_after_consumer_retireme
         result["evidence_scope_verdicts"][0],
         "src/other.rs => NA: 背景材料"
     );
+}
+
+#[tokio::test]
+async fn missing_root_verdict_is_corrected_before_child_delivery() {
+    let first = verdict(true);
+    let mut second = first.clone();
+    second["root_cause_verdict"] = json!("explains");
+    let mock = MockReviewer::new(vec![first.clone(), second]).await;
+    let snapshot = PlanReviewerDispatchSnapshot::new(
+        "mock",
+        "flash",
+        "auto",
+        "审查者",
+        json!({"question":"审查授权修改", "evidence_excerpt":"代码差异", "plan_review":true}),
+    )
+    .with_purpose("plan_review");
+    let (_tx, rx) = watch::channel(0u64);
+    let id = snapshot
+        .spawn(
+            None,
+            &mock.db,
+            "parent",
+            "root-correction-test",
+            &mock.root,
+            rx,
+            None,
+        )
+        .await
+        .unwrap();
+    let result = mock.wait_child(&id).await;
+    assert_eq!(result["root_cause_verdict"], "explains");
+    assert_eq!(result["findings"][0]["severity"], "blocking");
+    let requests = mock.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let messages = requests[1]["messages"].as_array().unwrap();
+    assert_eq!(messages[messages.len() - 2]["content"], first.to_string());
+    let feedback = messages.last().unwrap()["content"].as_str().unwrap();
+    assert!(feedback.contains("root_cause_verdict"));
+    assert!(feedback.contains("重新输出完整审查 JSON"));
+}
+
+#[tokio::test]
+async fn repeated_contract_errors_use_existing_budget_and_keep_raw_diagnostics() {
+    let invalid = verdict(true);
+    let mock = MockReviewer::new(vec![invalid.clone()]).await;
+    let snapshot = PlanReviewerDispatchSnapshot::new(
+        "mock",
+        "flash",
+        "auto",
+        "审查者",
+        json!({"question":"审查修改", "evidence_excerpt":"代码差异", "plan_review":true}),
+    );
+    let (_tx, rx) = watch::channel(0u64);
+    let id = snapshot
+        .spawn(
+            None,
+            &mock.db,
+            "parent-invalid-schema",
+            "schema-exhaustion-test",
+            &mock.root,
+            rx,
+            None,
+        )
+        .await
+        .unwrap();
+    let (status, result) = mock.wait_terminal(&id).await;
+    assert_eq!(status, "invalid_output");
+    assert_eq!(
+        mock.requests.lock().unwrap().len(),
+        20,
+        "沿用原有非合规上限"
+    );
+    assert!(result["validation_error"]
+        .as_str()
+        .unwrap()
+        .contains("root_cause_verdict"));
+    assert_eq!(result["raw_result_json"], invalid.to_string());
+    assert!(
+        result.get("root_cause_verdict").is_none(),
+        "宿主不能代填结论"
+    );
+    let polled = poll_completed_child_runs(&mock.db, "parent-invalid-schema").unwrap();
+    assert_eq!(polled.len(), 1);
+    assert_eq!(polled[0].status, "invalid_output");
+    assert!(polled[0].missing_evidence[0].contains("root_cause_verdict"));
+}
+
+#[tokio::test]
+async fn custom_contract_type_and_closed_set_errors_are_correctable() {
+    for bad in [
+        json!({"audit_note":42}),
+        json!({"audit_note":"已审", "undeclared":true}),
+    ] {
+        let mut good = verdict(false);
+        good.as_object_mut().unwrap().remove("cve_refs");
+        good["audit_note"] = json!("已审");
+        let mut invalid = good.clone();
+        invalid
+            .as_object_mut()
+            .unwrap()
+            .extend(bad.as_object().unwrap().clone());
+        let mock = MockReviewer::new(vec![invalid, good]).await;
+        let schema = ContractSchema::new(vec![ContractFieldDef::must_new(
+            "audit_note",
+            ContractFieldType::String,
+            "审查备注",
+            true,
+        )]);
+        let snapshot = PlanReviewerDispatchSnapshot::new(
+            "mock",
+            "flash",
+            "auto",
+            "审查者",
+            json!({"question":"审查修改", "evidence_excerpt":"代码差异"}),
+        )
+        .with_custom_schema(schema);
+        let (_tx, rx) = watch::channel(0u64);
+        let id = snapshot
+            .spawn(
+                None,
+                &mock.db,
+                "parent",
+                "custom-contract-test",
+                &mock.root,
+                rx,
+                None,
+            )
+            .await
+            .unwrap();
+        let result = mock.wait_child(&id).await;
+        assert_eq!(result["audit_note"], "已审");
+        let requests = mock.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let feedback = requests[1]["messages"].as_array().unwrap().last().unwrap()["content"]
+            .as_str()
+            .unwrap();
+        assert!(feedback.contains(if bad.get("undeclared").is_some() {
+            "undeclared"
+        } else {
+            "audit_note"
+        }));
+    }
+}
+
+#[tokio::test]
+async fn incident_severity_requires_explicit_correction_and_alias_text_survives() {
+    let invalid = json!({"confidence":"supported", "findings":[{
+        "id":"F1", "severity":"medium", "file":"src/http.js:10",
+        "title":"授权处理错误", "description":"授权失效不应被当作会话失效",
+        "recommendation":"分别处理授权状态和登录状态"}]});
+    let mut good = invalid.clone();
+    good["findings"][0]["severity"] = json!("blocking");
+    let mock = MockReviewer::new(vec![invalid, good]).await;
+    let snapshot = PlanReviewerDispatchSnapshot::new(
+        "mock",
+        "flash",
+        "auto",
+        "审查者",
+        json!({"question":"审查修改", "evidence_excerpt":"代码差异"}),
+    );
+    let (_tx, rx) = watch::channel(0u64);
+    let id = snapshot
+        .spawn(
+            None,
+            &mock.db,
+            "parent",
+            "severity-correction-test",
+            &mock.root,
+            rx,
+            None,
+        )
+        .await
+        .unwrap();
+    let result = mock.wait_child(&id).await;
+    assert_eq!(result["findings"][0]["severity"], "blocking");
+    assert_eq!(result["findings"][0]["location"], "src/http.js:10");
+    assert!(result["findings"][0]["why"]
+        .as_str()
+        .unwrap()
+        .contains("授权失效不应被当作会话失效"));
+    assert_eq!(
+        result["findings"][0]["suggestion"],
+        "分别处理授权状态和登录状态"
+    );
+    let requests = mock.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let feedback = requests[1]["messages"].as_array().unwrap().last().unwrap()["content"]
+        .as_str()
+        .unwrap();
+    assert!(feedback.contains("findings[0].severity") && feedback.contains("medium"));
+}
+
+#[tokio::test]
+async fn contract_correction_can_still_use_tools_and_explicit_na() {
+    let first = verdict(false);
+    let mut good = first.clone();
+    good["root_cause_verdict"] = json!("na");
+    let mock = MockReviewer::new(vec![
+        first,
+        json!({"tool":"read_file", "path":"evidence.txt"}),
+        good,
+    ])
+    .await;
+    std::fs::write(mock.root.join("evidence.txt"), "synthetic review evidence").unwrap();
+    let snapshot = PlanReviewerDispatchSnapshot::new(
+        "mock",
+        "flash",
+        "auto",
+        "审查者",
+        json!({"question":"审查修改", "evidence_excerpt":"代码差异", "plan_review":true}),
+    );
+    let (_tx, rx) = watch::channel(0u64);
+    let id = snapshot
+        .spawn(
+            None,
+            &mock.db,
+            "parent",
+            "schema-tools-test",
+            &mock.root,
+            rx,
+            None,
+        )
+        .await
+        .unwrap();
+    let result = mock.wait_child(&id).await;
+    assert_eq!(result["root_cause_verdict"], "na");
+    let requests = mock.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    let observation = requests[2]["messages"].as_array().unwrap().last().unwrap()["content"]
+        .as_str()
+        .unwrap();
+    assert!(observation.contains("取证结果 step 1/"));
+    assert!(observation.contains("synthetic review evidence"));
 }
