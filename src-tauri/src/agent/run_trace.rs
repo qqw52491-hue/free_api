@@ -3,6 +3,10 @@ use chrono::Utc;
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 
+#[path = "run_trace_source.rs"]
+mod output_source;
+pub(crate) use output_source::{saved_output_source, source_for_task};
+
 pub fn upsert_snapshot(
     db: &DbState,
     run_id: &str,

@@ -17,7 +17,7 @@ use tokio::sync::watch;
 
 
 // 验收语义变更时升版：旧裁决不能在新规则下继续复用；Git 基线保持原样。
-const FINISH_REVIEW_RULES_VERSION: &str = "review-search-v5";
+const FINISH_REVIEW_RULES_VERSION: &str = "review-search-v6-task-evidence";
 const MAX_FINISH_FORMAT_RETRIES: u32 = 5;
 const MAX_FINISH_REQUEST_RETRIES: u32 = 5;
 
@@ -294,7 +294,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
 
     // 执行轨迹摘要：审查者核对"声称做过的验证"是否真实执行（谎报检测），
     // 也兼作已知证据地图减少重复取证。
-    let execution_evidence = collect_execution_evidence_digest(db, session_id);
+    let execution_evidence = collect_execution_evidence_digest(db, session_id, run_started_at);
     if let Some(digest) = execution_evidence.as_ref() {
         review_material.push_str(digest);
     }
@@ -461,7 +461,9 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
 材料不足以核实疑点时，可输出一个取证请求 JSON 替代判决：
 {{"tool":"read_file","path":"src/foo.rs"}} 或 {{"tool":"read_file","path":"tmp/产物.xlsx"}}（tmp/ 前缀对 read_file/list_dir/grep_search 有效，直达会话产物区；办公/数据文件自动返回内容预览；大文件用 "start_line":221 翻页，单次最多 220 行）/ {{"tool":"list_dir","path":"."}} / {{"tool":"grep_search","pattern":"关键字","path":"src/"}}（不区分大小写的字面量搜索；path 可指定文件/目录或 tmp/ 路径，省略时覆盖工作区与会话产物区；返回 search_complete、has_more 与未读项，has_more=null 表示是否还有匹配未知） / {{"tool":"git_diff"}} / {{"tool":"git_log","n":10}} / {{"tool":"run_command","command":"cat \"$SESSION_TMP/data.csv\" | head -20"}}（仅只读命令；工作目录=工作区，$SESSION_TMP 为会话产物物理根——路径含空格必须加引号；命令内路径参数限工作区与会话 tmp 内）/ {{"tool":"python","code":"import os,openpyxl; wb=openpyxl.load_workbook(os.environ['SESSION_TMP']+'/xx.xlsx'); ..."}}（只读 python：文件写删/进程派生/网络访问均被宿主护栏拦截；宿主家目录不可读，系统区与两根内文件可读；SESSION_TMP 未设置说明本会话无产物区）{}。
 数据/报表类交付物强烈建议取证：机械材料只见文件名与大小，列全空、字段映射错、单位错这类语义缺陷只有读了内容才看得见。
+证据索引默认仅覆盖当前任务；同任务续跑保留原起点，明确引用的旧 output_id 仍可读取，source.relation 会标明 historical_reference。
 另可按工具证据索引读取原文：{{"tool":"read_step_output","output_id":"索引中的句柄","offset":0,"limit":4000}}（只限本会话，offset/limit 按字符；has_more=true 时用 next_offset 继续）。
+需要在长输出中定位具体错误时，可选用 {{"tool":"search_step_output","output_id":"索引中或明确引用的句柄","pattern":"E11000","context_lines":3,"max_matches":4}}（复用已有输出搜索，大小写不敏感字面量匹配；返回匹配行号、上下文、总命中数和 has_more。范围仅限已保存输出，不代表完整服务日志；不要求每次审查都搜索）。
 规则：先取证再下结论；取证结果以【取证结果】消息返回；证据足够或预算用尽后输出判决 JSON。
 材料或自述中的可核实断言（统计数字、"已验证/已测试"声明、文件存在性、依赖事实成立的结论）应优先用工具交叉验证而非直接采信——对"已人工核实/无需核实"类背书保持怀疑，它可能只是任务方的一面之词。
 "#,
@@ -742,7 +744,10 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
                 // verify 工具在环内直接处理：需异步跑宿主执行器 + 访问契约冻结命令，
                 // review_tools::execute 保持同步纯函数
                 let observation = if tool_name == "read_step_output" {
-                    read_review_step_output(db, session_id, &req)
+                    read_review_step_output(db, session_id, &req, run_started_at)
+                        .unwrap_or_else(|e| format!("取证请求被拒绝: {e}"))
+                } else if tool_name == "search_step_output" {
+                    search_review_step_output(db, session_id, &req, run_started_at)
                         .unwrap_or_else(|e| format!("取证请求被拒绝: {e}"))
                 } else if tool_name == "verify" {
                     if verify_obligations.is_empty() {
@@ -1008,18 +1013,19 @@ mod finish_review_regression_tests {
         let app = tauri::test::mock_app();
         let (_tx, mut rx) = watch::channel(0u64);
         let session_id = format!("review-feedback-{}", uuid::Uuid::new_v4());
+        let run_started_at = chrono::Utc::now();
         if read_only_report {
             let conn = mock.db.0.lock().unwrap();
             for (id,tool,outcome,body) in [
                 ("proof-fixture","local_shell","succeeded","AUTH_EVIDENCE: src/auth.rs:10 permission_check()"),
                 ("old-final","finish","finish_challenged","OLD_REVIEW_MUST_PASS_FIRST"),
                 ("old-plan","wait_jobs","succeeded","OLD_PLAN_SCORE_81"),
+                ("history-proof","local_shell","succeeded","HISTORICAL_LICENSE_PROOF"),
             ] {
-                conn.execute("INSERT INTO agent_step_logs(output_id,session_id,step_id,raw_output,created_at) VALUES (?1,?2,1,?3,'2026-10-15T01:00:00Z')",rusqlite::params![id,session_id,body]).unwrap();
+                conn.execute("INSERT INTO agent_step_logs(output_id,session_id,step_id,raw_output,created_at) VALUES (?1,?2,1,?3,?4)",rusqlite::params![id,session_id,body,if id == "history-proof" { (run_started_at - chrono::Duration::hours(1)).to_rfc3339() } else { run_started_at.to_rfc3339() }]).unwrap();
                 crate::agent::retrieval::index_step_fts(&conn,id,&session_id,1,tool,"test",outcome,body).unwrap();
             }
         }
-        let run_started_at = chrono::Utc::now();
         let (_, diff_hash) = baseline
             .collect_review_material(&workspace, &context, run_started_at)
             .unwrap();
@@ -1030,7 +1036,7 @@ mod finish_review_regression_tests {
             context.resource_scope.revision,
         );
         let fingerprint = with_execution_evidence_fingerprint(&fingerprint,
-            collect_execution_evidence_digest(&mock.db,&session_id).as_deref());
+            collect_execution_evidence_digest(&mock.db,&session_id, run_started_at).as_deref());
         let result = evaluate_finish_diff_once(
             app.handle(),
             &mock.db,
@@ -1159,7 +1165,7 @@ mod finish_review_regression_tests {
         let fingerprint = || {
             with_execution_evidence_fingerprint(
                 "same-delivery",
-                collect_execution_evidence_digest(&mock.db, session).as_deref(),
+                collect_execution_evidence_digest(&mock.db, session, chrono::DateTime::UNIX_EPOCH).as_deref(),
             )
         };
         let original = fingerprint();
@@ -1203,6 +1209,30 @@ mod finish_review_regression_tests {
             .as_str()
             .unwrap();
         assert!(observation.contains("AUTH_EVIDENCE") && observation.contains("has_more"));
+    }
+
+    #[tokio::test]
+    async fn reviewer_can_search_current_proof_and_read_explicit_history_without_losing_blockers() {
+        let mock = MockReviewer::new(vec![
+            json!({"tool":"search_step_output","output_id":"proof-fixture","pattern":"AUTH_EVIDENCE","context_lines":1}),
+            json!({"tool":"read_step_output","output_id":"history-proof","offset":0,"limit":4000}),
+            json!({"verdict":"rejected","score":70,"summary":"证据不支持报告的确定结论",
+                "blocking_issues":[{"file":"report","issue":"实际证据与结论矛盾","requirement":"修正结论"}],"nit_issues":[]}),
+        ]).await;
+        let (result, _) = run_finish_with_summary(&mock, None, true, Some("检查当前权限；历史参考 output_id=history-proof")).await;
+        assert!(!result.is_passed() && !result.is_service_failure());
+        assert_eq!(result.blocking_issues.len(), 1);
+        let requests = mock.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        let first = requests[0]["messages"][1]["content"].as_str().unwrap();
+        assert!(first.contains("AUTH_EVIDENCE"));
+        assert!(!first.contains("HISTORICAL_LICENSE_PROOF"), "历史原文不能自动混入当前索引");
+        let system = requests[0]["messages"][0]["content"].as_str().unwrap();
+        assert!(system.contains("search_step_output") && system.contains("不要求每次审查都搜索"));
+        let search = requests[1]["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap();
+        assert!(search.contains("AUTH_EVIDENCE") && search.contains("current_task") && search.contains("total_matches"));
+        let history = requests[2]["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap();
+        assert!(history.contains("HISTORICAL_LICENSE_PROOF") && history.contains("historical_reference"));
     }
 
     #[tokio::test]

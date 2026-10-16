@@ -1,6 +1,7 @@
 //! 评审证据采集：tmp 产物清单、步骤轨迹摘要与 Office 预览提取。
 
 use super::*;
+use chrono::Utc;
 use crate::agent::context::SandwichContext;
 use crate::agent::router::{AgentRouter, ModelRoutingConfig, roles};
 use crate::agent::tools::role_manager::resolve_enabled_card;
@@ -232,15 +233,25 @@ pub(crate) fn sniff_session_tmp_anomalies(session_id: &str) -> Vec<String> {
 
 /// 流程审计用的最近记录：包含历史审批/交付状态，供分流复核等场景追溯。
 pub(crate) fn collect_step_trace_digest(db: &DbState, session_id: &str) -> Option<String> {
-    collect_trace_digest(db, session_id, false)
+    collect_trace_digest(db, session_id, false, None)
 }
 
-/// 终审只把工具调用回执作为证据索引，不把历史终审判决再当成本轮验收证据。
-pub(crate) fn collect_execution_evidence_digest(db: &DbState, session_id: &str) -> Option<String> {
-    collect_trace_digest(db, session_id, true)
+/// 终审沿用现有任务起点（续跑不变，新任务重建），只索引本任务工具回执。
+/// 历史证据仍可明确按 output_id 读取，但不默认混入当前验收清单。
+pub(crate) fn collect_execution_evidence_digest(
+    db: &DbState,
+    session_id: &str,
+    task_started_at: chrono::DateTime<Utc>,
+) -> Option<String> {
+    collect_trace_digest(db, session_id, true, Some(task_started_at))
 }
 
-fn collect_trace_digest(db: &DbState, session_id: &str, execution_only: bool) -> Option<String> {
+fn collect_trace_digest(
+    db: &DbState,
+    session_id: &str,
+    execution_only: bool,
+    since: Option<chrono::DateTime<Utc>>,
+) -> Option<String> {
     // 分类依据是宿主保存的 tool/outcome，不根据输出正文里的词语猜测。
     // 先排除流程回执再取窗口，连续 finish 不会挤走取证/验证回执。
     let mut items = {
@@ -249,14 +260,14 @@ fn collect_trace_digest(db: &DbState, session_id: &str, execution_only: bool) ->
             "SELECT l.step_id,l.output_id,l.created_at,l.raw_output,f.tool,f.outcome \
              FROM agent_step_logs l LEFT JOIN agent_step_logs_fts f \
              ON f.output_id=l.output_id AND f.session_id=l.session_id \
-             WHERE l.session_id=?1 AND (?2=0 OR ( \
+             WHERE l.session_id=?1 AND (?3 IS NULL OR julianday(l.created_at)>=julianday(?3)) AND (?2=0 OR ( \
                lower(trim(COALESCE(f.tool,''))) NOT IN \
                  ('','core','finish','prepare_finish','submit_plan','fail_task','ask_human','wait_jobs','resume_child') \
                AND lower(COALESCE(f.outcome,''))!='finish_challenged')) \
-             ORDER BY julianday(l.created_at) DESC,l.rowid DESC LIMIT 16"
+             ORDER BY julianday(l.created_at) DESC,l.rowid DESC"
         ).ok()?;
         let rows = stmt
-            .query_map(rusqlite::params![session_id, execution_only], |r| {
+            .query_map(rusqlite::params![session_id, execution_only, since.map(|at| at.to_rfc3339())], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
                     r.get::<_, String>(1)?,
@@ -267,7 +278,12 @@ fn collect_trace_digest(db: &DbState, session_id: &str, execution_only: bool) ->
                 ))
             })
             .ok()?;
-        rows.collect::<Result<Vec<_>, _>>().ok()?
+        // SQLite 的日期运算只有毫秒精度；边界再按原时间戳核对，避免相邻任务混入。
+        rows.filter(|row| match (since, row) {
+            (Some(start), Ok((_, _, at, _, _, _))) => chrono::DateTime::parse_from_rfc3339(at)
+                .is_ok_and(|at| at >= start),
+            _ => true,
+        }).take(16).collect::<Result<Vec<_>, _>>().ok()?
     }; // 读取正文/溢出文件前释放数据库连接。
     let has_more = items.len() > 15;
     items.truncate(15);
@@ -287,8 +303,8 @@ fn collect_trace_digest(db: &DbState, session_id: &str, execution_only: bool) ->
     }
     if execution_only {
         Some(format!(
-            "\n\n【工具回执证据索引（{} 条，has_more={}）】\n仅列可归类的工具调用回执；流程回执不在此索引。索引缺项不代表此前未取证，失败回执也不代表命令已执行。可按 output_id 用 read_step_output 分页取原文。\n{}",
-            lines.len(), has_more, if lines.is_empty() { "尚无可索引的工具回执".into() } else { lines.join("\n") }
+            "\n\n【工具回执证据索引（{} 条，has_more={}）】\n当前任务起点：{}。仅列起点之后可归类的工具回执；同任务续跑沿用原起点。历史参考不自动并入清单，明确引用的本会话旧 output_id 仍可读取或搜索并标明来源。索引缺项不代表此前未取证，失败回执也不代表命令已执行。\n{}",
+            lines.len(), has_more, since.map(|at| at.to_rfc3339()).unwrap_or_default(), if lines.is_empty() { "尚无可索引的工具回执".into() } else { lines.join("\n") }
         ))
     } else if lines.is_empty() {
         None
@@ -302,6 +318,7 @@ pub(crate) fn read_review_step_output(
     db: &DbState,
     session_id: &str,
     request: &serde_json::Value,
+    task_started_at: chrono::DateTime<Utc>,
 ) -> Result<String, String> {
     let output_id = request
         .get("output_id")
@@ -326,11 +343,44 @@ pub(crate) fn read_review_step_output(
     let total_chars = raw.chars().count();
     let content: String = raw.chars().skip(offset).take(limit).collect();
     let end_offset = offset.saturating_add(content.chars().count());
-    Ok(
-        json!({"output_id":output_id,"offset":offset,"next_offset":end_offset,
-        "total_chars":total_chars,"has_more":end_offset<total_chars,"content":content})
-        .to_string(),
-    )
+    let mut result = json!({"output_id":output_id,"offset":offset,"next_offset":end_offset,
+        "total_chars":total_chars,"has_more":end_offset<total_chars,"content":content});
+    result["source"] = review_output_source(db, session_id, output_id, task_started_at)?;
+    Ok(result.to_string())
+}
+
+/// 读取与搜索均只允许当前会话的 output_id。历史引用可用，但不冒充当前任务执行。
+fn review_output_source(
+    db: &DbState,
+    session_id: &str,
+    output_id: &str,
+    task_started_at: chrono::DateTime<Utc>,
+) -> Result<serde_json::Value, String> {
+    let source = crate::agent::run_trace::saved_output_source(db, session_id, output_id)?;
+    Ok(crate::agent::run_trace::source_for_task(source, task_started_at))
+}
+
+/// 复用 task_store 的大小写不敏感字面量搜索及其上下文/命中上限，不新增搜索门禁。
+pub(crate) fn search_review_step_output(
+    db: &DbState,
+    session_id: &str,
+    request: &serde_json::Value,
+    task_started_at: chrono::DateTime<Utc>,
+) -> Result<String, String> {
+    for field in ["context_lines", "max_matches"] {
+        if request.get(field).is_some_and(|value| value.as_u64().is_none()) {
+            return Err(format!("search_step_output.{field} 必须为非负整数"));
+        }
+    }
+    let result = crate::agent::task_store::dispatch(db, session_id, "search_step_output", request);
+    if !result.success { return Err(result.stderr); }
+    let mut value: serde_json::Value = serde_json::from_str(&result.stdout).map_err(|e| e.to_string())?;
+    value["has_more"] = json!(value["total_matches"].as_u64().unwrap_or(0) > value["returned_matches"].as_u64().unwrap_or(0));
+    value["search_complete"] = json!(true);
+    value["search_scope"] = json!(if value["projected"] == true { "model_projection" } else { "persisted_output" });
+    value["source"] = crate::agent::run_trace::source_for_task(value["source"].take(), task_started_at);
+    value["scope_notice"] = json!("仅检索该工具已保存的输出；上游命令过滤、tail 或输出截断未保留的日志不在搜索范围。");
+    Ok(value.to_string())
 }
 
 /// 单步输出的摘要提取：JSON 回执抓关键字段，shell 输出抓状态行+命令回显。
@@ -872,7 +922,7 @@ mod review_material_regressions {
             "failed",
             "UNCLASSIFIED_CONTROL",
         );
-        let digest = collect_execution_evidence_digest(&mock.db, "s").unwrap();
+        let digest = collect_execution_evidence_digest(&mock.db, "s", chrono::DateTime::UNIX_EPOCH).unwrap();
         assert!(
             digest.contains("permission_check") && digest.contains(&proof),
             "{digest}"
@@ -903,13 +953,13 @@ mod review_material_regressions {
             "succeeded",
             &marker,
         );
-        let digest = collect_execution_evidence_digest(&mock.db, "s").unwrap();
+        let digest = collect_execution_evidence_digest(&mock.db, "s", chrono::DateTime::UNIX_EPOCH).unwrap();
         assert!(digest.contains("CODE_PROOF") && !digest.contains("spilled_to_disk"));
         let page: serde_json::Value = serde_json::from_str(
             &read_review_step_output(
                 &mock.db,
                 "s",
-                &json!({"output_id":id,"offset":0,"limit":10}),
+                &json!({"output_id":id,"offset":0,"limit":10}), chrono::DateTime::UNIX_EPOCH,
             )
             .unwrap(),
         )
@@ -920,7 +970,7 @@ mod review_material_regressions {
             &read_review_step_output(
                 &mock.db,
                 "s",
-                &json!({"output_id":id,"offset":10,"limit":100}),
+                &json!({"output_id":id,"offset":10,"limit":100}), chrono::DateTime::UNIX_EPOCH,
             )
             .unwrap(),
         )
@@ -928,10 +978,10 @@ mod review_material_regressions {
         assert!(page["content"].as_str().unwrap().contains("TAIL_EVIDENCE"));
         assert_eq!(page["has_more"], false);
         assert!(
-            read_review_step_output(&mock.db, "other-session", &json!({"output_id":id})).is_err()
+            read_review_step_output(&mock.db, "other-session", &json!({"output_id":id}), chrono::DateTime::UNIX_EPOCH).is_err()
         );
         assert!(
-            read_review_step_output(&mock.db, "s", &json!({"output_id":id,"offset":"wrong"}))
+            read_review_step_output(&mock.db, "s", &json!({"output_id":id,"offset":"wrong"}), chrono::DateTime::UNIX_EPOCH)
                 .is_err()
         );
     }
@@ -950,7 +1000,7 @@ mod review_material_regressions {
                 "[[cas_blob:invalid-fixture-marker]]",
             );
         }
-        let digest = collect_execution_evidence_digest(&mock.db, "s").unwrap();
+        let digest = collect_execution_evidence_digest(&mock.db, "s", chrono::DateTime::UNIX_EPOCH).unwrap();
         assert!(digest.contains("has_more=true") && digest.contains("正文暂不可读取"));
         assert!(!digest.contains("[[cas_blob:"));
     }
@@ -985,8 +1035,71 @@ mod review_material_regressions {
             "succeeded",
             "SOURCE_TEXT: 此函数返回‘终审未通过’，不是流程回执",
         );
-        let digest = collect_execution_evidence_digest(&mock.db, "s").unwrap();
+        let digest = collect_execution_evidence_digest(&mock.db, "s", chrono::DateTime::UNIX_EPOCH).unwrap();
         assert!(digest.find("OLDER_PROOF").unwrap() < digest.find("NEW_COMPILE_FAILURE").unwrap());
         assert!(digest.contains("failed") && digest.contains("SOURCE_TEXT"));
     }
+    #[tokio::test]
+    async fn evidence_scope_follows_task_start_across_new_tasks_and_resume() {
+        let mock = MockReviewer::new(vec![json!({})]).await;
+        let start = chrono::DateTime::parse_from_rfc3339("2026-10-16T02:00:00.000200Z").unwrap().with_timezone(&Utc);
+        for step in 0..20 {
+            put(&mock.db, "scope", step, "2026-10-16T01:00:00Z", Some("local_shell"), "succeeded", "OLD_TASK_LICENSE");
+        }
+        put(&mock.db, "scope", 90, "2026-10-16T02:00:00.000100Z", Some("local_shell"), "succeeded", "PREVIOUS_TASK_BOUNDARY");
+        let first = put(&mock.db, "scope", 0, "2026-10-16T10:00:00.000200+08:00", Some("local_shell"), "succeeded", "CURRENT_LOG_PROOF");
+        let digest = collect_execution_evidence_digest(&mock.db, "scope", start).unwrap();
+        assert!(digest.contains("CURRENT_LOG_PROOF") && digest.contains(&first));
+        assert!(!digest.contains("OLD_TASK_LICENSE") && !digest.contains("PREVIOUS_TASK_BOUNDARY"));
+        assert!(digest.contains("has_more=false"), "旧任务不应占用当前任务窗口: {digest}");
+        // 同一任务续跑仍用原起点，即使步骤号重置，也保留停止前证据。
+        put(&mock.db, "scope", 0, "2026-10-16T03:00:00Z", Some("local_file"), "succeeded", "RESUMED_PROOF");
+        let resumed = collect_execution_evidence_digest(&mock.db, "scope", start).unwrap();
+        assert!(resumed.contains("CURRENT_LOG_PROOF") && resumed.contains("RESUMED_PROOF"));
+        let next = chrono::DateTime::parse_from_rfc3339("2026-10-16T04:00:00Z").unwrap().with_timezone(&Utc);
+        let empty = collect_execution_evidence_digest(&mock.db, "scope", next).unwrap();
+        assert!(empty.contains("尚无可索引"));
+        assert!(!empty.contains("CURRENT_LOG_PROOF") && !empty.contains("RESUMED_PROOF"));
+        let reference: serde_json::Value = serde_json::from_str(&read_review_step_output(
+            &mock.db, "scope", &json!({"output_id":first}), next,
+        ).unwrap()).unwrap();
+        assert_eq!(reference["source"]["relation"], "historical_reference");
+        assert!(reference["content"].as_str().unwrap().contains("CURRENT_LOG_PROOF"));
+        assert!(collect_step_trace_digest(&mock.db, "scope").unwrap().contains("OLD_TASK_LICENSE"));
+    }
+
+    #[tokio::test]
+    async fn reviewer_search_finds_middle_errors_and_reports_coverage_and_ownership() {
+        let mock = MockReviewer::new(vec![json!({})]).await;
+        let start = chrono::DateTime::parse_from_rfc3339("2026-10-16T02:00:00Z").unwrap().with_timezone(&Utc);
+        let body = format!("{}\nBEFORE_ERROR\nE11000 alipay hash:123\nBETWEEN_ERRORS\nE11000 tenpay hash:null\nAFTER_ERROR\n{}", "ordinary log\n".repeat(1000), "ordinary tail\n".repeat(1000));
+        let file = mock.root.join("large-log.txt");
+        std::fs::write(&file, &body).unwrap();
+        let id = put(&mock.db, "search", 1, "2026-10-16T03:00:00Z", Some("local_shell"), "succeeded", &format!("[[spilled_to_disk:{}]]", file.display()));
+        let search = |request| serde_json::from_str::<serde_json::Value>(&search_review_step_output(
+            &mock.db, "search", &request, start,
+        ).unwrap()).unwrap();
+        let narrow = search(json!({"output_id":id,"pattern":"tenpay","context_lines":1}));
+        assert_eq!(narrow["total_matches"], 1);
+        assert_eq!(narrow["source"]["relation"], "current_task");
+        assert!(narrow["matches"][0]["line_number"].as_u64().unwrap() > 1000);
+        let snippet = narrow["matches"][0]["snippet"].as_str().unwrap();
+        assert!(snippet.contains("BETWEEN_ERRORS") && snippet.contains("hash:null") && snippet.contains("AFTER_ERROR"));
+        let limited = search(json!({"output_id":id,"pattern":"e11000","context_lines":0,"max_matches":1}));
+        assert_eq!(limited["total_matches"], 2);
+        assert_eq!(limited["returned_matches"], 1);
+        assert_eq!(limited["has_more"], true);
+        assert_eq!(limited["search_complete"], true);
+        assert_eq!(limited["search_scope"], "persisted_output");
+        let absent = search(json!({"output_id":id,"pattern":"ABSENT"}));
+        assert_eq!(absent["total_matches"], 0);
+        assert_eq!(absent["has_more"], false);
+        assert!(search_review_step_output(&mock.db,"other-session",&json!({"output_id":id,"pattern":"E11000"}),start).is_err());
+        assert!(search_review_step_output(&mock.db,"search",&json!({"output_id":id,"pattern":"  "}),start).is_err());
+        let historical: serde_json::Value = serde_json::from_str(&search_review_step_output(&mock.db,"search",
+            &json!({"output_id":id,"pattern":"E11000"}), start + chrono::Duration::hours(2),
+        ).unwrap()).unwrap();
+        assert_eq!(historical["source"]["relation"], "historical_reference");
+    }
+
 }

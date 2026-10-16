@@ -80,6 +80,7 @@ pub fn dispatch(
                 .or_else(|| optional_string(params_value, "id"))
                 .ok_or_else(|| "task_store 参数缺少 'output_id'。\n💡 正确示例: {\"action\": \"get_step_output\", \"params\": {\"output_id\": \"out-xxx\"}}".to_string())?;
             let persisted = crate::agent::run_trace::get_step_output(db, session_id, &output_id)?;
+            let source = crate::agent::run_trace::saved_output_source(db, session_id, &output_id)?;
             let projected = !raw_requested
                 && crate::agent::dispatcher::project_mcp_durable_output(&persisted).is_some();
             let text = if projected {
@@ -107,6 +108,7 @@ pub fn dispatch(
             let returned_chars = sliced.chars().count();
             return Ok(json!({
                 "output_id": output_id,
+                "source": source,
                 "offset": offset,
                 "requested_limit": requested_limit,
                 "effective_limit": effective_limit,
@@ -141,6 +143,7 @@ pub fn dispatch(
             let context_lines = requested_context_lines.min(MAX_STEP_OUTPUT_CONTEXT_LINES);
             let max_matches = requested_max_matches.clamp(1, MAX_STEP_OUTPUT_MATCHES);
             let persisted = crate::agent::run_trace::get_step_output(db, session_id, &output_id)?;
+            let source = crate::agent::run_trace::saved_output_source(db, session_id, &output_id)?;
             let projected = !raw_requested
                 && crate::agent::dispatcher::project_mcp_durable_output(&persisted).is_some();
             let text = if projected {
@@ -172,6 +175,7 @@ pub fn dispatch(
 
             return Ok(json!({
                 "output_id": output_id,
+                "source": source,
                 "pattern": pattern,
                 "total_matches": total_match_count,
                 "returned_matches": matches.len(),
