@@ -48,10 +48,11 @@ pub(crate) fn review_acceptance(
 pub(crate) fn acceptance_fingerprint(
     context: &SandwichContext,
     checkpoint: &AgentCheckpoint,
-    summary: Option<&str>,
+    finish_payload: &Value,
 ) -> String {
     use sha2::{Digest, Sha256};
     let raw = json!({
+        "version": 2,
         "effects": context.side_effects,
         "inherited": context.inherited_side_effects_count,
         "verification": context.change_verification,
@@ -66,7 +67,8 @@ pub(crate) fn acceptance_fingerprint(
         "plan_mode": checkpoint.plan_mode,
         "todos": context.todo_list.iter().map(|t| (&t.id, &t.status, &t.description)).collect::<Vec<_>>(),
         "active_scope": context.active_target_block().map(|b| (&b.id, &b.scope)),
-        "summary": summary,
+        "summary": finish_payload.get("summary"),
+        "details": finish_payload.get("details"),
     });
     format!("{:x}", Sha256::digest(raw.to_string().as_bytes()))
 }
@@ -101,8 +103,8 @@ fn payload(instruction: &AgentInstruction) -> Value {
 
 /// 所有未闭合项使用同一份清单；动态检查每次重跑，昂贵验证/审查仅复用新鲜就绪收据。
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn evaluate_completion(
-    app: &AppHandle,
+pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     db: &DbState,
     context: &mut SandwichContext,
     checkpoint: &mut AgentCheckpoint,
@@ -121,7 +123,7 @@ pub(crate) async fn evaluate_completion(
 ) -> CompletionEvaluation {
     let generation = *interrupt_rx.borrow();
     let request_payload = payload(instruction);
-    let summary = request_payload.get("summary").and_then(Value::as_str);
+    let body = delivery_body(&request_payload);
     let (mut blockers, mut notices, diff_context) = collect_checks(
         db,
         context,
@@ -140,7 +142,7 @@ pub(crate) async fn evaluate_completion(
         .collect_review_material(workspace, context, run_started_at)
         .map(|(_, h)| h)
         .unwrap_or_default();
-    let state_fp = acceptance_fingerprint(context, checkpoint, summary);
+    let state_fp = acceptance_fingerprint(context, checkpoint, &request_payload);
     let contract_fp = contract_fingerprint(context.review_contract.as_ref());
     if blockers.is_empty() && !interrupted_since(interrupt_rx, generation) {
         if let Some(cached) = checkpoint.pending_finalization.as_ref().filter(|r| {
@@ -315,7 +317,7 @@ pub(crate) async fn evaluate_completion(
             checkpoint.approved_target_files.as_deref(),
             checkpoint.triage_verdict.as_ref(),
             Some(checkpoint.plan_mode),
-            summary,
+            body.as_deref(),
         )
         .await;
         if result.is_service_failure() {
@@ -388,7 +390,7 @@ pub(crate) async fn evaluate_completion(
             diff_hash: final_hash,
             scope_revision: context.resource_scope.revision,
             contract_fingerprint: contract_fingerprint(context.review_contract.as_ref()),
-            acceptance_fingerprint: acceptance_fingerprint(context, checkpoint, summary),
+            acceptance_fingerprint: acceptance_fingerprint(context, checkpoint, &request_payload),
             step_id,
             verification,
             review,

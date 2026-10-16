@@ -21,7 +21,7 @@ fn ready(c: &SandwichContext, cp: &AgentCheckpoint) -> FinalizationReceipt {
         acceptance_fingerprint: crate::agent::finalization::acceptance_fingerprint(
             c,
             cp,
-            Some("done"),
+            &json!({"summary":"done"}),
         ),
         step_id: 42,
         verification: ReceiptVerification::Verified {
@@ -70,6 +70,50 @@ fn no_terminal_rows(db: &DbState) {
             .query_row(&format!("SELECT COUNT(*) FROM {}", table), [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0, "{table}");
+    }
+}
+
+#[test]
+fn commit_persists_the_full_reviewed_body_and_rejects_changed_details() {
+    for changed in [false, true] {
+        let db = db();
+        let mut c = context();
+        let mut cp = AgentCheckpoint::new("s".into(), &c);
+        let mut receipt = ready(&c, &cp);
+        receipt.finish_payload = json!({"summary":"摘要","details":"# 正文\n\n**保留**"});
+        receipt.acceptance_fingerprint = crate::agent::finalization::acceptance_fingerprint(&c, &cp, &receipt.finish_payload);
+        if changed { receipt.finish_payload["details"] = json!("偷换正文"); }
+        cp.pending_finalization = Some(receipt);
+        let result = commit(&db, &mut cp, &mut c);
+        if changed {
+            assert!(result.unwrap_err().contains("发生变化"));
+            no_terminal_rows(&db);
+        } else {
+            let output = result.unwrap();
+            assert_eq!(output["details"], "# 正文\n\n**保留**");
+            let body: String = db.0.lock().unwrap().query_row("SELECT content FROM chat_messages", [], |r| r.get(0)).unwrap();
+            assert_eq!(body, "摘要\n\n# 正文\n\n**保留**");
+        }
+    }
+}
+
+#[test]
+fn waiver_disclosure_does_not_duplicate_details_in_completion_projection() {
+    for summary in ["摘要", "# 正文", ""] {
+        let db = db();
+        let mut c = context();
+        let mut cp = AgentCheckpoint::new("s".into(), &c);
+        let mut receipt = ready(&c, &cp);
+        receipt.finish_payload = json!({"summary":summary,"details":"# 正文"});
+        receipt.acceptance_fingerprint = crate::agent::finalization::acceptance_fingerprint(&c, &cp, &receipt.finish_payload);
+        receipt.verification = ReceiptVerification::Waived { reason:"静态检查".into() };
+        cp.pending_finalization = Some(receipt);
+        let emitted = commit(&db, &mut cp, &mut c).unwrap();
+        let projected = crate::agent::finalization::delivery_body(&emitted).unwrap();
+        let persisted: String = db.0.lock().unwrap().query_row("SELECT content FROM chat_messages", [], |r| r.get(0)).unwrap();
+        assert_eq!(projected, persisted);
+        assert_eq!(projected.matches("# 正文").count(), 1);
+        assert_eq!(projected.matches("验证披露").count(), 1);
     }
 }
 #[test]
@@ -128,7 +172,7 @@ fn production_commit_uses_the_reviewed_body_in_event_trace_and_message() {
         let mut receipt = ready(&c, &cp);
         receipt.finish_payload = json!({"summary": expected});
         receipt.acceptance_fingerprint =
-            crate::agent::finalization::acceptance_fingerprint(&c, &cp, Some(expected));
+            crate::agent::finalization::acceptance_fingerprint(&c, &cp, &receipt.finish_payload);
         cp.pending_finalization = Some(receipt);
         let emitted = commit_completed_run(
             &db,

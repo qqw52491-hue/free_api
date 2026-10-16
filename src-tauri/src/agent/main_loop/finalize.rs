@@ -27,12 +27,8 @@ pub(crate) fn commit_completed_run(
         .as_ref()
         .filter(|r| r.is_ready() && !r.acceptance_fingerprint.is_empty())
         .ok_or_else(|| "交付未提交：缺少当前版本的就绪验收收据".to_string())?;
-    let summary = receipt
-        .finish_payload
-        .get("summary")
-        .and_then(serde_json::Value::as_str);
     if receipt.acceptance_fingerprint
-        != crate::agent::finalization::acceptance_fingerprint(context, checkpoint, summary)
+        != crate::agent::finalization::acceptance_fingerprint(context, checkpoint, &receipt.finish_payload)
     {
         return Err("交付未提交：验收状态在预检后发生变化，请重新核验".into());
     }
@@ -52,16 +48,8 @@ pub(crate) fn commit_completed_run(
     // 当前收据来自本轮评估；不能再用指令里的未规范化副本覆盖已验收正文。
     let finish_payload = receipt.finish_payload.clone();
 
-    let mut persisted_summary = finish_payload
-        .get("summary")
-        .and_then(|value| value.as_str())
-        .or_else(|| {
-            finish_payload
-                .get("details")
-                .and_then(|value| value.as_str())
-        })
-        .unwrap_or(output_text)
-        .to_string();
+    let mut persisted_summary = crate::agent::finalization::delivery_body(&finish_payload)
+        .unwrap_or_else(|| output_text.to_string());
     // 审查警告必须落在用户可见的持久化摘要里——只塞进 completion_json 结构字段
     // 而聊天消息不展示，等于把"带病交付"静默伪装成"完全成功"。
     if let Some(warnings) = reviewer_warnings_delivered {
@@ -88,9 +76,17 @@ pub(crate) fn commit_completed_run(
         serde_json::Value::Object(object) => serde_json::Value::Object(object),
         _ => json!({ "summary": persisted_summary }),
     };
-    if verification_disclosure.is_some() {
+    if let Some(disclosure) = &verification_disclosure {
         if let serde_json::Value::Object(ref mut map) = emitted_finish {
-            map.insert("summary".into(), json!(persisted_summary));
+            // 披露追加到最后展示的正文段，不能把完整正文塞回摘要后又展示一次 details。
+            if let Some(details) = map.get("details").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                let same = map.get("summary").and_then(|v| v.as_str()) == Some(details);
+                let text = format!("{details}\n\n{disclosure}");
+                if same { map.insert("summary".into(), json!(text)); }
+                map.insert("details".into(), json!(text));
+            } else {
+                map.insert("summary".into(), json!(persisted_summary));
+            }
         }
     }
     if let Some(warnings) = reviewer_warnings_delivered {

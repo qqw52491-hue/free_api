@@ -123,13 +123,14 @@ pub(crate) fn execute_command_with_images(
     registry: &PluginRegistry,
     workspace_root: Option<&std::path::Path>,
     pending: Option<&crate::agent::tools::view_image::PendingImageQueue>,
+    run_id: Option<&str>,
 ) -> DispatchResult {
     if tool.eq_ignore_ascii_case("view_image") || action.eq_ignore_ascii_case("view_image") {
         if let Some(pending) = pending {
             return crate::agent::tools::view_image::dispatch(params, workspace_root, session_id, pending);
         }
     }
-    execute_command_inner(db, session_id, tool, action, params, registry, workspace_root)
+    execute_command_in_run(db, session_id, tool, action, params, registry, workspace_root, run_id)
 }
 
 pub(crate) fn execute_command_inner(
@@ -140,6 +141,19 @@ pub(crate) fn execute_command_inner(
     params: &serde_json::Value,
     registry: &PluginRegistry,
     workspace_root: Option<&std::path::Path>,
+) -> DispatchResult {
+    execute_command_in_run(db, session_id, tool, action, params, registry, workspace_root, None)
+}
+
+fn execute_command_in_run(
+    db: &DbState,
+    session_id: &str,
+    tool: &str,
+    action: &str,
+    params: &serde_json::Value,
+    registry: &PluginRegistry,
+    workspace_root: Option<&std::path::Path>,
+    run_id: Option<&str>,
 ) -> DispatchResult {
     let normalized = if tool.eq_ignore_ascii_case("local_shell") {
         match crate::agent::tool_params::normalize_shell_params(params) {
@@ -294,7 +308,7 @@ pub(crate) fn execute_command_inner(
 
     // 3.14 核心原生工具 M: local_shell (工作区物理边界与超时保护本地命令行执行)
     if tool.eq_ignore_ascii_case("local_shell") {
-        return crate::agent::tools::local_shell::dispatch(db, session_id, core_action, params, workspace_root);
+        return crate::agent::tools::local_shell::dispatch_in_run(db, session_id, core_action, params, workspace_root, run_id);
     }
 
     // 4. 外部 MCP 插件工具 (支持 "插件名/工具名" 标准格式 或 "插件名" + action)

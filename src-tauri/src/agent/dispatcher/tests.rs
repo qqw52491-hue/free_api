@@ -284,38 +284,24 @@
     }
 
     #[test]
-    fn test_is_write_or_side_effect_tool_read_only_override() {
-        use crate::agent::types::AgentInstruction;
-        use serde_json::json;
-
-        // 1. preview_saved_logs 含有 "save" 动词，默认会被判为写操作
-        let mut inst_default = AgentInstruction::default();
-        inst_default.tool = Some("preview_saved_logs".to_string());
-        assert!(is_write_or_side_effect_tool(&inst_default));
-
-        // 2. 参数 command 中显式声明 read_only: true -> 优先判定为只读 (false)
-        let mut inst_read_only = AgentInstruction::default();
-        inst_read_only.tool = Some("preview_saved_logs".to_string());
-        inst_read_only.command = Some(json!({ "read_only": true, "log_id": 123 }));
-        assert!(!is_write_or_side_effect_tool(&inst_read_only));
-
-        // 3. 元数据 metadata 中声明 read_only: true
-        let mut inst_meta = AgentInstruction::default();
-        inst_meta.tool = Some("preview_saved_logs".to_string());
-        inst_meta.command = Some(json!({ "metadata": { "read_only": true } }));
-        assert!(!is_write_or_side_effect_tool(&inst_meta));
-
-        // 4. params 字段中声明 readonly: true
-        let mut inst_params = AgentInstruction::default();
-        inst_params.tool = Some("run_read_query".to_string());
-        inst_params.params = Some(json!({ "readonly": true }));
-        assert!(!is_write_or_side_effect_tool(&inst_params));
-
-        // 5. 真正的写操作即使带 read_only: false 依然是写操作
-        let mut inst_write = AgentInstruction::default();
-        inst_write.tool = Some("write_file".to_string());
-        inst_write.command = Some(json!({ "read_only": false }));
-        assert!(is_write_or_side_effect_tool(&inst_write));
+    fn input_readonly_flags_do_not_override_tool_classification() {
+        for flag in [
+            json!({"read_only":true}),
+            json!({"readonly":true}),
+            json!({"metadata":{"read_only":true}}),
+            json!({"meta":{"readonly":true}}),
+        ] {
+            for tool in ["write_file", "preview_saved_logs", "remote/exec_sql"] {
+                let inst: AgentInstruction = serde_json::from_value(json!({
+                    "tool":tool,"params":flag,"read_only":true,"metadata":{"readonly":true}
+                })).unwrap();
+                assert!(is_write_or_side_effect_tool(&inst), "{tool}: {flag}");
+            }
+        }
+        let read: AgentInstruction = serde_json::from_value(json!({
+            "tool":"remote/read_file","params":{"path":"a.rs","read_only":true}
+        })).unwrap();
+        assert!(!is_write_or_side_effect_tool(&read));
     }
 
     #[test]

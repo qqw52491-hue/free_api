@@ -49,6 +49,19 @@ pub(crate) fn finish_summary_text(raw: &str) -> String {
     recover().unwrap_or_else(|| raw.to_owned())
 }
 
+/// 与实时/历史界面一致的正文投影；评审与落库共用，保留 Markdown 原文。
+pub(crate) fn delivery_body(payload: &Value) -> Option<String> {
+    let summary = payload.get("summary").and_then(Value::as_str).unwrap_or("");
+    let details = payload.get("details").and_then(Value::as_str).unwrap_or("");
+    let body = match (summary.is_empty(), details.is_empty()) {
+        (false, false) if summary != details => format!("{summary}\n\n{details}"),
+        (false, _) => summary.to_string(),
+        (_, false) => details.to_string(),
+        _ => return None,
+    };
+    Some(body)
+}
+
 /// 收据中的验证结论。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]

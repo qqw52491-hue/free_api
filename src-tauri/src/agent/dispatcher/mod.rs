@@ -30,53 +30,6 @@ fn mcp_service_requires_concrete_tool(tool: &str, action: &str) -> bool {
         && (action.trim().is_empty() || tool.trim().eq_ignore_ascii_case(action.trim()))
 }
 
-fn has_read_only_flag(inst: &AgentInstruction) -> bool {
-    let check_val = |v: &serde_json::Value| -> bool {
-        if let Some(obj) = v.as_object() {
-            if obj.get("read_only").and_then(|b| b.as_bool()) == Some(true)
-                || obj.get("readonly").and_then(|b| b.as_bool()) == Some(true)
-            {
-                return true;
-            }
-            if let Some(meta) = obj.get("metadata").or_else(|| obj.get("meta")) {
-                if meta.get("read_only").and_then(|b| b.as_bool()) == Some(true)
-                    || meta.get("readonly").and_then(|b| b.as_bool()) == Some(true)
-                {
-                    return true;
-                }
-            }
-        }
-        false
-    };
-
-    if let Some(cmd) = &inst.command {
-        if check_val(cmd) {
-            return true;
-        }
-    }
-    if let Some(params) = &inst.params {
-        if check_val(params) {
-            return true;
-        }
-    }
-    if let Some(val) = inst.extra_fields.get("read_only") {
-        if val.as_bool() == Some(true) {
-            return true;
-        }
-    }
-    if let Some(val) = inst.extra_fields.get("readonly") {
-        if val.as_bool() == Some(true) {
-            return true;
-        }
-    }
-    if let Some(meta) = inst.extra_fields.get("metadata").or_else(|| inst.extra_fields.get("meta")) {
-        if check_val(meta) {
-            return true;
-        }
-    }
-    false
-}
-
 mod shell_safety;
 mod tool_events;
 mod project_dispatch;
@@ -91,10 +44,7 @@ pub(crate) use project_dispatch::*;
 pub(crate) use command_exec::*;
 
 pub fn is_write_or_side_effect_tool(inst: &AgentInstruction) -> bool {
-    // 显式声明只读时优先放行：即使工具名命中写动词，只要明确声明 read_only: true，一律按只读工具放行。
-    if has_read_only_flag(inst) {
-        return false;
-    }
+    // 调用参数里的 read_only/readonly 不是可信工具属性，不能覆盖有效动作。
 
     // 分类前统一剥离命名空间（remote-hub/read_file -> read_file）
     let orig_tool = inst.get_tool();
@@ -208,7 +158,7 @@ pub fn run_agent_step(
     registry: &PluginRegistry,
     workspace_root: Option<&std::path::Path>,
 ) -> DispatchResult {
-    run_agent_step_internal(db, session_id, instruction, registry, workspace_root, None)
+    run_agent_step_internal(db, session_id, instruction, registry, workspace_root, None, None)
 }
 
 pub(crate) fn run_agent_step_with_images(
@@ -218,8 +168,9 @@ pub(crate) fn run_agent_step_with_images(
     registry: &PluginRegistry,
     workspace_root: Option<&std::path::Path>,
     pending: &crate::agent::tools::view_image::PendingImageQueue,
+    run_id: Option<&str>,
 ) -> DispatchResult {
-    run_agent_step_internal(db, session_id, instruction, registry, workspace_root, Some(pending))
+    run_agent_step_internal(db, session_id, instruction, registry, workspace_root, Some(pending), run_id)
 }
 
 fn run_agent_step_internal(
@@ -229,6 +180,7 @@ fn run_agent_step_internal(
     registry: &PluginRegistry,
     workspace_root: Option<&std::path::Path>,
     pending: Option<&crate::agent::tools::view_image::PendingImageQueue>,
+    run_id: Option<&str>,
 ) -> DispatchResult {
     let tool_name = instruction.get_tool();
     if let Some(Err(error)) = instruction.resolved_local_shell_params() {
@@ -280,7 +232,7 @@ fn run_agent_step_internal(
                 ),
                 ..Default::default()
             });
-        return run_plan_tree_sync_with_images(db, session_id, &plan_node, registry, workspace_root, pending);
+        return run_plan_tree_sync_with_images(db, session_id, &plan_node, registry, workspace_root, pending, run_id);
     }
     if let Some(ref tree_val) = instruction.plan_tree {
         if let Ok(plan_node) =
@@ -290,7 +242,7 @@ fn run_agent_step_internal(
                 "🌳 [PlanTree: {}] 检测到 plan_tree 复合树形计划，启动树形解释器...",
                 session_id
             );
-            return run_plan_tree_sync_with_images(db, session_id, &plan_node, registry, workspace_root, pending);
+            return run_plan_tree_sync_with_images(db, session_id, &plan_node, registry, workspace_root, pending, run_id);
         }
     }
 
@@ -354,7 +306,7 @@ fn run_agent_step_internal(
                 },
             };
             let res =
-                execute_command_with_images(db, session_id, step_tool, &step_action, &step_params, registry, workspace_root, pending);
+                execute_command_with_images(db, session_id, step_tool, &step_action, &step_params, registry, workspace_root, pending, run_id);
             append_mcp_raw_results(&mut mcp_raw_items, res.view.as_ref());
 
             // 拼接输出结果
@@ -400,7 +352,7 @@ fn run_agent_step_internal(
     }
 
     let params = instruction.get_params();
-    execute_command_with_images(db, session_id, &tool_name, &action, &params, registry, workspace_root, pending)
+    execute_command_with_images(db, session_id, &tool_name, &action, &params, registry, workspace_root, pending, run_id)
 }
 
 #[tauri::command]

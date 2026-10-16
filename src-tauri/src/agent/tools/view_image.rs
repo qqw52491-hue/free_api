@@ -231,6 +231,7 @@ mod integration_tests {
             &PluginRegistry::new(),
             Some(root),
             queue,
+            None,
         )
     }
 

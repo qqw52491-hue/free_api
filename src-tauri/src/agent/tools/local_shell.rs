@@ -323,6 +323,19 @@ pub fn dispatch(
     params: &serde_json::Value,
     workspace_root: Option<&Path>,
 ) -> DispatchResult {
+    dispatch_in_run(db, session_id, _action, params, workspace_root, None)
+}
+
+/// run_id 只由宿主传递，禁止从模型参数或 session_id 猜测任务归属。
+pub(crate) fn dispatch_in_run(
+    db: &DbState,
+    session_id: &str,
+    _action: &str,
+    params: &serde_json::Value,
+    workspace_root: Option<&Path>,
+    run_id: Option<&str>,
+) -> DispatchResult {
+    let run_id = run_id.filter(|id| !id.trim().is_empty());
     // 直接调用 handler 的子任务也走同一字符串契约与原有目录检查。
     let normalized = match crate::agent::tool_params::normalize_shell_params(params) {
         Ok(value) => value,
@@ -483,10 +496,15 @@ pub fn dispatch(
             .map(|t| t > MAX_TIMEOUT_SECS)
             .unwrap_or(false);
     if wants_background {
-        return spawn_background_shell(db, session_id, &final_cmd, &execution_cwd, custom_env);
+        let Some(run_id) = run_id else {
+            return DispatchResult { view: None, success: false, stdout: String::new(),
+                stderr: "后台命令未执行：宿主未提供 run_id，无法登记任务归属；请从运行上下文派发。".into(),
+                route: "local_shell:missing_run_context".into() };
+        };
+        return spawn_background_shell(db, session_id, run_id, &final_cmd, &execution_cwd, custom_env);
     }
 
-    execute_command_blocking(db, session_id, &final_cmd, &execution_cwd, timeout_secs, custom_env)
+    execute_command_blocking(db, session_id, run_id, &final_cmd, &execution_cwd, timeout_secs, custom_env)
 }
 
 /// 后台命令执行：spawn 后立即返回，进程在独立进程组中长跑。
@@ -496,6 +514,7 @@ pub fn dispatch(
 fn spawn_background_shell(
     db: &DbState,
     session_id: &str,
+    run_id: &str,
     cmd_str: &str,
     cwd: &Path,
     custom_env: Option<HashMap<String, String>>,
@@ -511,9 +530,6 @@ fn spawn_background_shell(
         };
     }
 
-    // run_id 取当前 checkpoint（job 行归属 run 便于信箱/wait_jobs 按 run 过滤）
-    let run_id = current_run_id(db, session_id);
-
     let preview: String = cmd_str.chars().take(120).collect();
     let params_json = json!({
         "command": cmd_str,
@@ -522,7 +538,7 @@ fn spawn_background_shell(
     .to_string();
 
     let job_id = match crate::agent::job_engine::begin_job(
-        db, &run_id, session_id, "shell", &preview, &params_json,
+        db, run_id, session_id, "shell", &preview, &params_json,
     ) {
         Ok(id) => id,
         Err(e) => {
@@ -850,20 +866,13 @@ enum ExecWaitOutcome {
     },
 }
 
-fn current_run_id(db: &DbState, session_id: &str) -> String {
-    crate::agent::checkpoint::load_checkpoint(db, session_id)
-        .ok()
-        .flatten()
-        .map(|c| c.run_id)
-        .unwrap_or_else(|| session_id.to_string())
-}
-
 /// 到点仍存活的命令 → 后台 job：看守线程接管 rt+child+排空任务继续跑，
 /// 进程终态写回 job 行（走 wait_jobs/收件箱通道）。返回给模型的不是
 /// 「超时已杀」而是「仍活着 + 句柄 + 你的选择权」。
 #[allow(clippy::too_many_arguments)]
 fn promote_timed_out_shell(
     db: &DbState,
+    run_id: &str,
     rt: tokio::runtime::Runtime,
     mut child: tokio::process::Child,
     drain_stdout: tokio::task::JoinHandle<Vec<u8>>,
@@ -890,9 +899,8 @@ fn promote_timed_out_shell(
         "waited_secs": waited_secs,
     })
     .to_string();
-    let run_id = current_run_id(db, &session_id_owned);
     let job_id = crate::agent::job_engine::begin_job(
-        db, &run_id, &session_id_owned, "shell", &preview, &params_json,
+        db, run_id, &session_id_owned, "shell", &preview, &params_json,
     )
     .unwrap_or_else(|_| format!("untracked-{}", child_pid.unwrap_or(0)));
 
@@ -974,6 +982,7 @@ fn promote_timed_out_shell(
 fn execute_command_blocking(
     db: &DbState,
     session_id: &str,
+    run_id: Option<&str>,
     cmd_str: &str,
     cwd: &Path,
     timeout_secs: u64,
@@ -1099,6 +1108,18 @@ fn execute_command_blocking(
                     format!("命令等待执行结果失败: {e}"),
                 )))
             }
+            // 无运行归属的独立调用不能转成无人管理的后台任务。
+            Err(_) if run_id.is_none() => {
+                if let Some(pid) = child_pid { kill_process_group(pid, "KILL"); }
+                let _ = child.wait().await;
+                let _ = join_drains(drain_stdout, drain_stderr, Duration::from_secs(2)).await;
+                finish_stream!();
+                ExecWaitOutcome::Finished(Err((
+                    "missing_run_context".into(), false, false,
+                    "dispatch_with_host_run_context".into(),
+                    "命令已执行至同步超时并已中止：宿主未提供 run_id，未转后台。".into(),
+                )))
+            }
             // 到点不杀：进程仍在跑，交还模型裁决（续等/中止两可）。
             // rt/child/排空任务整体移交后台看守线程——ticker 与 live_tail
             // 随任务移交，让转后台的命令继续向 UI 流式输出直至收尾。
@@ -1164,6 +1185,7 @@ fn execute_command_blocking(
         } => {
             return promote_timed_out_shell(
                 db,
+                run_id.expect("只有宿主提供 run_id 才能转后台"),
                 rt,
                 child,
                 drain_stdout,
@@ -1936,12 +1958,13 @@ mod tests {
             "sleep 1; echo done-content > {}",
             marker.display()
         );
-        let res = dispatch(
+        let res = dispatch_in_run(
             &db,
             "test_sess_bg",
             "exec",
             &json!({"command": cmd, "timeout_secs": 60, "background": true}),
             Some(ws),
+            Some("host-shell-test-run"),
         );
         assert!(res.success, "background 派发应立即返回成功: {}", res.stderr);
         assert!(res.stdout.contains("job_id"), "应返回 job 句柄: {}", res.stdout);
@@ -1993,12 +2016,13 @@ mod tests {
         let db = test_db();
         let marker = ws.join("promoted_marker.txt");
         let cmd = format!("sleep 2; echo survived > {}", marker.display());
-        let res = dispatch(
+        let res = dispatch_in_run(
             &db,
             "test_sess_promote",
             "exec",
             &json!({"command": cmd, "timeout_secs": 1}),
             Some(ws),
+            Some("host-shell-test-run"),
         );
         assert!(res.success, "转后台应返回成功句柄而非超时错误: {}", res.stderr);
         assert!(res.stdout.contains("去留由你裁决"), "应告知裁决权移交: {}", res.stdout);
@@ -2022,12 +2046,13 @@ mod tests {
         let temp = TempDirGuard::new();
         let ws = temp.path();
         let db = test_db();
-        let res = dispatch(
+        let res = dispatch_in_run(
             &db,
             "test_sess_bg_kill",
             "exec",
             &json!({"command": "sleep 300", "timeout_secs": 60, "background": true}),
             Some(ws),
+            Some("host-shell-test-run"),
         );
         assert!(res.success);
         let job_id = res.stdout.split("job_id: ").nth(1)

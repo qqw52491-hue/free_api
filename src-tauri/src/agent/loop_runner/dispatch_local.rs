@@ -186,6 +186,7 @@ pub(super) async fn dispatch_local_tool(
         let registry_arc = ctx.registry_state.inner().clone();
         let db = ctx.state.inner().clone();
         let sid = ctx.final_session_id.clone();
+        let run_id = ctx.parent_run_id.to_string();
         let ws_root = ctx.workspace_dir.to_path_buf();
         let registry = {
             let guard = registry_arc.lock().await;
@@ -196,7 +197,7 @@ pub(super) async fn dispatch_local_tool(
         let tool_images = pending_images.clone();
         let mut tool_task = tokio::task::spawn_blocking(move || {
             println!("执行动作: {:?}", inst_c);
-            run_agent_step_with_images(&db, &sid, &inst_c, &registry, Some(&ws_root), &tool_images)
+            run_agent_step_with_images(&db, &sid, &inst_c, &registry, Some(&ws_root), &tool_images, Some(&run_id))
         });
 
         let mut dispatch_result = tokio::select! {

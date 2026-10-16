@@ -42,6 +42,14 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        let runs: Vec<String> = {
+            let conn = self.db.0.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT DISTINCT parent_run_id FROM agent_background_jobs").unwrap();
+            stmt.query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap()
+        };
+        for run in runs {
+            let _ = crate::agent::job_engine::cancel_all_running_jobs(&self.db, &run);
+        }
         let _ = std::fs::remove_dir_all(&self.workspace);
         let _ =
             std::fs::remove_dir_all(crate::agent::path_guard::get_session_tmp_dir(&self.session));
@@ -49,6 +57,92 @@ impl Drop for Fixture {
             crate::agent::artifact_manager::get_managed_artifacts_root().join(&self.session),
         );
     }
+}
+
+#[test]
+fn readonly_declarations_cannot_hide_real_file_writes_or_shell_effects() {
+    let f = Fixture::new();
+    for container in ["command", "params"] {
+        let path = format!("{container}.txt");
+        let mut raw = json!({"tool":"local_file","action":"write","read_only":true,
+            "metadata":{"readonly":true}});
+        raw[container] = json!({"path":path,"content":"new","readonly":true,
+            "meta":{"read_only":true}});
+        let (inst, result) = f.execute(raw);
+        assert!(is_write_or_side_effect_tool(&inst));
+        assert!(result.success, "{}", result.stderr);
+        assert_eq!(std::fs::read_to_string(f.workspace.join(&path)).unwrap(), "new");
+
+        let (inst, result) = f.execute(json!({"tool":"local_file","action":"read",
+            "params":{"path":path,"read_only":true}}));
+        assert!(!is_write_or_side_effect_tool(&inst));
+        assert!(result.success);
+        assert!(result.stdout.contains("new"));
+    }
+    let shell: AgentInstruction = serde_json::from_value(json!({"tool":"local_shell",
+        "command":{"command":"rm fixture.txt","read_only":true}})).unwrap();
+    assert!(is_write_or_side_effect_tool(&shell));
+}
+
+#[test]
+fn host_run_ownership_survives_single_batch_parallel_and_timeout_dispatch() {
+    use crate::agent::job_engine::{has_running_jobs, poll_targeted_inbox};
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+    let _entered = rt.enter();
+    let f = Fixture::new();
+    let bg = json!({"tool":"local_shell","params":{"command":"sleep 2; printf host-owned",
+        "background":true,"run_id":"model-supplied-wrong-run"}});
+    let cases = [
+        bg.clone(),
+        json!({"commands":[bg.clone()]}),
+        json!({"parallel":[bg.clone(),bg]}),
+        json!({"tool":"local_shell","params":{"command":"sleep 2; printf host-owned","timeout_secs":1}}),
+    ];
+    for (index, value) in cases.into_iter().enumerate() {
+        let run_id = format!("host-run-{index}");
+        let inst: AgentInstruction = serde_json::from_value(value).unwrap();
+        let result = run_agent_step_internal(&f.db, &f.session, &inst, &f.registry,
+            Some(&f.workspace), None, Some(&run_id));
+        assert!(result.success, "{} {}", result.route, result.stderr);
+        let ids: Vec<String> = {
+            let conn = f.db.0.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT id FROM agent_background_jobs WHERE parent_run_id=?1 AND parent_session_id=?2").unwrap();
+            stmt.query_map(rusqlite::params![run_id,f.session], |r| r.get(0)).unwrap()
+                .collect::<Result<_, _>>().unwrap()
+        };
+        assert_eq!(ids.len(), if index == 2 { 2 } else { 1 });
+        assert!(has_running_jobs(&f.db, &run_id));
+        assert!(!has_running_jobs(&f.db, &f.session));
+        assert!(poll_targeted_inbox(&f.db, "another-run", &ids).unwrap().is_empty());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut completed = Vec::new();
+        while completed.len() < ids.len() && std::time::Instant::now() < deadline {
+            completed.extend(rt.block_on(crate::agent::job_engine::wait_for_jobs(
+                &f.db, &run_id, Some(&ids), 5, None)).unwrap());
+        }
+        assert_eq!(completed.len(), ids.len());
+        assert!(completed.iter().all(|r| r.status == "succeeded" && r.result_json.contains("host-owned")));
+        assert!(!has_running_jobs(&f.db, &run_id));
+    }
+}
+
+#[test]
+fn cancellation_targets_the_host_run_and_missing_context_never_starts_background_work() {
+    let f = Fixture::new();
+    let raw = json!({"tool":"local_shell","params":{"command":"sleep 30","background":true}});
+    let inst: AgentInstruction = serde_json::from_value(raw.clone()).unwrap();
+    let (_, result) = f.execute(raw);
+    assert!(!result.success);
+    assert_eq!(result.route, "local_shell:missing_run_context");
+    for run in ["host-a", "host-b"] {
+        let result = run_agent_step_internal(&f.db, &f.session, &inst, &f.registry,
+            Some(&f.workspace), None, Some(run));
+        assert!(result.success, "{}", result.stderr);
+    }
+    assert_eq!(crate::agent::job_engine::cancel_all_running_jobs(&f.db, "host-a").unwrap(), 1);
+    assert!(!crate::agent::job_engine::has_running_jobs(&f.db, "host-a"));
+    assert!(crate::agent::job_engine::has_running_jobs(&f.db, "host-b"));
+    assert_eq!(crate::agent::job_engine::cancel_all_running_jobs(&f.db, "host-b").unwrap(), 1);
 }
 
 #[test]

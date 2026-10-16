@@ -109,8 +109,8 @@ fn append_contract_claims(
 }
 
 /// 执行终态审查（Reviewer Gatekeeper）
-pub async fn evaluate_finish_diff(
-    app: &AppHandle,
+pub async fn evaluate_finish_diff<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     db: &DbState,
     context: &SandwichContext,
     model_routing: &ModelRoutingConfig,
@@ -133,9 +133,7 @@ pub async fn evaluate_finish_diff(
     triage: Option<&crate::agent::triage::TriageVerdict>,
     // 保留参数：未来"控制面自改"机械升级规则将按模式分流（当前不变量由提示词契约承担）
     _plan_mode: Option<crate::agent::checkpoint::PlanExecutionMode>,
-    // 本次 finish 携带的交付摘要文本。分析/解答/报告类任务的成果物在 summary
-    // 里而非 diff——终审必须能看到它，且它参与复用指纹（否则摘要改进永远
-    // 撞在「Diff 未变」缓存上，实弹死循环）。
+    // 调用方已组装 summary + details 的完整交付正文，参与审查与复用指纹。
     finish_summary: Option<&str>,
 ) -> ReviewResult {
     let interrupt_generation = *interrupt_rx.borrow();

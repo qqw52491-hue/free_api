@@ -27,7 +27,7 @@ pub fn run_plan_tree_sync(
     registry: &PluginRegistry,
     workspace_root: Option<&std::path::Path>,
 ) -> DispatchResult {
-    run_plan_tree_sync_with_images(db, session_id, plan_node, registry, workspace_root, None)
+    run_plan_tree_sync_with_images(db, session_id, plan_node, registry, workspace_root, None, None)
 }
 
 pub(crate) fn run_plan_tree_sync_with_images(
@@ -37,6 +37,7 @@ pub(crate) fn run_plan_tree_sync_with_images(
     registry: &PluginRegistry,
     workspace_root: Option<&std::path::Path>,
     pending: Option<&crate::agent::tools::view_image::PendingImageQueue>,
+    run_id: Option<&str>,
 ) -> DispatchResult {
     // 硬拒绝第一道：任何深度出现超限/空并行组，整棵树拒绝执行，一个分支都不跑。
     if let Err(error) = validate_plan_tree_parallel_fanout(plan_node) {
@@ -58,6 +59,7 @@ pub(crate) fn run_plan_tree_sync_with_images(
     let mcp_raw_collector = mcp_raw_items.clone();
 
     let pending = pending.cloned();
+    let run_id = run_id.map(str::to_owned);
     let invoker: crate::agent::plan_tree::ToolInvoker = Arc::new(move |tool, args| {
         let db_c = db_clone.clone();
         let sid_c = sid.clone();
@@ -65,6 +67,7 @@ pub(crate) fn run_plan_tree_sync_with_images(
         let items_c = mcp_raw_items.clone();
         let ws_c = ws_owned.clone();
         let pending_c = pending.clone();
+        let run_id_c = run_id.clone();
 
         Box::pin(async move {
             let action = args
@@ -85,6 +88,7 @@ pub(crate) fn run_plan_tree_sync_with_images(
                     &reg_c,
                     ws_c.as_deref(),
                     pending_c.as_ref(),
+                    run_id_c.as_deref(),
                 )
             })
             .await

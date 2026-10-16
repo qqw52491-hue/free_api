@@ -5,6 +5,64 @@ use crate::agent::reviewer_gatekeeper::BlockingIssue;
 fn context() -> SandwichContext {
     SandwichContext::new("system".into(), "goal".into())
 }
+
+#[test]
+fn complete_delivery_body_preserves_markdown_and_versions_both_fields() {
+    let c = context();
+    let cp = checkpoint(&c);
+    for (payload, expected) in [
+        (json!({"summary":"摘要","details":"# 正文\n\n**结论**"}), "摘要\n\n# 正文\n\n**结论**"),
+        (json!({"details":"# 只有正文"}), "# 只有正文"),
+        (json!({"summary":"相同","details":"相同"}), "相同"),
+        (json!({"summary":"仅摘要"}), "仅摘要"),
+    ] {
+        assert_eq!(delivery_body(&payload).as_deref(), Some(expected));
+    }
+    let a = json!({"summary":"检查完成","details":"发现问题 A"});
+    let b = json!({"summary":"检查完成","details":"未发现问题"});
+    assert_ne!(acceptance_fingerprint(&c, &cp, &a), acceptance_fingerprint(&c, &cp, &b));
+}
+
+#[tokio::test]
+async fn changed_details_reach_real_review_and_cannot_reuse_prepare_receipt() {
+    use crate::agent::child_reviewer::retirement_tests::MockReviewer;
+    let pass = json!({"verdict":"passed","score":90,"blocking_issues":[],"nit_issues":[],"summary":"ok"});
+    let mock = MockReviewer::new(vec![pass]).await;
+    let workspace = mock.root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let baseline = GitBaseline::capture(&workspace);
+    std::fs::write(workspace.join("report.md"), "报告实物").unwrap();
+    let mut c = context();
+    c.record_side_effect(1, "local_file".into(), "report.md".into());
+    c.change_verification = Some(ChangeVerification { status:"waived".into(),
+        evidence_refs:vec![], waived_reason:Some("静态报告，终审核对内容".into()) });
+    let mut cp = checkpoint(&c);
+    let mut routing = ModelRoutingConfig::default();
+    routing.role_models.insert("reviewer".into(), "mock".into());
+    let app = tauri::test::mock_app();
+    let (_tx, mut rx) = watch::channel(0);
+    let session = format!("details-review-{}", uuid::Uuid::new_v4());
+    let start = Utc::now() - chrono::Duration::seconds(1);
+    for (index, details) in ["# 原结论\n\n发现问题 A", "# 新结论\n\n问题 A 已解决", "# 新结论\n\n问题 A 已解决"].into_iter().enumerate() {
+        let instruction: AgentInstruction = serde_json::from_value(if index == 0 {
+            json!({"prepare_finish":{"summary":"检查完成","details":details}})
+        } else {
+            json!({"tool":"finish","command":{"summary":"检查完成","details":details}})
+        }).unwrap();
+        let evaluation = evaluate_completion(app.handle(), &mock.db, &mut c, &mut cp,
+            "details-run", &session, 10+index, &workspace, &baseline, start, &routing, &mut rx,
+            &instruction, if index==0 { CompletionMode::Prepare } else { CompletionMode::Finish }, false, false).await;
+        assert!(evaluation.receipt.is_ready(), "{:?}", evaluation.receipt);
+        assert_eq!(evaluation.receipt.finish_payload["details"], details);
+        cp.pending_finalization = Some(evaluation.receipt);
+        assert_eq!(mock.requests.lock().unwrap().len(), if index==0 {1} else {2});
+    }
+    let requests = mock.requests.lock().unwrap();
+    for (request, text) in requests.iter().zip(["# 原结论\n\n发现问题 A", "# 新结论\n\n问题 A 已解决"]) {
+        let messages = request["messages"].as_array().unwrap();
+        assert!(messages.iter().any(|m| m["content"].as_str().is_some_and(|s| s.contains(&format!("检查完成\n\n{text}")))));
+    }
+}
 fn checkpoint(c: &SandwichContext) -> AgentCheckpoint {
     AgentCheckpoint::new("session".into(), c)
 }
@@ -81,20 +139,20 @@ fn acceptance_version_ignores_display_bookkeeping_but_tracks_new_writes_and_clai
     c.block_manager
         .set_blocks(vec![TargetBlock::new("b1", "repair")]);
     let cp = checkpoint(&c);
-    let fp = acceptance_fingerprint(&c, &cp, Some("交付"));
+    let fp = acceptance_fingerprint(&c, &cp, &json!({"summary":"交付"}));
     c.current_observation = "new output / artifact registration".into();
     c.add_host_feedback("display-only");
     c.active_target_block_mut().unwrap().on_step_finish();
-    assert_eq!(fp, acceptance_fingerprint(&c, &cp, Some("交付")));
+    assert_eq!(fp, acceptance_fingerprint(&c, &cp, &json!({"summary":"交付"})));
     c.record_side_effect(40, "local_file".into(), "source changed".into());
-    assert_ne!(fp, acceptance_fingerprint(&c, &cp, Some("交付")));
-    let written = acceptance_fingerprint(&c, &cp, Some("交付"));
+    assert_ne!(fp, acceptance_fingerprint(&c, &cp, &json!({"summary":"交付"})));
+    let written = acceptance_fingerprint(&c, &cp, &json!({"summary":"交付"}));
     c.change_verification = Some(ChangeVerification {
         status: "waived".into(),
         evidence_refs: vec![],
         waived_reason: Some("无测试工具，由终审核对".into()),
     });
-    assert_ne!(written, acceptance_fingerprint(&c, &cp, Some("交付")));
+    assert_ne!(written, acceptance_fingerprint(&c, &cp, &json!({"summary":"交付"})));
 }
 #[test]
 fn acceptance_version_tracks_stage_defects_scope_and_summary() {
@@ -103,19 +161,19 @@ fn acceptance_version_tracks_stage_defects_scope_and_summary() {
     c.block_manager
         .set_blocks(vec![TargetBlock::new("b1", "repair")]);
     let mut cp = checkpoint(&c);
-    let fp = acceptance_fingerprint(&c, &cp, Some("summary"));
+    let fp = acceptance_fingerprint(&c, &cp, &json!({"summary":"summary"}));
     assert_ne!(
         fp,
-        acceptance_fingerprint(&c, &cp, Some("different result"))
+        acceptance_fingerprint(&c, &cp, &json!({"summary":"different result"}))
     );
     cp.stage_review_blockers_open = 1;
-    assert_ne!(fp, acceptance_fingerprint(&c, &cp, Some("summary")));
+    assert_ne!(fp, acceptance_fingerprint(&c, &cp, &json!({"summary":"summary"})));
     cp.stage_review_blockers_open = 0;
     c.active_target_block_mut()
         .unwrap()
         .scope
         .push("another.rs".into());
-    assert_ne!(fp, acceptance_fingerprint(&c, &cp, Some("summary")));
+    assert_ne!(fp, acceptance_fingerprint(&c, &cp, &json!({"summary":"summary"})));
 }
 #[test]
 fn successful_review_does_not_consume_a_stop_signal_as_completion() {
