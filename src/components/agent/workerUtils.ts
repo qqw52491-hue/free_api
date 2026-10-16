@@ -527,7 +527,9 @@ export function extractSubagentsFromStep(
         receipts.set(r.id, { ...receipts.get(r.id), ...r });
         if (r.status == null && stepWorkerTool(source) !== "wait_jobs" && stepWorkerTool(source) !== "wait_for_jobs") origins.set(r.id, source);
     }
-    return ids.map(id => {
+    // A wait parameter identifies a job, not its role. Only real child receipts or live
+    // child events establish Agent identity; ordinary shell jobs stay outside the team.
+    return ids.filter(id => liveById.has(id) || receipts.get(id)?.tool).map(id => {
         const live = liveById.get(id);
         if (live) return live;
         const receipt = receipts.get(id);

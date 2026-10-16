@@ -64,11 +64,11 @@ pub(super) async fn dispatch_wait_jobs(
             ctx.context.wait_jobs_streak = 0;
         }
         let streak = ctx.context.wait_jobs_streak;
-        let effective_timeout = (timeout_secs << streak.min(3)).min(600);
+        let effective_timeout = crate::agent::job_engine::wait_timeout_secs(timeout_secs, streak);
 
         let _ = ctx.app.emit(
             &format!("agent-log-{}", ctx.final_session_id),
-            format!("⏳ 正在挂起等待后台异步任务完成 (超时限制: {}s)...", timeout_secs),
+            format!("⏳ 正在挂起等待后台异步任务完成 (等待窗口: {}s)...", effective_timeout),
         );
         let _ = ctx.app.emit(
             &format!("agent-progress-{}", ctx.final_session_id),
@@ -76,6 +76,7 @@ pub(super) async fn dispatch_wait_jobs(
                 "type": "agent_waiting_jobs",
                 "message": "正在挂起等待后台任务完成...",
                 "job_ids": target_ids.clone().unwrap_or_default(),
+                "timeout_secs": effective_timeout,
             }),
         );
 
@@ -165,63 +166,13 @@ pub(super) async fn dispatch_wait_jobs(
                 }
                 let mut out = String::new();
                 if completed_jobs.is_empty() {
-                    // 空结果消歧：区分「仍在途 / 结论待回收 / 已全部收口 / 从未派发」，
-                    // 避免模型对已交付完毕的结果反复空轮询（旧会话曾连刷 295 步）。
-                    if crate::agent::child_reviewer::has_running_child_runs(
-                        ctx.state.inner(),
-                        ctx.parent_run_id,
+                    match crate::agent::job_engine::empty_wait_message(
+                        ctx.state.inner(), ctx.parent_run_id, target_ids.as_deref(), effective_timeout,
                     ) {
-                        // 未完成待办数是纯事实披露：有可并行工作时干等是浪费，
-                        // 没有可做的时等待本身合理——数字摆出来由模型判断。
-                        let open_todos = ctx
-                            .context
-                            .todo_list
-                            .iter()
-                            .filter(|t| t.status == "pending" || t.status == "in_progress")
-                            .count();
-                        let todo_hint = if open_todos > 0 {
-                            format!("（当前另有 {} 项未完成待办可并行推进）", open_todos)
-                        } else {
-                            String::new()
-                        };
-                        if streak > 0 {
-                            out.push_str(&format!(
-                                "等待结束：仍有后台任务在运行中（本次为第 {} 次连等同一批任务，窗口已自适应扩至 {}s）{}。可再次 wait_jobs 挂起等待，或先推进其他独立操作（结论产出后会自动注入）。",
-                                streak + 1,
-                                effective_timeout,
-                                todo_hint
-                            ));
-                        } else {
-                            out.push_str(&format!(
-                                "等待结束：仍有后台任务在运行中，本次等待窗口内无新完成{}。可再次 wait_jobs 挂起等待，或先推进其他独立操作（结论产出后会自动注入）。",
-                                todo_hint
-                            ));
-                        }
-                    } else if crate::agent::child_reviewer::has_pending_review_results(
-                        ctx.state.inner(),
-                        ctx.parent_run_id,
-                    ) {
-                        out.push_str("等待结束：存在已终态但尚未回收的审查结论，请再次调用 wait_jobs 收取。");
-                    } else {
-                        let total_dispatched: i64 = ctx.state
-                            .inner()
-                            .0
-                            .lock()
-                            .ok()
-                            .and_then(|conn| {
-                                conn.query_row(
-                                    "SELECT COUNT(*) FROM agent_child_runs WHERE parent_run_id = ?1",
-                                    rusqlite::params![ctx.parent_run_id],
-                                    |r| r.get(0),
-                                )
-                                .ok()
-                            })
-                            .unwrap_or(0);
-                        if total_dispatched == 0 {
-                            out.push_str("等待结束：当前没有已派发的后台任务（wait_jobs 仅对已派发的 child 任务生效）。请直接推进后续行动。");
-                        } else {
-                            out.push_str("等待结束：所有已派发任务的结论均已交付并消费完毕，当前无挂起任务——结果已在你的上下文中，请直接基于其推进后续行动，无需再次 wait_jobs。");
-                        }
+                        Ok(message) => out.push_str(&message),
+                        Err(error) => out.push_str(&format!(
+                            "等待结束：本次未收到新结果，任务状态查询失败：{}。不能据此确认后台任务已完成。", error
+                        )),
                     }
                 } else {
                     out.push_str(refund_note);

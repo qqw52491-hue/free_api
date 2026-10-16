@@ -589,7 +589,9 @@
         s.evidence_refs = vec!["  ".to_string()];
         assert!(validate_plan_submission(&s, true).unwrap_err().contains("evidence_refs"));
         s.evidence_refs = (0..7).map(|i| format!("src/f{i}.rs")).collect();
-        assert!(validate_plan_submission(&s, true).unwrap_err().contains("evidence_refs"));
+        assert!(validate_plan_submission(&s, true).is_ok());
+        s.evidence_refs = vec!["x".repeat(crate::agent::child_reviewer::MAX_REVIEW_REFERENCE_CHARS + 1)];
+        assert!(validate_plan_submission(&s, true).unwrap_err().contains("引用总量"));
     }
 
     #[test]
@@ -598,9 +600,11 @@
         let mut s = valid_submission();
         s.evidence_refs = vec![];
         assert!(validate_plan_submission(&s, false).is_ok());
-        // 上限仍然生效：超过 6 条照样拒绝
+        // 可选证据允许多条引用，但仍受共享总量预算约束。
         s.evidence_refs = (0..7).map(|i| format!("src/f{i}.rs")).collect();
-        assert!(validate_plan_submission(&s, false).unwrap_err().contains("evidence_refs"));
+        assert!(validate_plan_submission(&s, false).is_ok());
+        s.evidence_refs = vec!["x".repeat(crate::agent::child_reviewer::MAX_REVIEW_REFERENCE_CHARS + 1)];
+        assert!(validate_plan_submission(&s, false).unwrap_err().contains("引用总量"));
     }
 
     #[test]

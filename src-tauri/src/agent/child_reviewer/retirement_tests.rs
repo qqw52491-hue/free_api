@@ -101,6 +101,36 @@ fn verdict(blocking: bool) -> Value {
         "scorecard":{"correctness":90,"risk":90,"style":90,"test_coverage":null,"null_reason":"无绑定验证"}})
 }
 
+#[tokio::test]
+async fn wide_references_reach_async_reviewer_and_storage_without_losing_blockers() {
+    let refs: Vec<String> = (0..12).map(|i| format!(
+        "src/{}/file_{i}.rs:10-20", "nested_module/".repeat(18)
+    )).collect();
+    let submission = serde_json::from_value(json!({"plan_summary":"核验服务暂停与解包方案的实际证据",
+        "target_files":[],"evidence_refs":refs})).unwrap();
+    let (_, plan_refs) = crate::agent::plan_gate::validate_plan_submission(&submission, true).unwrap();
+    let mut response = verdict(true);
+    response["evidence_refs"] = json!(refs);
+    response["root_cause_verdict"] = json!("na");
+    let mock = MockReviewer::new(vec![response]).await;
+    let snapshot = PlanReviewerDispatchSnapshot::new("mock", "flash", "auto", "审查员",
+        json!({"question":"核验服务暂停与解包方案", "plan_review":true, "evidence_refs":plan_refs}));
+    let (_tx, rx) = watch::channel(0u64);
+    let id = snapshot.spawn(None, &mock.db, "wide-ref-run", "wide-ref-session", &mock.root, rx, None).await.unwrap();
+    let result = mock.wait_child(&id).await;
+    let returned: ChildReviewResult = serde_json::from_value(result).unwrap();
+    assert_eq!(returned.unwithdrawn_blocking_count(), 1);
+    let mut expected = refs;
+    expected.sort();
+    assert_eq!(returned.evidence_refs, expected);
+    let requests = mock.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "合法引用不应触发补答");
+    for reference in &expected {
+        assert!(requests[0]["messages"].as_array().unwrap().iter().any(|m|
+            m["content"].as_str().is_some_and(|content| content.contains(reference))));
+    }
+}
+
 fn old_snapshot(scope: bool) -> PlanReviewerDispatchSnapshot {
     let params = json!({"question":"审查当前改动", "evidence_excerpt": "需求和代码 diff",
         "impact_pack_refs":["agent_logs/old.json:10"]});

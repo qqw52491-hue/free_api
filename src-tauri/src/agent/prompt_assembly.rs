@@ -57,7 +57,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "finish",
-        summary: "终态交付：全流程完成后的收尾交卷指令。summary 为简短结论，较长说明放在 command.details；两者正文均支持 Markdown，字符串按 JSON 规则转义。【交付前准备】代码类任务先完成真实测试验证，并闭合全部审查意见与待办，再交付；文件交付物把路径列表放进 artifacts（`tmp/xxx` 会话产物路径即可，交付门禁直接识别），系统会在界面底部自动生成下载与打开卡片。【两步交付范例】改动过文件、或带审查义务/待办的任务（含排查诊断类）分两步走——预检只给一句验收摘要，不写面向用户的长总结；就绪后保持 summary 不变，在 command.details 补充完整交付说明。若报告正文就是交付物，先落盘并作为证据/产物纳入验收，不能只验一句摘要后新增未经核验的报告。第 N 步只输出预检：{\"prepare_finish\": {\"summary\": \"已完成X，验证Y通过\"}}；收到「✅ 终态预检就绪」后，第 N+1 步输出：{\"tool\": \"finish\", \"command\": {\"summary\": \"已完成X，验证Y通过\", \"details\": \"完整交付说明\", \"artifacts\": [\"tmp/report.md\"]}}，仅验收相关状态与摘要保持一致时复用预检收据，免重复验证与终审；收到「⚠️ 终态预检未就绪」则先逐项闭合，再重新预检。",
+        summary: "终态交付：工作完成后优先直接调用 finish，宿主会执行与 prepare_finish 相同的适用验收，复杂任务同样适用；直接交付不表示跳过验证或审查。summary 为简短结论，较长说明放在 command.details；两者正文均支持 Markdown，字符串按 JSON 规则转义。代码类任务先完成适用验证并处理已有待办与审查问题；文件产物路径放进 command.artifacts（支持 tmp/ 会话产物路径）。【直接交付示例】已取得服务状态查询结果时：{\"tool\":\"finish\",\"command\":{\"summary\":\"已确认目标服务正在运行\",\"details\":\"状态查询返回 active；该结论仅覆盖本次服务状态查询。\"}}。示例内容应替换为本次实际结果。【可选预检】需要先查看尚未满足的验收条件时，可单独调用 prepare_finish，并一次提交准备交付的完整 summary 与 details；就绪后沿用同一份正文调用 finish，材料与验收状态未变时复用收据。正文补充或修改后需要重新核验；未就绪时按具体反馈补正后可直接 finish。",
         actions: &["finish(summary: string, details?: string, artifacts?: string[])"],
     },
     BuiltinToolSpec {
@@ -99,7 +99,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         name: "child_reviewer",
         summary: "受限只读子调查：审查父证据包，回交带 ID/严重级别/物理行号的结构化 findings 与 routing（certain/needs_alignment/blocked）；收到结果后必须先分诊再行动：逐条判定接受/反驳(须附证据)/需澄清，不要直接照改，也不要直接忽略；不会调用工具或写入文件；支持单发或 dispatches 批量并发派发多个专家会审",
         actions: &[
-            "investigate(question: string, role?: string [挂载专精角色卡标识], evidence_refs?: string[] <=6, evidence_excerpt?: string <=6000 chars, resource_ids?: string[] <=2 [仅当前项目会话的受管资源；不得传路径] 【⚠️证据三选一必填：refs/excerpt/resource_ids 至少供给一项（通常为你刚读过的文件路径列表），本次调用未提供三者中的任一项会被拒】, custom_inputs?: object [专项业务参数；角色卡声明必填项必须供给；保留键 verified_facts/hard_constraints/definition_of_done 会升格为一级小节优先呈现；注意 plan_summary 不算证据], dispatches?: Array<{question, role?, evidence_refs|evidence_excerpt|resource_ids 三选一必填, ...}> [一步批量并发派发多个审查员会审])",
+            "investigate(question: string, role?: string [挂载专精角色卡标识], evidence_refs?: string[] [去重后合计 <=16384 字符，含分隔；无固定条数或单条长度限制], evidence_excerpt?: string <=6000 chars, resource_ids?: string[] <=2 [仅当前项目会话的受管资源；不得传路径] 【⚠️证据三选一必填：refs/excerpt/resource_ids 至少供给一项（通常为你刚读过的文件路径列表），本次调用未提供三者中的任一项会被拒】, custom_inputs?: object [专项业务参数；角色卡声明必填项必须供给；保留键 verified_facts/hard_constraints/definition_of_done 会升格为一级小节优先呈现；注意 plan_summary 不算证据], dispatches?: Array<{question, role?, evidence_refs|evidence_excerpt|resource_ids 三选一必填, ...}> [一步批量并发派发多个审查员会审])",
         ],
     },
     BuiltinToolSpec {
@@ -119,7 +119,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "wait_jobs",
-        summary: "挂起等待后台异步任务或子审查完成；在无其他独立前置操作时使用，不消耗大模型 Token",
+        summary: "挂起等待已登记的后台命令或子任务；等待本身不调用模型，完成或中断即唤醒。默认窗口 180s，同批连续等待最多扩到 600s；窗口结束不等于任务失败，继续等待复用 job_id，不要重启任务",
         actions: &["wait_jobs(job_ids?: string[], timeout_secs?: number)"],
     },
     BuiltinToolSpec {
@@ -273,6 +273,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         actions: &[
             "调用格式优先 {\"tool\":\"local_shell\",\"params\":{\"command\":\"cargo check\",\"cwd\":\".\"}}。兼容旧 command 参数对象及非空命令字符串简写；简写只整理参数形状，仍走同一权限/目录/审查检查，不自动添加 cwd；附加选项放 params，两个来源冲突时不执行并报具体字段",
             "exec(command: string, args?: string[], cwd?: string, timeout_secs?: number [默认 60s，同步等待窗口上限 300s——到点不杀，自动转后台 job 交你裁决], env?: object, background?: boolean) — 在项目工作区执行 shell 命令行（支持参数数组与自定义环境变量；已注入 $SESSION_TMP_DIR/$TMPDIR=会话产物物理根）。预估超过 5 分钟的任务（视频渲染/大构建/批处理）传 background:true 或 timeout_secs>300 直接后台执行——立即返回 job_id，输出实时写日志文件，wait_jobs 挂起回收 / job_cancel 中止；同步命令跑满 300s 未结束也会自动转为后台任务（不杀进程），由你决定续等还是中止",
+            "退出码仅代表外层进程。包装脚本需保留关键检查退出码，例如 sh check.sh >check.log 2>&1; rc=$?; tail -n 40 check.log; exit \"$rc\"。管道或最后的 echo/tail 可能掩盖内部失败；远端脚本也应传回退出码，未完成的检查不能据外层 0 判通过",
             "⚠️【产物落点】shell 内写交付产物一律用 \"$SESSION_TMP_DIR/文件名\" 落点——裸相对路径 tmp/x 会落在当前执行目录下的 tmp/，既不是会话产物区也不随会话清理（系统会检测并提醒）；tmp/ 前缀路由只在 local_file/register_file 等工具参数中有效",
             "⚠️【基线提示】读取文件建议用 local_file(action: \"read\")——shell 读文件不建立乐观并发哈希基线，后续 write/edit 该既有文件会因缺基线被硬拦截",
         ],
@@ -318,14 +319,25 @@ mod tests {
     }
 
     #[test]
-    fn finish_guidance_keeps_precheck_short_and_summary_stable() {
-        let menu = build_local_tools_menu();
-        assert!(menu.contains("预检只给一句验收摘要"));
-        assert!(menu.contains("保持 summary 不变"));
-        assert!(menu.contains("command.details"));
-        assert!(menu.contains("作为证据/产物纳入验收"));
-        assert!(menu.contains("仅验收相关状态与摘要保持一致时复用预检收据"));
-        assert!(menu.contains("finish(summary: string, details?: string, artifacts?: string[])"));
+    fn direct_finish_example_is_an_executable_instruction_with_versioned_body() {
+        use crate::agent::{checkpoint::AgentCheckpoint, context::SandwichContext,
+            finalization::{acceptance_fingerprint, delivery_body}, types::AgentInstruction};
+        let spec = BUILTIN_TOOL_SPECS.iter().find(|s| s.name == "finish").unwrap();
+        let start = spec.summary.find('{').expect("交付示例缺失");
+        let value = serde_json::Deserializer::from_str(&spec.summary[start..])
+            .into_iter::<serde_json::Value>().next().unwrap().unwrap();
+        let inst: AgentInstruction = serde_json::from_value(value).unwrap();
+        assert!(crate::agent::dispatcher::is_finish_instruction(&inst));
+        assert!(inst.prepare_finish.is_none());
+        let mut payload = inst.command.unwrap();
+        let body = delivery_body(&payload).unwrap();
+        assert!(body.contains(payload["summary"].as_str().unwrap()));
+        assert!(body.contains(payload["details"].as_str().unwrap()));
+        let c = SandwichContext::new("system".into(), "查询服务状态".into());
+        let cp = AgentCheckpoint::new("example-run".into(), &c);
+        let fingerprint = acceptance_fingerprint(&c, &cp, &payload);
+        payload["details"] = serde_json::json!("服务状态尚未核实");
+        assert_ne!(fingerprint, acceptance_fingerprint(&c, &cp, &payload));
     }
 
     #[test]

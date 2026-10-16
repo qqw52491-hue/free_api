@@ -900,6 +900,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             const childParams = receipt?.dispatchIndex != null ? dispatches[receipt.dispatchIndex] : params;
             const details = extractWorkerDetails({ ...stepItem, tool: childTool, action: childTool, params: childParams });
             let worker = teamWorkers.value.find(w => w.id === id);
+            if (!worker && !receipt?.tool && !isDispatch) continue;
             if (!worker) {
                 worker = { id, name: details.name, role: details.role, roleLabel: details.roleLabel,
                     status: receipt?.status || "running", currentStep: "正在后台独立处理任务…", currentTool: childTool,
@@ -1307,26 +1308,10 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             return;
         }
 
-        // ⏳ 挂起等待后台 Worker 任务
+        // 等待事件不携带任务角色；未知 ID 可能是普通 shell job，不能据此虚构侦察子 Agent。
+        // 已派发子 Agent 的卡片由其真实生命周期事件维护。
         if (eventType === "agent_waiting_jobs") {
-            const jobIds = Array.isArray(payload.job_ids) ? payload.job_ids.map(toText).filter(Boolean) : [];
-            actionPhaseText.value = "⏳ 协程进入零 Token 挂起，等待后台任务中...";
-            for (const jid of jobIds) {
-                let worker = teamWorkers.value.find((w) => w.id === jid);
-                if (!worker) {
-                    teamWorkers.value.push({
-                        id: jid,
-                        name: jid.includes("reviewer") ? "代码质量审查员" : jid.includes("writer") ? "沙箱代码写入员" : "后台侦察 Worker",
-                        role: jid.includes("reviewer") ? "reviewer" : jid.includes("writer") ? "coder" : "worker",
-                        roleLabel: jid.includes("reviewer") ? "审查员" : jid.includes("writer") ? "写入员" : "Worker",
-                        status: "running",
-                        currentStep: "正在后台独立处理任务...",
-                        currentTool: jid.includes("reviewer") ? "child_reviewer" : jid.includes("writer") ? "child_writer" : "child_worker",
-                        progress: 50,
-                        startedAt: Date.now(),
-                    });
-                }
-            }
+            actionPhaseText.value = "⏳ 等待后台任务完成中...";
             return;
         }
 

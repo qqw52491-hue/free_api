@@ -350,6 +350,27 @@
     }
 
     #[test]
+    fn wide_evidence_references_survive_plan_request_and_review_result() {
+        // 真实失败形状：超过六条、单条超过 160 字符；引用原文须贯穿上下游。
+        let refs: Vec<String> = (0..12).map(|i| format!(
+            "src/{}/module_{i}.rs:100-120", "深层目录/".repeat(40)
+        )).collect();
+        let submission = serde_json::from_value(json!({
+            "plan_summary":"核查已有部署与归档证据，确认暂停方式后执行方案",
+            "target_files":[],"evidence_refs":refs
+        })).unwrap();
+        let (_, plan_refs) = crate::agent::plan_gate::validate_plan_submission(&submission, true).unwrap();
+        assert_eq!(plan_refs, refs);
+        let request = parse_child_review_request(&json!({"question":"核验当前方案", "evidence_refs":plan_refs})).unwrap();
+        let response = json!({"findings":[],"confidence":"supported", "evidence_refs":request.evidence_refs,
+            "missing_evidence":[],"scorecard":{"correctness":90,"risk":90,"style":90,"test_coverage":null,"null_reason":"静态方案核验"}});
+        let (_, _, returned_refs, _, _, _, _, _) = parse_controlled_output(&response.to_string(), &request.evidence_refs).unwrap();
+        let mut expected = refs;
+        expected.sort();
+        assert_eq!(returned_refs, expected);
+    }
+
+    #[test]
     fn request_is_bounded_and_deduplicates_evidence_references() {
         let request = parse_child_review_request(&json!({
             "question": "是否存在能证伪当前主根因的证据？",
@@ -358,12 +379,41 @@
         }))
         .unwrap();
         assert_eq!(request.evidence_refs, vec!["out-1", "out-2"]);
-        assert!(parse_child_review_request(&json!({"question": "x", "evidence_refs": ["a", "b", "c", "d", "e", "f", "g"]})).is_err());
+        assert!(parse_child_review_request(&json!({"question": "x", "evidence_refs": ["a", "b", "c", "d", "e", "f", "g"]})).is_ok());
         assert!(parse_child_review_request(&json!({"question": "没有证据包时不得调用"})).is_err());
         // 模型把不用的字段显式传 null：视为未传，不应被误报为「必须是 JSON 对象」
         let with_nulls = parse_child_review_request(&json!({"question": "q", "evidence_refs": ["a.rs"], "evidence_excerpt": null, "resource_ids": null, "dispatches": null})).unwrap();
         assert_eq!(with_nulls.evidence_refs, vec!["a.rs".to_string()]);
         assert!(parse_child_review_request(&json!({"question": "q", "evidence_refs": {"x": 1}})).is_err());
+    }
+
+    #[test]
+    fn reference_capacity_is_shared_unicode_aware_and_never_truncates() {
+        let capacity = MAX_REVIEW_REFERENCE_CHARS;
+        let boundary = vec!["证".repeat(capacity - 2), "据".into()];
+        let request = parse_child_review_request(&json!({"question":"容量边界", "evidence_refs":boundary})).unwrap();
+        let submission = serde_json::from_value(json!({"plan_summary":"验证完整引用在各个入口保持一致",
+            "target_files":[], "evidence_refs":boundary})).unwrap();
+        let (_, refs) = crate::agent::plan_gate::validate_plan_submission(&submission, true).unwrap();
+        assert_eq!(refs, boundary);
+        assert!(request.evidence_refs.contains(&boundary[0]));
+        let mut too_large = boundary.clone();
+        too_large.push("多".into());
+        let err = parse_child_review_request(&json!({"question":"超量", "evidence_refs":too_large})).unwrap_err();
+        assert!(err.contains(&capacity.to_string()) && err.contains("输入容量"));
+        let mut oversized = submission;
+        oversized.evidence_refs = too_large;
+        assert!(crate::agent::plan_gate::validate_plan_submission(&oversized, false).unwrap_err().contains(&capacity.to_string()));
+        let duplicate = vec!["x".repeat(capacity), "x".repeat(capacity)];
+        assert_eq!(normalize_review_evidence_refs(&duplicate).unwrap(), vec!["x".repeat(capacity)]);
+        let many: Vec<String> = (0..100).map(|i| format!("src/file_{i}.rs")).collect();
+        assert_eq!(normalize_review_evidence_refs(&many).unwrap(), many);
+        // 资源 ID 最终也会成为允许回传的引用，不能等到产物加载后才发现超量。
+        assert!(parse_child_review_request(&json!({"question":"资源预算", "evidence_refs":["x".repeat(capacity)],
+            "resource_ids":["resource-a"]})).unwrap_err().contains("引用总量"));
+        let response = json!({"findings":[],"confidence":"supported","evidence_refs":oversized.evidence_refs,
+            "missing_evidence":[],"scorecard":{"correctness":90,"risk":90,"style":90,"test_coverage":null,"null_reason":"无测试"}});
+        assert!(parse_controlled_output(&response.to_string(), &[]).unwrap_err().contains("引用总量"));
     }
 
     #[test]

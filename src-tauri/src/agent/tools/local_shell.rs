@@ -659,6 +659,7 @@ fn spawn_background_shell(
         };
         let result = json!({
             "exit_code": status.ok().and_then(|s| s.code()),
+            "exit_scope": "shell_process",
             "pid": child_pid,
             "log_path": log_path_w.display().to_string(),
             "tail": tail,
@@ -946,6 +947,7 @@ fn promote_timed_out_shell(
                 let tail = tail_of_file(&log_path_w, 4096);
                 let result = json!({
                     "exit_code": status.as_ref().ok().and_then(|s| s.code()),
+                    "exit_scope": "shell_process",
                     "pid": child_pid,
                     "log_path": log_path_w.display().to_string(),
                     "tail": tail,
@@ -1239,7 +1241,7 @@ fn execute_command_blocking(
             };
 
             let status_badge = if success {
-                format!("✅ [成功] (exit_code: 0, 耗时: {}ms)", duration_ms)
+                format!("✅ [进程正常退出] (exit_code: 0, 耗时: {}ms)", duration_ms)
             } else if search_no_match {
                 format!(
                     "🔍 [无匹配] (exit_code: 1 — 检索命令的 1 是'没有命中'不是执行失败，\
@@ -1294,6 +1296,7 @@ fn execute_command_blocking(
                 "command": cmd_str,
                 "cwd": cwd.display().to_string(),
                 "exit_code": exit_code,
+                "exit_scope": "shell_process",
                 "duration_ms": duration_ms,
                 "success": success,
                 "kind": kind,
@@ -1338,6 +1341,7 @@ fn execute_command_blocking(
                 "command": cmd_str,
                 "cwd": cwd.display().to_string(),
                 "exit_code": exit_code,
+                "exit_scope": "shell_process",
                 "duration_ms": duration_ms,
                 "truncated": is_truncated,
                 "output_tail": output_tail,
@@ -1770,6 +1774,29 @@ mod tests {
         assert!(res.stdout.contains("\"kind\":\"success\""));
     }
 
+    /// 复现事故中的外层管道吞退出码：不猜内部执行状态；保留退出码后真实报失败。
+    #[cfg(unix)]
+    #[test]
+    fn shell_wrapper_reports_outer_exit_and_preserved_timeout_code() {
+        let temp = TempDirGuard::new();
+        std::fs::write(temp.path().join("check.sh"), "echo partial-check; exit 124\n").unwrap();
+        let db = test_db();
+        let masked = dispatch(&db, "wrapper", "exec", &json!({
+            "command": "sh check.sh 2>&1 | tail -n 5"
+        }), Some(temp.path()));
+        assert!(masked.success);
+        assert!(masked.stdout.contains("[进程正常退出]"));
+        assert!(masked.stdout.contains("\"exit_scope\":\"shell_process\""));
+        assert!(masked.stdout.contains("partial-check"));
+        let preserved = dispatch(&db, "wrapper", "exec", &json!({
+            "command": "sh check.sh >check.log 2>&1; rc=$?; tail -n 40 check.log; exit \"$rc\""
+        }), Some(temp.path()));
+        assert!(!preserved.success);
+        assert!(preserved.stdout.contains("exit_code: 124"));
+        assert!(preserved.stderr.contains("partial-check"));
+        assert!(preserved.stdout.contains("\"exit_scope\":\"shell_process\""));
+    }
+
     #[test]
     fn test_local_shell_with_args_array() {
         let temp = TempDirGuard::new();
@@ -2003,6 +2030,7 @@ mod tests {
         }
         assert_eq!(status, "succeeded", "后台任务应以 succeeded 收官: {}", result_json);
         assert!(result_json.contains("\"exit_code\":0"), "result_json: {}", result_json);
+        assert!(result_json.contains("\"exit_scope\":\"shell_process\""));
         assert!(marker.exists(), "产物文件应由后台进程写出");
     }
 

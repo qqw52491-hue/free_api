@@ -13,6 +13,34 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::watch;
 use uuid::Uuid;
 
+/// 方案入口、子审查请求和审查输出共用同一预算，完整保留引用，不截断路径。
+pub(crate) fn normalize_review_evidence_refs(references: &[String]) -> Result<Vec<String>, String> {
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::new();
+    let mut total_chars = 0usize;
+    for (index, reference) in references.iter().enumerate() {
+        let reference = reference.trim();
+        if reference.is_empty() {
+            return Err(format!("evidence_refs 第 {} 条为空；请提供非空引用或省略该条。", index + 1));
+        }
+        if reference.chars().any(char::is_control) {
+            return Err(format!("evidence_refs 第 {} 条含控制字符；引用须为单行字符串。", index + 1));
+        }
+        if seen.insert(reference) {
+            total_chars = total_chars.saturating_add(reference.chars().count())
+                .saturating_add(usize::from(!normalized.is_empty()));
+            if total_chars > MAX_REVIEW_REFERENCE_CHARS {
+                return Err(format!(
+                    "evidence_refs 去重后的引用总量超过 {} 个字符（含条目间分隔）；请缩小本次引用总量，正文摘录可使用 evidence_excerpt。此为输入容量限制，不是审查判决。",
+                    MAX_REVIEW_REFERENCE_CHARS
+                ));
+            }
+            normalized.push(reference.to_string());
+        }
+    }
+    Ok(normalized)
+}
+
 
 pub fn parse_child_review_request(params: &Value) -> Result<ChildReviewRequest, String> {
     // 模型常把不用的字段显式传 null（如 evidence_excerpt: null），#[serde(default)] 不处理显式 null：
@@ -35,14 +63,8 @@ pub fn parse_child_review_request(params: &Value) -> Result<ChildReviewRequest, 
         ));
     }
 
-    let mut refs = BTreeSet::new();
-    for reference in raw.evidence_refs {
-        let reference = normalize_nonempty(&reference, 160, "evidence_refs")?;
-        refs.insert(reference);
-    }
-    if refs.len() > 6 {
-        return Err("child_reviewer.evidence_refs 最多 6 个。".to_string());
-    }
+    let mut refs = normalize_review_evidence_refs(&raw.evidence_refs)?;
+    refs.sort();
     let mut resource_ids = BTreeSet::new();
     for resource_id in raw.resource_ids {
         resource_ids.insert(normalize_nonempty(&resource_id, 160, "resource_ids")?);
@@ -53,6 +75,9 @@ pub fn parse_child_review_request(params: &Value) -> Result<ChildReviewRequest, 
             MAX_CHILD_RESOURCE_IDS
         ));
     }
+    // 受管资源 ID 会成为审查输出允许引用的一部分，入口一并计入同一预算。
+    let combined_refs: Vec<String> = refs.iter().chain(resource_ids.iter()).cloned().collect();
+    normalize_review_evidence_refs(&combined_refs)?;
     if raw.evidence_excerpt.trim().is_empty() && refs.is_empty() && resource_ids.is_empty() {
         return Err(
             "child_reviewer 必须携带证据：三选一传入 evidence_refs（你已读取过的文件路径，如 README.md、package.json）、evidence_excerpt（关键代码/文档摘录）或 resource_ids（受管资源 ID）。\n若尚未读取任何文件，请先用 read_text_file/grep 取证，再派发审查——空手派发审查没有意义。".to_string(),
@@ -62,7 +87,7 @@ pub fn parse_child_review_request(params: &Value) -> Result<ChildReviewRequest, 
     Ok(ChildReviewRequest {
         question,
         evidence_excerpt: raw.evidence_excerpt.trim().to_string(),
-        evidence_refs: refs.into_iter().collect(),
+        evidence_refs: refs,
         resource_ids: resource_ids.into_iter().collect(),
     })
 }
@@ -120,6 +145,7 @@ pub(crate) fn build_managed_resource_evidence(
     debug_assert!(evidence_excerpt.chars().count() <= MAX_EVIDENCE_CHARS);
     allowed_refs.sort();
     allowed_refs.dedup();
+    normalize_review_evidence_refs(&allowed_refs)?;
     Ok((evidence_excerpt, allowed_refs))
 }
 
@@ -237,8 +263,7 @@ pub(crate) fn parse_controlled_output(
 
     let allowed_refs_set = allowed_refs.iter().collect::<BTreeSet<_>>();
     let mut output_refs = BTreeSet::new();
-    for reference in &output.evidence_refs {
-        let reference = normalize_nonempty(reference, 160, "evidence_refs")?;
+    for reference in normalize_review_evidence_refs(&output.evidence_refs)? {
         if !allowed_refs.is_empty() && !allowed_refs_set.contains(&reference) {
             return Err(format!(
                 "child_reviewer.evidence_refs 引用 {:?} 不在父 Agent 显式传入的列表中。请原样使用完整引用（包括末尾说明），允许列表：{}。",

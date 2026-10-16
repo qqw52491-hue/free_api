@@ -38,6 +38,13 @@ async function main() {
  assert(!parseChildJobReceipts(failure).find(r=>r.id===b).output.includes('故障转移'));
  assert.deepEqual(getStepJobIds(step('step-9','resume_child',{child_run_id:a},`✅ 侦察 worker 追问已成功启动：新 child_run_id=${c}（继承历史）。`)),[c], 'resume params are OLD id');
  assert.deepEqual(getStepJobIds(step('step-10','child_worker',{},`未派发；任务描述说 child_run_id=${a}`)),[], 'task prose is not a receipt');
+ const shellId = 'job-archive-check';
+ const shellWait = step('step-shell','wait_jobs',{job_ids:[shellId]},result(shellId,'succeeded','shell'));
+ assert.deepEqual(extractSubagentsFromStep(shellWait,[shellWait]),[], 'shell receipt is not a child Agent in history');
+ const shellTimeout = step('step-shell-timeout','wait_jobs',{job_ids:[shellId]},'等待结束：仍有 1 个目标后台任务在运行');
+ assert.deepEqual(extractSubagentsFromStep(shellTimeout,[shellTimeout]),[], 'unknown waiting ID cannot invent a scout');
+ const mixedWait = step('step-mixed','wait_jobs',{job_ids:[a,shellId]},result(a)+result(shellId,'succeeded','shell'));
+ assert.deepEqual(extractSubagentsFromStep(mixedWait,[dispatch,mixedWait]).map(w=>w.id),[a], 'mixed wait retains real children only');
  const s = await session('failed');
  await emit('channel-run-started',{session_id:'existing-session',goal:'worker regression'});
  const progress = p => emit('agent-progress-existing-session',p);
@@ -117,6 +124,12 @@ async function main() {
  assert.equal(component.getAmbientDisplayItems(timeline.value[0]).filter(i=>i.type==='step').length,38);
  const count = Array.from({length:35},(_,i)=>step(`step-${i+20}`,'local_shell',{},'ok')).reduce((n,st)=>n+getStepWorkers(st,s.teamWorkers.value).length,0);
  assert.equal(count,0,'35 ordinary steps produce no repeated child rows');
+ // Generic shell waits must not create fake scouts through either live event channel.
+ const teamIdsBeforeShellWait = s.teamWorkers.value.map(w=>w.id);
+ progress({type:'agent_waiting_jobs',job_ids:[shellId]});
+ tool({type:'started',step_id:200,tool:'wait_jobs',action:'wait_jobs',params:{job_ids:[shellId]}});
+ tool({type:'succeeded',step_id:200,tool:'wait_jobs',action:'wait_jobs',params:{job_ids:[shellId]},result:shellWait.rawResult});
+ assert.deepEqual(s.teamWorkers.value.map(w=>w.id),teamIdsBeforeShellWait,'ordinary background job is never a child Agent card');
  // Parent failure must settle active child projections, retain completed results, and ignore late streams.
  progress({type:'complete',success:false,message:'审查通道失败，任务未完成'});
  assert.equal(s.runState.value,'failed');

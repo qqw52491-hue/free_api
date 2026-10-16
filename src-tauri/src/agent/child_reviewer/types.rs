@@ -57,6 +57,8 @@ pub const MAX_CHILD_REVIEWS_PER_PARENT_RUN: u8 = MAX_CHILDREN_PER_KIND_PER_RUN;
 pub(crate) const CHILD_MAX_OUTPUT_TOKENS: i64 = 900;
 pub(crate) const MAX_QUESTION_CHARS: usize = 2_000;
 pub(crate) const MAX_EVIDENCE_CHARS: usize = 6_000;
+/// 引用的容量预算（Unicode 字符，含条目间分隔）；不是证据质量或数量要求。
+pub(crate) const MAX_REVIEW_REFERENCE_CHARS: usize = 16_384;
 pub(crate) const MAX_CHILD_RESOURCE_IDS: usize = 2;
 pub(crate) const MAX_FINDING_CHARS: usize = 700;
 pub(crate) const MAX_MISSING_EVIDENCE_CHARS: usize = 300;

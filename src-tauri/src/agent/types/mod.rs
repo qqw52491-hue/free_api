@@ -153,7 +153,7 @@ pub struct PlanSubmission {
     /// 根因假设/问题定性（强烈建议填写）
     #[serde(default)]
     pub root_cause: String,
-    /// 支撑方案的证据引用（必填，1~6 条：已读取过的文件路径或证据标识）
+    /// 支撑方案的证据引用；按分流决定是否必填，共用审查引用总量预算。
     #[serde(default)]
     pub evidence_refs: Vec<String>,
     /// 关键假设（可选）

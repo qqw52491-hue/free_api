@@ -98,7 +98,7 @@ pub(crate) fn submit_plan_rejection(
 
 /// submit_plan 结构校验：方案必须带来源证据，防止空想方案进入审查。
 /// `evidence_required` 由任务入口分流判决驱动（evidence_policy=code_refs/operational_probes
-/// 或无判决时为 true；判决为 none/source_refs 时允许 0~6 条——产物类方案没有"已读代码"可引）。
+/// 或无判决时为 true；none/source_refs 时允许空引用。引用共用子审查的总字符预算。
 /// 成功返回 (规范化 target_files, 去重 evidence_refs)。
 pub(crate) fn validate_plan_submission(
     submission: &crate::agent::types::PlanSubmission,
@@ -124,22 +124,17 @@ pub(crate) fn validate_plan_submission(
             "【⚠️ submit_plan 结构不合法】target_files 最多 50 条非空文件路径；纯分析/只读任务可传空数组 []。".to_string(),
         );
     }
-    let mut evidence_refs: Vec<String> = submission
+    let evidence_refs: Vec<String> = submission
         .evidence_refs
         .iter()
         .map(|r| r.trim().to_string())
         .filter(|r| !r.is_empty())
         .collect();
-    evidence_refs.dedup();
+    let evidence_refs = crate::agent::child_reviewer::normalize_review_evidence_refs(&evidence_refs)
+        .map_err(|reason| format!("【⚠️ submit_plan 参数未通过校验，尚未派发审查】{}", reason))?;
     if evidence_required && evidence_refs.is_empty() {
         return Err(
-            "【⚠️ submit_plan 参数缺失】本次提交的 evidence_refs 为空，方案尚未提交审查。请在 evidence_refs 中补充 1~6 条已读取的证据引用（文件路径或证据标识）后重发；此错误不代表此前未取证。"
-                .to_string(),
-        );
-    }
-    if evidence_refs.len() > 6 {
-        return Err(
-            "【⚠️ submit_plan 结构不合法】evidence_refs 最多 6 条，请精选最关键的证据引用。"
+            "【⚠️ submit_plan 参数缺失】本次提交的 evidence_refs 为空，方案尚未提交审查。请补充已读取的证据引用（文件路径或证据标识）后重发；此错误不代表此前未取证。"
                 .to_string(),
         );
     }

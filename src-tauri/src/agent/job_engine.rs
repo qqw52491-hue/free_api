@@ -420,6 +420,79 @@ async fn enrich_and_refresh_collected_results(db: &DbState, collected: &mut [Bac
     }
 }
 
+/// 与 wait_jobs 的自适应窗口共用上限；完成通知或用户中断会提前唤醒。
+pub(crate) const MAX_WAIT_SECS: u64 = 600;
+
+pub(crate) fn wait_timeout_secs(requested: u64, streak: u32) -> u64 {
+    requested.clamp(1, MAX_WAIT_SECS)
+        .saturating_mul(1u64 << streak.min(3))
+        .min(MAX_WAIT_SECS)
+}
+
+/// 空回收结果只表示本次没有收到新回执；按同一 run / 同一目标范围查两类任务，
+/// 不能用「没有子审查在跑」推断「后台 shell 已完成」。查询失败也不声称全部完成。
+pub(crate) fn empty_wait_message(
+    db: &DbState,
+    parent_run_id: &str,
+    targets: Option<&[String]>,
+    waited_secs: u64,
+) -> Result<String, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(
+        "SELECT id, status, consumed, 1 FROM agent_background_jobs WHERE parent_run_id = ?1
+         UNION ALL
+         SELECT id, status, CASE WHEN applied_at IS NULL OR applied_at = '' THEN 0 ELSE 1 END,
+                CASE WHEN result_json IS NULL THEN 0 ELSE 1 END
+         FROM agent_child_runs WHERE parent_run_id = ?1"
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![parent_run_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+            row.get::<_, bool>(2)?, row.get::<_, bool>(3)?))
+    }).map_err(|e| e.to_string())?;
+    let mut matched = std::collections::HashSet::new();
+    let mut running = 0;
+    let mut pending = 0;
+    let mut unavailable = 0;
+    for row in rows {
+        let (id, status, consumed, has_result) = row.map_err(|e| e.to_string())?;
+        if targets.is_some_and(|ids| !ids.contains(&id)) { continue; }
+        matched.insert(id);
+        if status == "running" {
+            running += 1;
+        } else if !consumed {
+            if has_result && matches!(status.as_str(), "succeeded" | "failed" | "cancelled" | "timed_out" | "interrupted" | "invalid_output") {
+                pending += 1;
+            } else {
+                unavailable += 1;
+            }
+        }
+    }
+    let mut parts = Vec::new();
+    if running > 0 {
+        parts.push(format!("仍有 {} 个目标后台任务在运行；本次等待窗口为 {}s，未收到新结果。可继续 wait_jobs 等待同一任务，或推进其他独立工作；等待窗口结束不代表任务失败，无需重新启动该任务。", running, waited_secs));
+    }
+    if pending > 0 {
+        parts.push(format!("有 {} 个目标任务已到终态、结果尚未回收，可再次 wait_jobs 收取。", pending));
+    }
+    if unavailable > 0 {
+        parts.push(format!("有 {} 个目标任务尚无可回收结果，不能据此确认任务完成。", unavailable));
+    }
+    if let Some(ids) = targets {
+        let missing: std::collections::HashSet<_> = ids.iter().filter(|id| !matched.contains(*id)).collect();
+        if !missing.is_empty() {
+            parts.push(format!("当前 run 未找到 {} 个指定任务 ID，请核对派发返回的 ID。", missing.len()));
+        }
+    }
+    if parts.is_empty() {
+        parts.push(if matched.is_empty() {
+            "当前等待范围内没有已登记的后台任务。".to_string()
+        } else {
+            "当前等待范围内的任务均已到终态且结果已回收；本次没有新结果，任务是否成功请以已回收的结果为准。".to_string()
+        });
+    }
+    Ok(format!("等待结束：{}", parts.join("\n")))
+}
+
 /// 挂起当前协程等待后台异步任务完成，0 大模型 API 调用与 0 CPU 轮询消耗
 ///
 /// 等待范围同时覆盖通用后台任务信箱与子审查（child_reviewer）终态结果：
@@ -433,7 +506,7 @@ pub async fn wait_for_jobs(
     timeout_secs: u64,
     mut interrupt_rx: Option<&mut tokio::sync::watch::Receiver<u64>>,
 ) -> Result<Vec<BackgroundJobResult>, String> {
-    let timeout_duration = Duration::from_secs(timeout_secs.clamp(1, 180));
+    let timeout_duration = Duration::from_secs(wait_timeout_secs(timeout_secs, 0));
     let start_time = std::time::Instant::now();
 
     let found_target = |results: &[BackgroundJobResult]| -> bool {
@@ -803,4 +876,96 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(base);
     }
+    #[test]
+    fn wait_window_agrees_with_adaptive_limit_and_handles_extreme_inputs() {
+        assert_eq!(wait_timeout_secs(180, 0), 180);
+        assert_eq!(wait_timeout_secs(180, 1), 360);
+        assert_eq!(wait_timeout_secs(180, 2), 600);
+        assert_eq!(wait_timeout_secs(600, 0), 600);
+        assert_eq!(wait_timeout_secs(u64::MAX, u32::MAX), 600);
+        assert_eq!(wait_timeout_secs(0, 0), 1);
+    }
+
+    #[tokio::test]
+    async fn shell_wait_timeout_reports_running_then_recovers_same_job() {
+        let (base, db) = setup_test_db();
+        let id = begin_job(&db, "run-shell", "session", "shell", "archive check", "{}").unwrap();
+        let ids = [id.clone()];
+        let result = wait_for_jobs(&db, "run-shell", Some(&ids), 1, None).await.unwrap();
+        assert!(result.is_empty());
+        let message = empty_wait_message(&db, "run-shell", Some(&ids), 1).unwrap();
+        assert!(message.contains("仍有 1 个目标后台任务在运行"), "{}", message);
+        assert!(!message.contains("均已到终态"));
+        assert!(!message.contains("没有已登记"));
+        finish_job(&db, &id, "failed", 1010, Some(r#"{"exit_code":124}"#), None).unwrap();
+        assert!(empty_wait_message(&db, "run-shell", Some(&ids), 1).unwrap().contains("结果尚未回收"));
+        let result = wait_for_jobs(&db, "run-shell", Some(&ids), 600, None).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].job_id, id);
+        assert_eq!(result[0].status, "failed");
+        assert!(result[0].result_json.contains("124"));
+        let message = empty_wait_message(&db, "run-shell", Some(&ids), 600).unwrap();
+        assert!(message.contains("均已到终态且结果已回收"));
+        assert!(message.contains("是否成功请以已回收的结果为准"));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn empty_wait_feedback_covers_child_and_shell_in_same_target_scope() {
+        let (base, db) = setup_test_db();
+        let shell = begin_job(&db, "run-mixed", "session", "shell", "archive check", "{}").unwrap();
+        {
+            let conn = db.0.lock().unwrap();
+            for (id, kind, run) in [("review", "review", "run-mixed"), ("writer", "writer", "run-mixed"), ("other", "worker", "other-run")] {
+                conn.execute("INSERT INTO agent_child_runs (id,parent_run_id,parent_session_id,workspace_root,model_id,status,started_at,kind) VALUES (?1,?2,'session','.','fake','running',?3,?4)", params![id, run, Utc::now().to_rfc3339(), kind]).unwrap();
+            }
+        }
+        assert!(empty_wait_message(&db, "run-mixed", None, 360).unwrap().contains("仍有 3 个目标后台任务在运行"));
+        let ids = [shell.clone(), "writer".to_string(), "ghost".to_string(), "ghost".to_string(), "other".to_string()];
+        let message = empty_wait_message(&db, "run-mixed", Some(&ids), 360).unwrap();
+        assert!(message.contains("仍有 2 个目标后台任务在运行"), "{}", message);
+        assert!(message.contains("未找到 2 个指定任务 ID"), "{}", message);
+        db.0.lock().unwrap().execute("UPDATE agent_child_runs SET status='succeeded',result_json='{}' WHERE id='writer'", []).unwrap();
+        let message = empty_wait_message(&db, "run-mixed", Some(&ids), 360).unwrap();
+        assert!(message.contains("仍有 1 个目标后台任务在运行"));
+        assert!(message.contains("有 1 个目标任务已到终态、结果尚未回收"));
+        db.0.lock().unwrap().execute("UPDATE agent_child_runs SET applied_at='done' WHERE id='writer'", []).unwrap();
+        let message = empty_wait_message(&db, "run-mixed", Some(&["writer".to_string()]), 360).unwrap();
+        assert!(message.contains("均已到终态且结果已回收"));
+        assert!(!message.contains("仍有"), "无关的 running 任务不能影响定向反馈");
+        assert!(empty_wait_message(&db, "new-run", None, 180).unwrap().contains("没有已登记"));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn empty_wait_feedback_does_not_report_completion_when_status_is_unavailable() {
+        let (base, db) = setup_test_db();
+        {
+            let conn = db.0.lock().unwrap();
+            conn.execute("INSERT INTO agent_child_runs (id,parent_run_id,parent_session_id,workspace_root,model_id,status,started_at) VALUES ('incomplete','run','session','.','fake','failed',?1)", params![Utc::now().to_rfc3339()]).unwrap();
+        }
+        let message = empty_wait_message(&db, "run", None, 180).unwrap();
+        assert!(message.contains("尚无可回收结果"));
+        assert!(!message.contains("均已到终态"));
+        db.0.lock().unwrap().execute("DROP TABLE agent_background_jobs", []).unwrap();
+        assert!(empty_wait_message(&db, "run", None, 180).is_err());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn long_wait_remains_interruptible() {
+        let (base, db) = setup_test_db();
+        begin_job(&db, "run-stop", "session", "shell", "archive check", "{}").unwrap();
+        let (tx, mut rx) = tokio::sync::watch::channel(0u64);
+        let waiting = wait_for_jobs(&db, "run-stop", None, 600, Some(&mut rx));
+        let interrupt = async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            tx.send(1).unwrap();
+        };
+        let (result, _) = tokio::time::timeout(Duration::from_secs(2), async { tokio::join!(waiting, interrupt) }).await.unwrap();
+        assert!(result.unwrap_err().contains("中断"));
+        assert!(has_running_jobs(&db, "run-stop"), "等待中断不能伪造任务成功");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
 }
