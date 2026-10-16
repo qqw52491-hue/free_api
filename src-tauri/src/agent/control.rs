@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, watch, Mutex};
 // 替换只在模型/工具/等待人工三个安全边界消费，绝不硬杀未知副作用工具。
 #[derive(Debug, Clone)]
 pub(crate) enum HumanControl {
-    Answer(String),
+    Answer(String, Option<crate::agent::conversation::ConversationCursor>),
     ReplaceGoal(String),
     Cancel,
 }
@@ -102,18 +102,18 @@ pub async fn send_human_intervention(
     let sender = channels
         .get(&session_id)
         .ok_or_else(|| "任务已结束或通道不存在".to_string())?;
-    sender
-        .send(HumanControl::Answer(message.clone()))
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // 落盘成会话消息气泡：run 中时段的问答原来只走干预通道不写库，
-    // 导致桌面/网页会话页永远看不到人的回答。落库失败不阻断应答送达。
-    if let Err(error) =
-        crate::agent::conversation::append_human_intervention(state.inner(), &session_id, &message)
-    {
-        eprintln!("[control] 干预消息落盘失败（已送达运行中任务）: {error}");
-    }
+    // 先落消息取得身份，再投递；运行中任务消费回答后按 id 登记，入口才推进连续游标。
+    // 落库失败仍允许回答送达，不冒认其他未消费的聊天记录。
+    let cursor = match crate::agent::conversation::append_human_intervention(
+        state.inner(), &session_id, &message,
+    ) {
+        Ok(cursor) => Some(cursor),
+        Err(error) => {
+            eprintln!("[control] 干预消息落盘失败: {error}");
+            None
+        }
+    };
+    sender.send(HumanControl::Answer(message, cursor)).await.map_err(|e| e.to_string())?;
     // 统一分发中枢：SSE(手机/网页) + Tauri(桌面) 双路齐达
     crate::agent::channel::notify_session_event(&session_id, "message");
     Ok(())
@@ -166,7 +166,7 @@ pub(crate) fn take_pending_interrupt(rx: &mut mpsc::Receiver<HumanControl>) -> O
                 return Some(format!("用户提交了新的任务目标：{}", goal))
             }
             Ok(HumanControl::Cancel) => return Some("用户请求停止当前任务。".to_string()),
-            Ok(HumanControl::Answer(_)) => continue,
+            Ok(HumanControl::Answer(..)) => continue,
             Err(_) => return None,
         }
     }

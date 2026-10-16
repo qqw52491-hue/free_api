@@ -232,6 +232,12 @@ pub struct SandwichContext {
     // ════════════════════════════════════════════════════════════════════
     /// 历史对话回合流 (仅包含 action_brief 与脱水采样后的 execution feedback)
     pub turns_history: Vec<ChatMessage>,
+    /// 已导入聊天的位置不随摘要/脱水变化；不发送给模型。
+    #[serde(default)]
+    pub conversation_cursor: Option<crate::agent::conversation::ConversationCursor>,
+    /// 运行期单独消费的人工回答；入口合并前不能用它们跳过其他未消费的消息。
+    #[serde(default)]
+    pub acknowledged_chat_ids: BTreeSet<String>,
 
     // ════════════════════════════════════════════════════════════════════
     // 🍞 3. 底层面包 (Dynamic Tail State Card - 动态聚合状态卡，压在最末端)
@@ -417,6 +423,15 @@ pub struct SandwichContext {
 }
 
 impl SandwichContext {
+    pub(crate) fn acknowledge_chat(
+        &mut self,
+        cursor: Option<crate::agent::conversation::ConversationCursor>,
+    ) {
+        if let Some(cursor) = cursor {
+            self.acknowledged_chat_ids.insert(cursor.id);
+        }
+    }
+
     pub fn new(system_prompt: String, user_goal: String) -> Self {
         Self {
             system_prompt,
@@ -440,6 +455,8 @@ impl SandwichContext {
             block_manager: crate::agent::target_block::BlockManager::new(),
             change_verification: None,
             turns_history: Vec::new(),
+            conversation_cursor: None,
+            acknowledged_chat_ids: BTreeSet::new(),
             current_observation: String::new(),
             progress_summary: String::new(),
             plan_state: PlanState::new(),

@@ -6,6 +6,114 @@ use rusqlite::params;
 use serde_json::json;
 use uuid::Uuid;
 
+/// 对应 chat_messages 的稳定位置；与提示词正文及压缩结果无关。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ConversationCursor {
+    pub created_at: String,
+    pub id: String,
+}
+
+pub(crate) struct EntryHistory {
+    pub messages: Vec<ChatMessage>,
+    pub cursor: Option<ConversationCursor>,
+    pub legacy_reference: Option<ChatMessage>,
+}
+
+/// 只导入检查点尚未接收的消息。旧检查点没有游标时，已运行区间内的聊天
+/// 单独标记为历史参考（保留可能尚未消费的人工回答），不重新当作最新指令。
+pub(crate) fn history_for_entry(
+    db: &DbState,
+    session_id: &str,
+    checkpoint: Option<&AgentCheckpoint>,
+) -> Result<EntryHistory, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let previous = checkpoint.and_then(|cp| cp.data.conversation_cursor.as_ref());
+    let previous_rowid = previous
+        .map(|last| {
+            use rusqlite::OptionalExtension;
+            conn.query_row(
+                "SELECT rowid FROM chat_messages WHERE session_id=?1 AND id=?2",
+                params![session_id, last.id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+        })
+        .transpose()
+        .map_err(|e| e.to_string())?
+        .flatten();
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, created_at, role, content, rowid FROM chat_messages
+         WHERE session_id=?1 AND (?2 IS NULL OR rowid>?2) ORDER BY rowid ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![session_id, previous_rowid], |row| {
+            Ok((
+                ConversationCursor {
+                    id: row.get(0)?,
+                    created_at: row.get(1)?,
+                },
+                ChatMessage {
+                    role: row.get(2)?,
+                    content: json!(row.get::<_, String>(3)?),
+                },
+                row.get::<_, i64>(4)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let legacy = checkpoint.filter(|_| previous.is_none());
+    let mut messages = Vec::new();
+    let mut references = Vec::new();
+    let mut cursor = previous.cloned();
+    for row in rows {
+        let (position, message, rowid) = row.map_err(|e| e.to_string())?;
+        cursor = Some(position.clone());
+        if checkpoint.is_some_and(|cp| cp.data.acknowledged_chat_ids.contains(&position.id)) {
+            continue;
+        }
+        if let Some(last_rowid) = previous_rowid {
+            if rowid > last_rowid {
+                messages.push(message);
+            }
+        } else if legacy.is_some() || previous.is_some() {
+            // 按时间点比较，兼容旧库不同的小数精度/时区写法。
+            let time = chrono::DateTime::parse_from_rfc3339(&position.created_at)
+                .map_err(|e| format!("聊天时间无效: {e}"))?;
+            let cp = checkpoint.unwrap();
+            let cutoff = previous
+                .map(|last| last.created_at.as_str())
+                .unwrap_or(&cp.updated_at);
+            let updated = chrono::DateTime::parse_from_rfc3339(cutoff)
+                .map_err(|e| format!("检查点时间无效: {e}"))?;
+            let started = chrono::DateTime::parse_from_rfc3339(&cp.created_at)
+                .map_err(|e| format!("检查点起点无效: {e}"))?;
+            if time > updated {
+                messages.push(message);
+            } else if previous.is_some() || time >= started {
+                references.push(
+                    json!({"created_at":position.created_at,"message_id":position.id,
+                    "role":message.role,"content":message.content}),
+                );
+            }
+        } else {
+            messages.push(message);
+        }
+    }
+    let legacy_reference = (!references.is_empty()).then(|| ChatMessage {
+        role: "user".into(),
+        content: json!(format!(
+            "【历史聊天参考：按入库顺序，附原始时间】\n旧检查点未记录消息游标，或游标对应的消息已删除，以下记录的消费位置无法完全恢复，可能包含已处理或尚未处理的人工回答。它们是历史原文，不是本轮新增指令；当前新增消息见后续。\n{}",
+            serde_json::to_string(&references).unwrap_or_default()
+        )),
+    });
+    Ok(EntryHistory {
+        messages,
+        cursor,
+        legacy_reference,
+    })
+}
+
 fn title_from_goal(goal: &str) -> String {
     let normalized = goal.split_whitespace().collect::<Vec<_>>().join(" ");
     let candidate = if normalized.is_empty() {
@@ -45,13 +153,14 @@ fn append_message(
     role: &str,
     content: &str,
     model_id: Option<&str>,
-) -> Result<(), String> {
+) -> Result<ConversationCursor, String> {
     let conn = db.0.lock().map_err(|error| error.to_string())?;
     let now = Utc::now().to_rfc3339();
+    let id = Uuid::new_v4().to_string();
     conn.execute(
         "INSERT INTO chat_messages (id, session_id, role, content, attachments, created_at, model_id)
          VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
-        params![Uuid::new_v4().to_string(), session_id, role, content, now, model_id],
+        params![id, session_id, role, content, now, model_id],
     )
     .map_err(|error| error.to_string())?;
     conn.execute(
@@ -59,7 +168,10 @@ fn append_message(
         params![now, session_id],
     )
     .map_err(|error| error.to_string())?;
-    Ok(())
+    Ok(ConversationCursor {
+        created_at: now,
+        id,
+    })
 }
 
 /// 任务意图独立于模型配置；缺省保持旧客户端的非终态恢复行为。
@@ -92,7 +204,7 @@ pub fn begin_turn(
     user_message: &str,
 ) -> Result<(), String> {
     ensure_conversation(db, session_id, model_id, user_message)?;
-    append_message(db, session_id, "user", user_message, Some(model_id))
+    append_message(db, session_id, "user", user_message, Some(model_id)).map(|_| ())
 }
 
 pub fn complete_turn(
@@ -108,17 +220,19 @@ pub fn complete_turn(
         assistant_message,
         Some(model_id),
     )
+    .map(|_| ())
 }
 
 pub fn append_human_intervention(
     db: &DbState,
     session_id: &str,
     message: &str,
-) -> Result<(), String> {
+) -> Result<ConversationCursor, String> {
     append_message(db, session_id, "user", message, None)
 }
 
-pub fn recent_history(db: &DbState, session_id: &str) -> Result<Vec<ChatMessage>, String> {
+#[cfg(test)]
+fn recent_history(db: &DbState, session_id: &str) -> Result<Vec<ChatMessage>, String> {
     let conn = db.0.lock().map_err(|error| error.to_string())?;
     let mut stmt = conn
         .prepare(
@@ -141,6 +255,10 @@ pub fn recent_history(db: &DbState, session_id: &str) -> Result<Vec<ChatMessage>
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
 }
+
+#[cfg(test)]
+#[path = "conversation_history_tests.rs"]
+mod history_tests;
 
 #[cfg(test)]
 mod tests {
@@ -206,7 +324,10 @@ mod tests {
         let ctx = crate::agent::context::SandwichContext::new("system".into(), "原复杂任务".into());
         let mut cp = AgentCheckpoint::new("session".into(), &ctx);
         cp.mark_failed("用户取消".into(), &ctx);
-        assert!(should_start_new_turn(Some(&cp), None).unwrap(), "旧客户端保留旧行为");
+        assert!(
+            should_start_new_turn(Some(&cp), None).unwrap(),
+            "旧客户端保留旧行为"
+        );
         assert!(!should_start_new_turn(Some(&cp), Some(TaskStartMode::Resume)).unwrap());
         assert!(should_start_new_turn(Some(&cp), Some(TaskStartMode::New)).unwrap());
     }

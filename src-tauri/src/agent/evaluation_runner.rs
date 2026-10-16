@@ -689,7 +689,7 @@ pub async fn start_background_agent_evaluation(
                             .get(&human_wait_session_id)
                             .map(|sender| {
                                 sender
-                                    .try_send(HumanControl::Answer(reply))
+                                    .try_send(HumanControl::Answer(reply, None))
                                     .map_err(|e| e.to_string())
                             })
                             .unwrap_or(Err("通道不存在".to_string()));

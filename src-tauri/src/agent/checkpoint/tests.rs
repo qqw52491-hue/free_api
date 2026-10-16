@@ -501,10 +501,7 @@
         let mut next =
             SandwichContext::new("system".to_string(), "为什么 list_models 报错".to_string());
         next.turns_history = vec![
-            ChatMessage {
-                role: "user".to_string(),
-                content: json!("配置 OpenRouter"),
-            },
+            // 入口已按消息游标过滤；仅有旧任务结束后的新增聊天。
             ChatMessage {
                 role: "assistant".to_string(),
                 content: json!("OpenRouter 已就绪"),

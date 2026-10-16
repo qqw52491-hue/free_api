@@ -30,6 +30,10 @@ pub struct DurableAgentContext {
     #[serde(default)]
     pub change_verification: Option<ChangeVerification>,
     pub turns_history: Vec<ChatMessage>,
+    #[serde(default)]
+    pub conversation_cursor: Option<crate::agent::conversation::ConversationCursor>,
+    #[serde(default)]
+    pub acknowledged_chat_ids: BTreeSet<String>,
     /// 避坑教训；嵌入字段以兼容旧 checkpoint JSON。
     #[serde(default)]
     pub failed_attempts: Vec<FailedAttempt>,
@@ -80,6 +84,8 @@ impl DurableAgentContext {
             review_contract: context.review_contract.clone(),
             change_verification: context.change_verification.clone(),
             turns_history: context.turns_history.clone(),
+            conversation_cursor: context.conversation_cursor.clone(),
+            acknowledged_chat_ids: context.acknowledged_chat_ids.clone(),
             failed_attempts: context.failed_attempts.clone(),
             side_effects: context.side_effects.clone(),
             inherited_side_effects_count: context.inherited_side_effects_count,
@@ -121,6 +127,8 @@ impl DurableAgentContext {
         context.review_contract = self.review_contract.clone();
         context.change_verification = self.change_verification.clone();
         context.turns_history = self.turns_history.clone();
+        context.conversation_cursor = self.conversation_cursor.clone();
+        context.acknowledged_chat_ids = self.acknowledged_chat_ids.clone();
         context.failed_attempts = self.failed_attempts.clone();
         context.side_effects = self.side_effects.clone();
         context.inherited_side_effects_count = self.inherited_side_effects_count;
@@ -185,7 +193,7 @@ impl DurableAgentContext {
     /// 同一 session 上一轮已 finish 后，新用户消息仍 append 脱水夹心（Claude/Codex 会话内继承）。
     ///
     /// 不恢复旧 `user_goal` / todo / progress / observation（那是新任务）。
-    /// 恢复：`turns_history`（与最新 chat_messages 去重追加）、memories、
+    /// 恢复：`turns_history`（入口已按消息游标筛选新消息）、memories、
     /// failed_attempts、side_effects。工具正文仍以磁盘 / output_id 为准。
     pub fn inherit_filling_into(&self, context: &mut SandwichContext) {
         // 保持 M1 静态目标锚点不变（跨轮前缀 100% 缓存命中），新提问已作为 user 消息追加在 chat_tail 尾部。
@@ -195,7 +203,11 @@ impl DurableAgentContext {
             context.user_goal = self.user_goal.clone();
         }
         let chat_tail = std::mem::take(&mut context.turns_history);
-        context.turns_history = merge_chat_onto_filling(self.turns_history.clone(), chat_tail);
+        context.turns_history = self.turns_history.clone();
+        context.turns_history.extend(chat_tail);
+        if context.conversation_cursor.is_none() {
+            context.conversation_cursor = self.conversation_cursor.clone();
+        }
 
         // 保持已有会话的 M0 系统提示词恒定，若发生变更作为事件追加
         if let Some(baseline_prompt) = &self.epoch_system_prompt {
@@ -307,19 +319,4 @@ pub(crate) fn generate_prompt_diff_summary(old_p: &str, new_p: &str) -> String {
     }
 
     parts.join("\n\n")
-}
-
-pub(crate) fn merge_chat_onto_filling(
-    mut filling: Vec<ChatMessage>,
-    chat: Vec<ChatMessage>,
-) -> Vec<ChatMessage> {
-    for msg in chat {
-        let already = filling
-            .iter()
-            .any(|existing| existing.role == msg.role && existing.content == msg.content);
-        if !already {
-            filling.push(msg);
-        }
-    }
-    filling
 }

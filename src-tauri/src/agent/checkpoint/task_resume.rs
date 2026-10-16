@@ -25,7 +25,14 @@ impl AgentCheckpoint {
 
     /// 所有同任务入口共用恢复路径；用户补充不是新的任务题面。
     pub(crate) fn restore_task_for_entry(&mut self, context: &mut SandwichContext, reply: &str) {
+        let chat_tail = std::mem::take(&mut context.turns_history);
+        let cursor = context.conversation_cursor.take();
         self.restore_context(context);
+        context.turns_history.extend(chat_tail);
+        if cursor.is_some() {
+            context.conversation_cursor = cursor;
+            context.acknowledged_chat_ids.clear();
+        }
         if self.phase == AgentPhase::Failed {
             self.resume_failed_task(context, reply);
         } else {

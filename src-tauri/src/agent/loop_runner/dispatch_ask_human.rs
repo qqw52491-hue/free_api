@@ -266,7 +266,10 @@ pub(super) async fn dispatch_ask_human(
         )?;
         crate::agent::control::mark_stage(ctx.final_session_id, "ask_human:waiting_reply");
         let reply = match ctx.rx.recv().await {
-            Some(HumanControl::Answer(reply)) => reply,
+            Some(HumanControl::Answer(reply, cursor)) => {
+                ctx.context.acknowledge_chat(cursor);
+                reply
+            },
             Some(HumanControl::ReplaceGoal(goal)) => {
                 return Ok(ArmOutcome::Early(DispatchResult { view: None,
                     success: true,

@@ -557,8 +557,11 @@ async fn run_agent_main_loop_in_workspace_inner(
         }
         _ => {}
     }
-    context.turns_history =
-        crate::agent::conversation::recent_history(state.inner(), &final_session_id)?;
+    let entry_history = crate::agent::conversation::history_for_entry(
+        state.inner(), &final_session_id, existing_checkpoint.as_ref(),
+    )?;
+    context.turns_history = entry_history.messages;
+    context.conversation_cursor = entry_history.cursor;
     // 审查任务在首次模型调用前注入轻量项目地图。它只包含目录、入口和 Git 元数据，
     // 不读取源码正文；恢复中的运行沿用 checkpoint，避免反复追加同一张地图。
     if !is_resuming_existing && is_explicit_workspace {
@@ -590,6 +593,11 @@ async fn run_agent_main_loop_in_workspace_inner(
         }
         None => AgentCheckpoint::new(final_session_id.clone(), &context),
     };
+    if let Some(reference) = entry_history.legacy_reference {
+        context.turns_history.insert(0, reference);
+        context.maybe_compact_history();
+        checkpoint.refresh_context(&context);
+    }
 
     // 保存原任务审查起点，避免续跑前的改动被新基线当作用户原有改动排除。
     let git_baseline = checkpoint.task_git_baseline.clone().unwrap_or_else(|| {
@@ -1099,7 +1107,10 @@ async fn run_agent_main_loop_in_workspace_inner(
             .map_err(|error| error.to_string())?;
 
             let reply = match rx.recv().await {
-                Some(HumanControl::Answer(reply)) => reply,
+                Some(HumanControl::Answer(reply, cursor)) => {
+                    context.acknowledge_chat(cursor);
+                    reply
+                },
                 Some(HumanControl::ReplaceGoal(next_goal)) => {
                     let reason = format!("用户提交了新的任务目标：{}", next_goal);
                     finish_interrupted_run(
