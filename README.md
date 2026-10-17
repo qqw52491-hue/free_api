@@ -34,7 +34,7 @@
 | **评测与观测** | eval runner、机械判据、运行轨迹、Token/步骤及审查记录 | ✅ 已实现 |
 | **Sleep-Time Compute** | 长期经验蒸馏与策略淘汰设想 | 🚧 规划中 |
 
-**状态说明：**“已实现”表示仓库内已有对应代码、测试或调用链，**不等于**已经证明所有模型、长任务与平台环境下都稳定可靠。具体实测与历史局限见 [`OVERNIGHT_LOOP.md`](./OVERNIGHT_LOOP.md)、[`docs/agent-reliability-records.md`](./docs/agent-reliability-records.md) 及评测记录。
+**状态说明：**“已实现”表示仓库内已有对应代码、测试或调用链，**不等于**已经证明所有模型、长任务与平台环境下都稳定可靠。具体实测与历史局限见 [`OVERNIGHT_LOOP.md`](./OVERNIGHT_LOOP.md)、[`docs/agent-reliability-records.md`](./docs/agent-reliability-records.md) 及评测记录。**近期关于审查、验证证据复用与多 Agent 收敛的讨论及新会话续接方式**见 [`docs/agent-review-evidence-convergence-notes-2026-10-17.md`](./docs/agent-review-evidence-convergence-notes-2026-10-17.md)。
 
 ### 当前执行模型（一眼看懂）
 
