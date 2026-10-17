@@ -156,8 +156,19 @@ pub fn recovery_policy_for(instruction: &AgentInstruction) -> RecoveryPolicy {
 
     if tool == "task_store" {
         return match action.as_str() {
-            "list_resources" | "get_resource" | "list_records" | "get_record" => {
+            "list_resources" | "get_resource" | "list_records" | "get_record"
+            | "evidence_find" | "evidence_inspect" | "evidence_compare" => {
                 RecoveryPolicy::SafeRetry
+            }
+            // 显式键重试保留首次观察；无键会追加新记录，重试最多产生重复观察，
+            // 不覆盖既有证据或执行验证，故可安全重试但不宣称幂等。
+            "evidence_record" => {
+                if instruction.get_params().get("idempotency_key")
+                    .and_then(serde_json::Value::as_str).is_some_and(|key| !key.trim().is_empty()) {
+                    RecoveryPolicy::Idempotent
+                } else {
+                    RecoveryPolicy::SafeRetry
+                }
             }
             // create_resource 使用 session/kind/label 生成确定性 ID；upsert 以 record_key UPSERT。
             "create_resource" | "upsert_records" | "update_resource" => RecoveryPolicy::Idempotent,

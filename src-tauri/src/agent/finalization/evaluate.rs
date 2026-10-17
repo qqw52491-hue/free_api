@@ -142,14 +142,21 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
         .collect_review_material(workspace, context, run_started_at)
         .map(|(_, h)| h)
         .unwrap_or_default();
+    let registered_evidence = crate::agent::evidence_store::review_digest(db, session_id, run_started_at);
     let state_fp = acceptance_fingerprint(context, checkpoint, &request_payload);
+    let evidence_index_fingerprint = registered_evidence.as_ref().ok().and_then(|value| value.as_ref()).map(|digest| {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(digest.as_bytes()))
+    });
     let contract_fp = contract_fingerprint(context.review_contract.as_ref());
-    if blockers.is_empty() && !interrupted_since(interrupt_rx, generation) {
+    // 新增证据后应重新审查；索引无法读取时回到评估链并披露，不沿用未知版本的就绪收据。
+    if blockers.is_empty() && registered_evidence.is_ok() && !interrupted_since(interrupt_rx, generation) {
         if let Some(cached) = checkpoint.pending_finalization.as_ref().filter(|r| {
             r.is_ready()
                 && r.is_fresh(&initial_hash, context.resource_scope.revision, &contract_fp)
                 && !r.acceptance_fingerprint.is_empty()
                 && r.acceptance_fingerprint == state_fp
+                && r.evidence_index_fingerprint == evidence_index_fingerprint
         }) {
             let mut receipt = cached.clone();
             receipt.finish_payload = request_payload;
@@ -391,6 +398,7 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
             scope_revision: context.resource_scope.revision,
             contract_fingerprint: contract_fingerprint(context.review_contract.as_ref()),
             acceptance_fingerprint: acceptance_fingerprint(context, checkpoint, &request_payload),
+            evidence_index_fingerprint,
             step_id,
             verification,
             review,

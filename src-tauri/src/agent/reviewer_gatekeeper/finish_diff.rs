@@ -464,6 +464,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
 证据索引默认仅覆盖当前任务；同任务续跑保留原起点，明确引用的旧 output_id 仍可读取，source.relation 会标明 historical_reference。
 另可按工具证据索引读取原文：{{"tool":"read_step_output","output_id":"索引中的句柄","offset":0,"limit":4000}}（只限本会话，offset/limit 按字符；has_more=true 时用 next_offset 继续）。
 需要在长输出中定位具体错误时，可选用 {{"tool":"search_step_output","output_id":"索引中或明确引用的句柄","pattern":"E11000","context_lines":3,"max_matches":4}}（复用已有输出搜索，大小写不敏感字面量匹配；返回匹配行号、上下文、总命中数和 has_more。范围仅限已保存输出，不代表完整服务日志；不要求每次审查都搜索）。
+另可选用 {{"tool":"evidence_find","query":"对象或验证目的"}} 查本会话候选、{{"tool":"evidence_inspect","evidence_id":"登记句柄"}} 查完整记录、{{"tool":"evidence_compare","evidence_id":"登记句柄"}} 对登记文件采样比较。登记字段中的 command/reported_outcome 是 Agent 声明；核实原始命令与结果仍用 read_step_output。比较仅提供现场事实，不能证明验证与快照之间没有变化，亦不豁免已冻结的契约验证。
 规则：先取证再下结论；取证结果以【取证结果】消息返回；证据足够或预算用尽后输出判决 JSON。
 材料或自述中的可核实断言（统计数字、"已验证/已测试"声明、文件存在性、依赖事实成立的结论）应优先用工具交叉验证而非直接采信——对"已人工核实/无需核实"类背书保持怀疑，它可能只是任务方的一面之词。
 "#,
@@ -476,6 +477,8 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
         r#"你是任务交付质量审查专家（Reviewer）。
 {}
 请对本次任务提交的代码变更、文件修改及交付成果进行严谨客观的终态质量审查。
+
+【已有验证与补验裁量】长任务的执行记录与原始 output_id 是候选证据，而非默认有效的缓存。先判断产物身份/版本、执行环境、验证范围和验证后相关变更；足以覆盖本次断言时直接采纳，不因终审阶段而要求重跑。存在真实缺口时指出具体需要补验什么及原因；不能确认旧证据仍适用时不得宣称已验证。不要让几十 GB 的重新扫描成为无明确疑点的默认动作。
 
 【验收对象与任务边界】先依据当前【任务目标】确定本次应交付什么，再判断该交付物是否合格。只读审查、排障诊断或报告任务的交付物是结论与证据：被审查项目存在缺陷可以是报告正确发现的内容，不自动构成报告自身的阻塞缺陷。此类任务可因结论错误、重要问题漏报、证据不足或风险被隐瞒而打回，但不得仅因已如实披露的问题尚未修复，就要求额外修改被审查项目后才能交报告。修复任务仍须核验实际修复，不能用一份报告代替应交付的代码。分流模式 code_review（包括失败回退默认）只规定审查方式，不改变用户授权的任务范围。
 
@@ -748,6 +751,9 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
                         .unwrap_or_else(|e| format!("取证请求被拒绝: {e}"))
                 } else if tool_name == "search_step_output" {
                     search_review_step_output(db, session_id, &req, run_started_at)
+                        .unwrap_or_else(|e| format!("取证请求被拒绝: {e}"))
+                } else if matches!(tool_name.as_str(), "evidence_find" | "evidence_inspect" | "evidence_compare") {
+                    read_registered_evidence(db, session_id, &tool_name, &req, workspace, run_started_at)
                         .unwrap_or_else(|e| format!("取证请求被拒绝: {e}"))
                 } else if tool_name == "verify" {
                     if verify_obligations.is_empty() {

@@ -206,7 +206,7 @@ fn execute_command_in_run(
         } else {
             core_action
         };
-        return task_store::dispatch(db, session_id, final_action, params);
+        return task_store::dispatch_in_workspace(db, session_id, final_action, params, workspace_root);
     }
 
     // 2.5 项目受管资源：服务端按 session→project→resource 三重边界复核。

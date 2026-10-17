@@ -24,6 +24,7 @@ fn ready(c: &SandwichContext, cp: &AgentCheckpoint) -> FinalizationReceipt {
             &json!({"summary":"done"}),
         ),
         step_id: 42,
+        evidence_index_fingerprint: None,
         verification: ReceiptVerification::Verified {
             evidence: "host exit 0".into(),
         },

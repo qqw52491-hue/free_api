@@ -291,6 +291,17 @@
     }
 
     #[test]
+    fn evidence_recovery_distinguishes_fresh_observation_from_keyed_retry() {
+        let mut instruction = AgentInstruction {tool:Some("task_store".into()),
+            action:Some("evidence_record".into()), command:Some(serde_json::json!({
+                "subject":"产物", "purpose":"当前快照"
+            })), ..Default::default()};
+        assert_eq!(recovery_policy_for(&instruction), RecoveryPolicy::SafeRetry);
+        instruction.command.as_mut().unwrap()["idempotency_key"] = serde_json::json!("capture-1");
+        assert_eq!(recovery_policy_for(&instruction), RecoveryPolicy::Idempotent);
+    }
+
+    #[test]
     fn pending_call_reuses_a_stable_id_across_recovery_attempts() {
         let context = SandwichContext::new("system".to_string(), "goal".to_string());
         let mut checkpoint = AgentCheckpoint::new("run-1".to_string(), &context);

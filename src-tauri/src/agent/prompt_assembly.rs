@@ -93,6 +93,10 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
             "list_records(resource_id: string, limit?: <=100, offset?: number)",
             "get_record(resource_id: string, record_key: string)",
             "update_resource(resource_id: string, label?|summary?|status?|cursor?|schema?)",
+            "evidence_record(purpose: string, subject?: string, command?: string, output_id?: string, file_path?: string, reported_outcome?: string, tags?: string[], note?: string, idempotency_key?: string) — 可选登记，每次默认新观察；同一显式键重试返回首次记录，新观察换键或省略。文件快照由宿主在登记时采集，不证明原始验证对应同一版本；无文件的测试同样支持",
+            "evidence_find(query?: string, subject?: string, command?: string, limit?: <=30) — 测试/测验/检验等表述可召回候选，匹配不等于通过",
+            "evidence_inspect(evidence_id: string) — 读取完整结构化记录，原始回执用 get_step_output",
+            "evidence_compare(evidence_id: string) — 对原登记文件重新采样对比；非文件返回 not_applicable，由 Agent 自行结合历史判断",
         ],
     },
     BuiltinToolSpec {

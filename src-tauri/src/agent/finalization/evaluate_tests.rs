@@ -66,6 +66,126 @@ async fn changed_details_reach_real_review_and_cannot_reuse_prepare_receipt() {
 fn checkpoint(c: &SandwichContext) -> AgentCheckpoint {
     AgentCheckpoint::new("session".into(), c)
 }
+
+#[tokio::test]
+async fn existing_evidence_reaches_finish_without_reexecuting_its_command() {
+    use crate::agent::child_reviewer::retirement_tests::MockReviewer;
+    for changed in [false, true] {
+        let session = format!("verification-reuse-{}", uuid::Uuid::new_v4());
+        let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID,
+            json!(["verification-evidence-v2", session, "first-capture"]).to_string().as_bytes()).to_string();
+        let mock = MockReviewer::new(vec![
+            json!({"tool":"evidence_find", "query":"产物"}),
+            json!({"tool":"evidence_inspect", "evidence_id":id}),
+            json!({"tool":"read_step_output", "output_id":"prior-validation"}),
+            json!({"tool":"evidence_compare", "evidence_id":id}),
+            json!({"verdict":if changed {"rejected"} else {"passed"}, "score":85,
+                "summary":"依据原始回执和当前对比结果裁决", "nit_issues":[],
+                "blocking_issues":if changed {vec![json!({"file":"artifact.txt", "issue":"验证后的文件发生变化", "requirement":"针对当前版本补验"})]} else {vec![]}}),
+        ]).await;
+        let workspace = mock.root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let baseline = GitBaseline::capture(&workspace);
+        let start = Utc::now() - chrono::Duration::seconds(1);
+        std::fs::write(workspace.join("artifact.txt"), b"original artifact").unwrap();
+        let command = "printf x >> validation-count; test -s artifact.txt";
+        let verified = crate::agent::host_verify::run_command(&workspace, command, 10).await;
+        assert!(verified.passed);
+        {
+            let conn = mock.db.0.lock().unwrap();
+            let raw = format!("command={command}\nexit={}\n{}", verified.exit_code, verified.output_tail);
+            conn.execute("INSERT INTO agent_step_logs(output_id,session_id,step_id,raw_output,created_at) VALUES ('prior-validation',?1,2,?2,?3)",
+                rusqlite::params![session,raw,Utc::now().to_rfc3339()]).unwrap();
+            crate::agent::retrieval::index_step_fts(&conn,"prior-validation",&session,2,"local_shell","exec","succeeded",&raw).unwrap();
+        }
+        let recorded = crate::agent::task_store::dispatch_in_workspace(&mock.db, &session, "evidence_record",
+            &json!({"purpose":"产物完整性验证", "file_path":"artifact.txt", "command":command,
+                "output_id":"prior-validation", "idempotency_key":"first-capture"}), Some(&workspace));
+        assert!(recorded.success, "{}", recorded.stderr);
+        let record: Value = serde_json::from_str(&recorded.stdout).unwrap();
+        assert_eq!(record["evidence"]["evidence_id"], id);
+        if changed { std::fs::write(workspace.join("artifact.txt"), b"changed after validation").unwrap(); }
+        let mut c = context();
+        c.record_side_effect(1, "local_file".into(), "artifact.txt".into());
+        c.change_verification = Some(ChangeVerification {status:"verified".into(),
+            evidence_refs:vec!["output_id:prior-validation".into()], waived_reason:None});
+        let mut cp = checkpoint(&c);
+        let mut routing = ModelRoutingConfig::default();
+        routing.role_models.insert("reviewer".into(), "mock".into());
+        let app = tauri::test::mock_app();
+        let (_tx, mut rx) = watch::channel(0);
+        let instruction: AgentInstruction = serde_json::from_value(json!({"tool":"finish", "command":{
+            "summary":"交付产物，引用已有验证并核对其适用性"
+        }})).unwrap();
+        let evaluation = evaluate_completion(app.handle(), &mock.db, &mut c, &mut cp, "reuse-run", &session,
+            10, &workspace, &baseline, start, &routing, &mut rx, &instruction, CompletionMode::Finish, false, false).await;
+        assert_eq!(evaluation.receipt.is_ready(), !changed, "{:?}", evaluation.receipt);
+        assert_eq!(std::fs::read_to_string(workspace.join("validation-count")).unwrap(), "x",
+            "登记、终审取证与对比不应重新执行旧命令");
+        let requests = mock.requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        assert!(requests[0]["messages"][1]["content"].as_str().unwrap().contains("可选证据登记索引"));
+        let observation = |index: usize| requests[index]["messages"].as_array().unwrap()
+            .last().unwrap()["content"].as_str().unwrap().to_string();
+        assert!(observation(1).contains(&id));
+        assert!(observation(2).contains("current_task"));
+        assert!(observation(3).contains("exit=0"));
+        assert!(observation(4).contains(if changed {"change_detected"} else {"no_change_detected"}));
+        drop(requests);
+        if !changed {
+            cp.pending_finalization = Some(evaluation.receipt);
+            let cached = evaluate_completion(app.handle(), &mock.db, &mut c, &mut cp, "reuse-run", &session,
+                11, &workspace, &baseline, start, &routing, &mut rx, &instruction, CompletionMode::Finish, false, false).await;
+            assert!(cached.receipt.is_ready());
+            assert_eq!(mock.requests.lock().unwrap().len(), 5, "相同材料可复用就绪收据");
+            crate::agent::task_store::dispatch(&mock.db, &session, "evidence_record", &json!({
+                "subject":"产物", "purpose":"补充新证据", "reported_outcome":"failed"
+            }));
+            let refreshed = evaluate_completion(app.handle(), &mock.db, &mut c, &mut cp, "reuse-run", &session,
+                12, &workspace, &baseline, start, &routing, &mut rx, &instruction, CompletionMode::Finish, false, false).await;
+            assert!(refreshed.receipt.is_ready());
+            let requests = mock.requests.lock().unwrap();
+            assert_eq!(requests.len(), 6, "新证据必须进入审查，不能在就绪收据处被跳过");
+            assert!(requests[5]["messages"][1]["content"].as_str().unwrap().contains("补充新证据"));
+            assert_eq!(std::fs::read_to_string(workspace.join("validation-count")).unwrap(), "x");
+        }
+    }
+}
+
+#[tokio::test]
+async fn evidence_registration_does_not_bypass_frozen_verification() {
+    use crate::agent::child_reviewer::retirement_tests::MockReviewer;
+    let mock = MockReviewer::new(vec![json!({})]).await;
+    let workspace = mock.root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let baseline = GitBaseline::capture(&workspace);
+    let start = Utc::now() - chrono::Duration::seconds(1);
+    std::fs::write(workspace.join("artifact.txt"), "artifact").unwrap();
+    let recorded = crate::agent::task_store::dispatch(&mock.db, "frozen-session", "evidence_record", &json!({
+        "purpose":"自述旧验证通过", "subject":"产物", "reported_outcome":"passed"
+    }));
+    assert!(recorded.success);
+    let mut c = context();
+    c.record_side_effect(1, "local_file".into(), "artifact.txt".into());
+    c.change_verification = Some(ChangeVerification {status:"verified".into(),
+        evidence_refs:vec!["step_2".into()], waived_reason:None});
+    c.review_contract = Some(serde_json::from_value(json!({"scope_statement":"验证交付产物", "obligations":[{
+        "id":"frozen", "question":"当前产物通过冻结检查", "status":"evidenced",
+        "evidence_refs":["step_2"], "closure_form":"command",
+        "verify_command":"printf x >> frozen-checks; false"
+    }]})).unwrap());
+    let mut cp = checkpoint(&c);
+    let app = tauri::test::mock_app();
+    let (_tx, mut rx) = watch::channel(0);
+    let instruction: AgentInstruction = serde_json::from_value(json!({"tool":"finish", "command":{"summary":"交付产物"}})).unwrap();
+    let evaluation = evaluate_completion(app.handle(), &mock.db, &mut c, &mut cp, "frozen-run", "frozen-session",
+        10, &workspace, &baseline, start, &ModelRoutingConfig::default(), &mut rx,
+        &instruction, CompletionMode::Finish, false, false).await;
+    assert!(!evaluation.receipt.is_ready());
+    assert_eq!(std::fs::read_to_string(workspace.join("frozen-checks"))
+        .unwrap_or_else(|error| panic!("{error}; {:?}", evaluation.receipt)), "x");
+    assert!(mock.requests.lock().unwrap().is_empty(), "冻结验证失败不能被自述证据或模型判决覆盖");
+}
 fn review(blocking: bool) -> ReviewResult {
     let mut r = ReviewResult::skipped_empty();
     r.model_id = "reviewer".into();

@@ -66,6 +66,30 @@ pub fn dispatch(
     action: &str,
     params_value: &Value,
 ) -> DispatchResult {
+    dispatch_in_workspace(db, session_id, action, params_value, None)
+}
+
+pub fn dispatch_in_workspace(
+    db: &DbState,
+    session_id: &str,
+    action: &str,
+    params_value: &Value,
+    workspace_root: Option<&std::path::Path>,
+) -> DispatchResult {
+    if matches!(action, "evidence_record" | "evidence_find" | "evidence_inspect" | "evidence_compare") {
+        return match crate::agent::evidence_store::dispatch(
+            db, session_id, action, params_value, workspace_root
+        ) {
+            Ok(payload) => DispatchResult {
+                view: None, stdout: serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string()),
+                stderr: String::new(), success: true, route: format!("task_store:{action}"),
+            },
+            Err(error) => DispatchResult {
+                view: None, stdout: String::new(), stderr: error,
+                success: false, route: format!("task_store:{action}"),
+            },
+        };
+    }
     let raw_requested = params_value
         .get("raw")
         .and_then(|v| v.as_bool())
@@ -206,7 +230,7 @@ pub fn dispatch(
             "update_resource" => update_resource(&mut conn, session_id, params_value),
             "mcp_dedup_stats" => mcp_dedup_stats(&conn, session_id),
             _ => Err(format!(
-                "task_store 不支持 action='{}'。可用动作：create_resource、upsert_records、list_resources、get_resource、list_records、get_record、update_resource, get_step_output, search_step_output, mcp_dedup_stats",
+                "task_store 不支持 action='{}'。可用动作：create_resource、upsert_records、list_resources、get_resource、list_records、get_record、update_resource, get_step_output, search_step_output, mcp_dedup_stats, evidence_record, evidence_find, evidence_inspect, evidence_compare",
                 action
             )),
         }

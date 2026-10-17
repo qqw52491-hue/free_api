@@ -243,7 +243,91 @@ pub(crate) fn collect_execution_evidence_digest(
     session_id: &str,
     task_started_at: chrono::DateTime<Utc>,
 ) -> Option<String> {
-    collect_trace_digest(db, session_id, true, Some(task_started_at))
+    let mut digest = collect_trace_digest(db, session_id, true, Some(task_started_at)).unwrap_or_default();
+    match crate::agent::evidence_store::review_digest(db, session_id, task_started_at) {
+        Ok(Some(index)) => digest.push_str(&index),
+        Ok(None) => {},
+        Err(error) => digest.push_str(&format!("\n\n【可选证据索引读取失败】{error}；不能据此判断此前未取证，可按明确引用回查。")),
+    }
+    (!digest.is_empty()).then_some(digest)
+}
+
+/// 仅开放读取/比较，不允许 Reviewer 登记自述；来源沿用实际 output_id 的任务边界。
+pub(crate) fn read_registered_evidence(
+    db: &DbState,
+    session_id: &str,
+    action: &str,
+    request: &serde_json::Value,
+    workspace: &Path,
+    task_started_at: chrono::DateTime<Utc>,
+) -> Result<String, String> {
+    if !matches!(action, "evidence_find" | "evidence_inspect" | "evidence_compare") {
+        return Err("终审证据工具仅支持查找、读取与对比".into());
+    }
+    let mut result = crate::agent::evidence_store::dispatch(db, session_id, action, request, Some(workspace))?;
+    let mark = |record: &mut serde_json::Value| {
+        if let Some(source) = record.get_mut("output_source").filter(|value| !value.is_null()) {
+            *source = crate::agent::run_trace::source_for_task(source.clone(), task_started_at);
+        }
+    };
+    if let Some(record) = result.get_mut("evidence") { mark(record); }
+    if let Some(candidates) = result.get_mut("candidates").and_then(serde_json::Value::as_array_mut) {
+        for record in candidates { mark(record); }
+    }
+    serde_json::to_string(&result).map_err(|e| e.to_string())
+}
+
+/// 长任务的早期 shell 回执补充索引：最近 15 条之外，保留一小段较早的
+/// 可回查执行记录。这里只搬运宿主持久化来源，不通过命令名/输出关键词宣称
+/// 它是验证、更不推断旧结果适用于当前产物；适用性由终审核对。
+/// 元数据查询不解压原始日志，也不重新运行昂贵的验证命令。
+fn collect_early_shell_receipt_index(
+    db: &DbState,
+    session_id: &str,
+    task_started_at: chrono::DateTime<Utc>,
+    already_shown: &std::collections::HashSet<String>,
+) -> Option<String> {
+    let candidates = {
+        let conn = db.reader().ok()?;
+        let mut stmt = conn.prepare(
+            "SELECT l.step_id,l.output_id,l.created_at,f.tool,f.outcome \
+             FROM agent_step_logs l JOIN agent_step_logs_fts f \
+             ON f.output_id=l.output_id AND f.session_id=l.session_id \
+             WHERE l.session_id=?1 AND julianday(l.created_at)>=julianday(?2) \
+             AND lower(trim(f.tool)) IN ('local_shell','shell_exec') \
+             ORDER BY julianday(l.created_at) ASC,l.rowid ASC LIMIT 80"
+        ).ok()?;
+        let records = stmt.query_map(
+            rusqlite::params![session_id, task_started_at.to_rfc3339()],
+            |r| Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+            )),
+        ).ok()?;
+        records.collect::<Result<Vec<_>, _>>().ok()?
+    };
+    let mut previous = candidates.into_iter().filter(|(_, id, at, _, _)| {
+        !already_shown.contains(id)
+            && chrono::DateTime::parse_from_rfc3339(at)
+                .is_ok_and(|timestamp| timestamp >= task_started_at)
+    });
+    let mut lines = Vec::new();
+    for (step, id, at, tool, status) in previous.by_ref().take(6) {
+        lines.push(format!(
+            "- step {step} | {at} | tool={tool} | status={status} | output_id={id}"
+        ));
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    let may_have_more = previous.next().is_some();
+    Some(format!(
+        "\n\n【长任务早期 shell 回执补充索引（展示 {} 条，has_more={}；非验证通过证明）】\n         这些是当前任务较早的执行回执，不代表测试成功、覆盖了本次产物或结果仍然有效；需要时按 output_id 回查原文和执行状态，再根据产物版本、环境变化与验证范围裁决是否补验。不能因为终审开始就机械重跑高成本验证。\n{}",
+        lines.len(), may_have_more, lines.join("\n")
+    ))
 }
 
 fn collect_trace_digest(
@@ -287,6 +371,13 @@ fn collect_trace_digest(
     }; // 读取正文/溢出文件前释放数据库连接。
     let has_more = items.len() > 15;
     items.truncate(15);
+    let shown_ids: std::collections::HashSet<String> =
+        items.iter().map(|(_, output_id, _, _, _, _)| output_id.clone()).collect();
+    let older_receipts = if execution_only && has_more {
+        since.and_then(|date| collect_early_shell_receipt_index(db, session_id, date, &shown_ids))
+    } else {
+        None
+    };
     items.reverse();
     let mut lines = Vec::new();
     for (step_id, output_id, at, raw, tool, outcome) in items {
@@ -304,8 +395,9 @@ fn collect_trace_digest(
     if execution_only {
         Some(format!(
             "\n\n【工具回执证据索引（{} 条，has_more={}）】\n当前任务起点：{}。仅列起点之后可归类的工具回执；同任务续跑沿用原起点。历史参考不自动并入清单，明确引用的本会话旧 output_id 仍可读取或搜索并标明来源。索引缺项不代表此前未取证，失败回执也不代表命令已执行。\n{}",
-            lines.len(), has_more, since.map(|at| at.to_rfc3339()).unwrap_or_default(), if lines.is_empty() { "尚无可索引的工具回执".into() } else { lines.join("\n") }
-        ))
+            lines.len(), has_more, since.map(|at| at.to_rfc3339()).unwrap_or_default(),
+            if lines.is_empty() { "尚无可索引的工具回执".into() } else { lines.join("\n") }
+        ) + older_receipts.as_deref().unwrap_or_default())
     } else if lines.is_empty() {
         None
     } else {
@@ -879,6 +971,71 @@ mod review_material_regressions {
             .unwrap();
         }
         id
+    }
+
+    #[tokio::test]
+    async fn registered_history_keeps_original_provenance_and_session_boundary() {
+        let mock = MockReviewer::new(vec![json!({})]).await;
+        let start = Utc::now() - chrono::Duration::seconds(1);
+        let original_at = (start - chrono::Duration::hours(1)).to_rfc3339();
+        let output = put(&mock.db, "s", 1, &original_at, Some("local_shell"), "failed", "HISTORICAL_FAILURE");
+        let recorded = crate::agent::evidence_store::dispatch(&mock.db, "s", "evidence_record", &json!({
+            "purpose":"回查历史检查", "subject":"产物", "output_id":output, "reported_outcome":"passed"
+        }), None).unwrap();
+        let id = recorded["evidence"]["evidence_id"].as_str().unwrap();
+        let digest = collect_execution_evidence_digest(&mock.db, "s", start).unwrap();
+        assert!(digest.contains(id) && digest.contains("登记时间，不是验证时间"));
+        assert!(!digest.contains("HISTORICAL_FAILURE"));
+        let request = json!({"evidence_id":id});
+        let response: serde_json::Value = serde_json::from_str(&read_registered_evidence(
+            &mock.db, "s", "evidence_inspect", &request, &mock.root, start
+        ).unwrap()).unwrap();
+        assert_eq!(response["evidence"]["output_source"]["relation"], "historical_reference");
+        assert_eq!(response["evidence"]["output_source"]["created_at"], original_at);
+        assert_eq!(response["evidence"]["output_source"]["outcome"], "failed");
+        assert!(read_registered_evidence(&mock.db, "other", "evidence_inspect", &request, &mock.root, start).is_err());
+        assert!(read_registered_evidence(&mock.db, "s", "evidence_record", &request, &mock.root, start).is_err());
+        crate::agent::evidence_store::dispatch(&mock.db, "s", "evidence_record", &json!({
+            "purpose":"后续新观察", "subject":"产物"
+        }), None).unwrap();
+        let after = collect_execution_evidence_digest(&mock.db, "s", start).unwrap();
+        assert_ne!(digest, after, "补充登记应改变终审可见材料，不能沿用旧证据索引");
+    }
+
+    #[tokio::test]
+    async fn long_task_keeps_early_execution_receipt_without_claiming_it_is_valid() {
+        let mock = MockReviewer::new(vec![json!({})]).await;
+        let older_task = put(
+            &mock.db, "s", 1, "2026-10-14T23:00:00Z",
+            Some("local_shell"), "succeeded", "OLD_TASK_MUST_NOT_SHOW",
+        );
+        let early = put(
+            &mock.db, "s", 2, "2026-10-15T01:00:00Z",
+            Some("local_shell"), "failed", "PACKAGE_CHECK_FAILED_DO_NOT_INFER_PASS",
+        );
+        let _other_session = put(
+            &mock.db, "other", 1, "2026-10-15T01:30:00Z",
+            Some("local_shell"), "succeeded", "OTHER_SESSION",
+        );
+        // 大量后续工具回执会挤掉原先最近 15 条中的早期验证。
+        for step in 3..=25 {
+            let at = format!("2026-10-15T02:{:02}:00Z", step);
+            put(&mock.db, "s", step, &at, Some("local_file"), "succeeded", "newer tool receipt");
+        }
+        let start = chrono::DateTime::parse_from_rfc3339("2026-10-15T00:00:00Z")
+            .unwrap().with_timezone(&chrono::Utc);
+        let digest = collect_execution_evidence_digest(&mock.db, "s", start).unwrap();
+        assert!(digest.contains(&early), "{digest}");
+        assert!(digest.contains("status=failed"), "{digest}");
+        assert!(digest.contains("长任务早期 shell 回执补充索引"), "{digest}");
+        assert!(digest.contains("非验证通过证明"), "{digest}");
+        assert!(!digest.contains(&older_task), "{digest}");
+        assert!(!digest.contains("PACKAGE_CHECK_FAILED_DO_NOT_INFER_PASS"),
+            "earlier raw output must stay behind explicit output_id lookup, not leak into digest");
+        let content = read_review_step_output(
+            &mock.db, "s", &json!({"output_id": early}), start
+        ).unwrap();
+        assert!(content.contains("PACKAGE_CHECK_FAILED_DO_NOT_INFER_PASS"));
     }
 
     #[tokio::test]

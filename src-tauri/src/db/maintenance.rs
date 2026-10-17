@@ -71,6 +71,7 @@ impl SessionKey {
 /// 本表由 `session_scoped_registry_covers_schema` 反射测试兜底，漏登记 = 测试红。
 /// 顺序约束：桥接子表必须先于桥表（by_session 谓词在桥表行还在时求值）。
 const SESSION_SCOPED_TABLES: &[(&str, SessionKey)] = &[
+    ("agent_verification_evidence", SessionKey::SessionId),
     ("agent_task_records", SessionKey::ViaTaskResources),
     ("agent_task_resources", SessionKey::SessionId),
     ("agent_checkpoints", SessionKey::RunIdIsSessionId),

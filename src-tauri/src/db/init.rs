@@ -288,6 +288,24 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         CREATE INDEX IF NOT EXISTS idx_agent_task_records_resource
             ON agent_task_records(resource_id, record_key);
 
+        -- 自愿登记的验证证据链：关联旧 output_id，绝不由召回分数驱动强制验收。
+        CREATE TABLE IF NOT EXISTS agent_verification_evidence (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            purpose TEXT NOT NULL,
+            command TEXT NOT NULL,
+            search_text TEXT NOT NULL,
+            data_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_evidence_session
+            ON agent_verification_evidence(session_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_agent_evidence_subject
+            ON agent_verification_evidence(session_id, subject);
+        CREATE INDEX IF NOT EXISTS idx_agent_evidence_command
+            ON agent_verification_evidence(session_id, command);
+
         -- 一条记录保存完整、自洽的 Agent checkpoint：phase + data + pending。
         CREATE TABLE IF NOT EXISTS agent_checkpoints (
             run_id TEXT PRIMARY KEY,

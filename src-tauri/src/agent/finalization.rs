@@ -130,6 +130,9 @@ pub struct FinalizationReceipt {
     pub contract_fingerprint: String,
     #[serde(default)]
     pub acceptance_fingerprint: String,
+    /// 可选登记材料变化时重新评估；旧收据无此字段，不据此证明证据仍未变化。
+    #[serde(default)]
+    pub evidence_index_fingerprint: Option<String>,
     pub step_id: usize,
     pub verification: ReceiptVerification,
     pub review: ReceiptReview,
@@ -469,6 +472,7 @@ mod tests {
             scope_revision: revision,
             contract_fingerprint: fingerprint.to_string(),
             acceptance_fingerprint: "test-state".into(),
+            evidence_index_fingerprint: None,
             step_id: 10,
             verification: ReceiptVerification::Verified {
                 evidence: "cargo test ok".to_string(),

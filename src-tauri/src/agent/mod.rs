@@ -15,6 +15,7 @@ pub mod conversation;
 pub mod dispatcher;
 pub mod evaluation;
 pub mod evaluation_analysis;
+pub(crate) mod evidence_store;
 pub mod evaluation_runner;
 pub mod file_parser;
 pub mod job_engine;
