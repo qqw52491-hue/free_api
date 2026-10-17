@@ -1,8 +1,8 @@
 # 🤖 SandwichAgent (Free API Agent)
 
 <p align="center">
-  <strong>基于 Rust + Tauri 2.0 构建的高确定性、低 Token 成本的本地自主 Agent 平台</strong><br/>
-  为「又臭又长又容易翻车的重型编码任务」而生
+  <strong>基于 Rust + Tauri 2 / Vue 3 的本地自主 Agent 平台</strong><br/>
+  面向复杂、长时任务：规划与讨论、工具执行、多角色协作、证据审查、恢复与交付
 </p>
 
 <p align="center">
@@ -16,35 +16,57 @@
 
 ---
 
+<a id="current-capabilities"></a>
 ## 🚦 系统能力总览 (Current Capabilities)
 
-| 架构域 | 核心机制 | 状态 |
+| 架构域 | 当前实现 | 状态 |
 |:---|:---|:---:|
-| **三明治上下文引擎** | 冻结静态前缀 + 纯追加流水 + 尾部动态状态卡 | ✅ 生产就绪 |
-| **前缀缓存纪律** | 写入即定型、BTreeMap 字母序、真实值水位校准、出口级角色合并 | ✅ 生产就绪 |
-| **检索体系** | 定长路标 + SQLite FTS5 + ripgrep 联邦检索 + `output_id` 句柄回查 | ✅ 生产就绪 |
-| **检索去重与索引** | 同参检索锚点复用、同路径 signpost 软引导、进程级 SessionSearchIndex（LRU 128 上限 + 删除即清） | ✅ 生产就绪 |
-| **门禁与质量对账** | submit_plan 风险预检、方案交叉审查（child_reviewer）、阶段写入审查、finish 终态对账（Git Diff 行级证据） | ✅ 生产就绪 |
-| **多智能体并发** | child_worker / child_writer / child_reviewer + job_engine 异步任务池 + wait_jobs 信箱语义 | ✅ 生产就绪 |
-| **隔离写入机械合入** | `child_writer.apply`：指纹校验 + 字节级搬运 + patch 兜底，冲突整体拒绝，幂等可重放 | ✅ 生产就绪 |
-| **安全护栏** | 工作区路径牢笼、写副作用门（含 move/rename/remove 命名空间剥离）、破坏性命令拦截、工作区软锁 | ✅ 生产就绪 |
-| **死锁逃生** | 连续 8 次门禁拦截 → 确定性降级中断（`consecutive_gate_blocked` 持久化计数） | ✅ 生产就绪 |
-| **人机协同 (HITL)** | 异步抢方向盘（安全点拦截）+ AI 阻塞式求助（ask_human） | ✅ 生产就绪 |
-| **多通道接入** | 桌面 WebView + HTTP/Mobile Web 远程通道 | ✅ 生产就绪 |
-| **评测基础设施** | evaluation_runner 实弹回放、eval_oracle 阶段断言、Token/步数/缓存统计 | ✅ 生产就绪 |
-| **自我改进闭环** | Sleep-Time Compute + Lesson 蒸馏门禁 | 🚧 设计定稿（RFC） |
-| **工具输出三权分立** | `DispatchResult.view`：模型文本 / 无损存档 / UI 结构化卡片正交投影 | ✅ MVP 已落地 |
+| **任务分流与规划** | 入口 triage、直接执行/方案审查/专家讨论等路由；支持执行中带证据修订已批准方案 | ✅ 已实现 |
+| **多 Agent 协作与角色卡** | 主 Agent 按需派发 worker / writer / reviewer；角色卡可定义模型、职责范围、入参/产出结构化契约 | ✅ 已实现 |
+| **多层质量审查** | 方案反驳、阶段审查、最终 Reviewer；区分 `blocking_issues` 与非阻塞 `nit_issues` | ✅ 已实现 |
+| **可追溯验证证据** | `evidence_record/find/inspect/compare`；宿主保存来源、执行输出关联与文件快照 | ✅ 已实现 |
+| **冻结验证复用** | Reviewer 打回后，符合严格输入条件的宿主冻结命令回执可独立保留并供再审查；产物/契约改变触发重验 | ✅ 有边界地实现 |
+| **完成与交付** | `prepare_finish`/`finish`、ReviewContract、checkpoint、终态事务提交；仍有其他验证路径待优化 | 🔧 持续打磨 |
+| **长任务上下文与检索** | 三明治上下文、渐进压缩、SQLite FTS5、ripgrep、`output_id` 原文回查 | ✅ 已实现 |
+| **并发与恢复** | child job 池、`wait_jobs`、中断/续跑、检查点与任务步骤持久化 | ✅ 已实现 |
+| **执行安全与隔离** | 工作区权限围栏、写副作用审计、隔离写入 `child_writer.apply` 冲突校验 | ✅ 已实现 |
+| **人机协同与接入** | `ask_human`、运行中干预、Tauri 桌面端与 HTTP/Mobile Web 通道 | ✅ 已实现 |
+| **评测与观测** | eval runner、机械判据、运行轨迹、Token/步骤及审查记录 | ✅ 已实现 |
+| **Sleep-Time Compute** | 长期经验蒸馏与策略淘汰设想 | 🚧 规划中 |
 
-变更台账见 [`OVERNIGHT_LOOP.md`](./OVERNIGHT_LOOP.md)——每个阶段的改动、验证证据与实弹评测记录都在其中。
+**状态说明：**“已实现”表示仓库内已有对应代码、测试或调用链，**不等于**已经证明所有模型、长任务与平台环境下都稳定可靠。具体实测与历史局限见 [`OVERNIGHT_LOOP.md`](./OVERNIGHT_LOOP.md)、[`docs/agent-reliability-records.md`](./docs/agent-reliability-records.md) 及评测记录。
+
+### 当前执行模型（一眼看懂）
+
+```text
+任务请求
+   ↓
+入口分流 / 需求理解 ──→ 直接执行，或制定方案、邀请 Reviewer/多专家讨论
+   ↓
+主 Agent 调度工具和按需子 Agent ──→ 执行中新证据可促成方案修订
+   ↓
+真实工具输出、产物和验证记录 ──→ Checkpoint / Evidence Store
+   ↓
+阶段审查 / 最终 Reviewer ──→ 找到具体 Blocking → Agent 修复并补充受影响证据
+   ↓                                  ↑
+证据足够、硬性验收义务满足 ─────────────┘（不满足时返回）
+   ↓
+prepare_finish / finish → 宿主执行最终状态提交
+```
+
+**分工原则：**工具与宿主提供实际执行事实、权限边界与可靠回执；Agent 负责实现和调整计划；Reviewer 结合代码、产物和证据判断质量。**验证结果是审查证据，不等同于最终质量裁决。** 已通过的事实可复用，但不能因有一条旧 PASS 就自动放行新产物。
+
+**实战边界：**已有实际使用者反馈，长会话曾连续执行数百步骤，主要摩擦集中在最后的交付门禁；这属于具体使用经验，不代表经过统计验证的复杂任务成功率。当前已缓解部分**冻结验证重复执行**，但自适应验证、额外配置验证、增量审查和真实模型持续收敛仍需更多实测。避免把“框架能够支持复杂任务”写成“复杂任务已稳定自动完成”。
 
 ---
 
 ## 📖 目录
 
+- [当前能力和执行模型](#current-capabilities)
 - [一、设计哲学](#一设计哲学与理论背景)
 - [二、三明治上下文引擎](#二真三明治上下文引擎-sandwich-context-engine)
 - [三、检索体系：脱水不失忆](#三检索体系脱水不失忆)
-- [四、门禁与质量对账](#四门禁与质量对账体系)
+- [四、门禁、审查与证据复用](#四门禁审查与证据复用)
 - [五、多智能体并发](#五多智能体并发架构)
 - [六、人机协同](#六双模式人机协同-human-in-the-loop)
 - [七、工具体系与输出三权分立](#七工具体系与输出三权分立)
@@ -194,36 +216,55 @@ pub struct SearchQuery {
 
 ---
 
-## 四、门禁与质量对账体系
+## 四、门禁、审查与证据复用
 
-这是本项目区别于通用 Agent 框架的护城河：**门禁不止于权限，更对模型的"声称"做物理对账**。
+核心边界：**宿主守住可机械证明的事实，Agent / Reviewer 负责有上下文的语义判断。** 不以增加门禁次数代替质量，也不把模型自述当作宿主实测。
 
-### 1. 方案门禁（写前）
+### 1. 规划与方案反驳（写前）
 
-- `submit_plan` 是独立协议动作（禁止与工具调用混合提交），进入审批流程；
-- **风险预检**：静态防御设计检查（路径校验、错误处理、回滚方案等），缺项当场驳回并要求补强；
-- **交叉审查**：需独立 `child_reviewer` 出具评分卡（correctness/safety 分维度），评分异常偏低（<60）触发人工核验；审查轮次有预算上限，防无限打回空转；
-- **安全策略引擎**（`agent_policy.rs`）：Policy-as-Code 门禁，危险模式强力阻断或要求专家联合会审。
+- 入口 `triage` 可以分流到 `direct`、`outline_review`、`technical_plan`、`expert_panel` 或 `user_clarification`，不是所有任务都强制多 Agent 讨论。
+- `submit_plan` 与 `child_reviewer` 负责方案审查、反驳与修订；专家会审按任务和角色需要进行，并受预算及审批约束。自动、交叉审查和人工先批准模式由实际配置决定。
+- **执行中可推翻原先假设**：发现新证据时，通过 `request_retriage` 或带 `revision_reason` 的方案修订重新评估受影响部分；之前的先验不是不可修改的事实。
+- `agent_policy.rs`、路径范围和写入门保留确定性安全约束。方案审查给出的建议不天然等于事实。
 
-### 2. 阶段级写入审查（写中）
+### 2. 阶段审查与反馈（写中）
 
-`stage_review.rs` 补齐「方案批准 → 收尾审查」中段的独立审查缺口，双触发先到先审。
+`stage_review/` 在任务执行中对实际修改进行审查；最终 `reviewer_gatekeeper/` 可取证检查代码、产物、命令记录及登记的历史证据。Reviewer 输出 **`blocking_issues`（交付阻塞）** 与 **`nit_issues`（非阻塞建议）**，并提供具体修复要求。Agent 负责修复，Reviewer 负责核对修复是否成立；打回不应自动抹去所有此前有效的执行事实。
 
-### 3. finish 终态对账（收尾）
+### 3. 真实验证记录与适用性
 
-模型说"完成了"不算数，需过 `finish_guard` 两阶段交付：
+`task_store` 暴露四个证据动作：`evidence_record`、`evidence_find`、`evidence_inspect`、`evidence_compare`。可记录验证目的、命令、原始 `output_id` 关联、时间和文件快照；Reviewer 可以检索、阅读并与当前文件作比较。
 
-1. `prepare_finish` **物理对账**：Todo 勾选、Git Diff 实际修改行（行号漂移地图）、验证命令是否真的跑过——对不上当场打回并附缺失清单；
-2. 通过签发 `FinalizationReceipt`，正式 `finish` 毫秒级放行；
-3. **P3 死锁逃生口**：连续 **8 次**门禁拦截且无产出（`consecutive_gate_blocked` 持久化计数，重启不丢）→ 重写为 `RUN_INTERRUPTED_ROUTE`，走 `finish_interrupted_run` 安全收尾：标记失败、取消子任务、发停止事件——宁可降级交卷，绝不无限空转。普通工具失败不计数（那是正常反馈）。
+- **执行事实 ≠ 当前有效性 ≠ 质量结论**：宿主执行成功只证明当时命令退出成功；是否覆盖现在的交付，由 Reviewer 根据产物版本、执行环境、验证范围和后续修改判断。
+- 证据里的 Agent `reported_outcome` / `command` 属于声明，原始命令结果应核对 `output_id`。`evidence_find` 命中的是候选记录，不会自动授予 PASS。
+- 小文件可取得全文件哈希；较大文件采用首/中/尾有界采样（最多约 12 MiB），**抽样比较不等于完整性证明**，也不能替代业务验证。
 
-### 4. 写副作用门（执行面）
+### 4. `prepare_finish` / `finish`（收尾）
 
-`dispatcher/`（`is_write_or_side_effect_tool`）同时按**工具名与 action** 双重判定，剥离 MCP/插件命名空间后匹配 `write/edit/delete/save/move/rename/remove`——`remote-hub/move_file` 之类照样被拦截；`read_text_file`/`list_directory`/`search_graph`/`release_lock` 等只读工具不误伤。
+`prepare_finish` 和 `finish` 会调用同一套完成度评估：检查 TODO、验收契约、实际改动范围、相关后台任务及必要的验证，再进入最终 Reviewer。准备阶段不是纯粹的“查看状态”，可能执行检查；`finish` 通过后将完成状态、运行轨迹与交付消息作原子提交。
+
+**最新改进：冻结验证与终审判决分别保留。** 如果上一轮 Reviewer 只要求补充说明或证据，在同运行、同工作区、同材料/范围/契约及副作用条件匹配时，宿主可以复用先前真实成功的冻结命令回执，将其交给 Reviewer 再判断，而不直接再次执行。旧回执失效、产物或契约变化、原命令失败时仍走相应验证；Reviewer 有具体疑点可要求重验，其实际失败结果不能被旧 PASS 覆盖。
+
+```text
+首次验证成功 → Reviewer 打回说明 → 仅修改说明 → Reviewer 重新判断（冻结命令可不重跑）
+                                     ↘ 修改产物/验收契约 → 重新执行相关冻结验证
+```
+
+**仍有边界：**这项复用目前重点覆盖**冻结义务命令**，不是所有自适应验证、通道额外命令或全部审查项目的逐项缓存。冻结输入指纹没有变化，也不能机械证明外部服务、依赖和环境从未变化；最终适用性仍需审查判断。系统还保留 `consecutive_gate_blocked` 等异常收尾保护，具体触发以现行代码为准。
+
+### 5. 写副作用门（执行面）
+
+`dispatcher/`（`is_write_or_side_effect_tool`）同时按**工具名与 action** 判定写入副作用；MCP/插件命名空间也受相应权限校验。工作区路径围栏、不可逆操作保护和工作区软锁用于限制真实越权行为，而不是代替 Reviewer 判断实现是否正确。
 
 ---
 
 ## 五、多智能体并发架构
+
+**主 Agent 是执行与分派中心，角色是按需调用的能力，不要求每项任务都维持固定常驻团队。** 入口分流可以建议需要的专家与审查方式，主 Agent 结合任务与证据安排协作。
+
+**角色卡 (`tools/role_manager/`)** 支持为不同领域的 worker / writer / reviewer 配置模型、人设、允许的角色类型、关注领域、路径范围、技能，以及结构化**入参契约 (`input_schema`)** 和**产出契约 (`custom_schema`)**。这些约束有助于协作结果可消费、可检查，但不意味着角色的语义判断总是正确。
+
+**执行中修订**：方案和分流结论是可修正先验。发现与原方案冲突的新证据时，Agent 可以说明理由发起分流复核或方案修订；不必为纠正局部假设抹去此前已完成的有效工作。
 
 宏观任务级并发（比单步多工具并发更难的部分）：
 
@@ -271,15 +312,15 @@ pub struct DispatchResult {
 }
 ```
 
-### 3. 三权分立（借鉴 DeepSeek Harness 思路）
+### 3. 三权分立（模型观察、存档与 UI 视图）
 
-同一事实两路正交投影：
+同一事实分别向模型、界面与存档投影：
 
 - **模型**看 `stdout`（高信噪比采样文本，省 Token）；
 - **UI** 看 `view`（结构化字段 → 类型化卡片，零正则猜测）；
 - **存档**走 `output_id` + step json（无损可回放）。
 
-已接入 `kind:"search"`（命中列表卡）与 `kind:"search-cache"`（去重锚点卡）。**扩展新外观 = 工具返回塞 `view:{kind:...}` + 前端加一个 kind 分支**，无 view 自动回退文本启发式，渐进不死。
+`view.kind` 支持类型化展示，原始回执与模型观察文本独立保存。**扩展新外观 = 工具返回 `view:{kind:...}` + 前端对应渲染分支**；未提供 `view` 的工具继续使用通用文本回退，不强制每个工具都接入 UI 卡片。
 
 ### 4. 新增内置工具四步
 
@@ -292,7 +333,7 @@ pub struct DispatchResult {
 
 ## 八、代码库目录索引
 
-### 1. Agent 内核（`src-tauri/src/agent/`，191 个 Rust 文件，按域分目录）
+### 1. Agent 内核（`src-tauri/src/agent/`，按域分目录）
 
 **运行主线（一次任务的生命周期链路）**
 
@@ -323,9 +364,9 @@ pub struct DispatchResult {
 |:---|:---|
 | `plan_gate/` | 方案审批结论解析与前置写入门禁 |
 | `stage_review/` | 阶段级写入审查（批准→收尾的中段缺口） |
-| `reviewer_gatekeeper/` | 审查门禁：`baseline`（GitBaseline 起点快照）、`evidence`（证据收集）、`finish_diff`（终态 Diff 对账）、`verdict_parse`（评分卡裁决解析）、`git_utils` |
+| `reviewer_gatekeeper/` | 终审：`baseline`（任务起点材料）、`evidence`（当前产物及历史证据读取）、`finish_diff`（Reviewer 取证与判决、按需冻结命令补验）、`verdict_parse`（结构化裁决） |
 | `finish_guard/` | finish 终态质询：`diff`（行级对账/漂移地图）、`state_updates`（todo 守卫）+ 按主题拆分的 6 个测试文件 + `testkit` 夹具 |
-| `finalization.rs` | 终态收敛：Receipt 签发、交付结算、原子提交事务 |
+| `finalization.rs` + `finalization/evaluate.rs` | 完成度评估、终审与冻结验证执行回执分开复用；`FinalizationReceipt` 签发及原子提交 |
 | `agent_policy.rs` / `gate_applicability.rs` / `gate_messages.rs` | Policy-as-Code 策略引擎 / 门禁适用性判定 / 驳回话术 |
 | `impact_pack.rs` / `review_contract.rs` / `review_tools.rs` | 影响面证据包（漏问防线）/ 审查契约 / 审查工具 |
 
@@ -336,7 +377,7 @@ pub struct DispatchResult {
 | `context/` | 三明治引擎：`assembler`（组装）、`budget`（水位）、`compaction/`（压缩摘要）、`audit/`（不可逆台账 + `shell_readonly` 命令白名单）、`determinism`/`memory`/`render`/`sampling`/`no_progress`/`resource_scope`/`zero_hit`/`types/` |
 | `retrieval/` | 联邦检索：`fts_engine`（SQLite FTS5）、`workspace_search`（ripgrep 实时代码检索）、`memory_signpost`（路标召回）、`types` |
 | `checkpoint/` | 断点快照：`types`（数据结构）、`durable`（持久化）、`plan_ops`/`plan_batch`（计划操作）、`inquiry_ops`（问询操作）；含 `RecoveryDecision` 自愈与 `consecutive_gate_blocked` 持久化 |
-| `task_store.rs` / `task_summary.rs` / `artifact_manager.rs` | 结构化数据区 / 交付物汇总 / 工件管理（自动登记） |
+| `task_store.rs` / `evidence_store.rs` / `task_summary.rs` / `artifact_manager.rs` | 结构化数据区 / 验证证据的登记、检索、详情与比较 / 交付物汇总与工件管理 |
 | `lesson.rs` / `skill_context.rs` | 避坑经验血缘（召回记录 + 因果反馈打分）/ 技能装载 |
 
 **通道与基础设施**
@@ -350,7 +391,7 @@ pub struct DispatchResult {
 | `protocol/` / `types/` | 协议动作定义（finish/submit_plan/prepare_finish 判别）/ 核心类型（AgentInstruction/DispatchResult/TodoItem） |
 | `watch_engine.rs` / `scheduler.rs` / `workspace_lock.rs` | 持续监听引擎 / 定时触发器 / 工作区软锁 |
 | `evaluation*.rs` / `eval_oracle.rs` | 实弹评测：回放器、阶段断言、Token/步数统计、分析 |
-| `tools/` | 原生工具箱：local_file/、local_shell、mcp_manager、model_manager、role_manager/、project_manager、schedule_manager、skill_manager、system_info、wechat_manager |
+| `tools/` | 原生工具箱：local_file/、local_shell、mcp_manager、model_manager、role_manager/（含结构化角色契约）、project_manager、schedule_manager、skill_manager、system_info、wechat_manager |
 | `prompt_assembly.rs` / `tool_manual.rs` / `context_collector.rs` | 提示词组装 / 工具手册按需加载 / 上下文采集 |
 | `host_verify.rs` / `change_verification.rs` / `path_guard.rs` / `target_block.rs` / `project_map.rs` / `telemetry.rs` / `uv_runtime.rs` / `web_search.rs` / `file_parser.rs` / `plan_submit.rs` / `router.rs` | 宿主验证 / 变更核验 / 路径牢笼 / 目标区块 / 项目地图 / 遥测 / uv 运行时 / 联网搜索 / 文件解析 / 方案提交 / 模型路由 |
 
@@ -380,23 +421,30 @@ pub struct DispatchResult {
 ## 九、快速上手与运行
 
 ### 环境依赖
-- **Rust** 1.78+、**Node.js** 20+
+
+- **Node.js 20+ / npm**，以及项目 Rust 依赖所需的 **Rust stable / Cargo**。
+- 桌面端请先安装 [Tauri 2 的平台依赖](https://v2.tauri.app/start/prerequisites/)（macOS、Windows、Linux 要求不同）。
+- 使用真实模型前，需在应用内配置可用的模型通道/密钥；MCP 插件、角色卡和评测环境按实际任务配置。
 
 ### 开发
 
 ```bash
-git clone <repo> && cd free_api
+git clone https://github.com/qqw52491-hue/free_api.git
+cd free_api
 npm install
 
-# 后端单元测试（688 项）
+# Rust 静态检查和库测试
+cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --lib --manifest-path src-tauri/Cargo.toml
 
 # 前端类型检查 + 构建
 npm run build          # vue-tsc --noEmit && vite build
 
 # 桌面客户端
-npm run tauri dev      # Linux Wayland 环境用 npm run dev:wayland
+npm run tauri dev      # Linux Wayland 可按需使用 npm run dev:wayland
 ```
+
+> 本地 2026-10-17 的一次 Rust 库回归：`1155 passed / 0 failed / 10 ignored`（另过滤 1 项剪贴板测试）。这只是**代码层测试结果，不是复杂任务端到端成功率**。实际执行结果以当前平台重新测试为准。
 
 ### 实弹评测
 
@@ -409,24 +457,26 @@ npm run eval:real:dry   # 干跑校验配置
 
 ## 十、演进路线 (Roadmap)
 
-### 已完成（详见 OVERNIGHT_LOOP.md）
-- [x] 子 Agent 并发体系（worker/writer/reviewer + job_engine + dispatches）
-- [x] 写副作用门（含 move/rename/remove + 命名空间剥离）
-- [x] finish 两阶段对账 + P3 死锁降级逃生口
-- [x] 检索去重锚点 + 进程级索引治理
-- [x] `agent_run_steps` 行式存储（消除 O(n²) 步持久化）
-- [x] 工具输出三权分立（`DispatchResult.view`）
-- [x] 工作区软锁、HTTP/Mobile Web 通道、watch 监听引擎、定时调度器
-- [x] `child_writer.apply` 机械合入：指纹校验 + 字节搬运 + patch 兜底 + 冲突整体拒绝（3.8flash/3.1pro 实弹验证正常链路 + 冲突拒绝回退）
-- [x] 长文件按域模块化：3 万余行迁入子目录，测试统一独立 `tests.rs`（全程 688 项测试零回归）
+### 已实现（详见 OVERNIGHT_LOOP.md 与相关实现）
 
-### 进行中 / 规划
-- [ ] **Sleep-Time Compute**：睡眠期异步经验蒸馏 + Lesson 淘汰门禁（RFC 定稿）
-- [ ] **零信任渲染面**：不可信内容边界包裹、出站渲染脱敏完善
-- [ ] **会话表注册表化**：`SESSION_SCOPED_TABLES` 驱动级联删除 + schema 反射测试（新增表忘登记 = 测试红）
-- [ ] **view 接入面扩展**：`local_file.read`/`edit`/`local_shell` 等高频工具的类型化卡片
-- [ ] **P3 实弹验证**：无人类死锁场景下 8 连拒 → 降级中断的实跑观测
-- [ ] **步持久化耗时测量**：长会话 `append_step` 前后延迟对比
+- [x] 入口任务分流、方案审查/反驳、按需多角色协作及执行中带理由的方案修订。
+- [x] 角色卡的结构化输入/输出契约、模型分配、范围与技能声明。
+- [x] 子 Agent 并发体系（worker/writer/reviewer + job_engine + dispatches）、隔离 writer 的冲突安全合入。
+- [x] 阶段审查、最终 Reviewer 的 Blocking/Nit 区分及可取证审查工具。
+- [x] 证据存储与查找/详情/比较；`output_id` 原始记录关联；有界大文件采样与来源标识。
+- [x] 冻结验证宿主回执跨终审打回复用（在严格输入条件匹配时），并由 Reviewer 核对适用性。
+- [x] `prepare_finish` / `finish` 交付事务、权限边界与异常收尾保护。
+- [x] 检索去重、行式步骤持久化、checkpoint 恢复、结构化 UI 视图与多通道接入。
+- [x] `SESSION_SCOPED_TABLES` 驱动会话级联清理，并通过 schema 反射测试核对表归属。
+
+### 进行中 / 需要实测的方向
+
+- [ ] **交付摩擦**：用真实长任务定位重复验证、无效 Blocking 和反复 `finish` 的成本。
+- [ ] **验证复用覆盖**：评估自适应验证与额外配置验证是否需要独立回执；不无差别缓存 PASS。
+- [ ] **Reviewer 反馈质量**：观察真实缺陷命中、修复要求可执行性与打回后的闭合率。
+- [ ] **多 Agent 收敛**：对比有无方案讨论/阶段审查时的实际质量、成本和完成率。
+- [ ] **渲染与边界**：继续完善不可信内容隔离、脱敏、工具视图与跨平台恢复。
+- [ ] **Sleep-Time Compute**：睡眠期经验蒸馏、Lesson 淘汰等长期研究方向。
 
 ---
 
