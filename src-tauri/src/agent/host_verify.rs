@@ -210,7 +210,9 @@ pub async fn run(workspace: &Path) -> Option<String> {
     })
 }
 
-/// 逐义务验证结果：命令、退出码、输出尾部。
+/// 逐义务验证结果：命令、退出码、输出尾部。可随宿主交付收据持久化，
+/// 但不会因为记录存在就自动认定对后续产物仍然适用。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ObligationVerifyResult {
     pub obligation_id: String,
     pub command: String,

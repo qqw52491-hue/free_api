@@ -73,6 +73,52 @@ pub(crate) fn acceptance_fingerprint(
     format!("{:x}", Sha256::digest(raw.to_string().as_bytes()))
 }
 
+/// 冻结验证结果的输入身份不包含交付说明、证据索引或 Reviewer 判决。
+/// 这些变更只应影响审查；实际工具副作用、既有验证状态及范围变化仍需重新核对。
+fn verification_effects_fingerprint(context: &SandwichContext) -> String {
+    use sha2::{Digest, Sha256};
+    let raw = json!({
+        "effects": context.side_effects,
+        "inherited": context.inherited_side_effects_count,
+        "change_verification": context.change_verification,
+    });
+    format!("{:x}", Sha256::digest(raw.to_string().as_bytes()))
+}
+
+/// 仅接受此前由宿主真正执行且全部通过的同运行冻结命令。
+/// 文件/契约/效果签名是必要的保守边界，不是验证适用性证明；
+/// 后续 Reviewer 仍需看到旧命令的真实出处并决定是否需要补验。
+fn reusable_frozen_verification<'a>(
+    previous: Option<&'a FinalizationReceipt>,
+    context: &SandwichContext,
+    run_id: &str,
+    workspace: &Path,
+    current_material: &str,
+    current_contract: &str,
+    obligations: &[crate::agent::review_contract::ReviewObligation],
+) -> Option<&'a FrozenVerificationRun> {
+    let prior = previous?.frozen_verification_run.as_ref()?;
+    let required: Vec<_> = obligations.iter().filter(|o| {
+        o.verify_command.as_deref().is_some_and(|c| !c.trim().is_empty())
+    }).collect();
+    if required.is_empty() || required.len() != prior.results.len()
+        || current_material.is_empty() || prior.material_fingerprint != current_material
+        || prior.run_id != run_id
+        || prior.workspace_root != workspace.canonicalize().ok()?.to_string_lossy()
+        || prior.contract_fingerprint != current_contract
+        || prior.scope_revision != context.resource_scope.revision
+        || prior.effects_fingerprint != verification_effects_fingerprint(context)
+        || !prior.results.iter().all(|result| result.passed && result.exit_code == "0")
+    {
+        return None;
+    }
+    // 不仅依赖哈希，还逐项匹配已冻结的命令和真实执行目录。
+    required.iter().zip(&prior.results).all(|(ob, result)| {
+        ob.id == result.obligation_id
+            && ob.verify_command.as_deref() == Some(result.command.as_str())
+    }).then_some(prior)
+}
+
 pub(crate) fn interrupted_since(receiver: &watch::Receiver<u64>, generation: u64) -> bool {
     *receiver.borrow() != generation
 }
@@ -101,7 +147,8 @@ fn payload(instruction: &AgentInstruction) -> Value {
     value
 }
 
-/// 所有未闭合项使用同一份清单；动态检查每次重跑，昂贵验证/审查仅复用新鲜就绪收据。
+/// 所有未闭合项使用同一份清单；动态检查每次重跑。
+/// 就绪交付收据与真实冻结验证执行事实分别复用，不让说明修正无故重跑命令。
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -185,13 +232,35 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
     let mut review = ReceiptReview::Pending;
     let mut review_result = None;
     let mut host_evidence = Vec::new();
+    let obligations = context
+        .review_contract
+        .as_ref()
+        .map(|c| c.obligations.clone())
+        .unwrap_or_default();
+    // 预检可能先因 TODO / 阶段 Blocking 打回；只要执行来源与输入身份仍有效，
+    // 也应携带此前真实冻结验证回执，不要让这个新收据抹去唯一的宿主执行事实。
+    let prior = if new_effects
+        && !checkpoint.triage_verdict.as_ref().is_some_and(|v| {
+            v.final_review_mode.eq_ignore_ascii_case("mechanical_only")
+        })
+    {
+        reusable_frozen_verification(
+            checkpoint.pending_finalization.as_ref(), context, run_id, workspace,
+            &initial_hash, &contract_fp, &obligations,
+        ).cloned()
+    } else { None };
+    let mut frozen_verification_run = prior.clone();
     if blockers.is_empty() && !interrupted_since(interrupt_rx, generation) {
-        let obligations = context
-            .review_contract
-            .as_ref()
-            .map(|c| c.obligations.clone())
-            .unwrap_or_default();
-        let results = if new_effects {
+        // 仅有实际宿主旧回执才可能复用；无回执、命令失败、材料/契约/副作用变化，
+        // 或 mechanical_only 模式无法进行语义审查时，仍按原路径执行冻结验证。
+        let reused_frozen = prior.is_some();
+        let results = if let Some(ref previous) = prior {
+            host_evidence.push(format!(
+                "【旧冻结验证宿主执行回执】执行于 {}（step {}）；本轮未自动重跑。\n相同验收契约与交付材料只是复用候选，可能存在未被文件变更反映的环境/依赖变化；Reviewer 应核查适用性，必要时使用 verify 请求补验。",
+                previous.executed_at, previous.executed_step_id
+            ));
+            previous.results.clone()
+        } else if new_effects {
             crate::agent::host_verify::run_obligation_verifications(workspace, &obligations).await
         } else {
             Vec::new()
@@ -204,12 +273,27 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
         );
         host_evidence.extend(results.iter().map(|r| {
             format!(
-                "义务 [{}] `{}` → 退出码 {}\n{}",
-                r.obligation_id, r.command, r.exit_code, r.output_tail
+                "义务 [{}] `{}`（启动目录：{}）→ 退出码 {}\n{}",
+                r.obligation_id, r.command, r.working_dir.display(), r.exit_code, r.output_tail
             )
         }));
         // 冻结验证套件已实测通过，就保存宿主回执；不再要求模型另外抄一遍步骤号。
-        save_successful_obligation_receipt(context, step_id, &results);
+        if !reused_frozen && save_successful_obligation_receipt(context, step_id, &results) {
+            // 捕获真实执行事实；material_fingerprint 在全部宿主验证结束后落定，
+            // 避免命令本身产生构建产物导致误判为工作区发生了新的人工修改。
+            frozen_verification_run = Some(FrozenVerificationRun {
+                run_id: run_id.to_owned(),
+                workspace_root: workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf())
+                    .to_string_lossy().into_owned(),
+                material_fingerprint: String::new(),
+                contract_fingerprint: contract_fp.clone(),
+                scope_revision: context.resource_scope.revision,
+                effects_fingerprint: verification_effects_fingerprint(context),
+                executed_at: chrono::Utc::now().to_rfc3339(),
+                executed_step_id: step_id,
+                results: results.clone(),
+            });
+        }
         if blockers.is_empty()
             && new_effects
             && context
@@ -301,6 +385,11 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
         .collect_review_material(workspace, context, run_started_at)
         .map(|(_, h)| h)
         .unwrap_or_default();
+    if let Some(ref mut frozen) = frozen_verification_run {
+        if frozen.material_fingerprint.is_empty() {
+            frozen.material_fingerprint = review_hash.clone();
+        }
+    }
     if blockers.is_empty() && !interrupted_since(interrupt_rx, generation) {
         let evidence = (!host_evidence.is_empty()).then(|| host_evidence.join("\n\n"));
         let human_waivers = checkpoint.human_waiver_text();
@@ -383,6 +472,8 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
         .map(|(_, h)| h)
         .unwrap_or_default();
     if review_hash != final_hash {
+        // Reviewer 取证期间产物变化，旧验证结果不能带入下一轮。
+        frozen_verification_run = None;
         blockers.push(
             "验证/终审期间交付内容发生变化，旧结论不适用于当前版本；请对当前版本重新核验。".into(),
         );
@@ -399,6 +490,7 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
             contract_fingerprint: contract_fingerprint(context.review_contract.as_ref()),
             acceptance_fingerprint: acceptance_fingerprint(context, checkpoint, &request_payload),
             evidence_index_fingerprint,
+            frozen_verification_run,
             step_id,
             verification,
             review,

@@ -21,6 +21,25 @@ const FINISH_REVIEW_RULES_VERSION: &str = "review-search-v6-task-evidence";
 const MAX_FINISH_FORMAT_RETRIES: u32 = 5;
 const MAX_FINISH_REQUEST_RETRIES: u32 = 5;
 
+/// Reviewer 主动发起的真实复验若失败，不能再按旧通过回执放行。
+fn enforce_failed_rechecks(
+    result: &mut ReviewResult,
+    rechecks: &std::collections::BTreeMap<String, crate::agent::host_verify::ObligationVerifyResult>,
+) {
+    for checked in rechecks.values().filter(|r| !r.passed) {
+        result.verdict = "rejected".into();
+        result.blocking_issues.push(BlockingIssue {
+            file: "verification".into(),
+            issue: format!("Reviewer 请求的冻结义务 [{}] 本次复验未通过（退出码 {}）：{}",
+                checked.obligation_id, checked.exit_code, checked.output_tail),
+            requirement: "依据本次失败回执处理缺口，并对当前版本重新核验".into(),
+        });
+    }
+    if rechecks.values().any(|r| !r.passed) {
+        result.summary.push_str("；宿主复验失败，不能以旧通过回执放行");
+    }
+}
+
 fn finish_request_attempt_limit(retry_enabled: bool) -> u32 {
     if retry_enabled { MAX_FINISH_REQUEST_RETRIES + 1 } else { 1 }
 }
@@ -478,7 +497,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
 {}
 请对本次任务提交的代码变更、文件修改及交付成果进行严谨客观的终态质量审查。
 
-【已有验证与补验裁量】长任务的执行记录与原始 output_id 是候选证据，而非默认有效的缓存。先判断产物身份/版本、执行环境、验证范围和验证后相关变更；足以覆盖本次断言时直接采纳，不因终审阶段而要求重跑。存在真实缺口时指出具体需要补验什么及原因；不能确认旧证据仍适用时不得宣称已验证。不要让几十 GB 的重新扫描成为无明确疑点的默认动作。
+【已有验证与补验裁量】长任务的执行记录与原始 output_id 是候选证据，而非默认有效的缓存。先判断产物身份/版本、执行环境、验证范围和验证后相关变更；足以覆盖本次断言时直接采纳，不因终审阶段而要求重跑。若材料中出现【旧冻结验证宿主执行回执】，表示宿主确实在此前执行并取得了列出的退出码，而不是本轮已经重跑；工作区材料指纹相同并不能排除外部环境、依赖或运行条件变化。请独立判断旧结果是否仍覆盖当前交付：有具体疑点时，取证工具可用则可请求 verify 重新执行冻结义务，否则在 blocking_issues 中指出需补验的项目；不能确认适用性时不得声称已经验证。不要让几十 GB 的重新扫描成为无明确疑点的默认动作。
 
 【验收对象与任务边界】先依据当前【任务目标】确定本次应交付什么，再判断该交付物是否合格。只读审查、排障诊断或报告任务的交付物是结论与证据：被审查项目存在缺陷可以是报告正确发现的内容，不自动构成报告自身的阻塞缺陷。此类任务可因结论错误、重要问题漏报、证据不足或风险被隐瞒而打回，但不得仅因已如实披露的问题尚未修复，就要求额外修改被审查项目后才能交报告。修复任务仍须核验实际修复，不能用一份报告代替应交付的代码。分流模式 code_review（包括失败回退默认）只规定审查方式，不改变用户授权的任务范围。
 
@@ -614,6 +633,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     // forensic_budget 已在组装提示词时读取（工具段按预算条件拼接）。
     let session_tmp_root = crate::agent::path_guard::get_session_tmp_dir(session_id);
     let mut tool_steps_used: u32 = 0;
+    let mut rechecked_obligations = std::collections::BTreeMap::new();
     let mut forced_final = false;
     let mut llm_call_index = 0usize;
     // 与 child reviewer 同一超时：取证环让上下文逐轮变大，35s 固定值实测
@@ -776,6 +796,9 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
                                 workspace, &target,
                             )
                             .await;
+                            for result in &results {
+                                rechecked_obligations.insert(result.obligation_id.clone(), result.clone());
+                            }
                             results
                                 .iter()
                                 .map(|r| {
@@ -835,7 +858,10 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
 
         // 格式纠正只回到审查员，不将协议错误伪装为代码缺陷。
         match parsed {
-            Ok(result) => return result,
+            Ok(mut result) => {
+                enforce_failed_rechecks(&mut result, &rechecked_obligations);
+                return result;
+            },
             Err(error) => {
                 if retry_format {
                     messages.push(json!({"role": "assistant", "content": raw}));
@@ -858,6 +884,29 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
 #[cfg(test)]
 mod contract_handoff_tests {
     use super::*;
+
+    #[test]
+    fn requested_verify_failure_is_blocking_even_if_reviewer_claims_pass() {
+        let mut verdict = ReviewResult::skipped_empty();
+        let mut rechecks = std::collections::BTreeMap::new();
+        let mut checked = crate::agent::host_verify::ObligationVerifyResult {
+            obligation_id: "package".into(), command: "exit 1".into(),
+            working_dir: std::path::PathBuf::from("/tmp"), exit_code: "1".into(),
+            output_tail: "integrity check failed".into(), passed: false,
+        };
+        rechecks.insert(checked.obligation_id.clone(), checked.clone());
+        enforce_failed_rechecks(&mut verdict, &rechecks);
+        assert!(!verdict.is_passed());
+        assert!(verdict.blocking_issues[0].issue.contains("integrity check failed"));
+
+        // 同一冻结义务随后确实重新执行并通过，以最后一次宿主回执为准。
+        checked.passed = true;
+        checked.exit_code = "0".into();
+        rechecks.insert(checked.obligation_id.clone(), checked);
+        let mut after_success = ReviewResult::skipped_empty();
+        enforce_failed_rechecks(&mut after_success, &rechecks);
+        assert!(after_success.is_passed());
+    }
 
     #[test]
     fn old_review_rules_do_not_reuse_the_same_material_rejection() {

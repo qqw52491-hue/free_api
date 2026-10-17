@@ -153,6 +153,140 @@ async fn existing_evidence_reaches_finish_without_reexecuting_its_command() {
 }
 
 #[tokio::test]
+async fn rejected_review_reuses_real_frozen_execution_but_changed_artifact_runs_again() {
+    use crate::agent::child_reviewer::retirement_tests::MockReviewer;
+    let rejection = json!({"verdict":"rejected", "score":60, "summary":"交付说明不清晰",
+        "blocking_issues":[{"file":"artifact.txt","issue":"说明缺失","requirement":"补充交付说明"}],
+        "nit_issues":[]});
+    let accepted = json!({"verdict":"passed", "score":93, "summary":"已核对旧执行证据和新说明",
+        "blocking_issues":[], "nit_issues":[]});
+    let mock = MockReviewer::new(vec![rejection, accepted.clone(), accepted.clone(), accepted]).await;
+    let workspace = mock.root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let baseline = GitBaseline::capture(&workspace);
+    let start = Utc::now() - chrono::Duration::seconds(1);
+    std::fs::write(workspace.join("artifact.txt"), b"version-one").unwrap();
+    let command = "printf x >> frozen-count; test -s artifact.txt";
+    let mut c = context();
+    c.record_side_effect(1, "local_file".into(), "artifact.txt".into());
+    c.change_verification = Some(ChangeVerification {
+        status:"verified".into(), evidence_refs:vec!["step_1".into()], waived_reason:None,
+    });
+    c.review_contract = Some(serde_json::from_value(json!({
+        "scope_statement":"交付安装包",
+        "obligations":[{
+            "id":"frozen", "question":"当前产物完整性",
+            "status":"evidenced", "evidence_refs":["step_1"], "closure_form":"command",
+            "verify_command":command
+        }]
+    })).unwrap());
+    let mut cp = checkpoint(&c);
+    let mut routing = ModelRoutingConfig::default();
+    routing.role_models.insert("reviewer".into(), "mock".into());
+    let app = tauri::test::mock_app();
+    let (_tx, mut rx) = watch::channel(0);
+    let finish = |summary: &str| -> AgentInstruction {
+        serde_json::from_value(json!({"tool":"finish","command":{"summary":summary}})).unwrap()
+    };
+    let first = evaluate_completion(app.handle(), &mock.db, &mut c, &mut cp,
+        "frozen-run", "frozen-session", 10, &workspace, &baseline, start, &routing,
+        &mut rx, &finish("初稿"), CompletionMode::Finish, false, false).await;
+    assert!(!first.receipt.is_ready(), "Reviewer 阻塞应保留");
+    assert!(first.receipt.frozen_verification_run.is_some(),
+        "打回也必须保留真实宿主冻结验证回执");
+    assert_eq!(std::fs::read_to_string(workspace.join("frozen-count")).unwrap(), "x");
+    cp.pending_finalization = Some(first.receipt);
+    cp.stage_review_blockers_open = 1;
+    let blocked = evaluate_completion(app.handle(), &mock.db, &mut c, &mut cp,
+        "frozen-run", "frozen-session", 11, &workspace, &baseline, start, &routing,
+        &mut rx, &finish("等待阶段阻塞解除"), CompletionMode::Finish, false, false).await;
+    assert!(!blocked.receipt.is_ready());
+    assert!(blocked.receipt.frozen_verification_run.is_some(),
+        "中途被阶段 Blocking 拦下不应丢失旧的真实验证回执");
+    assert_eq!(mock.requests.lock().unwrap().len(), 1,
+        "未解决的阶段阻塞应继续生效，不应放行 Reviewer");
+    assert_eq!(std::fs::read_to_string(workspace.join("frozen-count")).unwrap(), "x");
+    cp.pending_finalization = Some(blocked.receipt);
+    cp.stage_review_blockers_open = 0;
+    // 新登记的审查证据只会刷新 Reviewer，不应无故使真实冻结验证重跑。
+    let registered = crate::agent::task_store::dispatch(&mock.db, "frozen-session", "evidence_record",
+        &json!({"subject":"交付说明", "purpose":"补充说明依据"}));
+    assert!(registered.success, "{}", registered.stderr);
+    let second = evaluate_completion(app.handle(), &mock.db, &mut c, &mut cp,
+        "frozen-run", "frozen-session", 11, &workspace, &baseline, start, &routing,
+        &mut rx, &finish("补充交付说明"), CompletionMode::Finish, false, false).await;
+    assert!(second.receipt.is_ready(), "{:?}", second.receipt);
+    assert_eq!(std::fs::read_to_string(workspace.join("frozen-count")).unwrap(), "x",
+        "只补说明或登记证据后须重新审查，而非无故重跑已通过的冻结命令");
+    let second_prompt = mock.requests.lock().unwrap()[1]["messages"][1]["content"]
+        .as_str().unwrap().to_string();
+    assert!(second_prompt.contains("旧冻结验证宿主执行回执"));
+    assert!(second_prompt.contains("补充说明依据"));
+    assert!(second.receipt.frozen_verification_run.is_some());
+    cp.pending_finalization = Some(second.receipt);
+
+    std::fs::write(workspace.join("artifact.txt"), b"version-two-different").unwrap();
+    let third = evaluate_completion(app.handle(), &mock.db, &mut c, &mut cp,
+        "frozen-run", "frozen-session", 12, &workspace, &baseline, start, &routing,
+        &mut rx, &finish("修改产物后重新交付"), CompletionMode::Finish, false, false).await;
+    assert!(third.receipt.is_ready(), "{:?}", third.receipt);
+    assert_eq!(std::fs::read_to_string(workspace.join("frozen-count")).unwrap(), "xx",
+        "产物变更不得机械沿用旧验证");
+    cp.pending_finalization = Some(third.receipt);
+    c.review_contract.as_mut().unwrap().scope_statement = "修改后的验收范围".into();
+    let fourth = evaluate_completion(app.handle(), &mock.db, &mut c, &mut cp,
+        "frozen-run", "frozen-session", 13, &workspace, &baseline, start, &routing,
+        &mut rx, &finish("验收契约变化后重新交付"), CompletionMode::Finish, false, false).await;
+    assert!(fourth.receipt.is_ready(), "{:?}", fourth.receipt);
+    assert_eq!(std::fs::read_to_string(workspace.join("frozen-count")).unwrap(), "xxx",
+        "验收契约变化不得复用之前的冻结验证");
+    assert_eq!(mock.requests.lock().unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn failed_frozen_verification_is_never_reused_from_a_rejected_receipt() {
+    use crate::agent::child_reviewer::retirement_tests::MockReviewer;
+    let mock = MockReviewer::new(vec![]).await;
+    let workspace = mock.root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let baseline = GitBaseline::capture(&workspace);
+    let start = Utc::now() - chrono::Duration::seconds(1);
+    std::fs::write(workspace.join("artifact.txt"), b"artifact").unwrap();
+    let mut c = context();
+    c.record_side_effect(1, "local_file".into(), "artifact.txt".into());
+    c.change_verification = Some(ChangeVerification {
+        status:"verified".into(), evidence_refs:vec!["step_1".into()], waived_reason:None
+    });
+    c.review_contract = Some(serde_json::from_value(json!({
+        "scope_statement":"验收安装包",
+        "obligations":[{
+            "id":"frozen", "question":"命令必须通过", "status":"evidenced",
+            "evidence_refs":["step_1"], "closure_form":"command",
+            "verify_command":"printf x >> frozen-count; false"
+        }]
+    })).unwrap());
+    let mut cp = checkpoint(&c);
+    let app = tauri::test::mock_app();
+    let (_tx, mut rx) = watch::channel(0);
+    let instruction: AgentInstruction = serde_json::from_value(json!({
+        "tool":"finish","command":{"summary":"自述已验证"}
+    })).unwrap();
+    for (step, count) in [(10, "x"), (11, "xx")] {
+        let evaluation = evaluate_completion(app.handle(), &mock.db, &mut c, &mut cp,
+            "frozen-run", "frozen-session", step, &workspace, &baseline, start,
+            &ModelRoutingConfig::default(), &mut rx, &instruction,
+            CompletionMode::Finish, false, false).await;
+        assert!(!evaluation.receipt.is_ready());
+        assert!(evaluation.receipt.frozen_verification_run.is_none(),
+            "失败的冻结命令不应产生可复用的宿主通过收据");
+        assert_eq!(std::fs::read_to_string(workspace.join("frozen-count")).unwrap(), count);
+        cp.pending_finalization = Some(evaluation.receipt);
+    }
+    assert!(mock.requests.lock().unwrap().is_empty(),
+        "宿主冻结命令失败不得由 Reviewer 自述覆盖");
+}
+
+#[tokio::test]
 async fn evidence_registration_does_not_bypass_frozen_verification() {
     use crate::agent::child_reviewer::retirement_tests::MockReviewer;
     let mock = MockReviewer::new(vec![json!({})]).await;

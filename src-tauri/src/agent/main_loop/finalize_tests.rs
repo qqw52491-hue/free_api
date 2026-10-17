@@ -25,6 +25,7 @@ fn ready(c: &SandwichContext, cp: &AgentCheckpoint) -> FinalizationReceipt {
         ),
         step_id: 42,
         evidence_index_fingerprint: None,
+        frozen_verification_run: None,
         verification: ReceiptVerification::Verified {
             evidence: "host exit 0".into(),
         },

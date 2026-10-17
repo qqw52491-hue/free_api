@@ -8,7 +8,8 @@
 //! - 事件通知与产物登记是提交后的可重放派生动作，不参与事务。
 //!
 //! 收据保鲜键：diff_hash + resource_scope.revision + 契约内容 + 验收状态指纹。
-//! 任一变化即收据失效，finish 重新走完整门禁，绝不按旧结论放行。
+//! 任一变化都会重新评估交付；审查材料变化不必抹除同运行、同契约、同产物
+//! 的宿主冻结验证事实，但仍需 Reviewer 独立裁量其适用性，不能按旧审查结论放行。
 
 use crate::agent::checkpoint::AgentCheckpoint;
 use crate::agent::context::SandwichContext;
@@ -118,6 +119,22 @@ impl ReceiptReview {
     }
 }
 
+/// 宿主真实执行的冻结义务结果。与 Reviewer 结论分别保存：
+/// 上一轮即使审查失败，验证事实仍可供下一轮审查参考。
+/// 复用必须核对运行、验收契约、产物材料和执行副作用；旧回执本身不是新 PASS。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FrozenVerificationRun {
+    pub run_id: String,
+    pub workspace_root: String,
+    pub material_fingerprint: String,
+    pub contract_fingerprint: String,
+    pub scope_revision: u64,
+    pub effects_fingerprint: String,
+    pub executed_at: String,
+    pub executed_step_id: usize,
+    pub results: Vec<crate::agent::host_verify::ObligationVerifyResult>,
+}
+
 /// 终态收据：一次通过门禁评估的冻结快照。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FinalizationReceipt {
@@ -133,6 +150,9 @@ pub struct FinalizationReceipt {
     /// 可选登记材料变化时重新评估；旧收据无此字段，不据此证明证据仍未变化。
     #[serde(default)]
     pub evidence_index_fingerprint: Option<String>,
+    /// 独立的真实冻结验证执行回执；旧 checkpoint 没有时必须重新验证。
+    #[serde(default)]
+    pub frozen_verification_run: Option<FrozenVerificationRun>,
     pub step_id: usize,
     pub verification: ReceiptVerification,
     pub review: ReceiptReview,
@@ -473,6 +493,7 @@ mod tests {
             contract_fingerprint: fingerprint.to_string(),
             acceptance_fingerprint: "test-state".into(),
             evidence_index_fingerprint: None,
+            frozen_verification_run: None,
             step_id: 10,
             verification: ReceiptVerification::Verified {
                 evidence: "cargo test ok".to_string(),
@@ -487,6 +508,14 @@ mod tests {
             finish_payload: Value::Null,
             created_at: "2026-09-25T00:00:00Z".to_string(),
         }
+    }
+
+    #[test]
+    fn legacy_receipt_without_frozen_host_execution_remains_readable_but_cannot_reuse_it() {
+        let mut json = serde_json::to_value(receipt("diff", 0, "contract")).unwrap();
+        json.as_object_mut().unwrap().remove("frozen_verification_run");
+        let restored: FinalizationReceipt = serde_json::from_value(json).unwrap();
+        assert!(restored.frozen_verification_run.is_none());
     }
 
     #[test]
