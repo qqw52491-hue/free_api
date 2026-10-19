@@ -640,8 +640,8 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     // 会在收敛判决那一步超时（gemini-3.1-pro 终审末轮超时即此因）。
     let review_timeout_secs =
         crate::agent::child_reviewer::child_timeout_secs(&model_config.model_name);
-    // 单次超时不再直接 fail-open：同一消息集按 2× 超时重试一次（幂等只读调用），
-    // 再超时/二次失败才降级。实测 35s 时代 finish-review 超时率 41%（pro-high），
+    // 首输出/流静默超时：同一消息集按 2× 静默时限重试一次（幂等只读调用），
+    // 调用总预算仍由传输层与活动守卫共同约束，持续输出不刷新总预算。实测 35s 时代超时率 41%（pro-high），
     // 无重试意味着近半数审查直接沦为橡皮图章。
     let mut timeout_retried = false;
     let mut cur_timeout_secs = review_timeout_secs;
@@ -656,69 +656,33 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     let mut ignore_stream = |_: llm::StreamEvent<'_>| true;
     loop {
         llm_call_index += 1;
-        let call = llm::stream_with_attempt_limit(
-            &model_config,
-            &messages,
-            "auto",
-            interrupt_rx,
-            request_attempt_limit,
-            &mut ignore_stream,
-        );
-
-        let stream_result =
-            match tokio::time::timeout(Duration::from_secs(cur_timeout_secs), call).await {
-                Ok(res) => res,
-                Err(_) => {
-                    crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
-                        session_id,
-                        "finish-review",
-                        llm_call_index,
-                        &model_config,
-                        &messages,
-                        None,
-                        "request_error",
-                        Some(if timeout_retried { "timeout_after_retry" } else { "timeout" }),
-                    );
-                    if !timeout_retried && review_retry_allowed() {
-                        timeout_retried = true;
-                        cur_timeout_secs = review_timeout_secs.saturating_mul(2).min(600);
-                        continue;
-                    }
-                    return ReviewResult::failed_open(
-                        &format!(
-                            "Reviewer 审查超时（>{}s，重试后仍超时），未获得有效审查结论",
-                            cur_timeout_secs
-                        ),
-                        &model_id,
-                        &review_fingerprint,
-                    );
-                }
-            };
-        // 本轮成功拿到响应：恢复基础超时（重试只救当前这一棒，不传染后续轮次）
-        timeout_retried = false;
-        cur_timeout_secs = review_timeout_secs;
-
-        let duration_ms = started_at.elapsed().as_millis() as u64;
+        let stream_result = crate::agent::review_stream::stream_review(
+            &model_config, &messages, "auto", interrupt_rx,
+            Some(request_attempt_limit), cur_timeout_secs, &mut ignore_stream,
+        ).await;
         let output = match stream_result {
-            Ok(output) => output,
-            Err(e) => {
-                crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
-                    session_id,
-                    "finish-review",
-                    llm_call_index,
-                    &model_config,
-                    &messages,
-                    None,
-                    "request_error",
-                    Some(&e),
-                );
+            Ok(output) => {
+                timeout_retried = false;
+                cur_timeout_secs = review_timeout_secs;
+                output
+            }
+            Err(failure) => {
+                failure.log(session_id, "finish-review", llm_call_index, &model_config, &messages);
+                if failure.may_retry_timeout() && !timeout_retried && review_retry_allowed() {
+                    timeout_retried = true;
+                    cur_timeout_secs = review_timeout_secs.saturating_mul(2).min(600);
+                    continue;
+                }
                 return ReviewResult::failed_open(
-                    &format!("Reviewer 调用失败: {}", e),
-                    &model_id,
-                    &review_fingerprint,
+                    &format!("Reviewer 审查{}：{}；{}",
+                        if failure.is_timeout() { "超时" } else { "调用失败" },
+                        failure.description(),
+                        if timeout_retried { "本轮已重试，未获得有效审查结论" } else { "未获得有效审查结论" }),
+                    &model_id, &review_fingerprint,
                 );
             }
         };
+        let duration_ms = started_at.elapsed().as_millis() as u64;
 
         let raw = output.full_response.clone();
         let as_value = serde_json::from_str::<serde_json::Value>(&extract_json_str(&raw)).ok();

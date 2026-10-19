@@ -18,7 +18,8 @@ pub const MAX_CHILDREN_PER_KIND_PER_RUN: u8 = 2;
 pub const MAX_TOTAL_CHILDREN_PER_RUN: u8 = 6;
 // 向后兼容原有常量别名
 pub const MAX_CHILD_REVIEWS_PER_PARENT_RUN: u8 = MAX_CHILDREN_PER_KIND_PER_RUN;
-    /// reviewer 单次调用超时（秒）：可通过 FREE_API_REVIEWER_TIMEOUT_SECS 调整。
+    /// reviewer 首个正文/思考与后续静默时限（秒），可通过 FREE_API_REVIEWER_TIMEOUT_SECS 调整。
+    /// 持续输出刷新静默计时，但不延长 FREE_API_LLM_CALL_BUDGET_SECONDS 的调用总预算。
     /// 实测教训：45s 对慢平台/大证据包太紧——审查超时→退款→重派→再超时，死循环到模型弃疗。
     /// 慢思考家族（Claude thinking 等）默认放宽到 120s：单审常超 45s，实测流错误+超时连发。
     /// pub(crate)：resume_child 复审路径（loop_runner）同样复用本模型感知超时。
@@ -45,13 +46,14 @@ pub const MAX_CHILD_REVIEWS_PER_PARENT_RUN: u8 = MAX_CHILDREN_PER_KIND_PER_RUN;
             })
     }
 
-    /// 无模型上下文场景（如 reap 宽限计算）取家族默认上限，保证"宽限 > 超时"不变式。
+    /// reap 宽限覆盖最长的静默重试等待，并受既有调用总预算约束。
     pub(crate) fn max_child_timeout_secs() -> u64 {
-        std::env::var("FREE_API_REVIEWER_TIMEOUT_SECS")
+        let base = std::env::var("FREE_API_REVIEWER_TIMEOUT_SECS")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
             .map(|v| v.clamp(30, 600))
-            .unwrap_or(120)
+            .unwrap_or(120);
+        base.saturating_mul(2).min(llm::llm_call_total_budget_ms().div_ceil(1000))
     }
 
 pub(crate) const CHILD_MAX_OUTPUT_TOKENS: i64 = 900;

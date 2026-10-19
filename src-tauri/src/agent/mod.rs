@@ -45,6 +45,7 @@ pub mod workspace_lock;
 pub(crate) mod workspace_access;
 pub mod stage_review;
 pub mod review_tools;
+pub(crate) mod review_stream;
 pub mod eval_oracle;
 pub mod host_verify;
 pub mod impact_pack;

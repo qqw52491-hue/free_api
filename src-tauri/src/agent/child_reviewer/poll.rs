@@ -107,15 +107,17 @@ pub fn poll_completed_delivery_receipts(
 /// 宽限上限 = 各 kind 自身预算的数倍，正常慢任务不会误伤。
 pub fn reap_stale_child_runs(db: &DbState, parent_run_id: &str) -> usize {
     let Ok(conn) = db.0.lock() else { return 0; };
-    let rows: Vec<(String, Option<String>, String)> = {
+    let rows: Vec<(String, Option<String>, String, Option<String>)> = {
         let mut stmt = match conn.prepare(
-            "SELECT id, kind, started_at FROM agent_child_runs WHERE parent_run_id = ?1 AND status = 'running'",
+            "SELECT c.id, c.kind, c.started_at, s.updated_at FROM agent_child_runs c \
+             LEFT JOIN agent_stage_marks s ON s.session_id = 'child:' || c.id \
+             WHERE c.parent_run_id = ?1 AND c.status = 'running'",
         ) {
             Ok(stmt) => stmt,
             Err(_) => return 0,
         };
         stmt.query_map(params![parent_run_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?))
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?))
         })
         .map(|mapped| mapped.filter_map(|r| r.ok()).collect())
         .unwrap_or_default()
@@ -135,16 +137,28 @@ pub fn reap_stale_child_runs(db: &DbState, parent_run_id: &str) -> usize {
         configured.max(max_child_timeout_secs() as i64 + 30)
     };
     let mut reaped = 0usize;
-    for (child_run_id, kind, started_at) in rows {
+    for (child_run_id, kind, started_at, last_activity_at) in rows {
         let budget_secs: i64 = match kind.as_deref() {
             Some("writer") => 1200,
             Some("worker") => 900,
             _ => reviewer_budget_secs,
         };
-        let age_secs = chrono::DateTime::parse_from_rfc3339(&started_at)
-            .map(|t| (now - t.with_timezone(&chrono::Utc)).num_seconds())
-            .unwrap_or(0);
-        if age_secs <= budget_secs {
+        let started = chrono::DateTime::parse_from_rfc3339(&started_at)
+            .map(|t| t.with_timezone(&chrono::Utc)).unwrap_or(now);
+        let age_secs = (now - started).num_seconds();
+        // 审查者根据最近一次真实请求/输出活动回收；旧行缺标记时仍回退起点。
+        // writer/worker 的原有总时长回收语义保持不变。
+        let last_activity = last_activity_at.as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|t| t.with_timezone(&chrono::Utc))
+            .filter(|t| *t >= started && *t <= now)
+            .unwrap_or(started);
+        let quiet_secs = if matches!(kind.as_deref(), Some("writer" | "worker")) {
+            age_secs
+        } else {
+            (now - last_activity).num_seconds()
+        };
+        if quiet_secs <= budget_secs {
             continue;
         }
         let _ = conn.execute(
@@ -158,8 +172,8 @@ pub fn reap_stale_child_runs(db: &DbState, parent_run_id: &str) -> usize {
         // 清理日志：reap 只做标记不撕关联——迟到结果仍允许落库（见 finish 守卫），
         // 复盘时能看到"该行曾被收割"与"真实迟到结论"两段完整事实。
         println!(
-            "[reap] child_run={} kind={:?} age={}s → timed_out(reaped_stale)，行保留待迟到结果落库",
-            child_run_id, kind, age_secs
+            "[reap] child_run={} kind={:?} age={}s quiet={}s → timed_out(reaped_stale)，行保留待迟到结果落库",
+            child_run_id, kind, age_secs, quiet_secs
         );
         reaped += 1;
     }
@@ -167,6 +181,44 @@ pub fn reap_stale_child_runs(db: &DbState, parent_run_id: &str) -> usize {
         crate::agent::job_engine::notify_job_state_changed();
     }
     reaped
+}
+
+#[cfg(test)]
+mod activity_reap_tests {
+    use super::*;
+
+    #[test]
+    fn active_review_is_not_reaped_by_total_age_but_stale_or_legacy_runs_still_are() {
+        let root = std::env::temp_dir().join(format!("review-activity-reap-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = DbState(std::sync::Arc::new(std::sync::Mutex::new(crate::db::init_db(&root.join("test.db")).unwrap())));
+        let now = chrono::Utc::now();
+        let old = (now - chrono::Duration::hours(2)).to_rfc3339();
+        {
+            let conn = db.0.lock().unwrap();
+            for (id, kind, stamp) in [
+                ("active-review", "review", Some(now.to_rfc3339())),
+                ("stale-review", "review", Some(old.clone())),
+                ("legacy-review", "review", None),
+                ("future-stamp", "review", Some((now + chrono::Duration::hours(1)).to_rfc3339())),
+                ("old-worker", "worker", Some(now.to_rfc3339())),
+            ] {
+                conn.execute("INSERT INTO agent_child_runs (id,parent_run_id,parent_session_id,workspace_root,model_id,status,kind,started_at)
+                    VALUES (?1,'reap-parent','test-session','/tmp','mock','running',?2,?3)", params![id, kind, old]).unwrap();
+                if let Some(stamp) = stamp {
+                    conn.execute("INSERT INTO agent_stage_marks(session_id,stage,updated_at) VALUES (?1,'child_task:stream_output',?2)",
+                        params![format!("child:{id}"), stamp]).unwrap();
+                }
+            }
+        }
+        assert_eq!(reap_stale_child_runs(&db, "reap-parent"), 4);
+        let conn = db.0.lock().unwrap();
+        let status: String = conn.query_row("SELECT status FROM agent_child_runs WHERE id='active-review'", [], |r| r.get(0)).unwrap();
+        assert_eq!(status, "running");
+        drop(conn);
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 pub fn has_running_child_runs(db: &DbState, parent_run_id: &str) -> bool {

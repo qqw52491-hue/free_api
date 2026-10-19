@@ -37,7 +37,7 @@ fn parse_llm_call_total_budget_ms(raw: Option<&str>) -> u64 {
         .unwrap_or(DEFAULT_LLM_CALL_TOTAL_BUDGET_MS)
 }
 
-fn llm_call_total_budget_ms() -> u64 {
+pub(crate) fn llm_call_total_budget_ms() -> u64 {
     parse_llm_call_total_budget_ms(std::env::var("FREE_API_LLM_CALL_BUDGET_SECONDS").ok().as_deref())
 }
 

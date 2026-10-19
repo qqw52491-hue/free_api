@@ -343,6 +343,7 @@ pub async fn spawn_child_reviewer(
         let think_chars_cb = think_chars.clone();
         let mut cur_effort = reasoning_effort.clone();
         let mut think_overflows: u32 = 0;
+        let mut last_activity_mark = std::time::Instant::now();
         let mut on_stream_event = |event: llm::StreamEvent<'_>| -> bool {
             if let llm::StreamEvent::Thinking { chunk, .. } = &event {
                 let add = chunk.chars().count();
@@ -350,6 +351,11 @@ pub async fn spawn_child_reviewer(
                 if total > think_cap {
                     return false;
                 }
+            }
+            // 仅据真实生成片段刷新既有位置记录；限频落库，避免每 token 写 SQLite。
+            if last_activity_mark.elapsed() >= Duration::from_secs(5) {
+                crate::agent::control::mark_stage(&stage_key, "child_task:stream_output");
+                last_activity_mark = std::time::Instant::now();
             }
             if let Some(ref handle) = app_handle {
                 match event {
@@ -397,7 +403,7 @@ pub async fn spawn_child_reviewer(
         // 归档计数：本子运行内的第几次 LLM 调用（取证循环每轮一次）
         let mut llm_call_index = 0usize;
         let child_log_suffix = format!("child-{}", child_run_id_clone);
-        // 与终审取证环同款：单次超时先按 2× 超时同参重试一次（幂等只读），
+        // 与终审取证环共用活动计时：首输出/静默超时按 2× 静默时限同参重试一次，
         // 再超时才落 timed_out 交给编排层 failover——实测取证环末轮判决
         // 带着膨胀后的全量历史最慢，恰好是最不该直接超时放弃的一棒。
         let mut timeout_retried = false;
@@ -427,104 +433,40 @@ pub async fn spawn_child_reviewer(
                     }),
                 );
             }
-            let call = llm::stream_with_retry(
-                &config,
-                &messages,
-                &cur_effort,
-                &mut interrupt_rx,
-                1,
-                &mut on_stream_event,
-            );
-            let stream_result = match tokio::time::timeout(
-                Duration::from_secs(cur_timeout_secs),
-                call,
-            )
-            .await
-            {
-                Err(_) => {
-                    crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
-                        &session_id_clone,
-                        &child_log_suffix,
-                        llm_call_index,
-                        &config,
-                        &messages,
-                        None,
-                        "request_error",
-                        Some(if timeout_retried { "timeout_after_retry" } else { "timeout" }),
-                    );
-                    if !timeout_retried {
+            let stream_result = crate::agent::review_stream::stream_review(
+                &config, &messages, &cur_effort, &mut interrupt_rx,
+                None, cur_timeout_secs, &mut on_stream_event,
+            ).await;
+            let stream_result = match stream_result {
+                Ok(result) => {
+                    timeout_retried = false;
+                    cur_timeout_secs = child_timeout_secs(&config.model_name);
+                    result
+                }
+                Err(failure) => {
+                    failure.log(&session_id_clone, &child_log_suffix, llm_call_index, &config, &messages);
+                    if failure.may_retry_timeout() && !timeout_retried {
                         timeout_retried = true;
                         cur_timeout_secs = cur_timeout_secs.saturating_mul(2).min(600);
                         continue;
                     }
                     let duration_ms = started_at.elapsed().as_millis() as u64;
-                    finish_child_run(
-                        &db_clone,
-                        &child_run_id_clone,
-                        "timed_out",
-                        duration_ms,
-                        0,
-                        0,
-                        Some(ChildErrorKind::Timeout),
-                        Some(&child_error_result_json(
-                            &child_run_id_clone,
-                            "timed_out",
-                            &ChildErrorKind::Timeout,
-                            duration_ms,
-                            0,
-                            0,
-                            None,
-                        )),
-                    );
-                    return;
-                }
-                Ok(Err(error)) => {
-                    crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
-                        &session_id_clone,
-                        &child_log_suffix,
-                        llm_call_index,
-                        &config,
-                        &messages,
-                        None,
-                        "request_error",
-                        Some(&error),
-                    );
-                    let duration_ms = started_at.elapsed().as_millis() as u64;
-                    let status = if error == llm::STREAM_INTERRUPTED_ERROR {
-                        "cancelled"
+                    let (status, error_kind) = if failure.error == llm::STREAM_INTERRUPTED_ERROR {
+                        ("cancelled", ChildErrorKind::Cancelled)
+                    } else if failure.is_timeout() {
+                        ("timed_out", ChildErrorKind::Timeout)
                     } else {
-                        "failed"
-                    };
-                    let error_kind = if status == "cancelled" {
-                        ChildErrorKind::Cancelled
-                    } else {
-                        ChildErrorKind::RequestOrStream
+                        ("failed", ChildErrorKind::RequestOrStream)
                     };
                     finish_child_run(
-                        &db_clone,
-                        &child_run_id_clone,
-                        status,
-                        duration_ms,
-                        0,
-                        0,
+                        &db_clone, &child_run_id_clone, status, duration_ms, 0, 0,
                         Some(error_kind.clone()),
                         Some(&child_error_result_json(
-                            &child_run_id_clone,
-                            status,
-                            &error_kind,
-                            duration_ms,
-                            0,
-                            0,
-                            Some(error.as_str()),
+                            &child_run_id_clone, status, &error_kind, duration_ms, 0, 0,
+                            Some(&failure.description()),
                         )),
                     );
                     return;
-                }
-                Ok(Ok(result)) => {
-                    // 本棒成功：恢复基础超时（重试只救当前一棒，不传染后续轮次）
-                    timeout_retried = false;
-                    cur_timeout_secs = child_timeout_secs(&config.model_name);
-                    result
                 }
             };
 

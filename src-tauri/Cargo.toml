@@ -50,6 +50,7 @@ tauri-plugin-process = "2.4.0"
 
 # 仅 `cargo build --features wdio` 的测试构建载入；正常开发与发布版均不包含 WebDriver。
 [dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
 # 测试里用 tauri::test::mock_app() 造 AppHandle；test feature 只对测试构建生效。
 tauri = { version = "2", features = ["test"] }
 

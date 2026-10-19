@@ -223,65 +223,40 @@ pub(super) async fn dispatch_resume_child(
                             tokio::spawn(async move {
                                 let started_at = std::time::Instant::now();
                                 let child_log_suffix = format!("child-{}", new_child_run_id_clone);
-                                let mut on_stream_event = |_: crate::llm::StreamEvent<'_>| -> bool { true };
-                                let call = crate::llm::stream_with_retry(
-                                    &config,
-                                    &messages,
-                                    &reasoning_effort,
-                                    &mut interrupt_rx_clone,
-                                    1,
-                                    &mut on_stream_event,
-                                );
-                                let stream_result = match tokio::time::timeout(
-                                    std::time::Duration::from_secs(
-                                        crate::agent::child_reviewer::child_timeout_secs(&config.model_name),
-                                    ),
-                                    call,
-                                ).await {
-                                    Ok(Ok(res)) => res,
-                                    Ok(Err(e)) => {
-                                        crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
-                                            &parent_session_id_clone,
-                                            &child_log_suffix,
-                                            1,
-                                            &config,
-                                            &messages,
-                                            None,
-                                            "request_error",
-                                            Some(&e),
-                                        );
-                                        crate::agent::child_reviewer::finish_child_run(
-                                            &db_clone,
-                                            &new_child_run_id_clone,
-                                            "failed",
-                                            started_at.elapsed().as_millis() as u64,
-                                            0,
-                                            0,
-                                            Some(crate::agent::types::ChildErrorKind::RequestOrStream),
-                                            None,
-                                        );
-                                        return;
+                                let stream_stage_key = format!("child:{}", new_child_run_id_clone);
+                                crate::agent::control::mark_stage(&stream_stage_key, "child_task:llm_call:1");
+                                let mut last_activity_mark = std::time::Instant::now();
+                                let mut on_stream_event = |_: crate::llm::StreamEvent<'_>| -> bool {
+                                    if last_activity_mark.elapsed() >= std::time::Duration::from_secs(5) {
+                                        crate::agent::control::mark_stage(&stream_stage_key, "child_task:stream_output");
+                                        last_activity_mark = std::time::Instant::now();
                                     }
-                                    Err(_) => {
-                                        crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
-                                            &parent_session_id_clone,
-                                            &child_log_suffix,
-                                            1,
-                                            &config,
-                                            &messages,
-                                            None,
-                                            "request_error",
-                                            Some("timeout"),
-                                        );
+                                    true
+                                };
+                                let stream_result = crate::agent::review_stream::stream_review(
+                                    &config, &messages, &reasoning_effort, &mut interrupt_rx_clone,
+                                    None, crate::agent::child_reviewer::child_timeout_secs(&config.model_name),
+                                    &mut on_stream_event,
+                                ).await;
+                                let stream_result = match stream_result {
+                                    Ok(result) => result,
+                                    Err(failure) => {
+                                        failure.log(&parent_session_id_clone, &child_log_suffix, 1, &config, &messages);
+                                        let (status, kind) = if failure.error == crate::llm::STREAM_INTERRUPTED_ERROR {
+                                            ("cancelled", crate::agent::types::ChildErrorKind::Cancelled)
+                                        } else if failure.is_timeout() {
+                                            ("timed_out", crate::agent::types::ChildErrorKind::Timeout)
+                                        } else {
+                                            ("failed", crate::agent::types::ChildErrorKind::RequestOrStream)
+                                        };
+                                        let elapsed_ms = started_at.elapsed().as_millis() as u64;
                                         crate::agent::child_reviewer::finish_child_run(
-                                            &db_clone,
-                                            &new_child_run_id_clone,
-                                            "timed_out",
-                                            started_at.elapsed().as_millis() as u64,
-                                            0,
-                                            0,
-                                            Some(crate::agent::types::ChildErrorKind::Timeout),
-                                            None,
+                                            &db_clone, &new_child_run_id_clone, status,
+                                            elapsed_ms, 0, 0, Some(kind.clone()),
+                                            Some(&crate::agent::child_reviewer::child_error_result_json(
+                                                &new_child_run_id_clone, status, &kind, elapsed_ms, 0, 0,
+                                                Some(&failure.description()),
+                                            )),
                                         );
                                         return;
                                     }
