@@ -137,6 +137,8 @@ pub fn begin_job(
     )
     .map_err(|e| e.to_string())?;
 
+    drop(conn);
+    crate::agent::work_history::bind_async(db, parent_session_id, &job_id, None);
     Ok(job_id)
 }
 
@@ -171,13 +173,22 @@ pub fn finish_job(
     let now = Utc::now().to_rfc3339();
     let conn = db.0.lock().map_err(|e| e.to_string())?;
 
-    conn.execute(
+    let changed = conn.execute(
         "UPDATE agent_background_jobs 
          SET status = ?2, finished_at = ?3, duration_ms = ?4, result_json = ?5, error_kind = ?6
          WHERE id = ?1 AND status = 'running'",
         params![job_id, status, now, duration_ms as i64, result_json, error_kind],
     )
     .map_err(|e| e.to_string())?;
+
+    let session: Option<String> = conn.query_row("SELECT parent_session_id FROM agent_background_jobs WHERE id=?1", [job_id], |r| r.get(0)).ok();
+    drop(conn);
+    if changed > 0 {
+        if let Some(session) = session {
+            let raw = serde_json::json!({"job_id":job_id,"status":status,"result":result_json,"error_kind":error_kind}).to_string();
+            crate::agent::work_history::record_async_result(db, &session, job_id, status, &raw);
+        }
+    }
 
     // ⚡ 广播唤醒挂起等待中的协程
     notify_job_state_changed();

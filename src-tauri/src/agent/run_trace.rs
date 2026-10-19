@@ -269,7 +269,31 @@ pub fn save_step_output_with_meta(
     outcome: &str,
     raw_output: &str,
 ) -> Result<String, String> {
-    let output_id = uuid::Uuid::new_v4().to_string();
+    save_step_output_in_group(db, session_id, step_id, tool, action, outcome, raw_output, None)
+}
+
+pub(crate) fn save_step_output_in_group(
+    db: &DbState,
+    session_id: &str,
+    step_id: usize,
+    tool: &str,
+    action: &str,
+    outcome: &str,
+    raw_output: &str,
+    group: Option<&crate::agent::work_history::WorkGroup>,
+) -> Result<String, String> {
+    save_group_observation(db, session_id, step_id, tool, action, outcome, raw_output, group, None)
+}
+
+pub(crate) fn save_group_observation(
+    db: &DbState, session_id: &str, step_id: usize, tool: &str, action: &str,
+    outcome: &str, raw_output: &str, group: Option<&crate::agent::work_history::WorkGroup>,
+    async_id: Option<&str>,
+) -> Result<String, String> {
+    let output_id = match async_id {
+        Some(id) => uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, json!([session_id,id]).to_string().as_bytes()).to_string(),
+        None => uuid::Uuid::new_v4().to_string(),
+    };
     let now = Utc::now().to_rfc3339();
 
     // blob 落盘必须先于获取 SQLite 锁完成：大文件写盘耗时不可控，
@@ -298,26 +322,33 @@ pub fn save_step_output_with_meta(
 
     let conn = db.0.lock().map_err(|error| error.to_string())?;
 
-    conn.execute(
+    let inserted = conn.execute(
         "INSERT INTO agent_step_logs (output_id, session_id, step_id, raw_output, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+         VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(output_id) DO NOTHING",
         params![output_id, session_id, step_id, sqlite_content, now],
     )
     .map_err(|error| error.to_string())?;
+    if inserted == 0 { return Ok(output_id); }
 
     let _ = crate::agent::retrieval::index_step_fts(
         &conn, &output_id, session_id, step_id, tool, action, outcome, raw_output,
     );
 
+    let group = group.filter(|g| g.session_id == session_id);
+    let parent_id = group.and_then(|g| match crate::agent::work_history::ensure_group(&conn, g) {
+        Ok(id) => Some(id),
+        Err(e) => { eprintln!("工作目录未保存，原始输出仍可回查: {e}"); None }
+    });
     // 写入三级记忆模型的 Level 0 原始事件节点 (带语义关键词)
     let node = crate::agent::retrieval::MemoryNode {
-        id: format!("step-{}", step_id),
-        parent_id: None,
+        // 步骤号会在不同会话/运行中复用；一次观察的身份跟随原始输出。
+        id: format!("event-{}", output_id),
+        parent_id,
         level: 0,
         kind: "event".to_string(),
         session_id: session_id.to_string(),
-        plan_id: None,
-        step_index: Some(step_id),
+        plan_id: group.map(|g| g.plan_id.clone()),
+        step_index: if async_id.is_some() { None } else { Some(step_id) },
         content: format!(
             "工具: {} | 动作: {} | 状态: {}\n输出: {}",
             tool,
@@ -330,6 +361,8 @@ pub fn save_step_output_with_meta(
             "tool": tool,
             "action": action,
             "outcome": outcome,
+            "work_group": group,
+            "async_result_id": async_id,
         })
         .to_string(),
         confidence_score: 100,

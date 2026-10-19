@@ -99,6 +99,10 @@ pub fn dispatch_in_workspace(
             .and_then(|v| v.as_str())
             == Some("raw");
     let result = (|| -> Result<Value, String> {
+        if action == "get_work_group" {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            return crate::agent::work_history::get_group(&conn, session_id, params_value);
+        }
         if action == "get_step_output" || action == "get_output" {
             let output_id = optional_string(params_value, "output_id")
                 .or_else(|| optional_string(params_value, "id"))
@@ -230,7 +234,7 @@ pub fn dispatch_in_workspace(
             "update_resource" => update_resource(&mut conn, session_id, params_value),
             "mcp_dedup_stats" => mcp_dedup_stats(&conn, session_id),
             _ => Err(format!(
-                "task_store 不支持 action='{}'。可用动作：create_resource、upsert_records、list_resources、get_resource、list_records、get_record、update_resource, get_step_output, search_step_output, mcp_dedup_stats, evidence_record, evidence_find, evidence_inspect, evidence_compare",
+                "task_store 不支持 action='{}'。可用动作：create_resource、upsert_records、list_resources、get_resource、list_records、get_record、update_resource, get_step_output, search_step_output, get_work_group, mcp_dedup_stats, evidence_record, evidence_find, evidence_inspect, evidence_compare",
                 action
             )),
         }

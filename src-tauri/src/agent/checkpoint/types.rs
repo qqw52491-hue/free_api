@@ -157,7 +157,7 @@ pub fn recovery_policy_for(instruction: &AgentInstruction) -> RecoveryPolicy {
     if tool == "task_store" {
         return match action.as_str() {
             "list_resources" | "get_resource" | "list_records" | "get_record"
-            | "evidence_find" | "evidence_inspect" | "evidence_compare" => {
+            | "evidence_find" | "evidence_inspect" | "evidence_compare" | "get_work_group" => {
                 RecoveryPolicy::SafeRetry
             }
             // 显式键重试保留首次观察；无键会追加新记录，重试最多产生重复观察，

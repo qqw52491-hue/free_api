@@ -54,9 +54,11 @@ async fn run_tool_phase_guarded(
     interrupt_rx: &mut watch::Receiver<u64>,
 ) -> Result<DispatchResult, String> {
     let secs = tool_watchdog_secs();
+    let group = crate::agent::work_history::WorkGroup::capture(final_session_id, context, step_id);
+    crate::agent::work_history::prepare_group(state.inner(), group.as_ref());
     match tokio::time::timeout(
         std::time::Duration::from_secs(secs),
-        run_tool_phase(
+        crate::agent::work_history::in_group(group, run_tool_phase(
             app,
             state,
             registry_state,
@@ -71,7 +73,7 @@ async fn run_tool_phase_guarded(
             run_machine,
             rx,
             interrupt_rx,
-        ),
+        )),
     )
     .await
     {
@@ -427,6 +429,10 @@ pub async fn run_call_llm_and_run_tool_phases(
             inst.description = "执行下一步操作".to_string();
         }
         let (plan_id, plan_title) = context.resolve_plan(&inst);
+        // 保存宿主已解析的身份，恢复时不重复消费 new_plan。
+        inst.plan_id = Some(plan_id.clone());
+        inst.plan_title = Some(plan_title.clone());
+        inst.new_plan = Some(false);
 
         // 🌟 捕获大模型输出的全局精炼任务标题并实时持久化到 SQLite
         if let Some(session_title) = &inst.session_title {
@@ -641,7 +647,7 @@ pub async fn run_call_llm_and_run_tool_phases(
             )?;
 
             // 🌟 立即将失败尝试的完整报错写入 SQLite (agent_step_logs & FTS5)，确保错误历史有据可查
-            let _ = crate::agent::run_trace::save_step_output_with_meta(
+            let _ = crate::agent::run_trace::save_step_output_in_group(
                 state.inner(),
                 final_session_id,
                 step_id,
@@ -649,6 +655,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                 &inst.description,
                 "failed",
                 &error_detail,
+                crate::agent::work_history::WorkGroup::capture(final_session_id, context, step_id).as_ref(),
             );
 
             // 🌟 立即将失败尝试写入复盘轨迹 run_trace_steps 并持久化到 agent_run_traces，保证页面刷新后红色的失败步骤不丢失

@@ -65,6 +65,77 @@
         conn
     }
 
+    fn memory_event(id: &str, session: &str, content: &str) -> MemoryNode {
+        MemoryNode {
+            id: id.into(), parent_id: None, level: 0, kind: "event".into(),
+            session_id: session.into(), plan_id: None, step_index: Some(1),
+            content: content.into(), metadata_json: "{}".into(),
+            confidence_score: 100, hit_count: 0, created_at: "2026-10-19".into(),
+        }
+    }
+
+    #[test]
+    fn memory_rewrite_replaces_search_index_and_rolls_back_on_index_failure() {
+        let conn = setup_test_db();
+        let mut node = memory_event("event-a", "s", "obsolete diagnosis");
+        insert_memory_node(&conn, &node, "obsolete").unwrap();
+        node.content = "current observation".into();
+        insert_memory_node(&conn, &node, "current").unwrap();
+        assert!(search_memory_nodes_enriched(&conn, "s", "obsolete", None, 10).unwrap().is_empty());
+        assert_eq!(search_memory_nodes_enriched(&conn, "s", "current", None, 10).unwrap().len(), 1);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM agent_memory_nodes_fts", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+
+        // 缺失索引表使第二步写入失败，主节点也必须保持原观察。
+        conn.execute_batch("DROP TABLE agent_memory_nodes_fts").unwrap();
+        node.content = "uncommitted replacement".into();
+        assert!(insert_memory_node(&conn, &node, "replacement").is_err());
+        assert_eq!(conn.query_row("SELECT content FROM agent_memory_nodes WHERE id='event-a'", [], |r| r.get::<_, String>(0)).unwrap(), "current observation");
+    }
+
+    #[test]
+    fn memory_search_excludes_legacy_stale_index_and_foreign_relations() {
+        let conn = setup_test_db();
+        let foreign = memory_event("foreign", "other", "PRIVATE parent context");
+        insert_memory_node(&conn, &foreign, "private").unwrap();
+        let mut node = memory_event("step-1", "s", "valid observation");
+        node.parent_id = Some("foreign".into());
+        insert_memory_node(&conn, &node, "valid").unwrap();
+        conn.execute("INSERT INTO agent_memory_nodes_fts VALUES ('step-1','old',0,'event',NULL,'obsolete diagnosis','obsolete')", []).unwrap();
+        conn.execute("INSERT INTO agent_memory_nodes_fts VALUES ('step-1','s',0,'event',NULL,'stale same session','stale')", []).unwrap();
+        assert!(search_memory_nodes_enriched(&conn, "s", "obsolete", None, 10).unwrap().is_empty());
+        assert!(search_memory_nodes_enriched(&conn, "s", "stale", None, 10).unwrap().is_empty());
+        let hits = search_memory_nodes_enriched(&conn, "s", "valid", None, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(!hits[0].evidence.iter().any(|e| e.contains("PRIVATE")));
+
+        let mut summary = memory_event("summary", "s", "phase conclusion");
+        summary.level = 2;
+        insert_memory_node(&conn, &summary, "conclusion").unwrap();
+        let mut foreign_child = memory_event("foreign-child", "other", "PRIVATE child context");
+        foreign_child.parent_id = Some("summary".into());
+        insert_memory_node(&conn, &foreign_child, "private").unwrap();
+        let hits = search_memory_nodes_enriched(&conn, "", "conclusion", None, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(!hits[0].evidence.iter().any(|e| e.contains("PRIVATE")));
+    }
+
+    #[test]
+    fn memory_events_use_output_identity_across_sessions_and_restarted_steps() {
+        let conn = setup_test_db();
+        conn.execute_batch("CREATE TABLE agent_step_logs(output_id TEXT PRIMARY KEY,session_id TEXT,step_id INTEGER,raw_output TEXT,created_at TEXT)").unwrap();
+        let db = crate::db::DbState(Arc::new(Mutex::new(conn)));
+        for (session, text) in [("s", "first observation"), ("other", "foreign observation"), ("s", "restarted observation")] {
+            let output_id = crate::agent::run_trace::save_step_output_with_meta(&db, session, 1, "local_shell", "exec", "failed", text).unwrap();
+            let conn = db.0.lock().unwrap();
+            let hits = search_memory_nodes_enriched(&conn, session, text, None, 10).unwrap();
+            assert_eq!(hits.len(), 1);
+            assert!(hits[0].evidence.iter().any(|e| e.contains(&output_id)), "命中后必须能沿精确 output_id 回查");
+        }
+        let conn = db.0.lock().unwrap();
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM agent_memory_nodes", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
+        assert_eq!(search_memory_nodes_enriched(&conn, "s", "observation", None, 10).unwrap().len(), 2);
+    }
+
     #[test]
     fn test_fts5_indexing_and_history_search() {
         let conn = setup_test_db();

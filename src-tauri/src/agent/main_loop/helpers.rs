@@ -118,7 +118,7 @@ pub(crate) fn persist_challenged_step(
     metrics: Option<serde_json::Value>,
     thinking_text: &str,
 ) {
-    let output_id = crate::agent::run_trace::save_step_output_with_meta(
+    let output_id = crate::agent::run_trace::save_step_output_in_group(
         db,
         session_id,
         step_id,
@@ -126,6 +126,7 @@ pub(crate) fn persist_challenged_step(
         &instruction.description,
         status,
         output_text,
+        crate::agent::work_history::WorkGroup::capture(session_id, context, step_id).as_ref(),
     )
     .unwrap_or_else(|e| {
         eprintln!("⚠️ 无法保存 step_output: {}", e);

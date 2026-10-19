@@ -195,9 +195,11 @@ pub(super) async fn dispatch_local_tool(
 
         let pending_images = crate::agent::tools::view_image::PendingImageQueue::default();
         let tool_images = pending_images.clone();
+        let work_group = crate::agent::work_history::current_group();
         let mut tool_task = tokio::task::spawn_blocking(move || {
             println!("执行动作: {:?}", inst_c);
-            run_agent_step_with_images(&db, &sid, &inst_c, &registry, Some(&ws_root), &tool_images, Some(&run_id))
+            crate::agent::work_history::in_blocking_group(work_group, ||
+                run_agent_step_with_images(&db, &sid, &inst_c, &registry, Some(&ws_root), &tool_images, Some(&run_id)))
         });
 
         let mut dispatch_result = tokio::select! {

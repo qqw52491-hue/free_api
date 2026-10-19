@@ -280,7 +280,7 @@ impl SandwichContext {
 }
 
 /// 对历史较旧的轮次进行证据化脱水，移除冗余的重型 raw stdout 和长报错堆栈。
-/// 唯一调用方是 compaction（高水位事件内一次性定型）；日常组装绝不调用，
+/// 由 compaction 的批量脱水/归档调用；日常组装绝不调用，
 /// 以保证相邻请求之间前缀字节稳定（增量前缀缓存的前提）。
 pub(crate) fn dehydrate_historical_turn(msg: &ChatMessage) -> ChatMessage {
     if msg.role != "user" {
@@ -290,46 +290,55 @@ pub(crate) fn dehydrate_historical_turn(msg: &ChatMessage) -> ChatMessage {
         serde_json::Value::String(s) => s,
         _ => return msg.clone(),
     };
+    if text.starts_with("【历史工具回执（节选）】") {
+        return msg.clone();
+    }
 
-    // 1. 如果是早期执行输出且较长（> 400 字符），提取 output_id 和结果状态，将正文脱水为结构化证据句柄
+    // 1. 只处理宿主工具输出外壳；普通消息引用 output_id 不是工具回执。
     if (text.starts_with("【执行输出")
-        || text.starts_with("[代码阅读护栏]")
-        || text.contains("output_id: "))
+        || text.starts_with("[代码阅读护栏]"))
         && text.len() > 400
     {
         let mut output_id = "";
-        let mut status_line = "";
+        let mut receipt_lines = Vec::new();
         for line in text.lines() {
             let trimmed = line.trim();
             if trimmed.starts_with("output_id: ") {
-                output_id = trimmed[11..].trim();
+                // 原文中可能包含其他输出的引用，不能覆盖外壳的观察身份。
+                if output_id.is_empty() {
+                    output_id = trimmed[11..].trim();
+                }
             } else if (trimmed.starts_with("【计划执行结果报告】")
                 || trimmed.starts_with("状态:")
                 || trimmed.starts_with("Finished")
-                || trimmed.starts_with("总耗时:"))
-                && status_line.is_empty()
+                || trimmed.starts_with("总耗时:")
+                || trimmed.contains("(exit_code:")
+                || trimmed.starts_with("退出码:")
+                || trimmed.starts_with("命令退出码:")
+                || trimmed.starts_with("$ "))
+                && receipt_lines.len() < 4
             {
-                status_line = trimmed;
+                receipt_lines.push(trimmed.chars().take(240).collect::<String>());
             }
         }
         if !output_id.is_empty() {
             let first_line = text.lines().next().unwrap_or("【执行输出】");
-            let summary = if !status_line.is_empty() {
-                format!(
-                    "{}\n(完整详细数据已安全持久化至 SQLite，可通过 output_id={} 精准检索)",
-                    status_line, output_id
-                )
+            // 保留有界的原文首尾，不按错误词推断结果或假定中间内容无关。
+            let body = text.lines().skip(1)
+                .filter(|line| !line.trim().starts_with("output_id: "))
+                .collect::<Vec<_>>().join("\n");
+            let excerpt = if body.chars().count() > 800 {
+                let head: String = body.chars().take(450).collect();
+                let tail: String = body.chars().rev().take(350).collect::<String>().chars().rev().collect();
+                format!("{}\n[已省略中间原文，结果可能不完整]\n{}", head, tail)
             } else {
-                format!(
-                    "(完整详细数据已安全持久化至 SQLite，可通过 output_id={} 精准检索)",
-                    output_id
-                )
+                body
             };
             return ChatMessage {
                 role: "user".to_string(),
                 content: json!(format!(
-                    "{}\noutput_id: {}\n{}",
-                    first_line, output_id, summary
+                    "【历史工具回执（节选）】\noutput_id: {}\n{}\n{}\n原文节选:\n{}\n(完整详细数据已安全持久化至 SQLite，可通过 output_id={} 精准检索)",
+                    output_id, first_line, receipt_lines.join("\n"), excerpt, output_id
                 )),
             };
         }
@@ -954,6 +963,39 @@ mod tests {
 #[cfg(test)]
 mod historical_error_feedback_tests {
     use super::*;
+
+    #[test]
+    fn historical_tool_receipt_keeps_observed_exit_and_bounded_original_excerpt() {
+        let msg = ChatMessage { role: "user".into(), content: json!(format!(
+            "【执行输出 (v2)】\noutput_id: failed-build\n⚠️ [退出码非零] (exit_code: 1, 耗时: 20ms)\n$ mvn compile\n--- STDOUT ---\n{}\n--- STDERR ---\ncannot find symbol SomeClass",
+            "编译过程\n".repeat(2000)
+        )) };
+        let receipt = dehydrate_historical_turn(&msg);
+        let text = receipt.content.as_str().unwrap();
+        assert!(text.contains("exit_code: 1"));
+        assert!(text.contains("$ mvn compile"));
+        assert!(text.contains("cannot find symbol SomeClass"));
+        assert!(text.contains("节选"));
+        assert!(text.contains("output_id: failed-build"));
+        assert!(text.chars().count() < 1600);
+        assert_eq!(dehydrate_historical_turn(&receipt).content, receipt.content);
+    }
+
+    #[test]
+    fn historical_receipt_uses_wrapper_identity_and_leaves_ordinary_references_alone() {
+        let ordinary = ChatMessage { role: "user".into(), content: json!(format!(
+            "这是用户要求和文档示例\noutput_id: example\n{}", "请保留正文\n".repeat(200)
+        )) };
+        assert_eq!(dehydrate_historical_turn(&ordinary), ordinary);
+        let output = ChatMessage { role: "user".into(), content: json!(format!(
+            "【执行输出】\noutput_id: actual\n{}\noutput_id: nested-reference", "原文\n".repeat(300)
+        )) };
+        let receipt = dehydrate_historical_turn(&output);
+        let text = receipt.content.as_str().unwrap();
+        assert!(text.contains("\noutput_id: actual\n"));
+        assert!(text.contains("output_id=actual"));
+        assert!(!text.contains("output_id=nested-reference"));
+    }
 
     #[test]
     fn blank_second_line_does_not_erase_historical_error_reason() {

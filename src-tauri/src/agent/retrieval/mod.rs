@@ -713,6 +713,7 @@ pub fn dispatch_search(
     };
 
     let mut history_ok = !wants_history;
+    let mut history_truncated = false;
     if wants_history {
         // 作用域解析：session(默认)=本会话围栏；global/all=跨会话检索。
         // 空 session_id 走引擎全局分支，该分支自动排除 agent-evaluation-* 评测会话的节点。
@@ -721,14 +722,16 @@ pub fn dispatch_search(
         let history_session_id = if global_scope { "" } else { session_id };
         if let Ok(conn) = db.0.lock() {
             let mut history_branch_hits = Vec::new();
-            if let Ok(hits) = search_history(
+            let mut memory_hits = Vec::new();
+            if let Ok(mut hits) = search_history(
                 &conn,
                 history_session_id,
                 &params.query,
                 params.outcome.as_deref(),
                 params.since_step,
-                limit,
+                limit.saturating_add(1),
             ) {
+                memory_signpost::enrich_history_groups(&conn, &mut hits);
                 history_branch_hits.extend(hits);
             }
 
@@ -738,21 +741,14 @@ pub fn dispatch_search(
                 history_session_id,
                 &params.query,
                 None,
-                limit,
+                limit.saturating_add(1),
             ) {
-                history_branch_hits.extend(mem_hits);
+                memory_hits = mem_hits;
             }
 
-            // 去重并限制返回条数
-            let mut seen_ids = std::collections::HashSet::new();
-            for hit in history_branch_hits {
-                if seen_ids.insert(hit.id_or_path.clone()) {
-                    all_hits.push(hit);
-                    if all_hits.len() >= limit {
-                        break;
-                    }
-                }
-            }
+            let (hits, truncated) = memory_signpost::merge_history_hits(history_branch_hits, memory_hits, limit);
+            history_truncated = truncated;
+            all_hits.extend(hits);
             history_ok = true;
         } else {
             errors.push("history 检索失败: 数据库锁获取失败".to_string());
@@ -865,7 +861,7 @@ pub fn dispatch_search(
     let mut result_payload = json!({
         "query": params.query,
         "total_hits": all_hits.len(),
-        "has_more": code_truncated,
+        "has_more": code_truncated || history_truncated,
         "hits": all_hits
     });
     if let Some(root) = resolved_root {

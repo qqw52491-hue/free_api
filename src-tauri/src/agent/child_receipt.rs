@@ -109,6 +109,9 @@ pub(crate) async fn reduce_child_receipt(
     };
     let receipt = &receipt_owned;
 
+    let raw = receipt.raw_text.clone().unwrap_or_else(|| serde_json::to_string(receipt).unwrap_or_default());
+    crate::agent::work_history::record_async_result(env.db, env.session_id, &receipt.child_run_id, &receipt.status, &raw);
+
     // 请求/超时/无效结构是审查通道失败，不是“方案不通过”。
     // 必须先处理备用，再进入各类审查聚合；未配置或备用已失败则进入统一失败出口。
     let kind = receipt.error_kind.as_deref().map(ChildErrorKind::parse);

@@ -116,12 +116,18 @@ pub struct SideEffectRecord {
     pub affected_paths: Vec<String>,
 }
 
+pub(crate) fn new_history_task_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 /// 阶段计划状态机：自包含管理计划 ID、标题与自增编号
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PlanState {
     pub active_id: Option<String>,
     pub active_title: Option<String>,
     pub next_index: usize,
+    #[serde(default)]
+    pub titles: BTreeMap<String, String>,
 }
 
 pub fn clip_plan_title(raw: &str) -> String {
@@ -159,8 +165,13 @@ impl PlanState {
         // 1. 如果模型明确指定了 ID
         if let Some(id) = requested_id {
             let title = requested_title
-                .or_else(|| self.active_title.clone())
+                .or_else(|| self.titles.get(&id).cloned())
+                .or_else(|| (self.active_id.as_ref() == Some(&id)).then(|| self.active_title.clone()).flatten())
                 .unwrap_or(default_clean);
+            if let Some(index) = id.strip_prefix("plan-").and_then(|s| s.parse::<usize>().ok()) {
+                self.next_index = self.next_index.max(index);
+            }
+            self.titles.insert(id.clone(), title.clone());
             self.active_id = Some(id.clone());
             self.active_title = Some(title.clone());
             return (id, title);
@@ -175,6 +186,7 @@ impl PlanState {
                 .unwrap_or(default_clean);
             self.active_id = Some(id.clone());
             self.active_title = Some(title.clone());
+            self.titles.insert(id.clone(), title.clone());
             return (id, title);
         }
 
@@ -184,6 +196,7 @@ impl PlanState {
                 .or_else(|| self.active_title.clone())
                 .unwrap_or(default_clean);
             self.active_title = Some(title.clone());
+            self.titles.insert(existing_id.clone(), title.clone());
             return (existing_id, title);
         }
 
@@ -193,6 +206,7 @@ impl PlanState {
         let title = requested_title.unwrap_or(default_clean);
         self.active_id = Some(id.clone());
         self.active_title = Some(title.clone());
+        self.titles.insert(id.clone(), title.clone());
         (id, title)
     }
 
@@ -224,6 +238,9 @@ pub struct SandwichContext {
     /// 终审/阶段审查/方案门等"本任务是什么"的判定以此为准）。
     #[serde(default)]
     pub current_goal: String,
+    /// 宿主生成的任务归属；同任务恢复保留，新任务不继承，不发送给模型。
+    #[serde(default = "new_history_task_id")]
+    pub history_task_id: String,
     /// 当前按需展开的活跃工具/Skill 规格详情 (通过 next_tool_hint 懒加载，其余时间为空)
     pub active_tool_detail: String,
 
@@ -436,6 +453,7 @@ impl SandwichContext {
         Self {
             system_prompt,
             current_goal: user_goal.clone(),
+            history_task_id: new_history_task_id(),
             user_goal,
 
             memories: BTreeMap::new(),
@@ -982,12 +1000,13 @@ impl SandwichContext {
             .filter(|value| !value.is_empty())
             .map(str::to_string);
         let is_new_plan = instruction.new_plan.unwrap_or(false);
+        let default_title = self.effective_goal().to_string();
 
         self.plan_state.resolve_plan_explicit(
             requested_id,
             requested_title,
             is_new_plan,
-            &self.user_goal,
+            &default_title,
         )
     }
 

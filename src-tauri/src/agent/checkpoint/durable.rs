@@ -19,6 +19,10 @@ pub struct DurableAgentContext {
     /// 恢复回退 user_goal，二者在单轮语义下本就一致）。
     #[serde(default)]
     pub current_goal: String,
+    #[serde(default = "crate::agent::context::types::new_history_task_id")]
+    pub history_task_id: String,
+    #[serde(default)]
+    pub plan_state: crate::agent::context::types::PlanState,
     pub memories: std::collections::BTreeMap<String, String>,
     /// 任务数据区目录，数据行仍由 agent_task_records 独立实时持久化。
     #[serde(default)]
@@ -78,6 +82,8 @@ impl DurableAgentContext {
         Self {
             user_goal: context.user_goal.clone(),
             current_goal: context.effective_goal().to_string(),
+            history_task_id: context.history_task_id.clone(),
+            plan_state: context.plan_state.clone(),
             memories: context.memories.clone(),
             task_resources: context.task_resources.clone(),
             todo_list: context.todo_list.clone(),
@@ -121,6 +127,8 @@ impl DurableAgentContext {
         } else {
             self.current_goal.clone()
         };
+        context.history_task_id = self.history_task_id.clone();
+        context.plan_state = self.plan_state.clone();
         context.memories = self.memories.clone();
         context.task_resources = self.task_resources.clone();
         context.todo_list = self.todo_list.clone();

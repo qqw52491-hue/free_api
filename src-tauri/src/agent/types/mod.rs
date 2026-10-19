@@ -479,16 +479,16 @@ pub struct AgentInstruction {
     /// finding 性质分类：start|breakthrough|milestone|summary|warning|blocker
     #[serde(default)]
     pub finding_kind: Option<String>,
-    /// 当前动作所属的稳定计划节点。相同 plan_id 的连续动作会收敛到同一父节点。
+    /// 当前动作所属的稳定工作组；回到原工作组时复用其 plan_id。显式 ID 优先于 new_plan。
     #[serde(default)]
     pub plan_id: Option<String>,
-    /// 面向用户的计划标题；切换该标题代表开始新的工作阶段。
+    /// 面向用户的工作组标签；修改标题不改变组身份，也不表示已完成。
     #[serde(default)]
     pub plan_title: Option<String>,
     /// 全局任务会话精炼主旨（仅在人类发起新任务或干预指令的首次规划中提供，4~12字名词短语）
     #[serde(default)]
     pub session_title: Option<String>,
-    /// 显式申明开始新工作阶段（结合 plan_id 切换 Episode）
+    /// 未提供 plan_id 时申请新工作组；提供 ID 时按该 ID 激活/复用。
     #[serde(default)]
     pub new_plan: Option<bool>,
     /// 模型决策中显式采纳的 Lesson ID 列表（用于血缘追踪与精准负反馈归因）

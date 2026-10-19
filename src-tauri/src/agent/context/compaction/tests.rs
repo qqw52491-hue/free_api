@@ -96,7 +96,7 @@ fn test_hybrid_summarizer_falls_back_gracefully() {
 }
 
 #[test]
-fn test_compaction_promotes_latest_goal_to_m1() {
+fn test_compaction_uses_current_goal_without_replaying_archived_goal() {
     let mut ctx = SandwichContext::new("SYS".to_string(), "初始目标：审计项目依赖".to_string());
     ctx.context_window_tokens = 8000;
 
@@ -122,12 +122,71 @@ fn test_compaction_promotes_latest_goal_to_m1() {
         });
     }
 
+    ctx.current_goal = "最新要求：只生成 nogpu 报告".into();
+
     ctx.maybe_compact_history();
 
     assert_eq!(
-        ctx.user_goal, "生成执行报告并写入 report.xlsx",
-        "compaction 应从历史事件中提取并提升最新任务目标到 M1"
+        ctx.user_goal, "最新要求：只生成 nogpu 报告",
+        "压缩只能从当前任务状态刷新锚点"
     );
+    assert_eq!(ctx.current_goal, "最新要求：只生成 nogpu 报告");
+}
+
+#[test]
+fn compaction_does_not_promote_summary_bullets_to_memories() {
+    let mut ctx = SandwichContext::new("SYS".into(), "Goal".into());
+    ctx.context_window_tokens = 8000;
+    ctx.memories.insert("explicit".into(), "明确保存的记忆".into());
+    for _ in 0..60 {
+        ctx.turns_history.push(ChatMessage {
+            role: "assistant".into(),
+            content: json!(format!("关键事实：可能是网络问题，尚未确认\n{}", "x".repeat(400))),
+        });
+    }
+    ctx.maybe_compact_history();
+    assert!(ctx.turns_history.iter().any(|m| m.content.as_str().is_some_and(|s| s.contains("【历史早期执行归档卡片"))));
+    assert_eq!(ctx.memories.len(), 1, "列表外观不能把历史猜测变成工作记忆");
+    assert_eq!(ctx.memories["explicit"], "明确保存的记忆");
+}
+
+#[test]
+fn rule_fallback_retains_observations_after_dehydration_with_a_bounded_index() {
+    let original = ChatMessage { role: "user".into(), content: json!(format!(
+        "【执行输出】\noutput_id: compile-1\n⚠️ [退出码非零] (exit_code: 1)\n$ mvn compile\n{}\ncannot find symbol SomeClass",
+        "过程日志\n".repeat(1000)
+    )) };
+    let dehydrated = crate::agent::context::assembler::dehydrate_historical_turn(&original);
+    let summary = RuleBasedSummarizer.summarize(&[dehydrated]).unwrap();
+    assert!(summary.contains("exit_code: 1"));
+    assert!(summary.contains("cannot find symbol SomeClass"));
+    assert!(summary.contains("output_id=compile-1"));
+    assert!(summary.contains("节选"));
+    assert!(summary.chars().count() < 250);
+}
+
+#[test]
+fn compaction_keeps_archive_references_and_legacy_goal_fallback() {
+    let mut ctx = SandwichContext::new("SYS".into(), "旧检查点锚点".into());
+    ctx.current_goal.clear(); // 旧 checkpoint 无 current_goal，仍回退既有锚点。
+    ctx.context_window_tokens = 8000;
+    for i in 0..60 {
+        ctx.turns_history.push(ChatMessage {
+            role: "assistant".into(),
+            content: json!(format!("step {} {}", i, "x".repeat(400))),
+        });
+        ctx.turns_history.push(ChatMessage {
+            role: "user".into(),
+            content: json!(format!("【执行输出】\noutput_id: out-{}\n{}", i, "y".repeat(400))),
+        });
+    }
+    ctx.maybe_compact_history();
+    assert_eq!(ctx.user_goal, "旧检查点锚点");
+    assert!(ctx.current_goal.is_empty());
+    let archive = ctx.turns_history.iter().find_map(|m| m.content.as_str()
+        .filter(|s| s.starts_with("【历史早期执行归档卡片"))).unwrap();
+    assert!(archive.contains("output_id=out-0"));
+    assert!(archive.contains("output_id=out-1"));
 }
 
 #[test]

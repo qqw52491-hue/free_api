@@ -2108,7 +2108,7 @@ async fn run_agent_main_loop_in_workspace_inner(
         let mcp_evidence = crate::agent::dispatcher::take_mcp_durable_output(&mut result.view);
         let has_mcp_evidence = mcp_evidence.is_some();
         let durable_output_text = mcp_evidence.unwrap_or_else(|| model_output_text.clone());
-        let output_id = crate::agent::run_trace::save_step_output_with_meta(
+        let output_id = crate::agent::run_trace::save_step_output_in_group(
             state.inner(),
             &final_session_id,
             step_id,
@@ -2116,6 +2116,7 @@ async fn run_agent_main_loop_in_workspace_inner(
             &instruction.description,
             outcome_str,
             &durable_output_text,
+            crate::agent::work_history::WorkGroup::capture(&final_session_id, &context, step_id).as_ref(),
         )
         .unwrap_or_else(|e| {
             eprintln!("⚠️ 无法保存 step_output: {}", e);

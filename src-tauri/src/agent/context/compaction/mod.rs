@@ -30,7 +30,21 @@ impl Summarizer for RuleBasedSummarizer {
             }
             let first_line = content_str.lines().next().unwrap_or("").trim();
             if !first_line.is_empty() {
-                let preview: String = first_line.chars().take(140).collect();
+                // 规则降级也保留有界原文首尾；不能复制完整回执使归档反而膨胀。
+                let preview: String = if content_str.starts_with("【历史工具回执（节选）】") {
+                    let excerpt = content_str.split_once("原文节选:\n")
+                        .map(|(_, body)| body.split("\n(完整详细数据").next().unwrap_or(body))
+                        .unwrap_or(first_line);
+                    let head: String = excerpt.chars().take(60).collect();
+                    let tail: String = excerpt.chars().rev().take(80).collect::<String>().chars().rev().collect();
+                    if excerpt.chars().count() > 140 {
+                        format!("[原文节选，结果可能不完整] {} … {}", head, tail)
+                    } else {
+                        format!("[原文节选] {}", excerpt)
+                    }
+                } else {
+                    first_line.chars().take(140).collect()
+                };
                 lines.push(format!("- [{}]{} {}", msg.role, out_ref, preview));
             }
         }
@@ -447,38 +461,10 @@ impl SandwichContext {
         // 单次 drain：O(n) 一次完成，头部一次性切除
         let to_compact: Vec<ChatMessage> = self.turns_history.drain(0..compact_count).collect();
 
-        // ── 3. 目标提升：扫描被压缩的历史，提取最新的任务目标更新并提升至 M1 静态区 ──
-        const GOAL_UPDATE_MARKER: &str = "【任务目标更新】";
-        let promoted_goal: Option<String> = to_compact.iter().rev().find_map(|msg| {
-            let text = match &msg.content {
-                serde_json::Value::String(s) => s.as_str(),
-                _ => return None,
-            };
-            if let Some(pos) = text.find(GOAL_UPDATE_MARKER) {
-                let after_marker = &text[pos + GOAL_UPDATE_MARKER.len()..];
-                let goal = after_marker
-                    .trim_start_matches('\n')
-                    .lines()
-                    .next()
-                    .map(|l| l.trim())
-                    .filter(|l| !l.is_empty())
-                    .map(|l| l.to_string());
-                goal
-            } else {
-                None
-            }
-        });
-        // 摘要请求前缀必须等于「压缩前最后一次真实请求」的前缀——
-        // 目标提升前的旧 user_goal 才是当时 M1 的字节，新目标是给后续请求用的。
+        // 压缩只能归档历史，不能把历史目标重新写回当前任务。
+        // 保留压缩前的锚点供摘要请求使用；仅在归档边界刷新后续 M1。
         let goal_before_promotion = self.user_goal.clone();
-        if let Some(new_goal) = promoted_goal {
-            println!(
-                "🎯 [Compaction] 提升最新任务目标到 M1 静态区: {:?}",
-                new_goal
-            );
-            self.user_goal = new_goal.clone();
-            self.current_goal = new_goal;
-        }
+        self.user_goal = self.effective_goal().to_string();
 
         // ── 4. 使用双层混合总结器进行安全归档 ──
         let summarizer = HybridSummarizer {
@@ -515,44 +501,7 @@ impl SandwichContext {
             self.turns_history
                 .insert(existing_summary_cards, compact_card);
 
-            // 🌟 核心增强：从压缩归档中提取高价值架构事实与踩坑教训，沉淀至工作台事实卡 (Memories)
-            if archive_text.contains("关键事实")
-                || archive_text.contains("踩坑记录")
-                || archive_text.contains("架构决策")
-            {
-                for line in archive_text.lines() {
-                    let trimmed = line.trim();
-
-                    let mut is_fact = false;
-                    let mut fact_body = "";
-
-                    if (trimmed.starts_with("- ") || trimmed.starts_with("* ")) && trimmed.len() > 6
-                    {
-                        is_fact = true;
-                        fact_body = trimmed[2..].trim();
-                    } else if let Some(idx) = trimmed.find(". ") {
-                        if idx > 0
-                            && trimmed[..idx].chars().all(|c| c.is_ascii_digit())
-                            && trimmed.len() > idx + 4
-                        {
-                            is_fact = true;
-                            fact_body = trimmed[idx + 2..].trim();
-                        }
-                    }
-
-                    if is_fact {
-                        if !fact_body.is_empty()
-                            && fact_body.len() <= 200
-                            && self.memories.len() < 8
-                        {
-                            let key = format!("auto_fact_{}", self.memories.len() + 1);
-                            self.memories
-                                .entry(key)
-                                .or_insert_with(|| fact_body.to_string());
-                        }
-                    }
-                }
-            }
+            // 摘要保留为历史材料；列表格式不证明其中条目是已确认事实。
         }
 
         // ── 5. 绝对保底降级：若压缩后仍然超出低水位线缓冲，降级最老的用户输出为纯句柄 ──
@@ -565,11 +514,15 @@ impl SandwichContext {
                         serde_json::Value::String(s) => s.clone(),
                         _ => continue,
                     };
+                    // 摘要中可以引用多个 output_id，不能把整张归档卡当一份工具输出丢弃。
+                    if text.starts_with("【历史早期执行归档") {
+                        continue;
+                    }
                     if let Some(pos) = text.find("output_id: ") {
                         let id = text[pos + 11..].lines().next().unwrap_or("").trim();
                         if !id.is_empty() && text.len() > 300 {
                             msg.content = json!(format!(
-                                "【执行输出精简句柄】\noutput_id: {}\n[提示: 已深度压缩为句柄，完整输出已存 SQLite，调用 search_step_output / get_step_output(output_id={}) 获取]",
+                                "【执行输出精简句柄】\noutput_id: {}\n[结果未保留，不能据此判断成功或失败；完整详细数据已安全持久化至 SQLite，调用 search_step_output / get_step_output(output_id={}) 获取]",
                                 id, id
                             ));
                             degraded_any = true;

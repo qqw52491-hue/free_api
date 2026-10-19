@@ -237,6 +237,8 @@ pub(crate) fn begin_child_run_extended(
         ],
     )
     .map_err(|error| error.to_string())?;
+    drop(conn);
+    crate::agent::work_history::bind_async(db, parent_session_id, &child_run_id, resumed_from);
     Ok(child_run_id)
 }
 

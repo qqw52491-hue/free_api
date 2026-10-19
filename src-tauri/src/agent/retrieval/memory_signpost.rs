@@ -7,7 +7,9 @@ pub fn insert_memory_node(
     node: &MemoryNode,
     trigger_keywords: &str,
 ) -> Result<(), String> {
-    conn.execute(
+    // 节点与独立 FTS 表必须同时提交；同 ID 重写不能留下旧关键词。
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    tx.execute(
         "INSERT OR REPLACE INTO agent_memory_nodes (id, parent_id, level, kind, session_id, plan_id, step_index, content, metadata_json, confidence_score, hit_count, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
@@ -26,8 +28,10 @@ pub fn insert_memory_node(
         ],
     ).map_err(|e| format!("Memory node insert error: {}", e))?;
 
+    tx.execute("DELETE FROM agent_memory_nodes_fts WHERE node_id = ?1", [&node.id])
+        .map_err(|e| format!("Memory node FTS5 delete error: {}", e))?;
     let content_capped: String = node.content.chars().take(4_000).collect();
-    conn.execute(
+    tx.execute(
         "INSERT INTO agent_memory_nodes_fts (node_id, session_id, level, kind, plan_id, content, trigger_keywords)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
@@ -41,7 +45,7 @@ pub fn insert_memory_node(
         ],
     ).map_err(|e| format!("Memory node FTS5 insert error: {}", e))?;
 
-    Ok(())
+    tx.commit().map_err(|e| format!("Memory node commit error: {}", e))
 }
 
 /// 跨层折叠检索与上下文补齐 (Cross-Tier Memory Search with Context Enrichment)
@@ -62,10 +66,13 @@ pub fn search_memory_nodes_enriched(
 
     let mut sql = String::from(
         "SELECT n.id, n.parent_id, n.level, n.kind, n.step_index, n.content,
-                snippet(agent_memory_nodes_fts, 5, '<b>', '</b>', '...', 25), rank, n.confidence_score
+                snippet(agent_memory_nodes_fts, 5, '<b>', '</b>', '...', 25), rank, n.confidence_score,
+                n.session_id, n.metadata_json
          FROM agent_memory_nodes_fts fts
          JOIN agent_memory_nodes n ON fts.node_id = n.id
          WHERE agent_memory_nodes_fts MATCH ?1
+           AND fts.session_id = n.session_id
+           AND fts.content = substr(n.content, 1, 4000)
            AND n.confidence_score >= 30",
     );
 
@@ -106,6 +113,8 @@ pub fn search_memory_nodes_enriched(
             let step_index: Option<i64> = row.get(4)?;
             let content: String = row.get(5)?;
             let snippet: String = row.get(6)?;
+            let node_session: String = row.get(9)?;
+            let metadata: String = row.get(10)?;
             Ok((
                 id,
                 parent_id,
@@ -114,32 +123,36 @@ pub fn search_memory_nodes_enriched(
                 step_index.map(|s| s as usize),
                 content,
                 snippet,
+                node_session,
+                metadata,
             ))
         })
         .map_err(|e| e.to_string())?;
 
     let mut hits = Vec::new();
     for r in rows {
-        if let Ok((id, parent_id, level, kind, step_index, content, snippet)) = r {
+        if let Ok((id, parent_id, level, kind, step_index, content, snippet, node_session, metadata)) = r {
             let mut evidence = Vec::new();
 
             // 上下文补齐 (Context Enrichment)
             if level == 0 {
                 if let Some(ref p_id) = parent_id {
                     if let Ok(parent_content) = conn.query_row(
-                        "SELECT content FROM agent_memory_nodes WHERE id = ?1",
-                        params![p_id],
+                        "SELECT content FROM agent_memory_nodes WHERE id = ?1 AND session_id = ?2",
+                        params![p_id, node_session],
                         |row| row.get::<_, String>(0),
                     ) {
-                        evidence.push(format!("所属阶段总结: {}", parent_content));
+                        evidence.push(format!("所属工作目录/历史节点（不表示完成）: {}", parent_content));
                     }
                 }
+            } else if level == 1 {
+                evidence.push(format!("工作目录；按需用 task_store.get_work_group(group_id={}) 分页查看观察", id));
             } else if level == 2 {
                 if let Ok(mut child_stmt) = conn
-                    .prepare("SELECT content FROM agent_memory_nodes WHERE parent_id = ?1 LIMIT 2")
+                    .prepare("SELECT content FROM agent_memory_nodes WHERE parent_id = ?1 AND session_id = ?2 ORDER BY created_at, id LIMIT 2")
                 {
                     if let Ok(child_rows) =
-                        child_stmt.query_map(params![id], |row| row.get::<_, String>(0))
+                        child_stmt.query_map(params![id, node_session], |row| row.get::<_, String>(0))
                     {
                         for c in child_rows.flatten() {
                             let short_c: String = c.chars().take(80).collect();
@@ -149,9 +162,18 @@ pub fn search_memory_nodes_enriched(
                 }
             }
 
+            // 预览不是原文；保留观察的精确回查引用。
+            let mut observation_id = None;
+            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&metadata) {
+                if let Some(output_id) = meta.get("output_id").and_then(|v| v.as_str()) {
+                    evidence.push(format!("原始输出: output_id={}", output_id));
+                    if level == 0 { observation_id = Some(output_id.to_string()); }
+                }
+            }
+
             hits.push(SearchHit {
                 kind,
-                id_or_path: id,
+                id_or_path: observation_id.unwrap_or(id),
                 parent_id,
                 level: Some(level),
                 step_id: step_index,
@@ -169,4 +191,50 @@ pub fn search_memory_nodes_enriched(
     }
 
     Ok(hits)
+}
+
+/// 同一观察可同时命中原文和 L0；先合并归属，再在两条检索分支间交错展示。
+pub(crate) fn merge_history_hits(
+    history: Vec<SearchHit>, memories: Vec<SearchHit>, limit: usize,
+) -> (Vec<SearchHit>, bool) {
+    let mut merged: Vec<SearchHit> = Vec::new();
+    let mut positions = std::collections::HashMap::<String, usize>::new();
+    let mut a = history.into_iter();
+    let mut b = memories.into_iter();
+    loop {
+        let pair = [a.next(), b.next()];
+        if pair.iter().all(Option::is_none) { break; }
+        for hit in pair.into_iter().flatten() {
+            if let Some(&pos) = positions.get(&hit.id_or_path) {
+                let existing = &mut merged[pos];
+                if existing.parent_id.is_none() { existing.parent_id = hit.parent_id; }
+                for item in hit.evidence {
+                    if !existing.evidence.contains(&item) { existing.evidence.push(item); }
+                }
+            } else {
+                positions.insert(hit.id_or_path.clone(), merged.len());
+                merged.push(hit);
+            }
+        }
+    }
+    let has_more = merged.len() > limit;
+    merged.truncate(limit);
+    (merged, has_more)
+}
+
+pub(crate) fn enrich_history_groups(conn: &Connection, hits: &mut [SearchHit]) {
+    for hit in hits {
+        // 新事件有精确输出身份；旧记录缺关联就保留未知，不按步骤号猜。
+        if let Ok((parent, content)) = conn.query_row(
+            "SELECT e.parent_id,p.content FROM agent_memory_nodes e JOIN agent_memory_nodes p
+             ON e.parent_id=p.id AND e.session_id=p.session_id
+             JOIN agent_step_logs l ON l.session_id=e.session_id AND l.output_id=json_extract(e.metadata_json,'$.output_id')
+             WHERE l.output_id=?1 AND e.level=0 AND p.level=1",
+            params![hit.id_or_path],
+            |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?))
+        ) {
+            hit.parent_id = Some(parent);
+            hit.evidence.push(format!("所属工作目录（不表示完成）: {content}"));
+        }
+    }
 }

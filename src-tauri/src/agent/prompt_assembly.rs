@@ -92,6 +92,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
             "get_resource(resource_id: string)",
             "list_records(resource_id: string, limit?: <=100, offset?: number)",
             "get_record(resource_id: string, record_key: string)",
+            "get_work_group(group_id: string [检索返回的 episode ID 或 parent_id], offset?: number, limit?: <=25) — 分页查看工作目录内的尝试/观察及 output_id；标签不代表完成",
             "update_resource(resource_id: string, label?|summary?|status?|cursor?|schema?)",
             "evidence_record(purpose: string, subject?: string, command?: string, output_id?: string, file_path?: string, reported_outcome?: string, tags?: string[], note?: string, idempotency_key?: string) — 可选登记，每次默认新观察；同一显式键重试返回首次记录，新观察换键或省略。文件快照由宿主在登记时采集，不证明原始验证对应同一版本；无文件的测试同样支持",
             "evidence_find(query?: string, subject?: string, command?: string, limit?: <=30) — 测试/测验/检验等表述可召回候选，匹配不等于通过",
