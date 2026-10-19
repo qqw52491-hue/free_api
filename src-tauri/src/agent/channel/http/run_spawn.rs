@@ -201,16 +201,7 @@ impl SessionRunGuard {
                 if !was_cancelled {
                     if let Ok(config) = load_channel_config() {
                         if config.auto_start_bridge {
-                            let push_text = if let Some(ref text) = result {
-                                let preview = if text.chars().count() > 300 {
-                                    format!("{}...", text.chars().take(300).collect::<String>())
-                                } else {
-                                    text.clone()
-                                };
-                                format!("🏁 任务已完成：\n\n{}", preview)
-                            } else {
-                                "🏁 任务已完成。".to_string()
-                            };
+                            let push_text = completion_notification(result.as_deref());
                             tauri::async_runtime::spawn(async move {
                                 notify_wechat(&config, &push_text).await;
                             });
@@ -365,4 +356,30 @@ pub(crate) fn register_and_spawn_run(
     });
 
     Ok(run_id)
+}
+
+// 发送端统一分段；这里保留全文，不生成只含前 300 字符的通知摘要。
+fn completion_notification(result: Option<&str>) -> String {
+    match result {
+        Some(text) => format!("🏁 任务已完成：\n\n{text}"),
+        None => "🏁 任务已完成。".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod completion_notification_tests {
+    use super::completion_notification;
+
+    #[test]
+    fn completion_notification_keeps_full_reply_beyond_old_limits() {
+        let text = "完整结果🙂\n".repeat(6000);
+        let notification = completion_notification(Some(&text));
+        assert_eq!(notification, format!("🏁 任务已完成：\n\n{text}"));
+        assert!(notification.ends_with(&text));
+    }
+
+    #[test]
+    fn completion_notification_without_result_keeps_existing_message() {
+        assert_eq!(completion_notification(None), "🏁 任务已完成。");
+    }
 }

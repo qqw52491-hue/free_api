@@ -6,7 +6,8 @@
   "description": "WeChat ClawBot bridge for SandwichAgent — connects weixin-agent-sdk to the local channel API",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node message-delivery.test.js"
   },
   "dependencies": {
     "qrcode": "^1.5.4",

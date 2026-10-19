@@ -65,12 +65,21 @@ async fn bridge_call(
     if let Some(value) = &body {
         request = request.json(value);
     }
+    // 完整结果可能包含多段网络发送，通知请求使用单独的总等待时间。
+    if path == "/bridge/notify" {
+        request = request.timeout(std::time::Duration::from_secs(120));
+    }
     let response = request
         .header("x-channel-token", &config.token)
         .send()
         .await
         .map_err(|_| format!("微信桥未响应（{url}）。请先在页面启动桥。"))?;
+    let status = response.status();
     let value: Value = response.json().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(value.get("error").and_then(Value::as_str)
+            .map(str::to_owned).unwrap_or_else(|| format!("微信桥返回 {status}")));
+    }
     if path.starts_with("/bridge/status") {
         cache_bridge_status(&value);
     }

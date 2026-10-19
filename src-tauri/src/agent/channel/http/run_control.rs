@@ -16,13 +16,16 @@ pub(crate) fn model_id_of_session(
 
 pub(crate) fn last_assistant_message(app: &AppHandle, session_id: &str) -> Option<String> {
     let conn = db_conn(app).ok()?;
+    load_last_assistant_message(&conn, session_id)
+}
+
+fn load_last_assistant_message(conn: &rusqlite::Connection, session_id: &str) -> Option<String> {
     conn.query_row(
         "SELECT content FROM chat_messages WHERE session_id=?1 AND role='assistant' ORDER BY created_at DESC, id DESC LIMIT 1",
         rusqlite::params![session_id],
         |row| row.get::<_, String>(0),
     )
     .ok()
-    .map(|content| truncate_chars(&content, MAX_RESULT_CHARS))
 }
 
 pub(crate) async fn handler_run_status(
@@ -168,4 +171,21 @@ pub(crate) struct AnswerReq {
 #[derive(Deserialize)]
 pub(crate) struct GoalReq {
     pub(crate) goal: String,
+}
+
+#[cfg(test)]
+mod result_delivery_tests {
+    use super::load_last_assistant_message;
+
+    #[test]
+    fn last_assistant_result_preserves_text_beyond_24000_and_session_boundary() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE chat_messages (id TEXT, session_id TEXT, role TEXT, content TEXT, created_at INTEGER)").unwrap();
+        let text = "结果🙂\n".repeat(9000);
+        conn.execute("INSERT INTO chat_messages VALUES ('1','target','assistant',?1,1)", [&text]).unwrap();
+        conn.execute("INSERT INTO chat_messages VALUES ('2','target','user','later user message',2)", []).unwrap();
+        conn.execute("INSERT INTO chat_messages VALUES ('3','other','assistant','other session',3)", []).unwrap();
+        assert_eq!(load_last_assistant_message(&conn, "target"), Some(text));
+        assert_eq!(load_last_assistant_message(&conn, "missing"), None);
+    }
 }

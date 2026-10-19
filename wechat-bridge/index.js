@@ -19,9 +19,10 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import QRCode from "qrcode";
+import { createMessageDelivery } from "./message-delivery.js";
 import { isLoggedIn, login, logout, start } from "weixin-agent-sdk";
 
-const BRIDGE_VERSION = "0.2.1";
+const BRIDGE_VERSION = "0.2.2";
 
 // 内置指令面板：随桥能力同步更新，首次联系与「帮助」指令时推送
 const COMMAND_PANEL = [
@@ -59,15 +60,9 @@ function inQuietHours(now = new Date()) {
   const minutes = now.getHours() * 60 + now.getMinutes();
   return start <= end ? minutes >= start && minutes < end : minutes >= start || minutes < end;
 }
-const MAX_PUSH_CHARS = 3500;
-function truncateForPush(text) {
-  if (!text || text.length <= MAX_PUSH_CHARS) return text;
-  return text.slice(0, MAX_PUSH_CHARS) + "\n……\n\n（结果过长已截断，完整内容见桌面端会话）";
-}
 const MAX_QUEUE = 5;
 const NUDGE_MS = 2 * 60 * 60 * 1000; // ask_human 挂起 2 小时提醒一次
 const MAX_ARTIFACT_BYTES = 25 * 1024 * 1024; // 微信文件回推上限
-const MAX_RESULT_CHARS = 1200;
 
 // ---------------------------------------------------------------- 配置与状态
 
@@ -152,31 +147,37 @@ async function api(method, apiPath, body) {
   return value;
 }
 
+const deliverMessage = createMessageDelivery(async (message) => {
+  if (!bot) throw new Error("微信 bot 未就绪");
+  await bot.sendMessage(message);
+}, {
+  onMediaError: (error) => console.error(`[bridge] 文件推送失败，降级为分段文本: ${error}`),
+});
+
 async function botSend(text) {
   if (!bot) {
     console.log("[bridge] botSend 跳过：bot 实例未就绪");
-    return;
+    return false;
   }
   try {
-    await bot.sendMessage(text);
-    console.log(`[bridge] 主动推送已下发: "${text.slice(0, 40).replace(/\n/g, ' ')}..."`);
+    await deliverMessage(text);
+    console.log(`[bridge] 主动推送已完整下发（${text.length} 字符）`);
+    return true;
   } catch (error) {
-    console.error(`[bridge] 主动推送失败（context_token 可能已过期）: ${error}`);
+    console.error(`[bridge] 主动推送未完成（未自动重试）: ${error}`);
+    return false;
   }
 }
 
-/** 带文件回推的推送；失败降级为纯文本 */
+/** 带文件回推的推送；附件失败时文本仍按同一规则分段发送。 */
 async function botSendWithMedia(text, media) {
-  if (!bot) {
-    console.log("[bridge] botSendWithMedia 跳过：bot 实例未就绪");
-    return;
-  }
   try {
-    await bot.sendMessage({ text, media });
-    console.log(`[bridge] 主动文件推送已下发: ${media.fileName || media.url}`);
+    await deliverMessage(text, media);
+    console.log(`[bridge] 主动文件推送已完成: ${media.fileName || media.url}`);
+    return true;
   } catch (error) {
-    console.error(`[bridge] 文件推送失败，降级为文本: ${error}`);
-    await botSend(text);
+    console.error(`[bridge] 主动文件推送未完成（未自动重试）: ${error}`);
+    return false;
   }
 }
 
@@ -462,7 +463,7 @@ function watchRun(conversationId, runId, num) {
       lastResults.set(conversationId, { num, text: run.result || "" });
       const artifact = await latestArtifact(run.session_id);
       const finishText = run.result
-        ? `🏁 任务 #${num} 完成：\n\n${truncateForPush(run.result)}`
+        ? `🏁 任务 #${num} 完成：\n\n${run.result}`
         : `🏁 任务 #${num} 完成（无文本产出，详情见桌面端会话）。`;
       if (artifact && artifact.size_bytes > 0 && artifact.size_bytes <= MAX_ARTIFACT_BYTES) {
         const mediaType = String(artifact.mime_type || "").startsWith("image/") ? "image" : "file";
@@ -643,7 +644,8 @@ const agent = {
       const last = lastResults.get(conversationId);
       if (!last) return { text: "还没有已完成的任务。" };
       const body = last.text || "（无文本产出）";
-      return { text: `📄 任务 #${last.num} 的结果：\n\n${body.slice(0, MAX_RESULT_CHARS)}` };
+      const delivered = await botSend(`📄 任务 #${last.num} 的结果：\n\n${body}`);
+      return { text: delivered ? "" : "⚠️ 结果发送未完成，完整结果仍已保存；请稍后发送「结果」重试。" };
     }
 
     // ⑤ 项目列表（编号列表上下文 = project）
@@ -836,8 +838,8 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 409, { error: "微信未登录，推送未送达" });
         return;
       }
-      await botSend(String(body.text));
-      sendJson(res, 200, { ok: true });
+      const delivered = await botSend(String(body.text));
+      sendJson(res, delivered ? 200 : 502, delivered ? { ok: true } : { error: "微信消息未完整送达，请检查桥日志；未自动重试。" });
       return;
     }
     if (req.method === "POST" && req.url === "/bridge/stop") {

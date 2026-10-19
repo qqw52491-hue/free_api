@@ -9,7 +9,6 @@ pub(crate) const SCRATCH_PROJECT_NAME: &str = "wechat-scratch";
 pub(crate) const DEFAULT_HEARTBEAT_MINUTES: u64 = 30;
 pub(crate) const MAX_RUN_RECORDS: usize = 200;
 pub(crate) const MAX_GOAL_PREVIEW_CHARS: usize = 120;
-pub(crate) const MAX_RESULT_CHARS: usize = 24_000;
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
