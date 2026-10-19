@@ -1022,7 +1022,7 @@ mod completion_todo_regressions {
             .map(|id| TodoItem {
                 id,
                 status: "pending".into(),
-                description: format!("[审查发现] [R-{id}] [QUESTION] 原始问题"),
+                description: format!("[审查发现] [R-{id}] [BLOCKING] 原始问题"),
                 evidence_output_id: None,
             })
             .collect();

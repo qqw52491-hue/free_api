@@ -42,6 +42,7 @@ use serde_json::json;
 pub(crate) fn open_todo_descriptions(todos: &[TodoItem]) -> Vec<String> {
     todos
         .iter()
+        .filter(|item| !item.is_review_reference())
         .filter(|item| {
             matches!(
                 item.status.trim().to_ascii_lowercase().as_str(),

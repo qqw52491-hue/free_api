@@ -246,8 +246,7 @@ pub(crate) async fn reduce_child_receipt(
 
 fn review_scorecard_description(sc: &crate::agent::child_reviewer::ReviewScorecard) -> String {
     let tc = sc.test_coverage.map_or_else(|| "N/A".to_string(), |tc| format!("{}/100", tc));
-    format!("\n审查评分卡: 综合平均 {} 分 (正确性: {}/100, 破坏性风险: {}/100, 代码规范: {}/100, 测试覆盖: {}) -> 评分条件: [{}]\n说明：此处仅表示评分条件，不能代表整体审查放行；阻塞缺陷与方案门禁状态另行判定。\n", sc.average_score(), sc.correctness, sc.risk, sc.style, tc,
-        if sc.passes_gate() { "✅已满足" } else { "⚠️未满足（均分需>=75且risk需>=60）" })
+    format!("\n审查评分（仅供参考，不作为放行条件）: 综合平均 {} 分 (正确性: {}/100, 破坏性风险: {}/100, 代码规范: {}/100, 测试覆盖: {})\n", sc.average_score(), sc.correctness, sc.risk, sc.style, tc)
 }
 
 /// 审查者（review）回执处理：故障转移 → infra 记账退款 → 交付聚合。
@@ -274,7 +273,7 @@ async fn reduce_reviewer_receipt(
         formatted_findings
     );
 
-    // 审查发现自动闭环：登记为待办条目，finish 门禁要求逐条闭合。
+    // 只有明确的 blocking 发现进入交付待办；question/suggestion 保留在回执与审查记录中。
     // （原本只在自动注入路径登记——wait_jobs 收取的 findings 曾不进 todo，
     // 统一 reducer 后两条通道行为一致。）
     {
@@ -285,8 +284,7 @@ async fn reduce_reviewer_receipt(
             .max()
             .map_or(0, |m| m + 1);
         for (offset, f) in findings.iter().enumerate() {
-            // suggestion 级只展示、不登记为 finish 必须闭合的待办（建议级不硬拦交付）
-            if f.severity.eq_ignore_ascii_case("suggestion") {
+            if !f.severity.eq_ignore_ascii_case("blocking") {
                 continue;
             }
             let desc = format!("[审查发现] {}", f.display_line());
@@ -335,6 +333,11 @@ async fn reduce_reviewer_receipt(
     };
 
     checkpoint.record_reviewer_delivery_for_run(env.db, Some(&receipt.child_run_id), &delivery);
+    if let Some(decision) = checkpoint.plan_review_deliveries.get(&receipt.child_run_id)
+        .and_then(|stored| stored.get_extra_str("decision"))
+    {
+        text.push_str(&format!("\n方案审查生效裁决: {}\n", decision));
+    }
     // 审查者撤回的异议：同步关闭对应的 [审查发现] 待办，否则 finish 门禁仍会拿已撤回的意见打回。
     for wid in &delivery.withdrawn_findings {
         let prefix = format!("[审查发现] [{}]", wid);
@@ -394,22 +397,20 @@ fn format_findings(findings: &[crate::agent::child_reviewer::ReviewFinding]) -> 
 mod tests {
     use super::*;
     use crate::agent::child_reviewer::PlanReviewerDispatchSnapshot;
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::sync::{Arc, Mutex};
 
     #[test]
-    fn scorecard_pass_only_reports_score_condition_not_overall_release() {
+    fn scorecard_reports_only_observation_without_release_thresholds() {
         let score = crate::agent::child_reviewer::ReviewScorecard::new(85, 75, 85, None);
-        assert!(score.passes_gate());
         let text = review_scorecard_description(&score);
         assert!(text.contains("综合平均 81 分"));
-        assert!(text.contains("评分条件: [✅已满足]"));
-        assert!(text.contains("不能代表整体审查放行"));
+        assert!(text.contains("仅供参考，不作为放行条件"));
+        assert!(!text.contains("评分条件"));
         assert!(!text.contains("门禁状态:"));
         assert!(!text.contains("合格放行"));
         let failing = crate::agent::child_reviewer::ReviewScorecard::new(80, 40, 80, None);
-        assert!(!failing.passes_gate());
-        assert!(review_scorecard_description(&failing).contains("评分条件: [⚠️未满足"));
+        assert!(review_scorecard_description(&failing).contains("仅供参考，不作为放行条件"));
     }
 
     #[tokio::test]
@@ -429,7 +430,7 @@ mod tests {
         let mut effects = ReceiptEffects::default();
         let text = reduce_reviewer_receipt(&env, &mut cp, &mut ctx, &delivery, &mut effects).await;
         assert!(text.contains("建议路由: [blocked]"), "{}", text);
-        assert!(text.contains("评分条件: [✅已满足]"), "{}", text);
+        assert!(text.contains("仅供参考，不作为放行条件"), "{}", text);
         assert!(text.contains("真实阻塞项"), "{}", text);
         assert!(!text.contains("合格放行"), "{}", text);
         std::fs::remove_dir_all(base).unwrap();
@@ -475,6 +476,79 @@ mod tests {
             payload: Some(payload.clone()),
             raw_text: Some(payload.to_string()),
         }
+    }
+
+    // 事故形状：approved、无 blocking、正确性 58 分，question 曾导致反复交付被拒。
+    #[tokio::test]
+    async fn approved_questions_allow_execution_and_finish_with_low_or_missing_scores() {
+        let (base, db) = test_db("approved-questions");
+        let ws = base.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let env = test_env(&db, &ws);
+        for (index, score) in [json!({"correctness":58,"risk":92,"style":78}), Value::Null].into_iter().enumerate() {
+            let mut context = SandwichContext::new("sys".into(), "比较网络传输与 U 盘速度".into());
+            let mut cp = AgentCheckpoint::new("run-1".into(), &context);
+            cp.plan_mode = crate::agent::checkpoint::PlanExecutionMode::CrossReview;
+            cp.plan_reviewer_retry_count = 1;
+            cp.submitted_plan = Some(crate::agent::types::PlanSubmission {
+                plan_summary: "测量网络上限并披露实际拷贝速度的不确定性".into(),
+                ..Default::default()
+            });
+            let id = format!("review-{index}");
+            let batch = format!("batch-{index}");
+            seed_run(&db, &id, "run-1", &batch, "plan_review", "succeeded", true);
+            cp.set_plan_review_batch(&batch, 1);
+            let mut payload = json!({
+                "decision":"approved", "root_cause_verdict":"na", "confidence":"supported",
+                "findings":[
+                    {"id":"F1","severity":"question","why":"磁盘写速尚未实测，请披露推断边界"},
+                    {"id":"F2","severity":"suggestion","why":"可进一步比较不同加密算法"}
+                ], "evidence_refs":[], "missing_evidence":["当前没有 U 盘，无法实测"]
+            });
+            if !score.is_null() { payload["scorecard"] = score; }
+            // 经生产解析器与回执 reducer，验证实际状态，不只验证某个过滤函数。
+            crate::agent::child_reviewer::parse_controlled_output(&payload.to_string(), &[]).unwrap();
+            let effects = reduce_child_receipt(&env, &mut cp, &mut context, &receipt("review", &id, None, payload)).await;
+            assert!(effects.model_text.contains("磁盘写速尚未实测"));
+            assert!(context.todo_list.is_empty(), "疑问必须保留展示，但不生成硬待办");
+            assert_eq!(cp.last_review_blocking_count, 0);
+            let saved = serde_json::to_string(&cp).unwrap();
+            let mut resumed: AgentCheckpoint = serde_json::from_str(&saved).unwrap();
+            assert!(crate::agent::plan_gate::check_pre_write_gatekeeper(
+                &mut resumed, &context, &db, "run-1", 5, false
+            ).is_none());
+            assert!(resumed.plan_phase.is_approved());
+            assert!(crate::agent::finish_guard::completion_claim_blockers_with_diff(
+                &context.todo_list, None, false, 0, None, None, &[]
+            ).is_empty());
+            assert_eq!(resumed.plan_review_deliveries[&id].findings.len(), 2);
+        }
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn explicit_global_blocking_still_blocks_execution_and_finish_without_scores() {
+        let (base, db) = test_db("global-blocking");
+        let ws = base.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let env = test_env(&db, &ws);
+        let mut context = SandwichContext::new("sys".into(), "核验报告".into());
+        let mut cp = AgentCheckpoint::new("run-1".into(), &context);
+        cp.plan_mode = crate::agent::checkpoint::PlanExecutionMode::CrossReview;
+        cp.plan_reviewer_retry_count = 1;
+        seed_run(&db, "blocking-1", "run-1", "b1", "plan_review", "succeeded", true);
+        cp.set_plan_review_batch("b1", 1);
+        let payload = json!({"decision":"approved", "confidence":"confirmed",
+            "findings":[{"id":"F1","severity":"blocking","location":"", "why":"报告声称校验通过，命令输出却是失败"}],
+            "evidence_refs":[],"missing_evidence":[]});
+        let (findings, _, _, _, _, _, _, _) = crate::agent::child_reviewer::parse_controlled_output(&payload.to_string(), &[]).unwrap();
+        assert_eq!(findings[0].severity, "blocking");
+        reduce_child_receipt(&env, &mut cp, &mut context, &receipt("review", "blocking-1", None, payload)).await;
+        let blocked = crate::agent::plan_gate::check_pre_write_gatekeeper(&mut cp, &context, &db, "run-1", 5, false).unwrap();
+        assert_eq!(blocked.route, "plan_gatekeeper:blocking_findings_open");
+        assert_eq!(context.todo_list.len(), 1);
+        assert_eq!(crate::agent::finish_guard::open_todo_descriptions(&context.todo_list).len(), 1);
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     /// 名单退役版夹具：往台账插一条带 batch/purpose 盖章的子任务行。

@@ -80,31 +80,14 @@ pub fn cross_review_batch_all_failed(failure_details: &str, budget_exhausted: bo
     )
 }
 
-/// 交叉审查模式：ReviewScorecard 评分未达硬门禁
-pub fn cross_review_scorecard_failed(reason: &str, budget_exhausted: bool) -> String {
-    let escape_guide = if budget_exhausted {
-        "【审查预算已耗尽】方案审查已达最大重试轮次，无法再次派发审查子 Agent。\n\
-         【解套路径（人工仲裁放行）】严禁因审查受阻而直接放弃写入或草率 finish！请立即调用 ask_human 工具（设置 kind: 'plan_approval'），在 message 中向用户说明技术方案与审查员的低分质疑，阐述为何该方案安全或确属任务必需，申请人工审批：\n\
-         ```json\n\
-         {\n  \"tool\": \"ask_human\",\n  \"command\": {\n    \"kind\": \"plan_approval\",\n    \"message\": \"技术方案说明与审批申请：...（说明方案及安全性，申请人工审批放行）\"\n  }\n}\n\
-         ```\n\
-         用户在界面确认放行后，前置门禁将立即解除并允许写入！"
+/// 审查员明确要求修订，评分不参与此判定。
+pub fn cross_review_revisions_required(budget_exhausted: bool) -> String {
+    let next = if budget_exhausted {
+        "审查预算已耗尽；可调用 ask_human(kind: 'plan_approval')，将方案与审查分歧交给用户裁决。"
     } else {
-        "【解套路径 1（方案修正）】若审查员指出的破坏性风险与漏洞属实，请修正方案后重新派发 child_reviewer 审查。\n\
-         【解套路径 2（人工仲裁放行）】若经核实审查员意见存在过度防御、偏执假设或与当前功能目标冲突，且方案整体可控，请调用 ask_human 工具（设置 kind: 'plan_approval'），将方案分歧呈报用户申请人工裁决：\n\
-         ```json\n\
-         {\n  \"tool\": \"ask_human\",\n  \"command\": {\n    \"kind\": \"plan_approval\",\n    \"message\": \"技术方案与审查分歧呈报：...（说明方案及安全性，申请人工审批放行）\"\n  }\n}\n\
-         ```\n\
-         用户批准后门禁立即放行写入，严禁放弃写入直接在对话中贴代码！"
+        "请根据已收到的具体审查意见修订方案，再提交 submit_plan；如有分歧，可附证据复审或向用户申请裁决。"
     };
-    format!(
-        "【⚠️ 门禁保护触发：代码写入已被拦截并丢弃，目标文件未受任何修改！】\n\
-         【原因】审查评分未达标（要求：综合平均分 >= 75 分，且破坏性风险/安全性评分 risk >= 60 分）：\n\
-         {}\n\
-         【必须采取的行动（严禁假装成功或草率 finish）】：\n\
-         {}",
-        reason, escape_guide
-    )
+    format!("【方案操作尚未执行】审查员的生效裁决为 rebuttal（要求修订），尚未批准当前方案。\n{}", next)
 }
 
 /// 全自动模式：首轮未完成只读排查与方案阐述即尝试写入
@@ -116,23 +99,6 @@ pub fn auto_mode_need_plan() -> String {
      2. 输出清晰的技术方案与反证推演说明；\n\
      3. 方案成形后调用 submit_plan 报方案拿判定（无需审查即直写 / 需审查则自动派发 Tech Lead），或确认改动仅限低危文件后直接写入。\n\
      方案确认后再执行修改。严禁盲目写入或未写代码假装完成！".to_string()
-}
-
-/// 交叉审查模式：审查结论缺少评分卡（fail-closed，绝不默认放行）
-pub fn cross_review_scorecard_missing(budget_exhausted: bool) -> String {
-    let escape = if budget_exhausted {
-        "审查轮次预算已耗尽，无法再次派发：请调用 ask_human 工具（kind: 'plan_approval'）将当前方案与已有审查结论呈报用户，由人工审批放行。"
-    } else {
-        "请重新调用 child_reviewer 派发审查，并确保输出包含 scorecard 四维评分；或直接调用 ask_human（kind: 'plan_approval'）走人工审批。"
-    };
-    format!(
-        "【⚠️ 门禁保护触发：已阻止无 Scorecard 写入，目标文件未受任何修改！】\n\
-         【原因】审查结论中缺少 ReviewScorecard 评分卡，硬门禁无法核定放行条件（缺失评分时绝不默认放行）。\n\
-         【必须执行的操作】：\n\
-         {}\n\
-         严禁直接假装成功或草率结项！",
-        escape
-    )
 }
 
 /// 交叉审查模式：并发审查任务尚未齐套（齐套屏障拦截）

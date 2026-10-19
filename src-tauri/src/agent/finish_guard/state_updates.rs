@@ -143,7 +143,7 @@ pub(crate) fn apply_instruction_state_updates(
 }
 
 /// 应用 todo_update 并执行监管继承守卫。
-/// [审查发现] 前缀的待办是审查环节的监管产出，不允许被 todo_update 静默剔除——
+/// 阻塞审查待办不允许被 todo_update 静默剔除；旧 question/suggestion 仅作参考。
 /// 更新中未保留的发现按原样恢复为 pending 并附恢复告警；
 /// 销账的唯一途径：在更新中保留该条目并显式置为 done/failed（附处理说明）。
 /// 所有 todo_list 的 todo_update 应用路径（loop_runner 状态更新 / main_loop 证据回填）
@@ -162,7 +162,7 @@ pub(crate) fn apply_todo_update_guarded(
         if let Some(existing) = context
             .todo_list
             .iter()
-            .find(|old| old.id == item.id && old.description.starts_with("[审查发现]"))
+            .find(|old| old.id == item.id && old.description.starts_with("[审查发现]") && !old.is_review_reference())
         {
             if item.description != existing.description {
                 if !item.description.trim().is_empty() {
@@ -189,7 +189,7 @@ pub(crate) fn apply_todo_update_guarded(
     // 先收集被剔除的审查发现（不可变借用），再统一恢复（可变借用）
     let mut dropped_findings = Vec::new();
     for existing in &context.todo_list {
-        if !existing.description.starts_with("[审查发现]") {
+        if !existing.description.starts_with("[审查发现]") || existing.is_review_reference() {
             continue;
         }
         let kept = incoming

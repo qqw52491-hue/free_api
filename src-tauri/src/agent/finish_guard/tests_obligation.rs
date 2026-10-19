@@ -739,7 +739,7 @@ fn review_finding_todos_cannot_be_silently_dropped() {
     context.todo_list.push(crate::agent::types::TodoItem {
         id: 5,
         status: "pending".to_string(),
-        description: "[审查发现] [QUESTION] at plan_gate.rs:135 冷却豁免白名单漏加新路由".to_string(),
+        description: "[审查发现] [BLOCKING] at plan_gate.rs:135 冷却豁免白名单漏加新路由".to_string(),
         evidence_output_id: None,
     });
 
@@ -764,12 +764,39 @@ fn review_finding_todos_cannot_be_silently_dropped() {
 }
 
 #[test]
+fn restored_question_todos_are_references_but_user_tasks_and_blockings_remain_required() {
+    let mut context = context::SandwichContext::new("system".into(), "goal".into());
+    // 真实持久化形状与更老的无 finding ID 格式都须兼容。
+    context.todo_list = serde_json::from_value(json!([
+        {"id":0,"status":"pending","description":"[审查发现] [F1] [QUESTION] 尚未测磁盘速度"},
+        {"id":1,"status":"in_progress","description":"[审查发现] [QUESTION] 缺少 U 盘实测"},
+        {"id":2,"status":"pending","description":"用户要求：回答 question 并提供测试证据"},
+        {"id":3,"status":"pending","description":"[审查发现] [F2] [BLOCKING] 引用了错误结果 [QUESTION]"}
+    ])).unwrap();
+    let blockers = open_todo_descriptions(&context.todo_list);
+    assert_eq!(blockers.len(), 2);
+    assert!(blockers.iter().any(|b| b.starts_with("用户要求")));
+    assert!(blockers.iter().any(|b| b.contains("[BLOCKING]")));
+    let rendered = crate::agent::context::ContextRenderer::render_todo_list(&context.todo_list);
+    assert!(rendered.contains("历史审查参考，非验收待办"));
+    assert!(rendered.contains("尚未测磁盘速度"));
+    assert_eq!(context.todo_list[0].status, "pending", "不伪造历史问题已解决");
+    // TODO 更新可移走旧参考；真实阻塞项仍自动恢复，保持原有保护。
+    apply_todo_update_guarded(&mut context, &[crate::agent::types::TodoItem {
+        id: 2, status: "done".into(), description: "用户要求：回答 question 并提供测试证据".into(), evidence_output_id: None
+    }]);
+    assert_eq!(context.todo_list.len(), 2);
+    assert_eq!(open_todo_descriptions(&context.todo_list).len(), 1);
+    assert!(context.todo_list.iter().any(|t| t.id == 3));
+}
+
+#[test]
 fn review_finding_kept_with_explicit_closure_is_accepted() {
     let mut context = context::SandwichContext::new("system".to_string(), "goal".to_string());
     context.todo_list.push(crate::agent::types::TodoItem {
         id: 5,
         status: "pending".to_string(),
-        description: "[审查发现] [QUESTION] at plan_gate.rs:135 冷却豁免白名单漏加新路由".to_string(),
+        description: "[审查发现] [BLOCKING] at plan_gate.rs:135 冷却豁免白名单漏加新路由".to_string(),
         evidence_output_id: None,
     });
 
@@ -779,7 +806,7 @@ fn review_finding_kept_with_explicit_closure_is_accepted() {
         todo_update: vec![crate::agent::types::TodoItem {
             id: 5,
             status: "done".to_string(),
-            description: "[审查发现] [QUESTION] at plan_gate.rs:135 冷却豁免白名单漏加新路由".to_string(),
+            description: "[审查发现] [BLOCKING] at plan_gate.rs:135 冷却豁免白名单漏加新路由".to_string(),
             evidence_output_id: None,
         }],
         ..Default::default()

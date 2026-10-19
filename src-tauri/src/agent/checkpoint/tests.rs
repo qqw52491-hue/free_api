@@ -244,8 +244,8 @@
         let stored2 = cp2.plan_review_deliveries.get(&r2).unwrap();
         assert_eq!(stored2.get_extra_str("decision"), Some("approved"));
         assert!(
-            stored2.scorecard.is_some(),
-            "正常 approved 应补齐基线评分卡"
+            stored2.scorecard.is_none(),
+            "正常 approved 不再合成评分卡"
         );
     }
 

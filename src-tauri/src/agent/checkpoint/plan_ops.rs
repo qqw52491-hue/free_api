@@ -428,21 +428,12 @@ impl AgentCheckpoint {
                         "[checkpoint] root_cause_verdict=insufficient 与 approved 矛盾，按自洽性规则降级为 rebuttal"
                     );
                 }
-                // 降级后的 decision 已非 approved——下面的通过卡合成与定稿覆盖
-                // 必须按【生效裁决】判定，否则 rebuttal 会领到放行评分卡。
+                // 定稿覆盖只认生效裁决；评分不参与批准，也不再合成高分卡。
                 let still_approved = delivery
                     .get_extra_str("decision")
                     .map(|d| d.eq_ignore_ascii_case("approved"))
                     .unwrap_or(false);
                 if still_approved {
-                    // 若 Tech Lead 裁决 approved 但未附带底层四维评分卡，自动补齐高分通过卡，避免 scorecard_missing 门禁误杀
-                    if delivery.scorecard.is_none() {
-                        eprintln!(
-                            "[checkpoint] Tech Lead 裁决 approved 但未附带评分卡，已合成基线放行评分卡（synthesized，非真实审查评分）"
-                        );
-                        delivery.scorecard =
-                            Some(crate::agent::child_reviewer::ReviewScorecard::synthesized_baseline());
-                    }
                     // Tech Lead 定稿权：approved 携带 revised_* 修订字段时，以审查者版本
                     // 覆盖 submitted_plan 成为最终执行方案（省掉"打回→重提"整轮往返）。
                     if let Some(rev) = Self::plan_revision_from(&delivery) {
@@ -527,6 +518,26 @@ impl AgentCheckpoint {
             }
         }
         blockings
+    }
+
+    /// 同一道审查题的续跑以已落账的最新 attempt 为准；独立审查员的修订裁决各自保留。
+    /// 复用台账 task_id/attempt_id，不让历史 rebuttal 在后续 approved 后永久锁住方案。
+    pub(crate) fn plan_revisions_required(&self, db: &DbState) -> bool {
+        let mut latest = BTreeMap::new();
+        for (run_id, delivery) in &self.plan_review_deliveries {
+            let identity = crate::agent::child_reviewer::load_run_identity(db, run_id);
+            let (task, attempt) = identity
+                .map(|i| (i.task_id, i.attempt_id))
+                .unwrap_or_else(|| (run_id.clone(), 0));
+            let value = latest.entry(task).or_insert((attempt, delivery));
+            if attempt > value.0 {
+                *value = (attempt, delivery);
+            }
+        }
+        latest.values().any(|(_, delivery)| {
+            delivery.get_extra_str("decision")
+                .is_some_and(|decision| decision.eq_ignore_ascii_case("rebuttal"))
+        })
     }
 
     /// 现场真聚合：计算所有已交付审查员 Scorecard 的算术平均值（真平均）

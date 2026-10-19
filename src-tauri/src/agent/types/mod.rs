@@ -51,6 +51,26 @@ pub struct TodoItem {
 }
 
 impl TodoItem {
+    /// 识别旧宿主自动生成的非阻塞审查待办，只解析固定头部，不按正文关键词猜任务意图。
+    /// 历史格式为 [审查发现] [QUESTION] 或 [审查发现] [F1] [QUESTION]。
+    pub(crate) fn is_review_reference(&self) -> bool {
+        let Some(mut rest) = self.description.strip_prefix("[审查发现] ") else {
+            return false;
+        };
+        for _ in 0..2 {
+            let Some(head) = rest.strip_prefix('[') else { return false; };
+            let Some((token, tail)) = head.split_once(']') else { return false; };
+            if token.eq_ignore_ascii_case("question") || token.eq_ignore_ascii_case("suggestion") {
+                return true;
+            }
+            if token.eq_ignore_ascii_case("blocking") {
+                return false;
+            }
+            rest = tail.trim_start();
+        }
+        false
+    }
+
     /// 实时指令用严格解析；旧检查点的缺省兼容仍留在 Deserialize 中。
     pub(crate) fn parse_input_id(value: &serde_json::Value) -> Option<usize> {
         match value {

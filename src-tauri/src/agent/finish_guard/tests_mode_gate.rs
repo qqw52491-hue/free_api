@@ -167,17 +167,18 @@ mod tests_inner {
         assert_eq!(rej2c.unwrap().route, "plan_gatekeeper:reviewer_result_missing");
         assert!(!checkpoint.plan_phase.is_approved());
 
-        // 阶段 3: 审查结论已消费但缺评分卡 -> fail-closed 拦截（绝不变相放行）
+        // 阶段 3: consumed 标志不证明存在有效结论，缺结论仍须拦截
         checkpoint.plan_reviewer_consumed = true;
         let rej_missing = crate::agent::loop_runner::check_pre_write_gatekeeper(
             &mut checkpoint, &context, &db, "test_run", 3, false,
         );
         assert!(rej_missing.is_some());
-        assert_eq!(rej_missing.unwrap().route, "plan_gatekeeper:scorecard_missing");
+        assert_eq!(rej_missing.unwrap().route, "plan_gatekeeper:reviewer_result_missing");
         assert!(!checkpoint.plan_phase.is_approved());
 
-        // 阶段 3b: 评分达标但有未解决 blocking 异议 -> 仍拦截
+        // 阶段 3b: 有有效结论但存在未解决 blocking 异议 -> 仍拦截
         checkpoint.last_review_scorecard = Some(crate::agent::child_reviewer::ReviewScorecard::new(90, 80, 85, Some(70)));
+        approved_review(&mut checkpoint);
         checkpoint.last_review_blocking_count = 2;
         let rej_blocking = crate::agent::loop_runner::check_pre_write_gatekeeper(
             &mut checkpoint, &context, &db, "test_run", 3, false,
@@ -197,7 +198,7 @@ mod tests_inner {
     }
 
     #[test]
-    fn scorecard_missing_gate_directs_to_human_approval_when_budget_exhausted() {
+    fn consumed_flag_without_a_review_result_does_not_approve() {
         let temp_dir = std::env::temp_dir().join(format!("gatekeeper-miss-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let conn = crate::db::init_db(&temp_dir.join("test.db")).unwrap();
@@ -208,14 +209,14 @@ mod tests_inner {
         checkpoint.set_execution_mode(crate::agent::checkpoint::PlanExecutionMode::CrossReview);
         checkpoint.plan_reviewer_retry_count = crate::agent::checkpoint::MAX_PLAN_REVIEWER_RETRIES;
         checkpoint.plan_reviewer_consumed = true;
-        // 预算耗尽 + 无评分卡：仍必须拦截，但文案应引导人工审批而非重新派发
+        // 预算耗尽也不能把 consumed 标志当作有效审查结果
         let rej = crate::agent::loop_runner::check_pre_write_gatekeeper(
             &mut checkpoint, &context, &db, "test_run", 3, false,
         );
         assert!(rej.is_some());
         let rej = rej.unwrap();
-        assert_eq!(rej.route, "plan_gatekeeper:scorecard_missing");
-        assert!(rej.stderr.contains("ask_human"), "预算耗尽时应引导人工审批: {}", rej.stderr);
+        assert_eq!(rej.route, "plan_gatekeeper:reviewer_result_missing");
+        assert!(rej.stderr.contains("未收到任何有效的审查结论"));
         assert!(!checkpoint.plan_phase.is_approved());
 
         let _ = std::fs::remove_dir_all(&temp_dir);

@@ -146,7 +146,7 @@
         assert_eq!(withdrawn, 1);
         assert_eq!(maintained, 0);
         assert_eq!(added, 1); // F2 is new blocking
-        assert!(receipt.scorecard().unwrap().passes_gate());
+        assert_eq!(receipt.scorecard().unwrap().correctness, 80);
     }
 
     #[test]

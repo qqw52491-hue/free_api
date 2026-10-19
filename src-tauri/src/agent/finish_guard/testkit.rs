@@ -67,3 +67,12 @@
             evidence_output_id: None,
         }
     }
+
+/// 提供真实形状的已批准结论；有无评分都不改变其身份。
+pub(crate) fn approved_review(checkpoint: &mut AgentCheckpoint) {
+    let delivery = serde_json::from_value(serde_json::json!({
+        "findings":[], "confidence":"supported", "evidence_refs":[], "missing_evidence":[],
+        "decision":"approved"
+    })).unwrap();
+    checkpoint.plan_review_deliveries.insert("review-1".into(), delivery);
+}

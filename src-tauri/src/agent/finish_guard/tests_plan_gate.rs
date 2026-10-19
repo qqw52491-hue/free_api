@@ -234,7 +234,7 @@ mod tests_inner {
     }
 
     #[test]
-    fn cross_review_scorecard_gate_blocks_low_risk_scores_then_passes_on_gate_clear() {
+    fn cross_review_approved_result_passes_with_low_or_missing_scores() {
         let temp_dir = std::env::temp_dir().join(format!("gatekeeper-score-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let conn = crate::db::init_db(&temp_dir.join("test.db")).unwrap();
@@ -258,22 +258,20 @@ mod tests_inner {
             ..Default::default()
         });
 
-        // 均分达标但 risk < 60：即使平均分 90+ 也必须硬拦截
-        checkpoint.last_review_scorecard = Some(crate::agent::child_reviewer::ReviewScorecard::new(95, 40, 95, Some(95)));
-        let rej = crate::agent::loop_runner::check_pre_write_gatekeeper(
-            &mut checkpoint, &context, &db, "test_run", 2, false,
-        );
-        assert!(rej.is_some());
-        assert_eq!(rej.unwrap().route, "plan_gatekeeper:scorecard_failed");
-        assert!(!checkpoint.plan_phase.is_approved());
-
-        // 达标评分卡：放行并推进为 Approved
-        checkpoint.last_review_scorecard = Some(crate::agent::child_reviewer::ReviewScorecard::new(90, 80, 85, Some(70)));
-        let pass = crate::agent::loop_runner::check_pre_write_gatekeeper(
-            &mut checkpoint, &context, &db, "test_run", 3, false,
-        );
-        assert!(pass.is_none());
-        assert!(checkpoint.plan_phase.is_approved());
+        approved_review(&mut checkpoint);
+        for score in [
+            Some(crate::agent::child_reviewer::ReviewScorecard::new(58, 92, 78, None)),
+            Some(crate::agent::child_reviewer::ReviewScorecard::new(95, 40, 95, Some(95))),
+            None,
+        ] {
+            checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Reviewing;
+            checkpoint.last_review_scorecard = score;
+            let pass = crate::agent::loop_runner::check_pre_write_gatekeeper(
+                &mut checkpoint, &context, &db, "test_run", 3, false,
+            );
+            assert!(pass.is_none(), "有效批准不得被评分否决: {pass:?}");
+            assert!(checkpoint.plan_phase.is_approved());
+        }
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -331,7 +329,7 @@ mod tests_inner {
     }
 
     #[test]
-    fn cross_review_human_arbitration_bypasses_failed_scorecard_and_blockers() {
+    fn cross_review_human_arbitration_can_resolve_explicit_review_rebuttal() {
         let temp_dir = std::env::temp_dir().join(format!("gatekeeper-esc-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let conn = crate::db::init_db(&temp_dir.join("test.db")).unwrap();
@@ -343,16 +341,14 @@ mod tests_inner {
         checkpoint.plan_reviewer_retry_count = 2; // 预算已耗尽
         checkpoint.plan_reviewer_consumed = true;
 
-        // 模拟审查员过度防御打了低分 (risk: 48 < 60)
-        checkpoint.last_review_scorecard = Some(crate::agent::child_reviewer::ReviewScorecard::new(80, 48, 85, Some(75)));
+        approved_review(&mut checkpoint);
+        checkpoint.plan_review_deliveries.get_mut("review-1").unwrap()
+            .extra.insert("decision".into(), json!("rebuttal"));
         let rej = crate::agent::loop_runner::check_pre_write_gatekeeper(
             &mut checkpoint, &context, &db, "test_run", 3, false,
-        );
-        assert!(rej.is_some());
-        let rej_res = rej.unwrap();
-        assert_eq!(rej_res.route, "plan_gatekeeper:scorecard_failed");
-        assert!(rej_res.stderr.contains("ask_human"), "预算耗尽拦截文案必须指引 ask_human 人工仲裁");
-        assert!(rej_res.stderr.contains("人工仲裁"), "拦截文案必须包含人工仲裁说明");
+        ).unwrap();
+        assert_eq!(rej.route, "plan_gatekeeper:review_revisions_required");
+        assert!(rej.stderr.contains("ask_human"));
 
         // 人工仲裁放行：用户确认批准后，plan_phase 变为 Approved
         checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;

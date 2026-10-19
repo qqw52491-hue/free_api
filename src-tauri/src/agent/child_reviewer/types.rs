@@ -231,7 +231,7 @@ impl PlanReviewerDispatchSnapshot {
 
 
 
-/// 对抗推演审查多维度评分卡
+/// 可选审查评分，仅供历史兼容、遥测与展示，不参与放行。
 /// 包含正确性、破坏性风险（安全性）、代码规范、测试覆盖四个维度，各 0~100 分
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[ts(export, export_to = "../src/types/generated/")]
@@ -243,7 +243,7 @@ pub struct ReviewScorecard {
     pub test_coverage: Option<u32>,
     #[serde(default)]
     pub null_reason: Option<String>,
-    /// 是否为系统合成的高分基线卡（Tech Lead approved 快速通道），而非审查员真实评分
+    /// 历史记录是否为系统合成评分；新审查不再合成评分。
     #[serde(default)]
     pub synthesized: bool,
 }
@@ -277,19 +277,6 @@ impl ReviewScorecard {
         }
     }
 
-    /// 合成的高分基线放行卡：Tech Lead 裁决 approved 但未输出四维评分卡时兜底，
-    /// 避免 scorecard_missing 门禁误拦。synthesized=true 便于日志与聚合区分真实评分。
-    pub fn synthesized_baseline() -> Self {
-        Self {
-            correctness: 95,
-            risk: 95,
-            style: 90,
-            test_coverage: None,
-            null_reason: None,
-            synthesized: true,
-        }
-    }
-
     /// 计算有效维度的综合平均分（向下取整，处理 test_coverage 为 None 的动态分母）
     pub fn average_score(&self) -> u32 {
         let mut sum = self.correctness + self.risk + self.style;
@@ -302,44 +289,6 @@ impl ReviewScorecard {
             0
         } else {
             sum / count
-        }
-    }
-
-    /// 检查是否满足硬门禁放行条件：综合均分 >= 75 且 risk >= 60
-    pub fn passes_gate(&self) -> bool {
-        self.average_score() >= 75 && self.risk >= 60
-    }
-
-    /// 弱作用兜底：判定评分是否异常偏低（正确性或安全性 < 60 分，或均分 < 60 分）
-    /// 用于在没有 blocking finding 时识别“审查员放水/偷懒”反常状态并转人工确认
-    pub fn is_abnormally_low(&self) -> bool {
-        self.correctness < 60 || self.risk < 60 || self.average_score() < 60
-    }
-
-    /// 未通过硬门禁时的详细诊断原因说明
-    pub fn gate_rejection_reason(&self) -> Option<String> {
-        if self.passes_gate() {
-            None
-        } else {
-            let mut failures = Vec::new();
-            let avg = self.average_score();
-            if avg < 75 {
-                failures.push(format!("综合平均分未达 75 分放行线（当前 {} 分）", avg));
-            }
-            if self.risk < 60 {
-                failures.push(format!("破坏性风险/安全性得分未达 60 分安全阈值（当前 {} 分）", self.risk));
-            }
-            let tc_desc = self.test_coverage.map_or_else(|| "N/A".to_string(), |tc| format!("{}/100", tc));
-            let reason_suffix = self.null_reason.as_deref().map_or(String::new(), |r| format!(" (N/A理由: {})", r));
-            Some(format!(
-                "{}。评分卡详情：正确性 {}/100, 破坏性风险 {}/100, 代码规范 {}/100, 测试覆盖 {}{}",
-                failures.join("，且 "),
-                self.correctness,
-                self.risk,
-                self.style,
-                tc_desc,
-                reason_suffix
-            ))
         }
     }
 }

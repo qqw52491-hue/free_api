@@ -255,46 +255,13 @@
     }
 
     #[test]
-    fn review_scorecard_passes_gate_and_clamping() {
-        // 1. 正常合格：均分 80，risk 80
-        let sc = ReviewScorecard::new(80, 80, 80, Some(80));
-        assert_eq!(sc.average_score(), 80);
-        assert!(sc.passes_gate());
-        assert!(sc.gate_rejection_reason().is_none());
-
-        // 2. 压线放行：均分恰好 75，risk 恰好 60
-        let sc_edge = ReviewScorecard::new(80, 60, 80, Some(80));
-        assert_eq!(sc_edge.average_score(), 75);
-        assert!(sc_edge.passes_gate());
-
-        // 3. 破坏性风险 risk < 60 单项硬拦截（即便综合平均分高达 82 分）
-        let sc_risk_fail = ReviewScorecard::new(95, 59, 90, Some(85));
-        assert_eq!(sc_risk_fail.average_score(), 82);
-        assert!(!sc_risk_fail.passes_gate(), "risk 低于 60 分必须自动拦截拒绝放行");
-        let reason = sc_risk_fail.gate_rejection_reason().unwrap();
-        assert!(reason.contains("破坏性风险/安全性得分未达 60 分安全阈值"));
-
-        // 4. 综合平均分 < 75 硬拦截（即便 risk 单项高达 90 分）
-        let sc_avg_fail = ReviewScorecard::new(60, 90, 70, Some(70));
-        assert_eq!(sc_avg_fail.average_score(), 72);
-        assert!(!sc_avg_fail.passes_gate(), "综合均分低于 75 分必须自动拦截拒绝放行");
-        let reason2 = sc_avg_fail.gate_rejection_reason().unwrap();
-        assert!(reason2.contains("综合平均分未达 75 分放行线"));
-
-        // 5. 0~100 数值钳制 (clamping)
-        let sc_clamped = ReviewScorecard::new(150, 200, 80, Some(70));
-        assert_eq!(sc_clamped.correctness, 100);
-        assert_eq!(sc_clamped.risk, 100);
-
-        // 6. 动态分母与 N/A 测试覆盖（UI 微调场景）
-        let sc_na = ReviewScorecard::new(90, 95, 95, None);
-        assert_eq!(sc_na.average_score(), 93);
-        assert!(sc_na.passes_gate());
-        assert!(!sc_na.is_abnormally_low());
-
-        // 7. 异常低分识别（放水防御）
-        let sc_low = ReviewScorecard::new(50, 90, 80, None);
-        assert!(sc_low.is_abnormally_low());
+    fn review_scorecard_remains_compatible_for_telemetry() {
+        let sc = ReviewScorecard::new(58, 92, 78, None);
+        assert_eq!(sc.average_score(), 76);
+        let sc = ReviewScorecard::new(150, 200, 80, Some(70));
+        assert_eq!((sc.correctness, sc.risk, sc.average_score()), (100, 100, 87));
+        let old: ReviewScorecard = serde_json::from_str(r#"{"correctness":95,"risk":95,"style":90,"synthesized":true}"#).unwrap();
+        assert!(old.synthesized);
     }
     use super::*;
     use rusqlite::params;
@@ -538,14 +505,14 @@
     }
 
     #[test]
-    fn unlocated_blocking_finding_is_automatically_downgraded_to_question() {
+    fn global_blocking_finding_retains_the_reviewers_classification() {
         let (findings, _, _, _, routing, _, _, _) = parse_controlled_output(
-            r#"{"findings":[{"id":"F1","severity":"blocking","location":"","current":"","why":"感觉架构还要优化","suggestion":"","evidence_strength":"unverified"}],"confidence":"confirmed","evidence_refs":["out-1"],"missing_evidence":[]}"#,
+            r#"{"findings":[{"id":"F1","severity":"blocking","location":"","current":"","why":"报告称校验通过，但已保存的命令结果为失败，结论需修正","suggestion":"","evidence_strength":"unverified"}],"confidence":"confirmed","evidence_refs":["out-1"],"missing_evidence":[]}"#,
             &["out-1".to_string()],
         )
         .unwrap();
-        assert_eq!(findings[0].severity, "question");
-        assert_eq!(routing, "certain");
+        assert_eq!(findings[0].severity, "blocking");
+        assert_eq!(routing, "needs_alignment");
     }
 
     #[test]

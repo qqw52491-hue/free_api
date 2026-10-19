@@ -281,9 +281,8 @@ pub(crate) fn check_pre_write_gatekeeper(
             // 记录拦截步（ask_human 冷却依据）；预算耗尽这类"指示去求助"的拦截豁免冷却
             checkpoint.recent_gate_block_step = Some(step_id as u64);
             if result.route == "plan_gatekeeper:reviewer_retry_limit"
-                || result.route == "plan_gatekeeper:scorecard_failed"
                 || result.route == "plan_gatekeeper:blocking_findings_open"
-                || result.route == "plan_gatekeeper:scorecard_missing"
+                || result.route == "plan_gatekeeper:review_revisions_required"
                 || result.route == "plan_gatekeeper:need_human_approval"
                 || result.route == "plan_gatekeeper:escalation_required"
                 || result.route == "plan_gatekeeper:reviewer_all_failed"
@@ -421,7 +420,14 @@ fn gate_interception(
                     ),
                     route: "plan_gatekeeper:escalation_required".to_string(),
                 })
-            } else if let Some(ref scorecard) = checkpoint.last_review_scorecard {
+            } else if checkpoint.plan_review_deliveries.is_empty() {
+                Some(DispatchResult { view: None,
+                    success: false,
+                    stdout: String::new(),
+                    stderr: gate_messages::cross_review_reviewer_result_missing(),
+                    route: "plan_gatekeeper:reviewer_result_missing".to_string(),
+                })
+            } else {
                 let budget_exhausted = checkpoint.plan_reviewer_retry_count
                     >= crate::agent::checkpoint::max_plan_reviewer_rounds();
                 let unwithdrawn_blockings = checkpoint.aggregate_unwithdrawn_blockings();
@@ -454,14 +460,12 @@ fn gate_interception(
                         ),
                         route: "plan_gatekeeper:blocking_findings_open".to_string(),
                     })
-                } else if scorecard.is_abnormally_low() {
-                    // 弱作用兜底：无 blocking 缺陷但评分异常偏低（正确性或安全性得分 < 60 分），防审查员放水，转人工核验
-                    let reason = scorecard.gate_rejection_reason().unwrap_or_else(|| "审查评分异常偏低（正确性或安全性得分 < 60 分），存在放水嫌疑，需人工核验".to_string());
+                } else if checkpoint.plan_revisions_required(db) {
                     Some(DispatchResult { view: None,
                         success: false,
                         stdout: String::new(),
-                        stderr: crate::agent::gate_messages::cross_review_scorecard_failed(&reason, budget_exhausted),
-                        route: "plan_gatekeeper:scorecard_failed".to_string(),
+                        stderr: gate_messages::cross_review_revisions_required(budget_exhausted),
+                        route: "plan_gatekeeper:review_revisions_required".to_string(),
                     })
                 } else if checkpoint.submitted_plan.is_none() {
                     // 结构化方案未落账不构成放行依据：investigate 直连 Tech Lead 也能
@@ -496,16 +500,6 @@ fn gate_interception(
                     checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
                     None
                 }
-            } else {
-                // fail-closed：审查结论缺失评分卡时绝不默认放行（旧的 fail-open 暗道）
-                let budget_exhausted = checkpoint.plan_reviewer_retry_count
-                    >= crate::agent::checkpoint::max_plan_reviewer_rounds();
-                Some(DispatchResult { view: None,
-                    success: false,
-                    stdout: String::new(),
-                    stderr: crate::agent::gate_messages::cross_review_scorecard_missing(budget_exhausted),
-                    route: "plan_gatekeeper:scorecard_missing".to_string(),
-                })
             }
         }
         crate::agent::checkpoint::PlanExecutionMode::Auto => {

@@ -284,7 +284,7 @@
     }
 
     #[test]
-    fn test_tech_lead_approved_synthesizes_scorecard_and_passes_gate() {
+    fn test_tech_lead_approved_without_scorecard_passes_gate() {
         let db = setup_test_db();
         let context = SandwichContext::new("system".to_string(), "goal".to_string());
         let mut cp = AgentCheckpoint::new("test-tech-lead-ok".to_string(), &context);
@@ -308,20 +308,46 @@
             routing: Some("certain".to_string()),
             withdrawn_findings: Vec::new(),
             objection_verdicts: Vec::new(),
-            scorecard: None, // 无显式 scorecard，由契约自动合成合格评分卡
+            scorecard: None, // 无评分也可形成有效批准
             extra,
         };
         mark_succeeded(&db, "rev-tl");
         cp.record_reviewer_delivery_for_run(&db, Some("rev-tl"), &del);
 
-        assert!(cp.last_review_scorecard.is_some(), "approved 应自动合成基线合格评分卡");
-        assert!(
-            cp.last_review_scorecard.as_ref().unwrap().synthesized,
-            "合成的基线评分卡必须携带 synthesized 标记，与非审查员真实评分区分"
-        );
+        assert!(cp.last_review_scorecard.is_none(), "批准不应伪造评分");
         let res = check_pre_write_gatekeeper(&mut cp, &context, &db, "test-tech-lead-ok", 1, false);
         assert!(res.is_none(), "Tech Lead 裁决 approved 且无 blocking 时应放行写入");
         assert_eq!(cp.plan_phase, PlanPhase::Approved);
+    }
+
+    #[test]
+    fn resumed_approval_supersedes_its_own_rebuttal_but_not_another_reviewers() {
+        let db = setup_test_db();
+        let context = SandwichContext::new("sys".into(), "goal".into());
+        let mut cp = AgentCheckpoint::new("review-lineage".into(), &context);
+        cp.plan_mode = PlanExecutionMode::CrossReview;
+        cp.plan_reviewer_retry_count = 1;
+        cp.submitted_plan = Some(valid_submission());
+        for (id, task, attempt, decision) in [
+            ("rev-old", "task-a", 1, "rebuttal"),
+            ("rev-new", "task-a", 2, "approved"),
+            ("rev-other", "task-b", 1, "rebuttal"),
+        ] {
+            seed_review(&db, id, &cp.run_id, "lineage-batch", "succeeded", true);
+            db.0.lock().unwrap().execute("UPDATE agent_child_runs SET task_id=?2, attempt_id=?3 WHERE id=?1",
+                rusqlite::params![id, task, attempt]).unwrap();
+            let delivery = serde_json::from_value(serde_json::json!({
+                "findings":[],"confidence":"supported","evidence_refs":[],"missing_evidence":[],"decision":decision
+            })).unwrap();
+            cp.plan_review_deliveries.insert(id.into(), delivery);
+        }
+        cp.plan_reviewer_consumed = true;
+        let blocked = check_pre_write_gatekeeper(&mut cp, &context, &db, "review-lineage", 3, false).unwrap();
+        assert_eq!(blocked.route, "plan_gatekeeper:review_revisions_required");
+        cp.plan_review_deliveries.remove("rev-other");
+        assert!(check_pre_write_gatekeeper(&mut cp, &context, &db, "review-lineage", 4, false).is_none());
+        assert!(cp.plan_phase.is_approved());
+        assert_eq!(cp.plan_review_deliveries["rev-old"].get_extra_str("decision"), Some("rebuttal"), "原始裁决保留");
     }
 
     /// 旁路通道防线：investigate 直连 Tech Lead 也能把 plan_phase 推进 Reviewing

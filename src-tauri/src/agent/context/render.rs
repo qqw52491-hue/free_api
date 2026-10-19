@@ -77,7 +77,11 @@ impl ContextRenderer {
                     .as_deref()
                     .map(|id| format!(" (证据 {})", id))
                     .unwrap_or_default();
-                format!("- [{}] #{} {}{}", t.status, t.id, t.description, ev)
+                if t.is_review_reference() {
+                    format!("- [历史审查参考，非验收待办；原状态 {}] #{} {}{}", t.status, t.id, t.description, ev)
+                } else {
+                    format!("- [{}] #{} {}{}", t.status, t.id, t.description, ev)
+                }
             })
             .collect();
         format!("【当前任务面板 (Todo List)】\n{}\n\n", lines.join("\n"))

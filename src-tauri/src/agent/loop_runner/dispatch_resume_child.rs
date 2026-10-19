@@ -110,6 +110,7 @@ pub(super) async fn dispatch_resume_child(
                             None => Vec::new(),
                         };
                         crate::agent::child_reviewer::retire_consumer_history(&mut messages);
+                        crate::agent::child_reviewer::refresh_review_instructions(&mut messages);
                         if messages.is_empty() {
                             DispatchResult { view: None,
                                 stdout: String::new(),

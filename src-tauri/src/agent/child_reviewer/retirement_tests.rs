@@ -475,3 +475,41 @@ async fn contract_correction_can_still_use_tools_and_explicit_na() {
     assert!(observation.contains("取证结果 step 1/"));
     assert!(observation.contains("synthetic review evidence"));
 }
+
+#[tokio::test]
+async fn current_review_accepts_no_scorecard_without_a_format_retry() {
+    let mock = MockReviewer::new(vec![json!({
+        "findings":[],"confidence":"confirmed","evidence_refs":[],"missing_evidence":[]
+    })]).await;
+    let snapshot = PlanReviewerDispatchSnapshot::new("mock", "flash", "auto", "基础审查员",
+        json!({"question":"核验只读报告中的结论", "evidence_excerpt":"当前仅能确认网络吞吐上界，不宣称已经测得真实磁盘写速"}));
+    let (_tx, rx) = watch::channel(0u64);
+    let id = snapshot.spawn(None, &mock.db, "no-score-run", "no-score-session", &mock.root, rx, None).await.unwrap();
+    let result = mock.wait_child(&id).await;
+    assert!(result.get("scorecard").is_none_or(Value::is_null));
+    assert_eq!(mock.requests.lock().unwrap().len(), 1, "缺评分不应制造格式补答");
+    let requests = mock.requests.lock().unwrap();
+    let system = requests[0]["messages"][0]["content"].as_str().unwrap();
+    assert!(system.contains("普通 question 只作参考，不自动成为证明义务"));
+    assert!(!system.contains("综合均分>=75"));
+    assert!(!system.contains("findings 为 1–5"));
+}
+
+#[test]
+fn old_review_resume_updates_host_policy_but_preserves_original_judgments_and_evidence() {
+    let evidence = json!({"role":"user","content":"证据原文：代码注释中也可能出现 scorecard 或 QUESTION"});
+    let result = json!({"role":"assistant","content":"{\"scorecard\":{\"correctness\":58},\"findings\":[{\"severity\":\"blocking\"}]}"});
+    let old = vec![json!({"role":"system","content":
+        "宿主规则\n0. 【核心强制】必须在顶级 JSON 中完整输出 scorecard 四维评分卡，综合均分>=75方可放行；\n1. findings 为 1–5 条结构化审查条目；若无确切位置 location，severity 必须标为 question\n病根核对、撤回裁决与证据范围仍须核验"}), evidence.clone(), result.clone()];
+    let mut resumed = old.clone();
+    refresh_review_instructions(&mut resumed);
+    assert!(resumed[0]["content"].as_str().unwrap().contains("不作为放行条件"));
+    assert!(resumed[0]["content"].as_str().unwrap().contains("病根核对、撤回裁决与证据范围仍须核验"));
+    assert!(!resumed[0]["content"].as_str().unwrap().contains("综合均分>=75"));
+    assert_eq!(resumed[1], evidence);
+    assert_eq!(resumed[2], result);
+    assert!(old[0]["content"].as_str().unwrap().contains("综合均分>=75"));
+    let once = resumed.clone();
+    refresh_review_instructions(&mut resumed);
+    assert_eq!(resumed, once);
+}

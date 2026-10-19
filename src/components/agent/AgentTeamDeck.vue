@@ -216,9 +216,9 @@
                         <div class="scorecard-header">
                             <span class="scorecard-icon">📊</span>
                             <strong class="scorecard-title">审查评分卡 (ReviewScorecard)</strong>
-                            <span class="scorecard-badge" :class="computeScorecardPass(selectedWorker.scorecard) ? 'pass' : 'fail'">
+                            <span class="scorecard-badge">
                                 均分: {{ computeScorecardAverage(selectedWorker.scorecard) }} 分 · 
-                                {{ computeScorecardPass(selectedWorker.scorecard) ? '✅ 门禁合格放行' : '🚨 未达门禁标准' }}
+                                仅供参考，不决定放行
                             </span>
                         </div>
                         <div class="scorecard-grid">
@@ -234,10 +234,10 @@
                             <div class="scorecard-item">
                                 <div class="item-label-row">
                                     <span class="dim-name">破坏性风险/安全 (Risk)</span>
-                                    <span class="dim-val" :class="selectedWorker.scorecard.risk < 60 ? 'text-danger' : ''">{{ selectedWorker.scorecard.risk }}/100</span>
+                                    <span class="dim-val">{{ selectedWorker.scorecard.risk }}/100</span>
                                 </div>
                                 <div class="progress-track">
-                                    <div class="progress-bar risk" :class="selectedWorker.scorecard.risk < 60 ? 'bar-danger' : ''" :style="{ width: `${selectedWorker.scorecard.risk}%` }"></div>
+                                    <div class="progress-bar risk" :style="{ width: `${selectedWorker.scorecard.risk}%` }"></div>
                                 </div>
                             </div>
                             <div class="scorecard-item">
@@ -252,7 +252,7 @@
                             <div class="scorecard-item">
                                 <div class="item-label-row">
                                     <span class="dim-name">测试覆盖 (Test Coverage)</span>
-                                    <span class="dim-val">{{ selectedWorker.scorecard.test_coverage != null ? `${selectedWorker.scorecard.test_coverage}/100` : 'N/A (免检)' }}</span>
+                                    <span class="dim-val">{{ selectedWorker.scorecard.test_coverage != null ? `${selectedWorker.scorecard.test_coverage}/100` : 'N/A（不适用）' }}</span>
                                 </div>
                                 <div class="progress-track">
                                     <div class="progress-bar test" :style="{ width: `${selectedWorker.scorecard.test_coverage ?? 100}%` }"></div>
@@ -478,11 +478,6 @@ function computeScorecardAverage(sc?: ReviewScorecard): number {
         count += 1;
     }
     return Math.round(sum / count);
-}
-
-function computeScorecardPass(sc?: ReviewScorecard): boolean {
-    if (!sc) return false;
-    return computeScorecardAverage(sc) >= 75 && sc.risk >= 60;
 }
 
 function isBlockingFinding(finding: any): boolean {
@@ -1409,16 +1404,6 @@ async function copyOutput(text?: string) {
     padding: 1px 6px;
     border-radius: 4px;
     font-weight: 500;
-}
-.scorecard-badge.pass {
-    background: rgba(34, 197, 94, 0.15);
-    color: #4ade80;
-    border: 1px solid rgba(34, 197, 94, 0.3);
-}
-.scorecard-badge.fail {
-    background: rgba(239, 68, 68, 0.15);
-    color: #f87171;
-    border: 1px solid rgba(239, 68, 68, 0.3);
 }
 .scorecard-grid {
     display: grid;

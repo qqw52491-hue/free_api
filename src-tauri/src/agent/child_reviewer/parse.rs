@@ -286,7 +286,7 @@ pub(crate) fn parse_controlled_output(
                 let id = s.id.unwrap_or_else(|| default_id.clone());
                 let id = if id.trim().is_empty() { default_id.clone() } else { id.trim().to_string() };
                 let location = s.location.unwrap_or_default().trim().to_string();
-                let mut severity = s.severity.ok_or_else(|| format!(
+                let severity = s.severity.ok_or_else(|| format!(
                     "child_reviewer.findings[{idx}].severity 缺失，必须明确提供 blocking、suggestion 或 question。"
                 ))?.trim().to_lowercase();
                 if !matches!(severity.as_str(), "blocking" | "suggestion" | "question") {
@@ -304,10 +304,6 @@ pub(crate) fn parse_controlled_output(
                     "final_only" | "blocking_if_final" => "final_only".to_string(),
                     _ => "regardless".to_string(),
                 };
-                // 🌟 硬规则：定位不到具体物理行号的，强制降级为 question，禁止当 blocking 阻塞缺陷！
-                if location.is_empty() && severity == "blocking" {
-                    severity = "question".to_string();
-                }
                 if severity == "blocking" {
                     has_blocking = true;
                 }

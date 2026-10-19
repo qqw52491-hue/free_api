@@ -6,7 +6,7 @@
         for route in [
             "plan_gatekeeper:reviewer_retry_limit",
             "plan_gatekeeper:need_human_approval",
-            "plan_gatekeeper:scorecard_missing",
+            "plan_gatekeeper:review_revisions_required",
             "stage_review:blocking_open",
             "finish_review:blocking",
             "host_rejection:ask_human_cooldown",

@@ -27,6 +27,32 @@ pub use parse::*;
 pub use poll::*;
 pub use types::*;
 
+const REVIEW_DECISION_POLICY: &str = "【判决口径】依据用户目标、实际证据和具体问题给出审查结论；无需输出 scorecard，历史评分与角色卡中的评分要求不作为放行条件。普通 question 只作参考，不自动成为证明义务；若缺证据使某项明确验收要求无法确认或存在具体阻塞风险，请说明影响并明确列为 blocking，不能仅因还能继续调查就要求重做；仅有普通疑问或建议时，不据此作出 rebuttal。";
+
+/// 旧子审查续跑只更新宿主指令副本，保留原始证据及模型判决。
+pub(crate) fn refresh_review_instructions(messages: &mut [Value]) {
+    for message in messages {
+        if message.get("role").and_then(Value::as_str) != Some("system") {
+            continue;
+        }
+        let Some(Value::String(text)) = message.get_mut("content") else { continue; };
+        if !text.contains("【核心强制】必须在顶级 JSON 中完整输出 scorecard") {
+            continue;
+        }
+        *text = text.split_inclusive('\n').map(|line| {
+            if line.contains("【核心强制】必须在顶级 JSON 中完整输出 scorecard") {
+                format!("0. {}\n", REVIEW_DECISION_POLICY)
+            } else if line.contains("findings 为 1–5 条结构化审查条目") {
+                "1. findings 为 0–5 条，无问题时为 []；全局阻塞问题允许 location 留空，须说明证据与影响。\n".into()
+            } else {
+                line.to_string()
+            }
+        }).collect::<String>()
+            .replace("，>=60方可放行", "")
+            .replace("输出合规评分卡（各项 >= 80），无阻塞缺陷。", "无需评分，有具体阻塞缺陷时不得批准。");
+    }
+}
+
 /// 解析单次审查调用的思考字符预算，不修改进程环境，便于独立回归验证。
 fn reviewer_thinking_cap(value: Option<&str>) -> usize {
     value
@@ -99,9 +125,9 @@ pub async fn spawn_child_reviewer(
     };
 
     let contract_verify_hint = if has_verify_obligation {
-        "【契约验证属性】：当前任务契约明确绑定了可执行验证义务 (verify_command)。test_coverage 维度必须如实评分（0~100整数），严禁填 null。"
+        "【契约验证属性】：当前任务契约绑定了可执行验证义务 (verify_command)。请核对该义务与实际结果，具体缺口写入 findings 或 missing_evidence，无须打分。"
     } else {
-        "【契约验证属性】：当前任务契约未绑定自动化验证命令 (verify_command)。test_coverage 维度已机械置为 N/A，请在 scorecard 中将 test_coverage 设为 null，并在 null_reason 填写“任务无绑定验证命令”。"
+        "【契约验证属性】：当前任务契约未绑定自动化验证命令 (verify_command)，不要仅因缺少自动化测试而判定不合格。"
     };
 
     // reviewer 只读取证步数预算（0 = 瞎子模式）：解除信息同源瓶颈。
@@ -159,19 +185,12 @@ pub async fn spawn_child_reviewer(
           \"confidence\": \"confirmed|supported|unverified\",\n\
           \"evidence_refs\": [\"仅可使用父Agent给定的引用\"],\n\
           \"missing_evidence\": [\"缺少的证据描述\"],\n\
-          \"scorecard\": {{\n\
-            \"correctness\": 0-100（代码逻辑正确性与功能完备性，100为完全正确零缺陷）,\n\
-            \"risk\": 0-100（破坏性风险/安全性评分，100为零破坏性完全安全，>=60方可放行）,\n\
-            \"style\": 0-100（代码规范与既有工程风格契合度）,\n\
-            \"test_coverage\": 0-100 或 null（测试用例充分度与反证覆盖度；若改动为纯界面展示、样式、文案调整或当前任务未绑定自动化测试验证义务，填 null 表示不适用 N/A，并在 null_reason 说明原因；严禁在无须单测时乱填 0 导致误拦截）,\n\
-            \"null_reason\": \"若 test_coverage 为 null 时必填简短原因说明，否则可省略\"\n\
-          }},\n\
           \"objection_verdicts\": [{{\"finding_id\":\"F1\",\"verdict\":\"maintain|withdraw\",\"reason\":\"裁决理由\"}}]\n\
         }}\n\
         【审查方法（去锚定）】：先不细读父Agent提交的方案，独立列出「该任务必须满足的硬条件」与「预判的最大风险」；再带着这份清单对照方案审查。findings 的 why 字段须以 [预判内] 或 [预判外] 前缀标注来源。\n\
         【硬规则】：\n\
-        0. 【核心强制】必须在顶级 JSON 中完整输出 scorecard 四维评分卡（correctness, risk, style, test_coverage），缺失该字段会导致审查判定无效并重修；综合均分>=75且破坏性风险>=60方可放行代码写入；\n\
-        1. findings 为 1–5 条结构化审查条目；若无确切位置 location，severity 必须标为 question（禁止标 blocking）；\n\
+        0. {REVIEW_DECISION_POLICY}\n\
+        1. findings 为 0–5 条结构化审查条目，无具体问题时为 []。blocking 须说明证据及对本次目标的具体影响；location 可为文件、命令、方案章节或证据标识，全局问题可留空，不编造定位。\n\
         2. 证据不足时 confidence 标 unverified 并在 missing_evidence 说明；\n\
         3. 若证据包中提供了此前审查的 blocking 异议及父Agent的处理说明，必须输出 objection_verdicts 逐条裁决：问题确已解决或经证伪不成立时 verdict 取 withdraw，理由必须引用证据包中父Agent处理说明或修订内容的具体点（空泛模板理由会被系统按 maintain 处理）；仍成立或有新证据支持时取 maintain。无历史异议时省略该字段；\n\
         3b. 【复审轮收敛】证据包含此前审查异议（即第 2 轮及以后）时，你的主要任务是核对历史异议是否已解决；新增 findings 只有“会导致执行失败、产物不可用、或违反用户明确的硬性约束（时长/格式/范围/安全）”才可标 blocking；审美、信息密度、风格取舒、“更好的做法”一律只能标 suggestion，不得再次打回；双方无法达成一致的分歧标 question 并写明，由父 Agent 决定是否向用户确认；\n\
@@ -756,7 +775,7 @@ pub async fn spawn_child_reviewer(
                     messages.push(json!({"role": "assistant", "content": raw}));
                     messages.push(json!({
                         "role": "user",
-                        "content": "【系统】取证预算已用尽。请立即基于已有证据输出最终审查 JSON（含 findings/scorecard），不要再请求取证。证据缺口写入 missing_evidence。"
+                        "content": "【系统】取证预算已用尽。请立即基于已有证据输出最终审查 JSON（含 findings），不要再请求取证。证据缺口写入 missing_evidence。"
                     }));
                     budget_warned = true;
                     continue;
