@@ -813,6 +813,78 @@ mod tests {
         let _ = std::fs::remove_dir_all(base);
     }
 
+    // 真实事故形状：审查员已经给出行号和改法，阶段/对质回执却只回传统计。
+    // 经三条消费通道共用的 reducer 验证模型实际收到正文，而非只测试数据库有值。
+    #[tokio::test]
+    async fn stage_and_rebuttal_receipts_deliver_findings_and_verdict_reasons() {
+        let (base, db) = test_db("stage-review-details");
+        let ws = base.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let env = test_env(&db, &ws);
+        let mut context = SandwichContext::new("sys".into(), "隐藏输入输出报文".into());
+        let mut cp = AgentCheckpoint::new("run-1".into(), &context);
+        cp.stage_review_batch_id = Some("details-batch".into());
+        let payload = json!({
+            "confidence":"confirmed", "routing":"needs_alignment",
+            "findings":[
+                {"id":"F1", "severity":"blocking", "finality":"regardless",
+                 "location":"AuditLogAspect.java:54,76",
+                 "current":"before 已隐藏，但 after 与 ex.getMessage() 仍无条件入库",
+                 "why":"用户要求输入输出均不落库，成功和失败路径都漏了输出侧",
+                 "suggestion":"after 和异常消息均改用 hidePayload ? null : 原值",
+                 "evidence_strength":"confirmed"},
+                {"id":"F2", "severity":"question", "finality":"regardless",
+                 "why":"其他接口是否也需隐藏，留作范围参考"},
+                {"id":"F3", "severity":"blocking", "finality":"final_only",
+                 "why":"交付前补充运行验证披露"}
+            ],
+            "evidence_refs":["AuditLogAspect.java:31-79", "git_diff"],
+            "missing_evidence":["未实测 null 字段落库行为"],
+            "withdrawn_findings":[], "objection_verdicts":[]
+        });
+        for (id, purpose) in [("detail-stage", "stage_review"), ("detail-maintain", "rebuttal")] {
+            seed_run(&db, id, "run-1", "details-batch", purpose, "succeeded", true);
+            let mut body = payload.clone();
+            if purpose == "rebuttal" {
+                body["objection_verdicts"] = json!([
+                    {"finding_id":"F1", "verdict":"maintain",
+                     "reason":"父 Agent 的反证只覆盖 before，未回答 L54/L76"}
+                ]);
+            }
+            let r = receipt("review", id, None, body.clone());
+            let effects = reduce_child_receipt(&env, &mut cp, &mut context, &r).await;
+            let text = &effects.model_text;
+            assert!(text.contains(id), "回执必须标明来源");
+            for f in body["findings"].as_array().unwrap() {
+                for key in ["id", "severity", "finality", "location", "current", "why", "suggestion", "evidence_strength"] {
+                    if let Some(value) = f[key].as_str().filter(|v| !v.is_empty()) {
+                        assert!(text.contains(value), "漏传 {key}={value}: {text}");
+                    }
+                }
+            }
+            for value in ["AuditLogAspect.java:31-79", "git_diff", "未实测 null 字段落库行为", "needs_alignment"] {
+                assert!(text.contains(value), "漏传 {value}: {text}");
+            }
+            if purpose == "rebuttal" {
+                assert!(text.contains("maintain"));
+                assert!(text.contains("父 Agent 的反证只覆盖 before，未回答 L54/L76"));
+            }
+            assert_eq!(cp.stage_review_blockers_open, 1, "正文透传不得改变阻塞计数");
+            assert!(context.todo_list.is_empty(), "参考意见不应因展示而生成强制待办");
+        }
+        seed_run(&db, "detail-withdraw", "run-1", "details-batch", "rebuttal", "succeeded", true);
+        let r = receipt("review", "detail-withdraw", None, json!({
+            "confidence":"confirmed", "findings":[], "withdrawn_findings":["F1"],
+            "objection_verdicts":[{"finding_id":"F1", "verdict":"withdraw", "reason":"已复核两条路径均已补正"}]
+        }));
+        let effects = reduce_child_receipt(&env, &mut cp, &mut context, &r).await;
+        for value in ["F1", "withdraw", "已复核两条路径均已补正"] {
+            assert!(effects.model_text.contains(value), "撤回正文漏传 {value}: {}", effects.model_text);
+        }
+        assert_eq!(cp.stage_review_blockers_open, 0);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
     #[tokio::test]
     async fn stage_review_infra_failure_defers_refund_to_batch_settle() {
         // 阶段审查退款延迟结算契约：回执只标记 refund_pending，

@@ -657,6 +657,67 @@ pub struct StageReceiptOutcome {
     pub refund_pending: bool,
 }
 
+/// 模型可见的审查正文：统计只说明数量，不能替代缺陷证据和对质裁决。
+/// 直接投影已接收字段，不推断缺失内容、不改裁决或截掉修复依据。
+fn append_stage_review_details(
+    text: &mut String,
+    receipt: &crate::agent::protocol::DeliveryReceipt,
+) {
+    text.push_str(&format!("\n【本次审查正文】\n置信度: {}", receipt.confidence()));
+    if let Some(routing) = receipt.routing() {
+        text.push_str(&format!("\n建议路由: {}", routing));
+    }
+    let delivery = receipt.as_reviewer_delivery();
+    let findings = receipt.findings();
+    if findings.is_empty() {
+        text.push_str("\n本次未附具体发现（不代表此前异议已撤回）。");
+    }
+    for finding in &findings {
+        text.push_str(&format!("\n- [{}] severity={} finality={}",
+            finding.id, finding.severity,
+            if finding.finality.is_empty() { "regardless（缺省）" } else { &finding.finality }));
+        if delivery.as_ref().is_some_and(|d| d.withdrawn_findings.contains(&finding.id)) {
+            text.push_str("（本次已撤回）");
+        }
+        for (label, value) in [
+            ("位置", &finding.location),
+            ("当前实现", &finding.current),
+            ("问题与依据", &finding.why),
+            ("修改建议", &finding.suggestion),
+            ("证据强度", &finding.evidence_strength),
+        ] {
+            if !value.is_empty() {
+                text.push_str(&format!("\n  {}: {}", label, value));
+            }
+        }
+    }
+    if let Some(delivery) = &delivery {
+        if !delivery.withdrawn_findings.is_empty() {
+            text.push_str(&format!("\n本次撤回异议: {}", delivery.withdrawn_findings.join(", ")));
+        }
+        if !delivery.objection_verdicts.is_empty() {
+            text.push_str("\n【对质逐项裁决】");
+            for verdict in &delivery.objection_verdicts {
+                text.push_str(&format!("\n- [{}] {}\n  裁决理由: {}",
+                    verdict.finding_id, verdict.verdict, verdict.reason));
+            }
+        }
+        if !delivery.evidence_refs.is_empty() {
+            text.push_str("\n【审查证据引用】");
+            for reference in &delivery.evidence_refs {
+                text.push_str(&format!("\n- {}", reference));
+            }
+        }
+    }
+    let missing = receipt.missing_evidence();
+    if !missing.is_empty() {
+        text.push_str("\n【审查披露的证据缺口】");
+        for item in &missing {
+            text.push_str(&format!("\n- {}", item));
+        }
+    }
+}
+
 /// 消费阶段审查交付回执（成功或基础设施失败均走这里）。
 /// oracle_index：宿主判分「下一未解阶段」索引（None = 无 oracle 场景）。
 /// blockers>0 时记录出生索引，供僵尸 blocker 清账判定。
@@ -787,6 +848,7 @@ pub fn apply_stage_receipt(
     if was_rebuttal {
         text.push_str("（对质复检结论）");
     }
+    append_stage_review_details(&mut text, receipt);
     if checkpoint.stage_review_blockers_open > 0 {
         text.push_str(&format!(
             "\n🚨 后续写入已被拦截，请用 resume_child 对质解套（child_run_id 见门禁提示）。"
