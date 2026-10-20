@@ -136,50 +136,71 @@ pub(crate) async fn handler_session_attachment(
         return Err(unauthorized());
     }
     let conn = db_conn(&state.app)?;
-    let resource_id = crate::commands::projects::register_attachment_for_session(
-        &conn,
-        &session_id,
-        std::path::Path::new(req.path.trim()),
-        req.original_name.as_deref().unwrap_or("attachment"),
-    )
-    .map_err(|e| bad_request(&e))?;
+    let resource_id = register_channel_attachment(
+        &conn, &session_id, std::path::Path::new(req.path.trim()),
+        req.original_name.as_deref().unwrap_or("attachment"), &effective_scratch_dir(&config),
+    ).map_err(|e| bad_request(&e))?;
     match resource_id {
         Some(id) => Ok(Json(json!({ "resource_id": id }))),
         None => Err(bad_request("该会话未关联项目，无法登记附件（请先绑定项目）")),
     }
 }
 
-/// 会话最近产物（供微信回推文件）
+/// 未绑定项目的微信附件使用既有临时工作区，仍按受管资源读取。
+fn register_channel_attachment(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    path: &std::path::Path,
+    name: &str,
+    scratch: &std::path::PathBuf,
+) -> Result<Option<String>, String> {
+    let metadata = std::fs::metadata(path).map_err(|e| format!("无法读取收到的附件: {e}"))?;
+    if !metadata.is_file() { return Err("附件路径不是文件".into()); }
+    if metadata.len() > super::upload::MAX_UPLOAD_BYTES as u64 { return Err("附件超过 25MB 上限".into()); }
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    if crate::commands::projects::project_for_session(&tx, session_id)?.is_none() {
+        let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM chat_sessions WHERE id=?1)", [session_id], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        if !exists { return Err("附件会话不存在".into()); }
+        let project_id = ensure_scratch_project(&tx, scratch)?;
+        tx.execute("INSERT INTO agent_project_sessions (project_id, session_id, created_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params![project_id, session_id, now_ts()]).map_err(|e| e.to_string())?;
+    }
+    let resource = crate::commands::projects::register_attachment_for_session(&tx, session_id, path, name)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(resource)
+}
+
+#[derive(Deserialize, Default)]
+pub(crate) struct ArtifactsQuery {
+    run_id: Option<String>,
+}
+
+/// 可选按本次运行取产物，避免把同会话的旧文件再次推送。
 pub(crate) async fn handler_session_artifacts(
     AxumState(state): AxumState<Arc<ChannelState>>,
     headers: HeaderMap,
     AxumPath(session_id): AxumPath<String>,
+    AxumQuery(query): AxumQuery<ArtifactsQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let config = state.config.read().expect("config poisoned").clone();
-    if !authorized(&headers, &config) {
-        return Err(unauthorized());
-    }
+    if !authorized(&headers, &config) { return Err(unauthorized()); }
     let db = state.app.state::<DbState>();
-    let records = crate::agent::artifact_manager::list_session_artifacts(db.inner(), &session_id)
-        .map_err(internal_error)?;
-    let mut records = records;
+    channel_artifacts(db.inner(), &session_id, query.run_id.as_deref())
+        .map(Json).map_err(internal_error)
+}
+
+fn channel_artifacts(db: &DbState, session_id: &str, run_id: Option<&str>) -> Result<Value, String> {
+    let mut records = crate::agent::artifact_manager::list_artifacts_by_scope(db, session_id, run_id)?;
     records.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    let total = records.len();
     records.truncate(5);
-    let artifacts: Vec<Value> = records
-        .into_iter()
-        .map(|record| {
-            json!({
-                "id": record.id,
-                "display_name": record.display_name,
-                "path": record.canonical_path,
-                "size_bytes": record.size_bytes,
-                "mime_type": record.mime_type,
-                "kind": record.kind,
-                "created_at": record.created_at,
-            })
-        })
-        .collect();
-    Ok(Json(json!({ "artifacts": artifacts })))
+    let artifacts: Vec<Value> = records.into_iter().map(|record| json!({
+        "id": record.id, "run_id": record.run_id, "display_name": record.display_name,
+        "path": record.canonical_path, "size_bytes": record.size_bytes, "mime_type": record.mime_type,
+        "kind": record.kind, "created_at": record.created_at,
+    })).collect();
+    Ok(json!({ "artifacts": artifacts, "total": total, "has_more": total > artifacts.len() }))
 }
 
 pub(crate) fn eval_report_dirs(app: &AppHandle) -> Vec<std::path::PathBuf> {
@@ -391,3 +412,48 @@ pub(crate) fn config_value(config: &ChannelConfig) -> Value {
 }
 
 // ---------------------------------------------------------------- 小工具
+
+#[cfg(test)]
+mod file_transfer_tests {
+    use super::*;
+
+    #[test]
+    fn unbound_wechat_attachment_is_copied_to_scratch_and_readable_as_a_resource() {
+        let base = std::env::temp_dir().join(format!("wechat-files-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let conn = crate::db::init_db(&base.join("test.db")).unwrap();
+        let session = crate::commands::projects::create_plain_session_row(&conn, "微信 · 临时", "model").unwrap();
+        let incoming = base.join("source.txt");
+        std::fs::write(&incoming, "小文件正文🙂").unwrap();
+        let scratch = base.join("scratch");
+        let resource = register_channel_attachment(&conn, &session.id, &incoming, "报告.txt", &scratch).unwrap().unwrap();
+        std::fs::remove_file(&incoming).unwrap(); // 原始下载路径消失后，受管副本仍可读取
+        let preview = crate::commands::projects::read_project_resource_for_session(&conn, &session.id, &resource).unwrap();
+        assert_eq!(preview.content, "小文件正文🙂");
+        assert!(std::path::Path::new(&preview.resource.canonical_path).starts_with(scratch.join(".attachments")));
+        assert!(register_channel_attachment(&conn, &session.id, &base, "directory", &scratch).is_err());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn returned_files_are_scoped_to_the_run_and_session_and_disclose_truncation() {
+        let base = std::env::temp_dir().join(format!("wechat-artifacts-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let db = DbState(std::sync::Arc::new(std::sync::Mutex::new(crate::db::init_db(&base.join("test.db")).unwrap())));
+        for (index, session, run) in [(0, "s", "old"), (1, "other", "r"), (2, "s", "r"),
+            (3, "s", "r"), (4, "s", "r"), (5, "s", "r"), (6, "s", "r"), (7, "s", "r")] {
+            let path = base.join(format!("{index}.txt"));
+            std::fs::write(&path, "output").unwrap();
+            crate::agent::artifact_manager::register_workspace_artifact(&db, session, Some(run), path.to_str().unwrap()).unwrap();
+        }
+        let response = channel_artifacts(&db, "s", Some("r")).unwrap();
+        assert_eq!(response["total"], 6);
+        assert_eq!(response["has_more"], true);
+        let files = response["artifacts"].as_array().unwrap();
+        assert_eq!(files.len(), 5);
+        assert!(files.iter().all(|file| file["run_id"] == "r" && file["display_name"] != "1.txt"));
+        assert_eq!(channel_artifacts(&db, "s", Some("missing")).unwrap()["total"], 0);
+        assert_eq!(channel_artifacts(&db, "s", None).unwrap()["total"], 7);
+        let _ = std::fs::remove_dir_all(base);
+    }
+}

@@ -95,7 +95,7 @@ test("actual result command routes full replies through multipart delivery witho
 
 function watcherHarness(api, send = async () => {}) {
   const source = fs.readFileSync(new URL("./index.js", import.meta.url), "utf8");
-  const watchSource = source.slice(source.indexOf("function watchRun("), source.indexOf("async function latestArtifact("));
+  const watchSource = source.slice(source.indexOf("function watchRun("), source.indexOf("async function sendRunFiles("));
   const callbacks = [];
   const activeRuns = new Map();
   const lastResults = new Map();
@@ -108,7 +108,7 @@ function watcherHarness(api, send = async () => {}) {
     MAX_ARTIFACT_BYTES: 25 * 1024 * 1024,
     setInterval: (callback) => { callbacks.push(callback); return callbacks.length; },
     clearInterval: () => {}, console: { log() {}, error() {} },
-    inQuietHours: () => false, latestArtifact: async () => null,
+    inQuietHours: () => false, sendRunFiles: async () => {},
     botSend: async (text) => { sent.push(text); await send(text); return true; },
     drainQueue: async () => { drained++; },
   };
@@ -215,4 +215,20 @@ test("poll errors release the busy flag so a later poll can complete", async () 
   assert.equal(requests, 2);
   assert.equal(h.sent.length, 1);
   assert.equal(h.drained(), 1);
+});
+
+test("media fallback reports attachment failure separately from successful text delivery", async () => {
+  const delivery = createMessageDelivery(async (message) => {
+    if (typeof message !== "string") throw new Error("upload failed");
+  });
+  assert.equal((await delivery("文件说明", { url: "/tmp/report.pdf" })).mediaDelivered, false);
+  const source = fs.readFileSync(new URL("./index.js", import.meta.url), "utf8");
+  const helper = source.slice(source.indexOf("async function botSendWithMedia("), source.indexOf("// ---------------------------------------------------------------- 登录与二维码"));
+  const warnings = [];
+  const sendMedia = vm.runInNewContext(`${helper}\nbotSendWithMedia`, {
+    deliverMessage: delivery, botSend: async (text) => warnings.push(text), console: { log() {}, error() {} },
+  });
+  assert.equal(await sendMedia("说明", { fileName: "report.pdf", url: "/tmp/report.pdf" }), false);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /report.pdf.*未确认送达/);
 });

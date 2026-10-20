@@ -20,25 +20,25 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 function harness(api, saved = {}) {
   const runtime = restoreRuntime(saved.runtime);
   const state = { owner: "owner", task_counter: 0, senders: { owner: { seen: true, session_id: "s" } }, ...saved };
-  const callbacks = [], sent = [], cleared = new Set();
+  const callbacks = [], sent = [], mediaSent = [], cleared = new Set();
   let snapshot;
   const context = {
     ...runtime, state, config: {}, lastSelections: new Map(), submitting: new Set(), answering: new Set(),
-    api, readRun, randomUUID, bot: {}, runtimeResumed: false,
+    api, readRun, randomUUID, path, bot: {}, runtimeResumed: false,
     senderOf: (id) => state.senders[id],
     saveState: () => { snapshot = JSON.parse(JSON.stringify({ ...state, runtime: snapshotRuntime(runtime) })); },
     console: { log() {}, error() {} }, MAX_QUEUE: 5, MAX_ARTIFACT_BYTES: 25 * 1024 * 1024,
     POLL_INTERVAL_MS: 10_000, HEARTBEAT_MS: 1_800_000, NUDGE_MS: 7_200_000,
     COMMAND_PANEL: "帮助", inQuietHours: () => false,
     botSend: async (text) => { sent.push(text); return true; },
-    botSendWithMedia: async (text) => { sent.push(text); return true; },
+    botSendWithMedia: async (text, media) => { mediaSent.push({ text, media }); return true; },
     setInterval: (callback) => { callbacks.push(callback); return callbacks.length; },
     clearInterval: (id) => cleared.add(id), AbortController,
     start: () => ({ wait: () => new Promise(() => {}) }),
   };
   const code = vm.runInNewContext(`${startSource}\n${taskSource}\n({ agent, watchRun, drainQueue, startBot })`, context);
   return {
-    ...code, ...runtime, sent, callbacks, cleared, context, snapshot: () => snapshot,
+    ...code, ...runtime, sent, mediaSent, callbacks, cleared, context, snapshot: () => snapshot,
     chat: (text, media) => code.agent.chat({ conversationId: "owner", text, media }),
     restart: () => { context.bot = null; code.startBot(); },
   };
@@ -291,4 +291,73 @@ test("a delayed waiting snapshot cannot restore a question that has already been
   assert(!h.pendingQuestions.has("owner"));
   assert.equal(h.activeRuns.get("owner").status, "running");
   assert.equal(h.sent.length, 0);
+});
+
+test("received files are registered before dispatch, and registration failure keeps the queued input", async () => {
+  const calls = [];
+  const h = harness(async (method, url, body) => {
+    calls.push({ url, body });
+    if (url.endsWith("/attachment")) return { resource_id: "resource-file" };
+    return { run_id: "file-task" };
+  });
+  await h.chat("整理这个文件", { type: "file", filePath: "/tmp/报告.txt", fileName: "报告.txt" });
+  assert.equal(calls[0].url, "/channel/session/s/attachment");
+  assert.equal(calls[0].body.original_name, "报告.txt");
+  assert(calls[1].body.goal.includes("resource_id=resource-file"));
+  const failed = harness(async (method, url) => {
+    assert(url.endsWith("/attachment"));
+    throw new Error("文件已不存在");
+  });
+  assert.match((await failed.chat("整理文件", { filePath: "/tmp/missing", fileName: "丢失.txt" })).text, /附件.*接收失败/);
+  assert.equal(failed.activeRuns.size, 0);
+  assert.equal(failed.taskQueues.get("owner")[0].dispatching, undefined);
+});
+
+test("completion sends all current-run small files, excludes old files and can resend after restart", async () => {
+  const files = [
+    { run_id: "r", path: "/tmp/表.xlsx", display_name: "表.xlsx", size_bytes: 12 },
+    { run_id: "r", path: "/tmp/图片.png", display_name: "图片.png", size_bytes: 20, mime_type: "image/png" },
+    { run_id: "old", path: "/tmp/old.txt", display_name: "old.txt", size_bytes: 5 },
+  ];
+  const api = async (method, url) => {
+    if (url.includes("/artifacts?")) {
+      assert(url.endsWith("run_id=r"));
+      return { artifacts: files };
+    }
+    return { status: "done", session_id: "s", result: "已完成" };
+  };
+  const h = harness(api);
+  h.watchRun("owner", "r", 4, { sessionId: "s" });
+  await h.callbacks[0]();
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.mediaSent.length, 2);
+  assert.deepEqual(h.mediaSent.map((file) => file.media.url), ["/tmp/表.xlsx", "/tmp/图片.png"]);
+  assert.equal(h.mediaSent[1].media.type, "image");
+  const after = harness(api, h.snapshot());
+  assert.equal((await after.chat("文件")).text, "");
+  assert.equal(after.mediaSent.length, 2);
+  assert.equal(after.taskQueues.size, 0);
+});
+
+test("oversize files and truncated file listings are disclosed; file command works while waiting", async () => {
+  const h = waiting(async () => ({ artifacts: [
+    { run_id: "r", path: "/tmp/big.zip", display_name: "big.zip", size_bytes: 26 * 1024 * 1024 },
+  ], has_more: true }));
+  h.lastResults.set("owner", { num: 1, runId: "r", sessionId: "s" });
+  await h.chat("文件");
+  assert.equal(h.mediaSent.length, 0);
+  assert(h.sent.some((text) => text.includes("超过 25MB")));
+  assert(h.sent.some((text) => text.includes("前 5 个")));
+  assert(h.pendingQuestions.has("owner"));
+});
+
+
+test("media without a filename retains the downloaded file extension during registration", async () => {
+  let name;
+  const h = harness(async (method, url, body) => {
+    if (url.endsWith("/attachment")) { name = body.original_name; return { resource_id: "image" }; }
+    return { run_id: "image-task" };
+  });
+  await h.chat("看看这张图", { type: "image", filePath: "/tmp/download-123.png", mimeType: "image/png" });
+  assert.equal(name, "download-123.png");
 });

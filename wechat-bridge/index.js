@@ -24,7 +24,7 @@ import { createMessageDelivery } from "./message-delivery.js";
 import { restoreRuntime, saveBindings, readRun } from "./runtime-state.js";
 import { isLoggedIn, login, logout, start } from "weixin-agent-sdk";
 
-const BRIDGE_VERSION = "0.3.0";
+const BRIDGE_VERSION = "0.3.1";
 
 // 内置指令面板：随桥能力同步更新，首次联系与「帮助」指令时推送
 const COMMAND_PANEL = [
@@ -38,6 +38,7 @@ const COMMAND_PANEL = [
   "▶️ 继续队列 = 恢复暂停的排队任务",
   "⏭ 跳过队首 = 核对桌面记录后，移除未确认的队首任务",
   "📄 结果 = 回放上一次任务的结果",
+  "📎 文件 = 重发上一次任务生成的小文件（每个不超过 25MB）",
   "📁 项目 = 项目列表（回复编号绑定工作区）",
   "🤖 模型 = 模型列表（回复编号切换默认模型）",
   "🆕 新会话 = 重开一个干净会话（上下文清零）",
@@ -179,11 +180,16 @@ async function botSend(text) {
 /** 带文件回推的推送；附件失败时文本仍按同一规则分段发送。 */
 async function botSendWithMedia(text, media) {
   try {
-    await deliverMessage(text, media);
+    const delivery = await deliverMessage(text, media);
+    if (!delivery.mediaDelivered) {
+      await botSend(`⚠️ 文件「${media.fileName || "附件"}」未确认送达。可发送「文件」手动重取，或在桌面端获取。`);
+      return false;
+    }
     console.log(`[bridge] 主动文件推送已完成: ${media.fileName || media.url}`);
     return true;
   } catch (error) {
     console.error(`[bridge] 主动文件推送未完成（未自动重试）: ${error}`);
+    await botSend(`⚠️ 文件「${media.fileName || "附件"}」未确认送达。可发送「文件」手动重取，或在桌面端获取。`);
     return false;
   }
 }
@@ -296,14 +302,15 @@ async function relogin() {
 /** 微信媒体文件登记为项目受管资源，返回拼进 goal 的说明文本 */
 async function buildGoalWithMedia(sessionId, text, media) {
   if (!media) return text;
+  const name = media.fileName || path.basename(media.filePath || "") || "attachment";
   try {
     const value = await api("POST", `/channel/session/${sessionId}/attachment`, {
       path: media.filePath,
-      original_name: media.fileName || media.mimeType,
+      original_name: name,
     });
-    return `${text}\n\n[用户发来附件] ${media.fileName || media.mimeType} 已登记为受管资源 resource_id=${value.resource_id}，可用 project_resources.read_resource 读取。`;
+    return `${text}\n\n[用户发来附件] ${name} 已登记为受管资源 resource_id=${value.resource_id}，可用 project_resources.read_resource 读取。`;
   } catch (error) {
-    return `${text}\n\n[用户发来附件] ${media.fileName || media.mimeType} path=${media.filePath}（登记失败：${error.message}）`;
+    throw new Error(`附件「${name}」接收失败：${error.message}`);
   }
 }
 
@@ -510,7 +517,7 @@ function watchRun(conversationId, runId, num, restored = {}) {
       }
       if (!["done", "failed", "cancelled", "unknown"].includes(run.status)) return;
       // 先保存终态和完整正文，再发送；发送中断后可用「结果」显式重取，不自动重播。
-      if (run.status === "done") lastResults.set(conversationId, { num, text: run.result || "" });
+      if (run.status === "done") lastResults.set(conversationId, { num, text: run.result || "", runId, sessionId: run.session_id || entry.sessionId });
       if (run.status === "unknown") queuePauses.set(conversationId, run.error);
       activeRuns.delete(conversationId);
       const previousQuestion = pendingQuestions.get(conversationId);
@@ -523,20 +530,11 @@ function watchRun(conversationId, runId, num, restored = {}) {
       clearInterval(timer);
       console.log(`[bridge] watchRun 检测到任务 #${num} 终态: ${run.status} (hasResult: ${Boolean(run.result)})`);
       if (run.status === "done") {
-        const artifact = await latestArtifact(run.session_id);
         const finishText = run.result
           ? `🏁 任务 #${num} 完成：\n\n${run.result}`
           : `🏁 任务 #${num} 完成（无文本产出，详情见桌面端会话）。`;
-        if (artifact && artifact.size_bytes > 0 && artifact.size_bytes <= MAX_ARTIFACT_BYTES) {
-          const mediaType = String(artifact.mime_type || "").startsWith("image/") ? "image" : "file";
-          await botSendWithMedia(finishText, {
-            type: mediaType,
-            url: artifact.path,
-            fileName: artifact.display_name,
-          });
-        } else {
-          await botSend(finishText);
-        }
+        await botSend(finishText);
+        await sendRunFiles(run.session_id || entry.sessionId, runId, num);
       } else if (run.status === "failed") {
         await botSend(`❌ 任务 #${num} 失败：\n${run.error || "未知错误"}`);
       } else if (run.status === "cancelled") {
@@ -553,13 +551,31 @@ function watchRun(conversationId, runId, num, restored = {}) {
   }, POLL_INTERVAL_MS);
 }
 
-async function latestArtifact(sessionId) {
-  if (!sessionId) return null;
+async function sendRunFiles(sessionId, runId, num, requested = false) {
+  if (!sessionId || !runId) {
+    if (requested) await botSend("这条历史结果没有保存文件归属，请在桌面端获取文件。");
+    return;
+  }
   try {
-    const value = await api("GET", `/channel/session/${sessionId}/artifacts`);
-    return value.artifacts && value.artifacts[0];
-  } catch {
-    return null;
+    const value = await api("GET", `/channel/session/${sessionId}/artifacts?run_id=${encodeURIComponent(runId)}`);
+    const artifacts = (value.artifacts || []).filter((file) => file.run_id === runId);
+    if (!artifacts.length) {
+      if (requested) await botSend(`任务 #${num} 暂无已登记文件，可在桌面端查看。`);
+      return;
+    }
+    for (const file of artifacts) {
+      if (!file.path || !Number.isFinite(file.size_bytes) || file.size_bytes <= 0 || file.size_bytes > MAX_ARTIFACT_BYTES) {
+        await botSend(`📎「${file.display_name || "附件"}」未发送：${file.size_bytes > MAX_ARTIFACT_BYTES ? "超过 25MB" : "文件路径或大小不可用"}，请在桌面端获取。`);
+        continue;
+      }
+      await botSendWithMedia(`📎 任务 #${num}：${file.display_name}`, {
+        type: String(file.mime_type || "").startsWith("image/") ? "image" : "file",
+        url: file.path, fileName: file.display_name,
+      });
+    }
+    if (value.has_more) await botSend("本次仅回传前 5 个文件，其余文件请在桌面端获取。");
+  } catch (error) {
+    await botSend(`⚠️ 任务 #${num} 的文件获取未完成：${error.message}。可发送「文件」重试。`);
   }
 }
 
@@ -707,6 +723,13 @@ const agent = {
       const body = last.text || "（无文本产出）";
       const delivered = await botSend(`📄 任务 #${last.num} 的结果：\n\n${body}`);
       return { text: delivered ? "" : "⚠️ 结果发送未完成，完整结果仍已保存；请稍后发送「结果」重试。" };
+    }
+
+    if (/^(文件|附件|\/files)$/i.test(text)) {
+      const last = lastResults.get(conversationId);
+      if (!last) return { text: "还没有已完成任务的文件。" };
+      await sendRunFiles(last.sessionId, last.runId, last.num, true);
+      return { text: "" };
     }
 
     // ⑤ 项目列表（编号列表上下文 = project）

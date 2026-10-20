@@ -38,6 +38,7 @@ export function createMessageDelivery(send, { onMediaError = () => {} } = {}) {
   let tail = Promise.resolve();
   return (text, media) => {
     const operation = tail.then(async () => {
+      let mediaDelivered = Boolean(media);
       const parts = splitWechatText(text);
       if (!parts.length && media) parts.push("");
       for (const [index, part] of parts.entries()) {
@@ -45,6 +46,7 @@ export function createMessageDelivery(send, { onMediaError = () => {} } = {}) {
           try {
             await send({ text: part, media });
           } catch (error) {
+            mediaDelivered = false;
             onMediaError(error);
             if (part) await send(part);
             else throw error;
@@ -53,6 +55,7 @@ export function createMessageDelivery(send, { onMediaError = () => {} } = {}) {
           await send(part);
         }
       }
+      return { mediaDelivered };
     });
     tail = operation.catch(() => {});
     return operation;
