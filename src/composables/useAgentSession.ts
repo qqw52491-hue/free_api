@@ -379,7 +379,21 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         messages: messagesForRun(run).map((message) => ({ ...message, timestamp: traceTimestamp(message.created_at) })),
     })));
     // 仅保留没有任何运行轨迹可归属的早期旧消息；有轨迹的消息由对应回合原位显示。
-    const legacyConversationMessages = computed(() => conversationMessages.value.filter((message) => !historyRuns.value.some((run) => isMessageInsideRun(message, run))));
+    // 若任务正在执行中，当前运行期间产生的任何消息（如人工干预回复）均属于当前活跃回合，绝不泄漏为早期旧消息。
+    const legacyConversationMessages = computed(() => conversationMessages.value.filter((message) => {
+        if (historyRuns.value.some((run) => isMessageInsideRun(message, run))) return false;
+        if (isRunning.value) {
+            const timestamp = traceTimestamp(message.created_at, 0);
+            const runStart = runStartedAt.value;
+            if (runStart != null) {
+                if (timestamp >= runStart - 5000) return false;
+            } else {
+                // 若刚从 checkpoint 恢复或启动边界导致 runStartedAt 未初始化，兜底判定：有活跃任务时，任何在 10 分钟内的消息都不算早期遗留消息
+                if (timestamp >= Date.now() - 600000) return false;
+            }
+        }
+        return true;
+    }));
     const finishOutput = ref<Record<string, unknown> | null>(null);
     const hasError = ref(false);
     // 每次运行只有首次终态可改变 UI；终态后的异步流事件必须被丢弃，
@@ -1716,6 +1730,9 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 isThinking.value = true;
                 // 新代任务起跑：上一轮挂起步骤快照随之作废
                 pausedStepId.value = undefined;
+                if (!runStartedAt.value) {
+                    runStartedAt.value = Date.now();
+                }
                 setRunState("executing", "Agent 正在执行任务...");
                 await loadRunTraces();
                 await loadConversation();
@@ -1922,6 +1939,9 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 isThinking.value = false;
                 setRunState("waiting_for_human", "Agent 正在等待你的输入。");
                 pauseReason.value = cp.last_error || "Agent 正在等待你的输入。";
+                if (!runStartedAt.value) {
+                    runStartedAt.value = Date.now();
+                }
                 humanForm.value = normalizeHumanForm(cp.form, pauseReason.value);
                 currentGoal.value = cp.user_goal;
                 appendLog(`⏸️ [状态恢复] 会话正处于人工交互挂起状态 (步骤 #${cp.step_id + 1}): ${pauseReason.value}`);
