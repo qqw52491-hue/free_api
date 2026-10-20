@@ -24,6 +24,26 @@
     }
 
     #[test]
+    fn shell_query_containers_match_execution_and_do_not_create_verification_debt() {
+        use serde_json::json;
+        let command = "curl -s -X GET https://example.invalid/models";
+        for params in [json!(command), json!({"command": command}), json!({"script": command}), json!({"command_line": command}), json!({"CommandLine": command}), json!({"input": command})] {
+            assert!(!AuditLedger::is_mutating_side_effect("local_shell", &params), "{params}");
+        }
+        // 执行端优先执行完整脚本；不能由旁边的只读 command 掩盖写入。
+        for params in [json!("curl -s https://example.invalid > result.json"), json!({"script": "rm result.json", "command": "ls"}), json!({"command": "curl -X POST https://example.invalid"})] {
+            assert!(AuditLedger::is_mutating_side_effect("local_shell", &params), "{params}");
+        }
+        for action in ["list_specs", "list_platforms"] {
+            assert!(!AuditLedger::is_mutating_side_effect("model_manager", &json!({"action": action})));
+        }
+        assert!(!AuditLedger::is_mutating_side_effect("model_manager", &json!({})));
+        assert!(AuditLedger::is_mutating_side_effect_with_action("model_manager", "delete_spec", &json!({"action": "list_specs"})));
+        assert!(AuditLedger::is_mutating_side_effect("model_manager", &json!({"action": "upsert_spec"})));
+        assert!(AuditLedger::is_mutating_side_effect("model_manager", &json!({"action": "list_unknown"})));
+    }
+
+    #[test]
     fn output_redirection_disqualifies_readonly() {
         let ro = |cmd: &str| {
             AuditLedger::is_readonly_shell_command(&serde_json::json!({ "command": cmd }))

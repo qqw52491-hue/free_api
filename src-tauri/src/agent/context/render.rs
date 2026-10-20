@@ -8,7 +8,7 @@ use crate::agent::types::TodoItem;
 /// 写入后验证的完整规则文案（静态）：首次有待闭合写入时作为一次性
 /// 历史事件注入（见 SandwichContext::ensure_rule_events）；此后尾部
 /// 只投影一行待闭合状态，不再每轮重发这段规则。
-pub(crate) const VERIFICATION_RULES_TEXT: &str = "- 智能感知与主动闭环规则：\n  * 🚀 主动验证授权：代码写入完成后，无需向用户申请许可，请主动调用终端工具运行自测或编译命令；若测试报错，直接依据错误输出就地修复；\n  * 若运行了验证命令（如 cargo test / npm test / pytest 等）且成功通过，系统将自动标记为 verified，无须手动声明；\n  * 非编码任务（运维/系统/文件外产物）的验证手段自选：which/test -e/pacman -Q/systemctl status/curl -f 等状态探针成功即可——但探针命令必须引用本次改动的具体对象（路径/名称），无关探针不自动认账；\n  * 存在性探针返回非零（找不到/不存在）若正是目标状态（卸载/删除/禁用类），请用手动声明 verified + evidence_refs=[\"step_N\"] 举证；\n  * 若工程中无可用测试套件，或改动全为纯静态资源（样式/图片/文档等），系统在提交 finish 时将自动豁免 (waived)；\n- 若需在调用 finish 交付时手动声明闭合（在顶层 JSON 中二选一填空，严禁拼入 summary 正文中）：\n  1. 已验证：\"change_verification_update\": {\"status\": \"verified\", \"evidence_refs\": [\"step_N 或 命令输出摘要\"]}\n  2. 免测豁免：\"change_verification_update\": {\"status\": \"waived\", \"waived_reason\": \"说明免测理由，如UI微调/无自动化单测环境\"}";
+pub(crate) const VERIFICATION_RULES_TEXT: &str = "- 写入后验证规则（纯只读且无挂账副作用时不适用，无需申报豁免）：\n  * output_id 或命令摘要不能单独证明验证时序；必须包含严格晚于最近一次副作用、且已完成的 step_N。同一步不满足要求。\n  * 若只读查询被记录为可能副作用，核实实际命令后可用 waived 说明未发生变更的具体理由，不要运行无关验证来凑闭合；\n  * 🚀 主动验证授权：代码写入完成后，无需向用户申请许可，请主动调用终端工具运行自测或编译命令；若测试报错，直接依据错误输出就地修复；\n  * 若运行了验证命令（如 cargo test / npm test / pytest 等）且成功通过，系统将自动标记为 verified，无须手动声明；\n  * 非编码任务（运维/系统/文件外产物）的验证手段自选：which/test -e/pacman -Q/systemctl status/curl -f 等状态探针成功即可——但探针命令必须引用本次改动的具体对象（路径/名称），无关探针不自动认账；\n  * 存在性探针返回非零（找不到/不存在）若正是目标状态（卸载/删除/禁用类），请用手动声明 verified + evidence_refs=[\"step_N\"] 举证；\n  * 若工程中无可用测试套件，或改动全为纯静态资源（样式/图片/文档等），系统在提交 finish 时将自动豁免 (waived)；\n- 若需在调用 finish 交付时手动声明闭合（在顶层 JSON 中二选一填空，严禁拼入 summary 正文中）：\n  1. 已验证：\"change_verification_update\": {\"status\": \"verified\", \"evidence_refs\": [\"step_N\"]}\n  2. 免测豁免：\"change_verification_update\": {\"status\": \"waived\", \"waived_reason\": \"说明免测理由，如查询实际未变更对象/无自动化单测环境\"}";
 
 /// 审查契约的闭合规则文案（静态）：契约存在时作为一次性历史事件注入；
 /// 尾部契约卡此后只渲染范围+义务清单动态值。
@@ -468,20 +468,51 @@ impl ContextRenderer {
     }
 
     pub fn render_decision_instruction(compact_tools: Option<&str>) -> String {
-        if let Some(tools) = compact_tools.filter(|s| !s.trim().is_empty()) {
+        Self::render_decision_instruction_at(compact_tools, chrono::Local::now().fixed_offset())
+    }
+
+    // 日期只投影到请求尾部，不写入静态系统前缀；跨日更新，不注入逐秒变化。
+    fn render_decision_instruction_at(
+        compact_tools: Option<&str>,
+        now: chrono::DateTime<chrono::FixedOffset>,
+    ) -> String {
+        let instruction = if let Some(tools) = compact_tools.filter(|s| !s.trim().is_empty()) {
             format!(
-                "【当前可用工具快速索引】(只能从以下调用，严禁臆造 core/bash 等未声明工具)\n{}\n\n请基于上述上下文执行下一步。只能输出纯文本 JSON（禁止裹 ```），tool 名必须严格来自可用工具清单。thought 字段默认留空——仅在关键转折/矛盾发现/方案切换/受阻时简要写出思考推断（支持直截了当的 Markdown 表述说清楚），严禁问候/客套/向用户汇报进度、不复述 description，常规连续执行严格静默；description 字段保持一句话进度标签；仅当上一步失败或被拦截时在 reflection 补一句原因与改法；本轮若取得阶段突破、关键结论、里程碑进展或发现风险阻碍，额外输出 finding(1~2 句结论) 与 finding_kind(start|breakthrough|milestone|summary|warning|blocker)——finding 与 thought 互斥，输出 finding 时 thought 必须为 ''，严禁同一轮两处各说一遍。",
+                "【当前可用工具快速索引】(插件级条目先经 capability_search / next_tool_hint 取得完整工具名和 schema；勿猜名称)\n{}\n\n请基于上述上下文执行下一步。只能输出纯文本 JSON（禁止裹 ```），tool 名必须来自当前工具清单或本会话已加载的工具 schema。thought 字段默认留空——仅在关键转折/矛盾发现/方案切换/受阻时简要写出思考推断（支持直截了当的 Markdown 表述说清楚），严禁问候/客套/向用户汇报进度、不复述 description，常规连续执行严格静默；description 字段保持一句话进度标签；仅当上一步失败或被拦截时在 reflection 补一句原因与改法；本轮若取得阶段突破、关键结论、里程碑进展或发现风险阻碍，额外输出 finding(1~2 句结论) 与 finding_kind(start|breakthrough|milestone|summary|warning|blocker)——finding 与 thought 互斥，输出 finding 时 thought 必须为 ''，严禁同一轮两处各说一遍。",
                 tools
             )
         } else {
-            "请基于上述上下文执行下一步。只能输出纯文本 JSON（禁止裹 ```），tool 名必须严格来自上方工具菜单。thought 字段默认留空——仅在关键转折/矛盾发现/方案切换/受阻时简要写出思考推断（支持直截了当的 Markdown 表述说清楚），严禁问候/客套/向用户汇报进度、不复述 description，常规连续执行严格静默；description 字段保持一句话进度标签；仅当上一步失败或被拦截时在 reflection 补一句原因与改法；本轮若取得阶段突破、关键结论、里程碑进展或发现风险阻碍，额外输出 finding(1~2 句结论) 与 finding_kind(start|breakthrough|milestone|summary|warning|blocker)——finding 与 thought 互斥，输出 finding 时 thought 必须为 ''，严禁同一轮两处各说一遍。".to_string()
-        }
+            "请基于上述上下文执行下一步。只能输出纯文本 JSON（禁止裹 ```），tool 名必须来自上方工具菜单或本会话已加载的工具 schema；目录仅列插件时先经 capability_search / next_tool_hint 取得完整名称与参数。thought 字段默认留空——仅在关键转折/矛盾发现/方案切换/受阻时简要写出思考推断（支持直截了当的 Markdown 表述说清楚），严禁问候/客套/向用户汇报进度、不复述 description，常规连续执行严格静默；description 字段保持一句话进度标签；仅当上一步失败或被拦截时在 reflection 补一句原因与改法；本轮若取得阶段突破、关键结论、里程碑进展或发现风险阻碍，额外输出 finding(1~2 句结论) 与 finding_kind(start|breakthrough|milestone|summary|warning|blocker)——finding 与 thought 互斥，输出 finding 时 thought 必须为 ''，严禁同一轮两处各说一遍。".to_string()
+        };
+        format!(
+            "【宿主当前日期】{}（宿主本地时区 UTC{}；用于时间定位，不证明版本或发布信息）\n\n{}",
+            now.format("%Y-%m-%d"), now.format("%:z"), instruction
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decision_tail_date_tracks_the_host_day_and_offset_without_second_churn() {
+        let render = |timestamp: &str| ContextRenderer::render_decision_instruction_at(
+            Some("example: 46 个工具"),
+            chrono::DateTime::parse_from_rfc3339(timestamp).unwrap(),
+        );
+        let before = render("2026-10-19T23:59:58+08:00");
+        assert_eq!(before, render("2026-10-19T23:59:59+08:00"));
+        let after = render("2026-10-20T00:00:00+08:00");
+        assert!(before.contains("2026-10-19") && after.contains("2026-10-20"));
+        assert!(after.contains("UTC+08:00") && after.contains("不证明版本"));
+        // 同一瞬间，宿主处于 UTC 时日期应不同，不能硬编码用户或供应商时区。
+        let utc = render("2026-10-19T16:00:00+00:00");
+        assert!(utc.contains("2026-10-19") && utc.contains("UTC+00:00"));
+        assert!(after.contains("capability_search / next_tool_hint") && after.contains("已加载的工具 schema"));
+        let core = include_str!("../../../prompts/core_logic.md");
+        assert!(!core.contains("【宿主当前日期】"));
+    }
 
     fn gate(mode: &str, phase: &str, dispatched: bool, consumed: bool) -> PlanGateProjection {
         PlanGateProjection {

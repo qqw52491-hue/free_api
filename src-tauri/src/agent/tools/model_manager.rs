@@ -1,6 +1,11 @@
 use crate::agent::types::DispatchResult;
 use crate::db::DbState;
 
+/// 与真实 handler 对齐的查询动作；不能仅因调用方声称 read/list 就放宽。
+pub(crate) fn is_readonly_action(action: &str) -> bool {
+    matches!(action, "list_specs" | "list_platforms")
+}
+
 pub fn dispatch(db: &DbState, action: &str, params: &serde_json::Value) -> DispatchResult {
     let conn = match db.0.lock() {
         Ok(c) => c,

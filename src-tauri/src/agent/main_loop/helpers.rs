@@ -358,12 +358,12 @@ pub(crate) fn build_path_scope_manifest(
     if has_workspace_scope {
         format!(
             "【当前会话可操作文件边界与作用域 (Operational Path Scope)】\n\
-             • 项目物理工作区: `{}`\n\
+             • 主文件操作根目录（显式作用域，是否绑定项目见会话模式）: `{}`\n\
                - 相对路径默认基于此目录解析（如 \"src/main.rs\"、\"package.json\"）；修改已有文件优先调用 `local_file` 的 `edit` 局部替换，禁止动辄全量重写。\n\
                - 门禁与台账规则: 对项目源码的写操作受阶段审查门禁保护，成功写入将记入不可逆副作用台账。\n\
              • 会话专属临时目录: `{}`\n\
                - 快捷路由: 相对路径以 \"tmp/\" 或 \"./tmp/\" 开头会自动映射路由至此目录；显式作用域 URI \"session-tmp://<相对路径>\" 等价且对内部工具与外部 MCP 工具同样有效；⚠️ 但 shell/run_command 命令里的相对 tmp/ 不会被映射（它指向执行目录下的 tmp/），命令中请写 $SESSION_TMP_DIR/文件名（\"workspace://<相对路径>\" 等价项目相对路径）。\n\
-               - 临时与未明确路径产物隔离: 凡未明确指定项目路径的临时文件、数据导出或中间草稿，统一写入此目录（路径如 \"tmp/filename.ext\"），严禁直接写入项目物理工作区根目录！写入后可调用 `artifact_manager(action: \"register_file\", path: \"tmp/filename.ext\")` 上屏供用户下载或系统程序打开。\n\
+               - 临时与未明确路径产物隔离: 凡未明确指定项目路径的临时文件、数据导出或中间草稿，统一写入此目录（路径如 \"tmp/filename.ext\"），严禁直接散落在主文件操作根目录！写入后可调用 `artifact_manager(action: \"register_file\", path: \"tmp/filename.ext\")` 上屏供用户下载或系统程序打开。\n\
                - 交付门禁直接认 tmp/ 产物：方案 target_files 声明 \"tmp/x\" 与本目录产物/登记记录自动对账，finish 时无需也不许把产物拷入项目工作区——拷贝副本只会污染用户仓库。\n\
                - 草稿免审: 任务推演计划、分析草稿、临时数据均建议写入此目录；临时草稿免审豁免，不消耗测试配额，不会阻塞交付。\n\
              • 物理牢笼约束: 受控文件工具按项目工作区、会话 tmp、技能只读目录及当前附加目录权限表校验；附加目录是显式扩展，不切换主工作区。Shell/MCP 不是 OS 沙箱。\n",
@@ -375,6 +375,7 @@ pub(crate) fn build_path_scope_manifest(
             "【当前会话可操作文件边界与作用域 (Operational Path Scope)】\n\
              • 项目工作区：无（未绑定）\n\
              • 会话专属临时目录（产物与草稿暂存区，非工作区）: `{}`\n\
+               - 默认物理执行目录可使用此暂存区，但这不表示绑定了工程项目。\n\
                - 快捷路由: 相对路径以 \"tmp/\" 或 \"./tmp/\" 开头会自动映射路由至此目录；显式作用域 URI \"session-tmp://<相对路径>\" 等价且对内部工具与外部 MCP 工具同样有效；⚠️ 但 shell/run_command 命令里的相对 tmp/ 不会被映射（它指向执行目录下的 tmp/），命令中请写 $SESSION_TMP_DIR/文件名。\n\
                - 临时产物与草稿隔离: 凡未明确要求存放于项目工程中的临时文件、数据导出或中间脚本，统一写入此目录（路径如 \"tmp/filename.ext\"），严禁直接写入宿主当前运行目录！写入后可调用 `artifact_manager(action: \"register_file\", path: \"tmp/filename.ext\")` 上屏供用户下载或系统程序打开。\n\
                - 交付门禁直接认 tmp/ 产物：方案 target_files 声明 \"tmp/x\" 与本目录产物/登记记录自动对账，finish 时无需也不许把产物拷入当前目录——拷贝副本只会污染宿主项目目录。\n\

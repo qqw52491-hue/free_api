@@ -1145,6 +1145,42 @@ fn shell_params_fixture() -> (PathBuf,DbState,PluginRegistry) {
     let db=DbState(Arc::new(Mutex::new(init_db(&PathBuf::from(":memory:")).unwrap())));
     (root,db,PluginRegistry::new())
 }
+
+#[test]
+fn tool_key_order_is_compatible_through_parsing_and_real_dispatch() {
+    let (root, db, registry) = shell_params_fixture();
+    for raw in [
+        r#"{"tool":"local_shell","params":{"command":"printf key-order-ok"},"description":"check"}"#,
+        r#"{"description":"check","params":{"command":"printf key-order-ok"},"tool":"local_shell"}"#,
+    ] {
+        let extracted = crate::agent::utils::extract_json_from_text(raw).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&extracted).unwrap();
+        crate::agent::utils::normalize_raw_instruction_value(&mut value);
+        let inst: AgentInstruction = serde_json::from_value(value).unwrap();
+        let result = run_agent_step(&db, "key-order-compatibility", &inst, &registry, Some(&root));
+        assert!(result.success, "{}", result.stderr);
+        assert!(result.stdout.contains("\n--- STDOUT ---\nkey-order-ok\n"), "{}", result.stdout);
+        assert!(result.stdout.contains("exit_code: 0"));
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn documented_plan_tree_resolves_the_actual_resource_receipt() {
+    let (root, db, registry) = shell_params_fixture();
+    let core = include_str!("../../../prompts/core_logic.md");
+    let section = core.split("### 形态 C：").nth(1).unwrap();
+    let example = section.split("```json\n").nth(1).unwrap().split("```").next().unwrap();
+    let inst: AgentInstruction = serde_json::from_str(example).unwrap();
+    let result = run_agent_step(&db, "documented-tree", &inst, &registry, Some(&root));
+    assert!(result.success, "{}", result.stderr);
+    let resources = crate::agent::task_store::list_resource_refs(&db, "documented-tree").unwrap();
+    assert_eq!(resources.len(), 1);
+    assert_eq!(resources[0].label, "调查记录");
+    assert!(result.stdout.contains(&resources[0].resource_id));
+    assert!(!result.stdout.contains("$step1"));
+    std::fs::remove_dir_all(root).unwrap();
+}
 #[test]
 fn shell_params_single_step_executes_preserved_cwd_args_and_env() {
     let (root,db,registry)=shell_params_fixture();

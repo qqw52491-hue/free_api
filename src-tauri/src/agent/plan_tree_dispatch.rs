@@ -159,7 +159,7 @@ pub(crate) fn is_readonly_parallel_tool(tool: &str) -> bool {
 /// 只看工具名会把纯读取误判为可变而卡在上限 2。这里对 local_file 取 action 拼成
 /// `local_file/<action>`（action 取自显式字段或 params/args/command 里的 action），
 /// 交给 is_readonly_parallel_tool 判定；action 缺失按 `read` 计——与 local_file 执行端一致（缺省 action = read），实测模型常只写 path/行号。
-/// local_shell 仅当命令命中纯只读白名单时按只读计；其它工具不放宽。
+/// local_shell 按命令白名单，model_manager 按已实现的查询动作判定。
 pub(crate) fn parallel_branch_label(
     tool: &str,
     action: Option<&str>,
@@ -182,7 +182,7 @@ pub(crate) fn parallel_branch_label(
             _ => tool.to_string(),
         };
     }
-    if !base.eq_ignore_ascii_case("local_file") {
+    if !base.eq_ignore_ascii_case("local_file") && !tool.eq_ignore_ascii_case("model_manager") {
         return tool.to_string();
     }
     let from_payload = || {
@@ -196,6 +196,14 @@ pub(crate) fn parallel_branch_label(
                 })
         })
     };
+    if tool.eq_ignore_ascii_case("model_manager") {
+        let act = action.filter(|a| !a.is_empty()).or_else(from_payload).unwrap_or("list_specs");
+        return if crate::agent::tools::model_manager::is_readonly_action(act) {
+            format!("{}/list", tool)
+        } else {
+            tool.to_string()
+        };
+    }
     match action.or_else(from_payload) {
         Some(a) if !a.trim().is_empty() => format!("{}/{}", tool, a.trim()),
         _ => format!("{}/read", tool),
@@ -221,7 +229,7 @@ pub(crate) fn parallel_branch_label_from_json(step: &Value) -> String {
     let action_field = step.get("action").and_then(Value::as_str);
     let tool = tool_field.or(action_field).unwrap_or("");
     let explicit_action = if tool_field.is_some() { action_field } else { None };
-    if tool.eq_ignore_ascii_case("local_shell") {
+    if tool.eq_ignore_ascii_case("local_shell") || tool.eq_ignore_ascii_case("model_manager") {
         return serde_json::from_value::<crate::agent::plan_tree::PlanNodeObj>(step.clone())
             .ok().and_then(|node| node.get_args().ok())
             .map(|params| parallel_branch_label(tool, explicit_action, &[Some(&params)]))
@@ -242,7 +250,7 @@ pub(crate) fn parallel_branch_label_from_node(obj: &crate::agent::plan_tree::Pla
     } else {
         None
     };
-    if tool.eq_ignore_ascii_case("local_shell") {
+    if tool.eq_ignore_ascii_case("local_shell") || tool.eq_ignore_ascii_case("model_manager") {
         return obj.get_args().map(|params|
             parallel_branch_label(&tool, explicit_action, &[Some(&params)]))
             .unwrap_or(tool);
@@ -486,6 +494,34 @@ mod tests {
             controlled_parallel_cap_for_tools([] as [&str; 0]),
             MAX_CONTROLLED_PARALLEL_BRANCHES
         );
+    }
+
+    #[test]
+    fn model_queries_use_the_readonly_cap_but_mutations_and_unknown_actions_do_not() {
+        let web = || json!({"tool": "web_search", "params": {"query": "test"}});
+        for branch in [
+            json!({"tool": "model_manager", "action": "list_specs"}),
+            json!({"tool": "model_manager", "params": {"action": "list_platforms"}}),
+            json!({"tool": "model_manager", "command": {"action": "list_specs"}}),
+            json!({"tool": "model_manager", "params": {}}),
+        ] {
+            let batch = vec![web(), web(), branch, web()];
+            assert!(validate_controlled_parallel_batch(&batch).is_ok(), "{batch:?}");
+            let tree: PlanNode = serde_json::from_value(json!({"parallel": batch})).unwrap();
+            assert!(validate_plan_tree_parallel_fanout(&tree).is_ok());
+        }
+        for action in ["upsert_spec", "delete_spec", "add_platform", "update_platform", "add_model", "delete_model", "list_unknown"] {
+            let batch = vec![web(), web(), json!({"tool": "model_manager", "action": action})];
+            assert!(validate_controlled_parallel_batch(&batch).unwrap_err().contains("最多允许 2"), "{action}");
+        }
+        // 顶层动作优先，不能被参数中的 list_specs 掩盖。
+        let batch = vec![web(), web(), json!({"tool": "model_manager", "action": "delete_spec", "params": {"action": "list_specs"}})];
+        assert!(validate_controlled_parallel_batch(&batch).is_err());
+        // 执行端 args 优先于 params：两种表示冲突时按实际执行参数判定。
+        let batch = vec![web(), web(), json!({"tool": "model_manager", "args": {"action": "delete_spec"}, "params": {"action": "list_specs"}})];
+        assert!(validate_controlled_parallel_batch(&batch).is_err());
+        let tree: PlanNode = serde_json::from_value(json!({"parallel": batch})).unwrap();
+        assert!(validate_plan_tree_parallel_fanout(&tree).is_err());
     }
 
     #[test]

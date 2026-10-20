@@ -58,6 +58,14 @@ impl AuditLedger {
     ) -> bool {
         let lower_tool = tool.to_lowercase();
         let action_name = lower_tool.split('/').last().unwrap_or(&lower_tool);
+        if lower_tool == "model_manager" {
+            let effective_action = if action.is_empty() {
+                params.get("action").and_then(|v| v.as_str()).unwrap_or("list_specs")
+            } else {
+                action
+            };
+            return !crate::agent::tools::model_manager::is_readonly_action(effective_action);
+        }
         let act = if !action.is_empty() {
             action.to_lowercase()
         } else {
@@ -128,7 +136,6 @@ impl AuditLedger {
                 | "get_resource"
                 | "list_records"
                 | "get_record"
-                | "model_manager"
                 | "ask_human"
                 | "finish"
         );
@@ -250,6 +257,10 @@ impl AuditLedger {
 
     /// 检测 shell 命令是否为只读查询（如 git log/show/diff, ls, cat, grep 等）
     pub fn is_readonly_shell_command(params: &serde_json::Value) -> bool {
+        // local_shell 执行端接受非空命令字符串简写；台账须使用同一形态。
+        if let Some(command) = params.as_str() {
+            return Self::is_readonly_shell_command(&serde_json::json!({"command": command}));
+        }
         let mut explicit_args: Vec<&str> = params
             .get("args")
             .and_then(|a| a.as_array())
@@ -258,14 +269,13 @@ impl AuditLedger {
 
         let owned_args_cmd;
         let raw_cmd = {
-            let c = params
-                .get("command")
-                .or_else(|| params.get("cmd"))
-                .or_else(|| params.get("commandline"))
-                .or_else(|| params.get("command_line"))
-                .and_then(|c| c.as_str())
-                .unwrap_or("")
-                .trim();
+            // 与执行端相同：完整脚本字段优先于 command/cmd/input。
+            let c = ["script", "command_line", "CommandLine", "command", "cmd", "input", "commandline"]
+                .iter()
+                .filter_map(|key| params.get(*key).and_then(|v| v.as_str()))
+                .map(str::trim)
+                .find(|value| !value.is_empty())
+                .unwrap_or("");
             if c.is_empty() && !explicit_args.is_empty() {
                 // args-only 形态（{"args":["ls","-la"]}）：args 本体即命令行——
                 // dispatcher 同款提取，两侧分类保持一致

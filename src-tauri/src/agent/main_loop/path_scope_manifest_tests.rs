@@ -92,4 +92,8 @@
         for anchor in ["项目工作区：无（未绑定）", "非工作区", "会话专属临时目录"] {
             assert!(card.contains(anchor), "自由会话卡片缺失语义锚点: {anchor}");
         }
+        assert!(card.contains("默认物理执行目录") && card.contains("不表示绑定了工程项目"));
+        let explicit = build_path_scope_manifest(&PathBuf::from("/scratch"), &tmp, true);
+        assert!(explicit.contains("主文件操作根目录") && explicit.contains("是否绑定项目见会话模式"));
+        assert!(!explicit.contains("项目物理工作区"));
     }

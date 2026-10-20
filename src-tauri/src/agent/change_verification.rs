@@ -89,8 +89,8 @@ fn verify_evidence_freshness(
     for n in step_refs {
         if n <= last_write {
             return Err(format!(
-                "证据引用 step_{} 不晚于最近一次已记录的副作用 step_{}——该凭据已随写入作废。\
-                请重新执行验证命令，并引用新步骤的 step_N 举证。",
+                "证据引用 step_{} 已失效：必须引用严格晚于最近一次已记录副作用 step_{}、\
+                且已执行完成的新步骤；同一步不满足要求。请执行与本次操作相关的验证，再以新步骤的 step_N 举证。",
                 n, last_write
             ));
         }
@@ -1241,6 +1241,31 @@ mod tests {
         // 新凭据 step_52 > step_51 → 接受
         let fresh = verified_with_refs(&["step_52 (npx vue-tsc --noEmit → exit 0)"]);
         assert!(apply_change_verification_update(&mut None, fresh, &window).is_ok());
+    }
+
+    #[test]
+    fn same_step_rejection_explains_the_strict_boundary_and_next_step_succeeds() {
+        let window = EvidenceWindow { last_write_step: Some(12), current_step: 14 };
+        let mut current = None;
+        let error = apply_change_verification_update(&mut current, verified_with_refs(&["step_12"]), &window).unwrap_err();
+        assert!(error.contains("严格晚于") && error.contains("step_12") && error.contains("同一步不满足"));
+        assert!(current.is_none());
+        apply_change_verification_update(&mut current, verified_with_refs(&["step_13"]), &window).unwrap();
+
+        // 核心提示词中的举证范例必须能通过真实校验。
+        let core = include_str!("../../prompts/core_logic.md");
+        let marker = r#"{"status": "verified", "evidence_refs":"#;
+        let mut example_count = 0;
+        for (start, _) in core.match_indices(marker) {
+            // 只取内层验证对象，避开外层 Markdown/JSON 正文中的反引号。
+            let end = start + core[start..].find('}').unwrap() + 1;
+            let example = core[start..end].replace("step_N", "step_13");
+            let update: ChangeVerification = serde_json::from_str(&example).unwrap();
+            apply_change_verification_update(&mut None, update, &window).unwrap();
+            example_count += 1;
+        }
+        assert!(example_count >= 3);
+        assert!(!crate::agent::context::render::VERIFICATION_RULES_TEXT.contains("step_N 或 命令输出摘要"));
     }
 
     /// 回归：自由文本摘要无法证明时序，有挂账写入时必须至少含一个 step_N 引用。
