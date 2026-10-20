@@ -22,7 +22,7 @@
       </div>
 
       <div class="trigger-right">
-        <span class="badge-count" v-if="models.length > 0 && !selectedModel">{{ models.length }}</span>
+        <span class="badge-count" v-if="displayModels.length > 0 && !selectedModel">{{ displayModels.length }}</span>
         <svg class="chevron-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="m6 9 6 6 6-6"/>
         </svg>
@@ -68,10 +68,10 @@
           <div class="search-stats-row">
             <span class="stats-text">
               <template v-if="searchQuery.trim()">
-                找到 <strong>{{ matchedModelsCount }}</strong> 个匹配项 (共 {{ models.length }} 个)
+                找到 <strong>{{ matchedModelsCount }}</strong> 个匹配项 (共 {{ displayModels.length }} 个)
               </template>
               <template v-else>
-                共 <strong>{{ models.length }}</strong> 个可用模型 · {{ groupedFilteredModels.length }} 个平台
+                共 <strong>{{ displayModels.length }}</strong> 个可用模型 · {{ groupedFilteredModels.length }} 个平台
               </template>
             </span>
             <span class="shortcut-tip">按 Enter 选择首项</span>
@@ -147,6 +147,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { invoke } from '@tauri-apps/api/core'
 
 export interface ModelOptionItem {
   id: string;
@@ -168,6 +169,7 @@ const props = withDefaults(
     disabled?: boolean;
     size?: 'sm' | 'md' | 'lg';
     placement?: 'auto' | 'top' | 'bottom';
+    autoFetch?: boolean;
   }>(),
   {
     modelValue: '',
@@ -176,6 +178,7 @@ const props = withDefaults(
     disabled: false,
     size: 'md',
     placement: 'auto',
+    autoFetch: true,
   }
 )
 
@@ -252,8 +255,14 @@ const popoverFixedStyle = computed(() => {
 
 const selectedModel = computed(() => {
   if (!props.modelValue) return null
-  return props.models.find(m => m.id === props.modelValue) || null
+  return displayModels.value.find(m => m.id === props.modelValue) || null
 })
+
+const fetchedModels = ref<ModelOptionItem[] | null>(null)
+const isLoadingModels = ref(false)
+let fetchSeq = 0
+
+const displayModels = computed(() => fetchedModels.value ?? props.models)
 
 function getPlatformEmoji(name: string) {
   const n = (name || '').toLowerCase()
@@ -286,7 +295,7 @@ const groupedFilteredModels = computed(() => {
   const query = searchQuery.value.trim().toLowerCase()
   const map = new Map<string, ModelOptionItem[]>()
 
-  for (const m of props.models) {
+  for (const m of displayModels.value) {
     const platform = m.platform_name || '其他平台'
     const nameMatch = m.name.toLowerCase().includes(query)
     const displayMatch = (m.display_name || '').toLowerCase().includes(query)
@@ -344,12 +353,34 @@ function handleSearchEnter(event: KeyboardEvent) {
   selectFirstMatch()
 }
 
+async function fetchModels() {
+  if (!props.autoFetch) return
+  const seq = ++fetchSeq
+  isLoadingModels.value = true
+  try {
+    const list = await invoke<ModelOptionItem[]>('get_all_models_with_platform')
+    if (seq === fetchSeq) {
+      fetchedModels.value = list
+    }
+  } catch {
+    // 拉取失败：若已有历史成功数据则保留，否则保持回退 props.models
+    if (seq === fetchSeq && fetchedModels.value === null) {
+      fetchedModels.value = null
+    }
+  } finally {
+    if (seq === fetchSeq) {
+      isLoadingModels.value = false
+    }
+  }
+}
+
 watch(isOpen, async (val) => {
   if (val) {
     calculatePlacement()
     searchQuery.value = ''
     await nextTick()
     searchInputRef.value?.focus()
+    void fetchModels()
   }
 })
 
