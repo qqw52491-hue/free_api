@@ -17,7 +17,7 @@ use tokio::sync::watch;
 
 
 // 验收语义变更时升版：旧裁决不能在新规则下继续复用；Git 基线保持原样。
-const FINISH_REVIEW_RULES_VERSION: &str = "review-search-v6-task-evidence";
+const FINISH_REVIEW_RULES_VERSION: &str = "review-search-v7-material-changes";
 const MAX_FINISH_FORMAT_RETRIES: u32 = 5;
 const MAX_FINISH_REQUEST_RETRIES: u32 = 5;
 
@@ -386,7 +386,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     // API 响应、系统状态），而不是依赖不存在的 diff 对账结果。
     if !gate_notices.is_empty() {
         review_material.push_str(
-            "\n\n【门禁适用域交接：以下机械检查对本任务不适用（证据域不存在），请终审直接核验语义证据】\n",
+            "\n\n【门禁适用域交接与宿主补充观察】\n以下记录可能是机械检查不适用的原因、验证边界或审查期间的材料变化；请按记录中的实际事实核验，不把提示本身视为额外验收义务。\n",
         );
         for notice in gate_notices {
             review_material.push_str(&format!("- {}\n", notice));

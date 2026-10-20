@@ -29,7 +29,7 @@ pub(crate) use diff::{
     noncode_evidence_skip_reasons, obligation_is_diagnostic, review_contract_evidence_blockers,
     undiffed_locatable_notices,
 };
-pub(crate) use state_updates::{apply_instruction_state_updates, apply_todo_update_guarded};
+pub(crate) use state_updates::{apply_instruction_state_updates, apply_instruction_state_updates_with_source, apply_todo_update_guarded};
 
 use crate::agent::change_verification::{change_verification_blocker, ChangeVerification};
 use crate::agent::checkpoint::AgentCheckpoint;

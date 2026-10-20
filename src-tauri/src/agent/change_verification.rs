@@ -1,8 +1,13 @@
 use serde::{Deserialize, Serialize};
+use crate::agent::utils::evidence_refs::normalize_evidence_refs;
 
-const MAX_EVIDENCE_REFS: usize = 8;
-const MAX_EVIDENCE_REF_CHARS: usize = 240;
 const MAX_WAIVER_REASON_CHARS: usize = 600;
+
+mod output_evidence;
+pub(crate) use output_evidence::EvidenceLookup;
+
+#[cfg(test)]
+mod reference_tests;
 
 /// 对本会话最近一批真实写入的验证闭合。
 ///
@@ -53,9 +58,19 @@ pub fn apply_change_verification_update(
     update: ChangeVerification,
     evidence_window: &EvidenceWindow,
 ) -> Result<(), String> {
+    apply_change_verification_with_source(current, update, evidence_window, None)
+}
+
+pub(crate) fn apply_change_verification_with_source(
+    current: &mut Option<ChangeVerification>,
+    mut update: ChangeVerification,
+    evidence_window: &EvidenceWindow,
+    source: Option<&EvidenceLookup<'_>>,
+) -> Result<(), String> {
+    update.evidence_refs = normalize_evidence_refs(&update.evidence_refs)?;
     validate_change_verification(&update)?;
 
-    verify_evidence_freshness(&update, evidence_window)?;
+    verify_evidence_freshness(&update, evidence_window, source)?;
     *current = Some(update);
     Ok(())
 }
@@ -64,11 +79,12 @@ pub fn apply_change_verification_update(
 /// 模型可以在 finish 指令里再次提交 change_verification_update——若只查
 /// "evidence_refs 非空"，已被作废的旧 output_id/step_N 就能原样贴回重新闭合，
 /// 形成"写完代码不验证，拿写入前的旧测试结果交卷"的漏洞。这里把 verified 的证据
-/// 绑定到可回查的执行步骤：至少一个 step_N 引用，且全部落在 (最后写入步, 当前步)
-/// 开区间内。无法证明新鲜度的引用形式（output_id/自由文本）不允许单独成立。
+/// step_N 保持既有运行内时序规则；output_id 经宿主回查精确归属和完成状态后，
+/// 使用记录中的步骤号核验同一窗口。自由文本摘要本身不构成时序证明。
 fn verify_evidence_freshness(
     update: &ChangeVerification,
     window: &EvidenceWindow,
+    source: Option<&EvidenceLookup<'_>>,
 ) -> Result<(), String> {
     if normalized_status(update).as_deref() != Some("verified") {
         return Ok(());
@@ -77,12 +93,16 @@ fn verify_evidence_freshness(
     let Some(last_write) = window.last_write_step else {
         return Ok(());
     };
-    let step_refs = extract_step_refs(&update.evidence_refs);
+    let (output_ids, step_text) = output_evidence::split_output_references(&update.evidence_refs);
+    let mut step_refs = extract_step_refs(&step_text);
+    for output_id in output_ids {
+        let source = source.ok_or_else(|| "本入口未附宿主来源，无法按 output_id 确认验证时序；可引用已有已完成步骤的 step_N，不必重复执行已有有效验证。".to_string())?;
+        step_refs.push(source.completed_step(&output_id)?);
+    }
     if step_refs.is_empty() {
         return Err(format!(
-            "verified 的 evidence_refs 必须至少包含一个 step_N 引用（指向产生证据的真实执行步骤，\
-            最近一次真实写入发生在 step_{}）；output_id 或自由文本摘要无法证明晚于该写入，\
-            不能单独作为证据。请重新执行验证命令后以新步骤号举证。",
+            "verified 的 evidence_refs 需要已完成步骤的 step_N，或可回查到本运行已完成步骤的 output_id:<完整句柄>；\
+            最近一次已记录副作用为 step_{}。自由文本摘要不能单独证明时序；请引用已有的有效记录，无需仅为转换引用格式重跑验证。",
             last_write
         ));
     }
@@ -142,7 +162,7 @@ pub fn change_verification_blocker(
     Some(format!(
         "本会话已记录 {} 次写入/可能产生副作用的操作，但最近操作后尚无验证证据或明确豁免\
         （运行与本次写入相关的验证命令/状态探针后，用 change_verification_update 以 \
-        verified + 指向该步骤的 evidence_refs=[\"step_N\"] 闭合；存在性探针的非零退出\
+        verified + evidence_refs=[\"step_N\"] 或 [\"output_id:<完整句柄>\"] 闭合；存在性探针的非零退出\
         若是目标状态同样可用）",
         side_effect_count
     ))
@@ -152,19 +172,12 @@ fn validate_change_verification(verification: &ChangeVerification) -> Result<(),
     let status = normalized_status(verification)
         .ok_or_else(|| "change_verification.status 只能是 verified 或 waived。".to_string())?;
 
-    let refs_are_valid = !verification.evidence_refs.is_empty()
-        && verification.evidence_refs.len() <= MAX_EVIDENCE_REFS
-        && verification.evidence_refs.iter().all(|reference| {
-            !reference.trim().is_empty() && reference.chars().count() <= MAX_EVIDENCE_REF_CHARS
-        });
+    let refs_are_valid = !verification.evidence_refs.is_empty();
     let waiver = verification.waived_reason.as_deref().unwrap_or("").trim();
 
     match status.as_str() {
         "verified" if refs_are_valid && waiver.is_empty() => Ok(()),
-        "verified" => Err(format!(
-            "verified 必须包含 1–{} 条非空 evidence_refs，且不能带 waived_reason。",
-            MAX_EVIDENCE_REFS
-        )),
+        "verified" => Err("verified 必须包含非空 evidence_refs，且不能带 waived_reason。".into()),
         "waived"
             if verification.evidence_refs.is_empty()
                 && !waiver.is_empty()

@@ -1804,8 +1804,13 @@ async fn run_agent_main_loop_in_workspace_inner(
             let mut probe = context.review_contract.clone();
             apply_review_contract_update(&mut probe, u.clone()).err()
         });
+        let evidence_source = crate::agent::change_verification::EvidenceLookup {
+            db: state.inner(), session_id: &final_session_id, run_id: &run_id,
+        };
         let review_contract_started_this_turn =
-            apply_instruction_state_updates(&mut context, &instruction, step_id);
+            crate::agent::finish_guard::apply_instruction_state_updates_with_source(
+                &mut context, &instruction, step_id, &evidence_source,
+            );
         if let Some(err) = contract_update_rejection {
             let short: String = err.chars().take(100).collect();
             let _ = app.emit(
@@ -2008,16 +2013,16 @@ async fn run_agent_main_loop_in_workspace_inner(
                     .collect_review_material(&workspace_dir, &context, task_started_at)
                     .map(|(_, h)| h)
                     .unwrap_or_default();
-                if !receipt.is_fresh(
-                    &current_hash,
-                    context.resource_scope.revision,
-                    &crate::agent::finalization::contract_fingerprint(
-                        context.review_contract.as_ref(),
-                    ),
-                ) {
+                // 文件变化的意义由终审裁量；此处只披露审查后的窄窗变化。
+                // scope/契约和用户停止仍按既有事实边界处理。
+                if !receipt.diff_hash.starts_with("unsettled:") {
+                    receipt.note_later_material_change(&current_hash);
+                }
+                if receipt.scope_revision != context.resource_scope.revision
+                    || receipt.contract_fingerprint != crate::agent::finalization::contract_fingerprint(context.review_contract.as_ref()) {
                     receipt
                         .blockers
-                        .push("验收后交付内容已变化，本次未提交；请重新核验当前版本。".into());
+                        .push("验收后范围或契约已变化，本次未提交；请重新核验。".into());
                 }
             }
             checkpoint.pending_finalization = Some(receipt.clone());

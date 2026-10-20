@@ -26,6 +26,7 @@ fn ready(c: &SandwichContext, cp: &AgentCheckpoint) -> FinalizationReceipt {
         step_id: 42,
         evidence_index_fingerprint: None,
         frozen_verification_run: None,
+        material_notices: vec![],
         verification: ReceiptVerification::Verified {
             evidence: "host exit 0".into(),
         },
@@ -116,6 +117,31 @@ fn waiver_disclosure_does_not_duplicate_details_in_completion_projection() {
         assert_eq!(projected, persisted);
         assert_eq!(projected.matches("# 正文").count(), 1);
         assert_eq!(projected.matches("验证披露").count(), 1);
+    }
+}
+
+#[test]
+fn material_change_disclosure_survives_resume_and_reaches_both_final_displays() {
+    for summary in ["摘要", "# 正文", ""] {
+        let db = db();
+        let mut c = context();
+        let mut cp = AgentCheckpoint::new("s".into(), &c);
+        let mut receipt = ready(&c, &cp);
+        receipt.finish_payload = json!({"summary":summary,"details":"# 正文"});
+        receipt.acceptance_fingerprint = crate::agent::finalization::acceptance_fingerprint(&c, &cp, &receipt.finish_payload);
+        receipt.note_later_material_change("newer-material");
+        assert!(receipt.is_ready(), "后续变化只披露，不合成质量缺陷");
+        assert!(!receipt.is_fresh("newer-material", c.resource_scope.revision, ""));
+        cp.pending_finalization = Some(receipt);
+        let saved = serde_json::to_string(&cp).unwrap();
+        let mut restored: AgentCheckpoint = serde_json::from_str(&saved).unwrap();
+        let emitted = commit(&db, &mut restored, &mut c).unwrap();
+        let body = crate::agent::finalization::delivery_body(&emitted).unwrap();
+        let persisted: String = db.0.lock().unwrap().query_row("SELECT content FROM chat_messages", [], |r| r.get(0)).unwrap();
+        assert_eq!(body, persisted);
+        assert_eq!(body.matches("# 正文").count(), 1);
+        assert_eq!(body.matches("材料变化披露").count(), 1);
+        assert!(body.contains("未取得独立审查结论"));
     }
 }
 #[test]

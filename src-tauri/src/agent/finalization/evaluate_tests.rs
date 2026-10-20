@@ -68,6 +68,78 @@ fn checkpoint(c: &SandwichContext) -> AgentCheckpoint {
 }
 
 #[tokio::test]
+async fn review_logging_during_finish_keeps_receipt_valid_and_real_changes_reach_reviewer() {
+    use crate::agent::child_reviewer::retirement_tests::MockReviewer;
+    for change_real_file in [false, true] {
+        let workspace = std::env::temp_dir().join(format!("finish-runtime-{}", uuid::Uuid::new_v4()));
+        for dir in ["agent_logs", "src-tauri/agent_logs", "config"] {
+            std::fs::create_dir_all(workspace.join(dir)).unwrap();
+        }
+        std::fs::write(workspace.join(".gitignore"), "agent_logs/\n").unwrap();
+        std::fs::write(workspace.join("config/settings.json"), r#"{"enabled":true}"#).unwrap();
+        for args in [
+            vec!["init", "-q"], vec!["add", "."],
+            vec!["-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "baseline"],
+        ] {
+            assert!(std::process::Command::new("git").current_dir(&workspace).args(args).status().unwrap().success());
+        }
+        let baseline = GitBaseline::capture(&workspace);
+        let changed_workspace = workspace.clone();
+        let mock = MockReviewer::with_request_hook(vec![json!({"verdict":"passed","score":90,
+            "summary":"核查报告与证据后通过","blocking_issues":[],"nit_issues":[]})], move || {
+            // 在真实终审请求进行中合成宿主写日志；不改变 cwd、不写真实会话日志。
+            for path in ["agent_logs/review.json", "src-tauri/agent_logs/review.json"] {
+                std::fs::write(changed_workspace.join(path), r#"[{"content":"终审记录"}]"#).unwrap();
+            }
+            if change_real_file {
+                std::fs::write(changed_workspace.join("config/settings.json"), r#"{"enabled":false}"#).unwrap();
+            }
+        }).await;
+        let mut c = context();
+        c.record_side_effect(1, "local_shell".into(), "SQLite SELECT 查询的保守台账".into());
+        c.change_verification = Some(ChangeVerification {status:"waived".into(),
+            evidence_refs:vec![], waived_reason:Some("只读诊断，终审核对报告".into())});
+        let mut cp = checkpoint(&c);
+        let mut routing = ModelRoutingConfig::default();
+        routing.role_models.insert("reviewer".into(), "mock".into());
+        let app = tauri::test::mock_app();
+        let (_tx, mut rx) = watch::channel(0);
+        let session = format!("runtime-review-{}", uuid::Uuid::new_v4());
+        let start = Utc::now() - chrono::Duration::seconds(1);
+        let instruction: AgentInstruction = serde_json::from_value(json!({"tool":"finish",
+            "command":{"summary":"只读诊断报告：核对数据库和源码后给出结论"}})).unwrap();
+        let result = evaluate_completion(app.handle(), &mock.db, &mut c, &mut cp,
+            "runtime-run", &session, 10, &workspace, &baseline, start, &routing, &mut rx,
+            &instruction, CompletionMode::Finish, false, false).await;
+        assert!(result.receipt.review.is_accepted(), "本地审查员确实通过");
+        assert!(result.receipt.is_ready(), "审查员可认可变化：{:?}", result.receipt);
+        assert_eq!(mock.requests.lock().unwrap().len(), if change_real_file { 2 } else { 1 });
+        if change_real_file {
+            let requests = mock.requests.lock().unwrap();
+            let refreshed = requests[1]["messages"].as_array().unwrap().iter()
+                .filter_map(|m| m["content"].as_str()).collect::<Vec<_>>().join("\n");
+            assert!(refreshed.contains("审查期间材料变化"));
+            assert!(refreshed.contains("config/settings.json"));
+            assert!(refreshed.contains("\"enabled\":true") && refreshed.contains("\"enabled\":false"));
+        }
+        if !change_real_file {
+            cp.pending_finalization = Some(result.receipt);
+            std::fs::write(workspace.join("agent_logs/review.json"), "追加一条运行记录").unwrap();
+            let reused = evaluate_completion(app.handle(), &mock.db, &mut c, &mut cp,
+                "runtime-run", &session, 11, &workspace, &baseline, start, &routing, &mut rx,
+                &instruction, CompletionMode::Finish, false, false).await;
+            assert!(reused.receipt.is_ready(), "写日志后仍可复用就绪收据");
+            assert_eq!(mock.requests.lock().unwrap().len(), 1, "不能因日志变化再次调用终审");
+        }
+        let requests = mock.requests.lock().unwrap();
+        assert!(!requests[0]["messages"].to_string().contains("--- 文件内容: agent_logs/"));
+        assert!(!requests[0]["messages"].to_string().contains("--- 文件内容: src-tauri/agent_logs/"));
+        drop(requests);
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+}
+
+#[tokio::test]
 async fn existing_evidence_reaches_finish_without_reexecuting_its_command() {
     use crate::agent::child_reviewer::retirement_tests::MockReviewer;
     for changed in [false, true] {

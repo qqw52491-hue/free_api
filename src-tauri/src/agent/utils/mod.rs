@@ -1,6 +1,8 @@
 pub mod json_pipeline;
+pub(crate) mod evidence_refs;
 pub mod llm_client;
 pub mod log_sampler;
+pub(crate) mod runtime_logs;
 pub mod subprocess;
 
 pub use json_pipeline::*;

@@ -69,3 +69,6 @@ pub struct ReviewResult {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod runtime_log_tests;

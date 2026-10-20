@@ -382,10 +382,10 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
         }
     }
     // 测试允许生成构建产物；冻结评审前的材料，而非执行测试前的目录快照。
-    let review_hash = baseline
-        .collect_review_material(workspace, context, run_started_at)
-        .map(|(_, h)| h)
-        .unwrap_or_default();
+    let mut review_snapshot = baseline.collect_review_snapshot(workspace, context, run_started_at);
+    let review_hash = review_snapshot.hash.clone();
+    let mut receipt_hash = review_hash.clone();
+    let mut material_notices = Vec::new();
     if let Some(ref mut frozen) = frozen_verification_run {
         if frozen.material_fingerprint.is_empty() {
             frozen.material_fingerprint = review_hash.clone();
@@ -394,29 +394,87 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
     if blockers.is_empty() && !interrupted_since(interrupt_rx, generation) {
         let evidence = (!host_evidence.is_empty()).then(|| host_evidence.join("\n\n"));
         let human_waivers = checkpoint.human_waiver_text();
-        let result = crate::agent::reviewer_gatekeeper::evaluate_finish_diff(
-            app,
-            db,
-            context,
-            model_routing,
-            step_id,
-            workspace,
-            baseline,
-            run_started_at,
-            session_id,
-            interrupt_rx,
-            checkpoint.last_reviewed_diff_hash.as_deref(),
-            checkpoint.last_review_result.as_ref(),
-            &checkpoint.stage_review_final_only,
-            evidence.as_deref(),
-            human_waivers.as_deref(),
-            &notices,
-            checkpoint.approved_target_files.as_deref(),
-            checkpoint.triage_verdict.as_ref(),
-            Some(checkpoint.plan_mode),
-            body.as_deref(),
-        )
-        .await;
+        let mut completed_review = None;
+        // 稳定材料仍只审一次。观察到变化时补充一次现有审查，不把哈希变化判作缺陷；
+        // 持续变化只披露覆盖边界，不无限追加审查或要求执行模型盲目重交。
+        for refresh in 0..=1 {
+            let result = crate::agent::reviewer_gatekeeper::evaluate_finish_diff(
+                app,
+                db,
+                context,
+                model_routing,
+                step_id,
+                workspace,
+                baseline,
+                run_started_at,
+                session_id,
+                interrupt_rx,
+                if refresh == 0 {
+                    checkpoint.last_reviewed_diff_hash.as_deref()
+                } else {
+                    None
+                },
+                if refresh == 0 {
+                    checkpoint.last_review_result.as_ref()
+                } else {
+                    None
+                },
+                &checkpoint.stage_review_final_only,
+                evidence.as_deref(),
+                human_waivers.as_deref(),
+                &notices,
+                checkpoint.approved_target_files.as_deref(),
+                checkpoint.triage_verdict.as_ref(),
+                Some(checkpoint.plan_mode),
+                body.as_deref(),
+            )
+            .await;
+            let after_review = baseline.collect_review_snapshot(workspace, context, run_started_at);
+            if review_snapshot.hash != after_review.hash {
+                let paths = after_review.changed_paths_since(&review_snapshot);
+                // 已有具体 blocking 或宿主复验失败继续按原路径处理，不能借材料变化
+                // 重开一个空白审查环，把本轮真实失败的验证事实丢掉。
+                if refresh == 0
+                    && result.is_passed()
+                    && !interrupted_since(interrupt_rx, generation)
+                    && !checkpoint
+                        .triage_verdict
+                        .as_ref()
+                        .is_some_and(|v| v.final_review_mode.eq_ignore_ascii_case("mechanical_only"))
+                {
+                    let mut notice = after_review.change_notice_since(&review_snapshot);
+                    notice.push_str(&format!(
+                        "\n此前审查针对变化前材料，其结论仅供重新判断参考：{}\n",
+                        serde_json::to_string(&result).unwrap_or_default()
+                    ));
+                    notices.push(notice);
+                    material_notices.push(format!(
+                        "审查期间材料发生变化，已移交审查员复核；涉及路径：{}。",
+                        if paths.is_empty() {
+                            "未取得可归属路径".into()
+                        } else {
+                            paths
+                                .iter()
+                                .take(12)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join("、")
+                        }
+                    ));
+                    review_snapshot = after_review;
+                    receipt_hash = review_snapshot.hash.clone();
+                    continue;
+                }
+                // 未审的最新状态不能冒充已经审查的版本；保留通过/阻塞的实际裁决。
+                receipt_hash = format!("unsettled:{}", review_snapshot.hash);
+                material_notices.push(format!("审查收口期间材料仍有变化（涉及 {} 个文件）；后续变化未取得独立审查结论，本次按已有审查结果处理，不保证持续变化的最终版本。", paths.len()));
+            } else {
+                receipt_hash = review_snapshot.hash.clone();
+            }
+            completed_review = Some(result);
+            break;
+        }
+        let result = completed_review.expect("bounded review produces a result");
         if result.is_service_failure() {
             checkpoint.pending_task_failure = Some(result.summary.clone());
         }
@@ -468,17 +526,6 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
     {
         blockers.push("验收期间仍有后台任务在执行；请等待或停止后台任务后再提交。".into());
     }
-    let final_hash = baseline
-        .collect_review_material(workspace, context, run_started_at)
-        .map(|(_, h)| h)
-        .unwrap_or_default();
-    if review_hash != final_hash {
-        // Reviewer 取证期间产物变化，旧验证结果不能带入下一轮。
-        frozen_verification_run = None;
-        blockers.push(
-            "验证/终审期间交付内容发生变化，旧结论不适用于当前版本；请对当前版本重新核验。".into(),
-        );
-    }
     if interrupted_since(interrupt_rx, generation) {
         blockers.push("已收到停止或替换任务信号，本次不提交交付。".into());
     }
@@ -486,7 +533,7 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
     CompletionEvaluation {
         receipt: FinalizationReceipt {
             receipt_id: format!("fr_{}_s{}", &run_id[..run_id.len().min(8)], step_id),
-            diff_hash: final_hash,
+            diff_hash: receipt_hash,
             scope_revision: context.resource_scope.revision,
             contract_fingerprint: contract_fingerprint(context.review_contract.as_ref()),
             acceptance_fingerprint: acceptance_fingerprint(context, checkpoint, &request_payload),
@@ -495,6 +542,7 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
             step_id,
             verification,
             review,
+            material_notices,
             blockers,
             risk_flags: detect_risk_flags(&context.new_affected_paths()),
             finish_payload: request_payload,
@@ -857,3 +905,7 @@ fn collect_scope_and_targets(
 #[cfg(test)]
 #[path = "evaluate_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "material_change_tests.rs"]
+mod material_change_tests;

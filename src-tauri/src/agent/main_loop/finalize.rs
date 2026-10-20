@@ -32,12 +32,12 @@ pub(crate) fn commit_completed_run(
     {
         return Err("交付未提交：验收状态在预检后发生变化，请重新核验".into());
     }
-    let verification_disclosure = match &receipt.verification {
-        crate::agent::finalization::ReceiptVerification::Waived { reason } => {
-            Some(format!("验证披露：{}", reason))
-        }
-        _ => None,
-    };
+    let mut disclosures = receipt.material_notices.iter()
+        .map(|notice| format!("材料变化披露：{notice}")).collect::<Vec<_>>();
+    if let crate::agent::finalization::ReceiptVerification::Waived { reason } = &receipt.verification {
+        disclosures.push(format!("验证披露：{reason}"));
+    }
+    let verification_disclosure = (!disclosures.is_empty()).then(|| disclosures.join("\n\n"));
     let mut candidate_context = context.clone();
     let mut candidate = checkpoint.clone();
     if let Some(block) = candidate_context.active_target_block_mut() {

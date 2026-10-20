@@ -15,30 +15,12 @@ use uuid::Uuid;
 
 /// 方案入口、子审查请求和审查输出共用同一预算，完整保留引用，不截断路径。
 pub(crate) fn normalize_review_evidence_refs(references: &[String]) -> Result<Vec<String>, String> {
-    let mut seen = BTreeSet::new();
-    let mut normalized = Vec::new();
-    let mut total_chars = 0usize;
     for (index, reference) in references.iter().enumerate() {
-        let reference = reference.trim();
-        if reference.is_empty() {
-            return Err(format!("evidence_refs 第 {} 条为空；请提供非空引用或省略该条。", index + 1));
-        }
-        if reference.chars().any(char::is_control) {
+        if reference.trim().chars().any(char::is_control) {
             return Err(format!("evidence_refs 第 {} 条含控制字符；引用须为单行字符串。", index + 1));
         }
-        if seen.insert(reference) {
-            total_chars = total_chars.saturating_add(reference.chars().count())
-                .saturating_add(usize::from(!normalized.is_empty()));
-            if total_chars > MAX_REVIEW_REFERENCE_CHARS {
-                return Err(format!(
-                    "evidence_refs 去重后的引用总量超过 {} 个字符（含条目间分隔）；请缩小本次引用总量，正文摘录可使用 evidence_excerpt。此为输入容量限制，不是审查判决。",
-                    MAX_REVIEW_REFERENCE_CHARS
-                ));
-            }
-            normalized.push(reference.to_string());
-        }
     }
-    Ok(normalized)
+    crate::agent::utils::evidence_refs::normalize_evidence_refs(references)
 }
 
 

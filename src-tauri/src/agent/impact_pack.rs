@@ -3,6 +3,7 @@
 //! 自动符号消费点枚举及其逐项裁决义务已退出审查流程；
 //! 写方材料只提供定位线索，不产生消费点清单或额外裁决字段。
 
+use crate::agent::utils::runtime_logs::is_runtime_log_dir;
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -64,7 +65,7 @@ fn collect_scan_files(root: &Path, out: &mut Vec<PathBuf>, depth: usize) {
     }
     const SKIP_DIRS: &[&str] = &[
         "node_modules", "target", ".git", "dist", "build", "out", ".next",
-        "coverage", "vendor", "test-artifacts", ".idea", ".vscode", "agent_logs",
+        "coverage", "vendor", "test-artifacts", ".idea", ".vscode",
     ];
     const EXTS: &[&str] = &[
         "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "go", "java", "kt",
@@ -85,7 +86,10 @@ fn collect_scan_files(root: &Path, out: &mut Vec<PathBuf>, depth: usize) {
         if ft.is_dir() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if !name.starts_with('.') && !SKIP_DIRS.contains(&name.as_ref()) {
+            if !name.starts_with('.')
+                && !SKIP_DIRS.contains(&name.as_ref())
+                && !is_runtime_log_dir(&name)
+            {
                 collect_scan_files(&path, out, depth + 1);
             }
         } else if ft.is_file() {

@@ -1,12 +1,11 @@
 use serde::{Deserialize, Serialize};
+use crate::agent::utils::evidence_refs::normalize_evidence_refs;
 
 // 上限需容纳用户显式规格表（一行一义务，典型 8-10 行）；仍封顶防过度拆分。
 const MAX_REVIEW_OBLIGATIONS: usize = 12;
 const MAX_SCOPE_CHARS: usize = 500;
 const MAX_OBLIGATION_ID_CHARS: usize = 64;
 const MAX_OBLIGATION_TEXT_CHARS: usize = 360;
-const MAX_EVIDENCE_REFS: usize = 6;
-const MAX_EVIDENCE_REF_CHARS: usize = 240;
 const MAX_WAIVER_REASON_CHARS: usize = 360;
 
 /// 复杂审查、诊断或研究任务的可审计完成契约。
@@ -74,6 +73,7 @@ impl ReviewContract {
             merged.scope_statement = update.scope_statement;
         }
         for mut item in update.obligations {
+            item.evidence_refs = normalize_evidence_refs(&item.evidence_refs)?;
             if !ids.insert(item.id.trim().to_string()) {
                 return Err(format!(
                     "审查契约更新重复提交义务 {}；每个 id 只能出现一次。",
@@ -278,16 +278,6 @@ fn validate_contract(contract: &ReviewContract) -> Result<(), String> {
             }
         }
 
-        if item.evidence_refs.len() > MAX_EVIDENCE_REFS
-            || item.evidence_refs.iter().any(|reference| {
-                reference.trim().is_empty() || reference.chars().count() > MAX_EVIDENCE_REF_CHARS
-            })
-        {
-            return Err(format!(
-                "审查义务 {} 的 evidence_refs 最多 {} 项，且每项必须为 1–{} 个字符。",
-                item.id, MAX_EVIDENCE_REFS, MAX_EVIDENCE_REF_CHARS
-            ));
-        }
         if item
             .waived_reason
             .as_deref()
@@ -299,6 +289,10 @@ fn validate_contract(contract: &ReviewContract) -> Result<(), String> {
             ));
         }
     }
+    // 整份合并后的契约共用总预算，不按每个义务重新获得一份容量。
+    let references: Vec<String> = contract.obligations.iter()
+        .flat_map(|item| item.evidence_refs.iter().cloned()).collect();
+    normalize_evidence_refs(&references)?;
     Ok(())
 }
 

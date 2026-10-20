@@ -156,6 +156,9 @@ pub struct FinalizationReceipt {
     pub step_id: usize,
     pub verification: ReceiptVerification,
     pub review: ReceiptReview,
+    /// 材料变化的观察与审查覆盖边界，只作披露，不自动阻断交付。
+    #[serde(default)]
+    pub material_notices: Vec<String>,
     /// 未闭合项；为空且 review 被接受 = ready-to-commit。
     pub blockers: Vec<String>,
     /// 高风险路径信号（鉴权/密钥/迁移/并发/安全策略）。
@@ -167,6 +170,14 @@ pub struct FinalizationReceipt {
 }
 
 impl FinalizationReceipt {
+    /// 结束后仍在变化时披露未知，不把未审版本标为可复用，也不合成质量缺陷。
+    pub(crate) fn note_later_material_change(&mut self, current_hash: &str) {
+        if self.diff_hash != current_hash {
+            self.material_notices.push("审查结束后材料仍有变化；后续变化未取得独立审查结论，本次按已有审查结果交付，不能视为对持续变化的最终版本保证。".into());
+            self.diff_hash = format!("unsettled:{}", self.diff_hash);
+        }
+    }
+
     /// 收据是否允许 finish 直接提交。
     pub fn is_ready(&self) -> bool {
         self.blockers.is_empty()
@@ -494,6 +505,7 @@ mod tests {
             acceptance_fingerprint: "test-state".into(),
             evidence_index_fingerprint: None,
             frozen_verification_run: None,
+            material_notices: vec![],
             step_id: 10,
             verification: ReceiptVerification::Verified {
                 evidence: "cargo test ok".to_string(),
@@ -514,7 +526,9 @@ mod tests {
     fn legacy_receipt_without_frozen_host_execution_remains_readable_but_cannot_reuse_it() {
         let mut json = serde_json::to_value(receipt("diff", 0, "contract")).unwrap();
         json.as_object_mut().unwrap().remove("frozen_verification_run");
+        json.as_object_mut().unwrap().remove("material_notices");
         let restored: FinalizationReceipt = serde_json::from_value(json).unwrap();
+        assert!(restored.material_notices.is_empty());
         assert!(restored.frozen_verification_run.is_none());
     }
 

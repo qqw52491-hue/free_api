@@ -1,6 +1,6 @@
 //! 指令执行后的状态更新、TargetBlocks 自动桥接、权限提升与 Scope 扩展。
 
-use crate::agent::change_verification::apply_change_verification_update;
+use crate::agent::change_verification::{apply_change_verification_with_source, EvidenceLookup};
 use crate::agent::context;
 use crate::agent::review_contract::apply_review_contract_update;
 use crate::agent::types::AgentInstruction;
@@ -12,6 +12,24 @@ pub(crate) fn apply_instruction_state_updates(
     context: &mut context::SandwichContext,
     instruction: &AgentInstruction,
     current_step_id: usize,
+) -> bool {
+    apply_state_updates(context, instruction, current_step_id, None)
+}
+
+pub(crate) fn apply_instruction_state_updates_with_source(
+    context: &mut context::SandwichContext,
+    instruction: &AgentInstruction,
+    current_step_id: usize,
+    source: &EvidenceLookup<'_>,
+) -> bool {
+    apply_state_updates(context, instruction, current_step_id, Some(source))
+}
+
+fn apply_state_updates(
+    context: &mut context::SandwichContext,
+    instruction: &AgentInstruction,
+    current_step_id: usize,
+    source: Option<&EvidenceLookup<'_>>,
 ) -> bool {
     if !instruction.todo_update.is_empty() {
         apply_todo_update_guarded(context, &instruction.todo_update);
@@ -45,13 +63,14 @@ pub(crate) fn apply_instruction_state_updates(
                 .max(),
             current_step: current_step_id.saturating_add(1),
         };
-        if let Err(error) = apply_change_verification_update(
+        if let Err(error) = apply_change_verification_with_source(
             &mut context.change_verification,
             update,
             &evidence_window,
+            source,
         ) {
             context.add_host_feedback(&format!(
-                "【写入验证更新未采纳】{}\n最近已记录副作用之后，可用 verified + evidence_refs=[\"step_N\"] 申报验证（本步工具已执行完，可引用本步），或用 waived + waived_reason 说明豁免；旧凭据不能覆盖新副作用。",
+                "【写入验证更新未采纳】{}\n可引用最近已记录副作用之后的已完成 step_N，或 output_id:<完整句柄>（宿主回查来源与时序）；不必仅为转换引用格式重跑已有有效验证。本步工具已完成时可引用本步 step_N；或用 waived + waived_reason 说明豁免。旧凭据不能覆盖新副作用。",
                 error
             ));
         }

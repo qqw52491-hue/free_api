@@ -128,10 +128,12 @@ pub fn is_binary_file(path: &str) -> bool {
         || p.ends_with(".mp3")
 }
 
-/// 判定路径是否为噪音文件（lockfile、构建产物、依赖库等）
+/// 自动审查材料排除运行日志、lockfile、构建产物、依赖库等。
+/// 材料展示、变更路径与完整内容指纹共用此规则。
 pub fn is_noise_path(path: &str) -> bool {
     let p = path.to_ascii_lowercase();
-    p.contains("package-lock.json")
+    crate::agent::utils::runtime_logs::is_runtime_log_path(path)
+        || p.contains("package-lock.json")
         || p.contains("pnpm-lock.yaml")
         || p.contains("yarn.lock")
         || p.contains("cargo.lock")
