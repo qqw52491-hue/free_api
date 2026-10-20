@@ -31,6 +31,7 @@ pub(crate) fn channel_router(state: Arc<ChannelState>) -> Router {
         .route("/channel/eval/{eval_id}", get(handler_eval_detail))
         .route("/channel/run/{run_id}/answer", post(handler_run_answer))
         .route("/channel/run/{run_id}/goal", post(handler_run_goal))
+        .route("/channel/run/{run_id}/supplement", post(handler_run_supplement))
         .route("/channel/run/{run_id}/cancel", post(handler_run_cancel))
         .route("/channel/config", get(handler_config_get).put(handler_config_put))
         .route("/channel/models", get(handler_models))

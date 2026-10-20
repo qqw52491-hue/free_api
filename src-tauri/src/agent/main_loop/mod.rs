@@ -560,6 +560,10 @@ async fn run_agent_main_loop_in_workspace_inner(
     let entry_history = crate::agent::conversation::history_for_entry(
         state.inner(), &final_session_id, existing_checkpoint.as_ref(),
     )?;
+    let pending_live_goals: Vec<String> = if is_resuming_existing {
+        entry_history.messages.iter().filter(|m| m.role == "user")
+            .filter_map(|m| m.content.as_str().map(str::to_owned)).collect()
+    } else { Vec::new() };
     context.turns_history = entry_history.messages;
     context.conversation_cursor = entry_history.cursor;
     // 审查任务在首次模型调用前注入轻量项目地图。它只包含目录、入口和 Git 元数据，
@@ -593,6 +597,10 @@ async fn run_agent_main_loop_in_workspace_inner(
         }
         None => AgentCheckpoint::new(final_session_id.clone(), &context),
     };
+    for message in pending_live_goals {
+        crate::agent::conversation::append_live_goal(&mut context, &message);
+        checkpoint.pending_finalization = None;
+    }
     if let Some(reference) = entry_history.legacy_reference {
         context.turns_history.insert(0, reference);
         context.maybe_compact_history();
@@ -1402,6 +1410,11 @@ async fn run_agent_main_loop_in_workspace_inner(
             return Err(reason);
         }
 
+        crate::agent::channel::set_supplements_closed(&run_id, false);
+        if crate::agent::conversation::import_live_messages(state.inner(), &final_session_id, &mut context)? > 0 {
+            checkpoint.pending_finalization = None;
+        }
+
         // 步边界状态刷新：收养旧 checkpoint 的手写名单（升级一次性迁移）
         // 并按台账重算 consumed 标志。名单退役后"在途/齐套"全部由
         // batch_id+consumed_at 推导——孤儿 id 让门禁等死人的死锁类
@@ -1933,7 +1946,18 @@ async fn run_agent_main_loop_in_workspace_inner(
         let completion_generation = *interrupt_rx.borrow();
         let mut finish_challenged = false;
         let mut reviewer_warnings_delivered = None;
-        if finish_gate_requested && result.success {
+        let late_messages = if finish_gate_requested && result.success {
+            crate::agent::channel::set_supplements_closed(&run_id, true);
+            crate::agent::conversation::import_live_messages(state.inner(), &final_session_id, &mut context)?
+        } else { 0 };
+        if late_messages > 0 {
+            // 事实边界：该请求生成后又收到用户消息，本次 finish 尚未考虑这些消息。
+            checkpoint.pending_finalization = None;
+            finish_challenged = is_finish;
+            output_text = "已收到新的用户补充，本次交付尚未提交；请先处理补充内容后再交付。".into();
+            context.add_host_feedback(&output_text);
+        }
+        if finish_gate_requested && result.success && late_messages == 0 {
             let generation = *interrupt_rx.borrow();
             let evaluation = crate::agent::finalization::evaluate_completion(
                 &app,

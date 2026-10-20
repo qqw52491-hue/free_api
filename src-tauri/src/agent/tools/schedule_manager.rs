@@ -320,6 +320,7 @@ fn run_now(db: &DbState, params: &serde_json::Value) -> DispatchResult {
         config.action_milestone_steps,
         config.phase_pushes,
         None,
+        false, // run_now 不启动独立 watcher，由应用守卫通知
     )
     {
         Ok(run_id) => DispatchResult { view: None,

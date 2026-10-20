@@ -52,7 +52,8 @@ pub(crate) fn acceptance_fingerprint(
 ) -> String {
     use sha2::{Digest, Sha256};
     let raw = json!({
-        "version": 2,
+        "version": 3,
+        "current_goal": context.effective_goal(),
         "effects": context.side_effects,
         "inherited": context.inherited_side_effects_count,
         "verification": context.change_verification,

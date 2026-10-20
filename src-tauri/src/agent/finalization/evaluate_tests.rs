@@ -589,3 +589,14 @@ async fn completed_report_todos_do_not_infer_a_requirement_to_write_code() {
         );
     }
 }
+
+#[test]
+fn new_current_requirements_change_acceptance_identity_without_changing_frozen_anchor() {
+    let mut context = SandwichContext::new("sys".into(), "original".into());
+    let checkpoint = AgentCheckpoint::new("s".into(), &context);
+    let payload = json!({"summary":"done"});
+    let before = acceptance_fingerprint(&context, &checkpoint, &payload);
+    crate::agent::conversation::append_live_goal(&mut context, "also export a PDF");
+    assert_eq!(context.user_goal, "original");
+    assert_ne!(before, acceptance_fingerprint(&context, &checkpoint, &payload));
+}

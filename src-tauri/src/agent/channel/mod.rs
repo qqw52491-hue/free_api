@@ -129,6 +129,21 @@ pub struct RunRecord {
     /// 任务来源: "channel" (微信/通道派发) | "desktop" (桌面端会话)
     #[serde(default = "default_run_source")]
     pub source: String,
+    /// 调用方负责终态通知（微信桥或定时 watcher），应用守卫不重复推送。
+    pub caller_notifies: bool,
+    /// 交付核验期间关闭补充入口，避免已接收的补充落在终态提交之后。
+    #[serde(skip)]
+    pub(crate) supplements_closed: bool,
+}
+
+impl RunRecord {
+    pub(crate) fn application_notifies_terminal(&self) -> bool {
+        !self.caller_notifies && self.status != "cancelled"
+    }
+}
+
+pub(crate) fn set_supplements_closed(run_id: &str, closed: bool) {
+    patch_run(run_id, |record| record.supplements_closed = closed);
 }
 
 fn default_run_source() -> String {

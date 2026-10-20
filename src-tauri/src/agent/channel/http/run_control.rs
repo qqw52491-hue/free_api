@@ -75,16 +75,18 @@ pub(crate) async fn handler_run_answer(
     if !authorized(&headers, &config) {
         return Err(unauthorized());
     }
-    let session_id = {
-        let runs = runs_store().lock().expect("runs store poisoned");
-        runs.get(&run_id)
-            .map(|r| r.session_id.clone())
-            .ok_or_else(|| not_found("任务不存在"))?
-    };
     let text = req.text.trim().to_string();
     if text.is_empty() {
         return Err(bad_request("回答内容不能为空"));
     }
+    let session_id = {
+        let runs = runs_store().lock().expect("runs store poisoned");
+        let run = runs.get(&run_id).ok_or_else(|| not_found("任务不存在"))?;
+        if run.status != "waiting_human" {
+            return Err((StatusCode::CONFLICT, Json(json!({"error": "任务当前未等待回答，请查状态；执行中补充要求请使用「补充：内容」。"}))));
+        }
+        run.session_id.clone()
+    };
     let answer_state = state.app.state::<DbState>();
     crate::agent::control::send_human_intervention(answer_state, session_id.clone(), text)
         .await
@@ -95,6 +97,50 @@ pub(crate) async fn handler_run_answer(
         record.paused_form = None;
     });
     Ok(Json(json!({"ok": true, "session_id": session_id})))
+}
+
+/// 补充只落聊天记录，由下一步规划按消息身份导入，不发送停止/替换目标信号。
+pub(crate) async fn handler_run_supplement(
+    AxumState(state): AxumState<Arc<ChannelState>>,
+    headers: HeaderMap,
+    AxumPath(run_id): AxumPath<String>,
+    Json(req): Json<AnswerReq>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let config = state.config.read().expect("config poisoned").clone();
+    if !authorized(&headers, &config) {
+        return Err(unauthorized());
+    }
+    let text = req.text.trim();
+    if text.is_empty() {
+        return Err(bad_request("补充内容不能为空"));
+    }
+    let session_id = {
+        // 与交付关闭入口共用锁：关闭前成功落库的消息必须先导入，关闭后明确拒绝。
+        let runs = runs_store().lock().expect("runs store poisoned");
+        let run = runs.get(&run_id).ok_or_else(|| not_found("任务不存在"))?;
+        validate_supplement_target(run).map_err(|message| (
+            StatusCode::CONFLICT, Json(json!({"error": message})),
+        ))?;
+        let db = state.app.state::<DbState>();
+        crate::agent::conversation::append_human_intervention(db.inner(), &run.session_id, text)
+            .map_err(internal_error)?;
+        run.session_id.clone()
+    };
+    notify_session_event(&session_id, "message");
+    Ok(Json(json!({"ok": true, "session_id": session_id})))
+}
+
+fn validate_supplement_target(run: &RunRecord) -> Result<(), &'static str> {
+    if run.status == "waiting_human" {
+        return Err("当前任务正在等你回答，请发送「回答：内容」。");
+    }
+    if run.status != "running" {
+        return Err("当前任务已结束，补充未发送，请作为新任务发送。");
+    }
+    if run.supplements_closed {
+        return Err("当前任务尚未进入执行步骤或正在核验交付，补充未发送，请稍后查状态再发送。");
+    }
+    Ok(())
 }
 
 pub(crate) async fn handler_run_goal(
@@ -187,5 +233,29 @@ mod result_delivery_tests {
         conn.execute("INSERT INTO chat_messages VALUES ('3','other','assistant','other session',3)", []).unwrap();
         assert_eq!(load_last_assistant_message(&conn, "target"), Some(text));
         assert_eq!(load_last_assistant_message(&conn, "missing"), None);
+    }
+}
+
+#[cfg(test)]
+mod supplement_tests {
+    use super::*;
+
+    #[test]
+    fn supplements_only_enter_an_open_running_task() {
+        let mut run = RunRecord {
+            run_id: "supplement-test".into(), session_id: "s".into(), goal_preview: "goal".into(),
+            status: "running".into(), paused_reason: None, paused_form: None, last_progress: None,
+            event_count: 0, started_at: now_ts(), updated_at: now_ts(), result: None, error: None,
+            llm_retries: 3, report_every_actions: 15, phase_push: true, phase: None, state_detail: None,
+            source: "channel".into(), caller_notifies: true, supplements_closed: false,
+        };
+        assert!(validate_supplement_target(&run).is_ok());
+        run.supplements_closed = true;
+        assert!(validate_supplement_target(&run).unwrap_err().contains("核验交付"));
+        run.supplements_closed = false;
+        for status in ["waiting_human", "done", "failed", "cancelled"] {
+            run.status = status.into();
+            assert!(validate_supplement_target(&run).is_err());
+        }
     }
 }

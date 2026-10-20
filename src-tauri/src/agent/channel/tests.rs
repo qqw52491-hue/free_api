@@ -54,7 +54,20 @@ use super::runtime::*;
             phase: None,
             state_detail: None,
             source: "channel".to_string(),
+            caller_notifies: false,
+            supplements_closed: false,
         };
+        assert!(record.application_notifies_terminal());
+        let mut external = record.clone();
+        external.caller_notifies = true;
+        for status in ["running", "waiting_human", "done", "failed", "cancelled"] {
+            external.status = status.to_string();
+            assert!(!external.application_notifies_terminal());
+        }
+        external.caller_notifies = false;
+        assert!(!external.application_notifies_terminal()); // cancelled
+        external.status = "failed".to_string();
+        assert!(external.application_notifies_terminal());
         upsert_run(record);
         patch_run(&key, |r| {
             r.event_count = 5;
@@ -87,6 +100,8 @@ use super::runtime::*;
                 phase: None,
                 state_detail: None,
                 source: "channel".to_string(),
+                caller_notifies: false,
+                supplements_closed: false,
             });
         }
         let runs = runs_store().lock().unwrap();
@@ -232,6 +247,8 @@ use super::runtime::*;
             phase: None,
             state_detail: None,
                 source: "channel".to_string(),
+                caller_notifies: false,
+                supplements_closed: false,
             });
         let overlaid = apply_run_overlay(sessions);
         assert_eq!(overlaid[0]["status"], "waiting_human");

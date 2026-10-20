@@ -251,3 +251,40 @@ fn deleted_cursor_retains_uncertain_history_without_replaying_it_as_new_commands
         .unwrap()
         .contains("先测试nogpu"));
 }
+
+#[test]
+fn live_supplements_are_imported_in_order_once_and_survive_checkpoint_and_compaction() {
+    let db = db();
+    begin_turn(&db, "s", "model", "原始目标").unwrap();
+    let mut ctx = enter(&db, None, "原始目标");
+    append_human_intervention(&db, "other", "不能混入其他会话").unwrap();
+    append_human_intervention(&db, "s", "把颜色改为蓝色").unwrap();
+    let answer = append_human_intervention(&db, "s", "已通过提问消费的回答").unwrap();
+    ctx.turns_history.push(ChatMessage { role: "user".into(), content: json!("已通过提问消费的回答") });
+    ctx.acknowledge_chat(Some(answer));
+    append_human_intervention(&db, "s", "同时保留导出功能").unwrap();
+    assert_eq!(import_live_messages(&db, "s", &mut ctx).unwrap(), 2);
+    assert_eq!(ctx.user_goal, "原始目标");
+    assert!(ctx.effective_goal().contains("把颜色改为蓝色"));
+    assert!(ctx.effective_goal().contains("同时保留导出功能"));
+    assert!(!ctx.effective_goal().contains("不能混入"));
+    assert_eq!(exact_count(&ctx, "已通过提问消费的回答"), 1);
+    assert_eq!(import_live_messages(&db, "s", &mut ctx).unwrap(), 0);
+    let frozen = checkpoint(&ctx);
+    let mut restored = ctx.clone();
+    frozen.data.restore_into(&mut restored);
+    assert_eq!(restored.effective_goal(), ctx.effective_goal());
+    assert_eq!(import_live_messages(&db, "s", &mut restored).unwrap(), 0);
+    restored.turns_history.clear(); // 正文压缩/清空不改变消费身份或当前要求
+    assert_eq!(import_live_messages(&db, "s", &mut restored).unwrap(), 0);
+    assert!(restored.effective_goal().contains("把颜色改为蓝色"));
+}
+
+#[test]
+fn missing_live_cursor_never_replays_old_messages() {
+    let db = db();
+    begin_turn(&db, "s", "model", "历史消息").unwrap();
+    let mut ctx = SandwichContext::new("SYS".into(), "新任务".into());
+    assert_eq!(import_live_messages(&db, "s", &mut ctx).unwrap(), 0);
+    assert_eq!(ctx.effective_goal(), "新任务");
+}

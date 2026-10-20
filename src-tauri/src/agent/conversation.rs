@@ -114,6 +114,44 @@ pub(crate) fn history_for_entry(
     })
 }
 
+/// 运行期只接入游标之后的用户消息；已通过 ask_human 消费的回答按身份跳过。
+/// 缺失游标时不猜历史消费位置，留给既有恢复入口处理。
+pub(crate) fn import_live_messages(
+    db: &DbState,
+    session_id: &str,
+    context: &mut crate::agent::context::SandwichContext,
+) -> Result<usize, String> {
+    let Some(previous) = context.conversation_cursor.as_ref() else { return Ok(0) };
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(
+        "SELECT id, created_at, role, content FROM chat_messages
+         WHERE session_id=?1 AND rowid>(SELECT rowid FROM chat_messages WHERE session_id=?1 AND id=?2)
+         ORDER BY rowid ASC",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![session_id, previous.id], |row| {
+        Ok((ConversationCursor { id: row.get(0)?, created_at: row.get(1)? },
+            row.get::<_, String>(2)?, row.get::<_, String>(3)?))
+    }).map_err(|e| e.to_string())?;
+    // 先完整读取成功，再推进内存游标，查询错误不能造成半导入。
+    let rows = rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+    let mut imported = 0;
+    for (position, role, content) in rows {
+        if role == "user" && !context.acknowledged_chat_ids.contains(&position.id) {
+            append_live_goal(context, &content);
+            context.turns_history.push(ChatMessage { role, content: json!(content) });
+            imported += 1;
+        }
+        context.acknowledged_chat_ids.remove(&position.id);
+        context.conversation_cursor = Some(position);
+    }
+    Ok(imported)
+}
+
+pub(crate) fn append_live_goal(context: &mut crate::agent::context::SandwichContext, message: &str) {
+    // user_goal 是冻结的前缀锚点；仅更新当前目标，使后续审查与压缩也能看到补充。
+    context.current_goal = format!("{}\n\n【本任务新增用户要求】\n{}", context.effective_goal(), message);
+}
+
 fn title_from_goal(goal: &str) -> String {
     let normalized = goal.split_whitespace().collect::<Vec<_>>().join(" ");
     let candidate = if normalized.is_empty() {

@@ -256,6 +256,7 @@ async fn fire_run(
         config.action_milestone_steps,
         config.phase_pushes,
         None,
+        true, // spawn_completion_watcher 负责带定时任务名的终态通知
     )
     .map_err(
         |error| match error {

@@ -15,14 +15,16 @@
 // 鉴权：与通道 API 共用 channel-config.json 中的 token（X-Channel-Token）。
 
 import fs from "node:fs";
+import { randomUUID } from "node:crypto";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import QRCode from "qrcode";
 import { createMessageDelivery } from "./message-delivery.js";
+import { restoreRuntime, saveBindings, readRun } from "./runtime-state.js";
 import { isLoggedIn, login, logout, start } from "weixin-agent-sdk";
 
-const BRIDGE_VERSION = "0.2.2";
+const BRIDGE_VERSION = "0.3.0";
 
 // 内置指令面板：随桥能力同步更新，首次联系与「帮助」指令时推送
 const COMMAND_PANEL = [
@@ -31,6 +33,10 @@ const COMMAND_PANEL = [
   "🚀 直接发消息 = 派任务",
   "　支持文字/语音/图片/Excel/PDF；执行中再发会自动排队",
   "📊 状态 = 当前进度 + 队列 + 绑定项目",
+  "💬 补充：内容 = 补充当前任务，不排队、不打断操作",
+  "🗣 回答：内容 = 回答 Agent 的提问（也可直接回复）",
+  "▶️ 继续队列 = 恢复暂停的排队任务",
+  "⏭ 跳过队首 = 核对桌面记录后，移除未确认的队首任务",
   "📄 结果 = 回放上一次任务的结果",
   "📁 项目 = 项目列表（回复编号绑定工作区）",
   "🤖 模型 = 模型列表（回复编号切换默认模型）",
@@ -42,7 +48,8 @@ const COMMAND_PANEL = [
   "🎚 详细汇报 / 安静汇报 = 一键切换详略",
   "🎚 动作汇报 N = 每 N 个动作汇报（0 关闭）",
   "──────────────",
-  "💬 Agent 提问时，直接回复即算回答",
+  "💬 Agent 提问时，直接回复即算回答；状态、结果等指令仍可用",
+  "🔄 桥重启后恢复监听；执行状态不明时暂停队列，不自动重跑",
   "⏱ 进度按配置间隔自动汇报，卡住会主动提问",
   "📁 绑定项目后任务在项目目录执行，未绑定在临时工作区",
 ].join("\n");
@@ -95,7 +102,7 @@ if (fs.existsSync(statePath)) {
   }
 }
 function saveState() {
-  fs.writeFileSync(statePath, JSON.stringify(state, null, 2), "utf-8");
+  saveBindings(statePath, state, runtime);
 }
 
 function senderOf(conversationId) {
@@ -110,16 +117,13 @@ function senderOf(conversationId) {
   return state.senders[conversationId];
 }
 
-/** conversationId → { runId, num, status, lastHeartbeat, waitingSince, lastNudge } */
-const activeRuns = new Map();
-/** conversationId → { runId, num }：等待用户回复答案的任务 */
-const pendingQuestions = new Map();
-/** conversationId → { type: "project"|"model", items }：最近一次推送的编号列表 */
+// 运行快照与绑定一起保存；区分已确认的运行与尚未拿到派发回执的队首。
+const runtime = restoreRuntime(state.runtime);
+const { activeRuns, pendingQuestions, taskQueues, lastResults, queuePauses } = runtime;
 const lastSelections = new Map();
-/** conversationId → [{ text, media }]：会话忙时的任务队列 */
-const taskQueues = new Map();
-/** conversationId → { num, text }：最近一次完成的任务结果 */
-const lastResults = new Map();
+const submitting = new Set();
+const answering = new Set();
+let runtimeResumed = false;
 
 let bot = null;
 let accountId = null;
@@ -134,6 +138,7 @@ let loginGeneration = 0;
 async function api(method, apiPath, body) {
   const response = await fetch(`${API_BASE}${apiPath}`, {
     method,
+    signal: AbortSignal.timeout(20_000),
     headers: {
       "x-channel-token": TOKEN,
       "content-type": "application/json",
@@ -142,7 +147,9 @@ async function api(method, apiPath, body) {
   });
   const value = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(value.error || `通道 API ${response.status}`);
+    const error = new Error(value.error || `通道 API ${response.status}`);
+    error.status = response.status;
+    throw error;
   }
   return value;
 }
@@ -223,6 +230,15 @@ function startBot() {
   if (bot) return;
   abortController = new AbortController();
   bot = start(agent, { abortSignal: abortController.signal });
+  if (!runtimeResumed) {
+    runtimeResumed = true;
+    for (const [conversationId, entry] of activeRuns) {
+      watchRun(conversationId, entry.runId, entry.num, entry);
+    }
+    for (const conversationId of taskQueues.keys()) {
+      void drainQueue(conversationId).catch((error) => console.error(`[bridge] 恢复队列失败: ${error}`));
+    }
+  }
   bot
     .wait()
     .then(() => console.log("[bridge] 微信监听已停止"))
@@ -291,7 +307,7 @@ async function buildGoalWithMedia(sessionId, text, media) {
   }
 }
 
-async function submitTask(conversationId, goalText) {
+async function submitTask(conversationId, goalText, queueId) {
   const sender = senderOf(conversationId);
   let sessionId = sender.session_id;
   if (!sessionId) {
@@ -305,13 +321,12 @@ async function submitTask(conversationId, goalText) {
   }
   let task;
   try {
-    task = await api("POST", "/channel/task", { session_id: sessionId, goal: goalText });
+    task = await api("POST", "/channel/task", { session_id: sessionId, goal: goalText, caller_notifies: true });
   } catch (error) {
-    if (
-      String(error.message).includes("会话") ||
-      String(error.message).includes("session") ||
-      String(error.message).includes("模型")
-    ) {
+    if (error.status !== 409 && (
+      String(error.message).includes("会话不存在") ||
+      String(error.message).includes("session expired")
+    )) {
       console.log(`[bridge] 会话 ${sessionId} 失效/异常，尝试自动重建并重试派发任务...`);
       const session = await api("POST", "/channel/session", {
         project_id: sender.project_id || undefined,
@@ -320,43 +335,60 @@ async function submitTask(conversationId, goalText) {
       sender.session_id = session.session_id;
       saveState();
       sessionId = session.session_id;
-      task = await api("POST", "/channel/task", { session_id: sessionId, goal: goalText });
+      task = await api("POST", "/channel/task", { session_id: sessionId, goal: goalText, caller_notifies: true });
     } else {
       throw error;
     }
   }
   state.task_counter = (state.task_counter || 0) + 1;
-  saveState();
   const num = state.task_counter;
-  watchRun(conversationId, task.run_id, num);
+  watchRun(conversationId, task.run_id, num, { sessionId, queueId });
   return { num, llmRetries: task.llm_retries ?? null };
 }
 
-/** 当前任务结束后取队列中的下一个（如有） */
-async function drainQueue(conversationId) {
-  if (activeRuns.has(conversationId)) return;
+/** 先保存派发中的队首，再调用 API；缺少回执时不自动重发。 */
+async function drainQueue(conversationId, announce = true) {
+  if (activeRuns.has(conversationId) || submitting.has(conversationId) || queuePauses.has(conversationId)) return;
   const queue = taskQueues.get(conversationId);
-  if (!queue || !queue.length) return;
-  const next = queue.shift();
-  if (!queue.length) taskQueues.delete(conversationId);
+  if (!queue?.length) return;
+  const next = queue[0];
+  if (next.dispatching) {
+    queuePauses.set(conversationId, "队首任务的派发回执未确认，请先在桌面端核对；不会自动重发。确认后可「跳过队首」，再「继续队列」。");
+    saveState();
+    return;
+  }
+  submitting.add(conversationId);
   try {
+    // 尚未发起任务前的附件登记失败不会冒充任务已经启动。
     const sender = senderOf(conversationId);
-    let sessionId = sender.session_id;
-    if (!sessionId) {
-      const session = await api("POST", "/channel/session", { title: "微信 · 临时" });
+    if (!sender.session_id) {
+      const session = await api("POST", "/channel/session", {
+        project_id: sender.project_id || undefined,
+        title: sender.project_name ? `微信 · ${sender.project_name}` : "微信 · 临时",
+      });
       sender.session_id = session.session_id;
       saveState();
-      sessionId = session.session_id;
     }
-    const goalText = await buildGoalWithMedia(sessionId, next.text, next.media);
-    const { num } = await submitTask(conversationId, goalText);
-    await botSend(`🚀 排队任务 #${num} 已开始。`);
+    const goalText = await buildGoalWithMedia(sender.session_id, next.text, next.media);
+    next.dispatching = true;
+    saveState();
+    const task = await submitTask(conversationId, goalText, next.id);
+    if (announce) await botSend(`🚀 排队任务 #${task.num} 已开始。`);
+    return task;
   } catch (error) {
-    await botSend(`⚠️ 排队任务启动失败：${error.message}`);
+    const reason = next.dispatching
+      ? `队首派发未确认：${error.message}。请先在桌面端核对，不会自动重发；确认后可「跳过队首」，再「继续队列」。`
+      : `队首启动失败：${error.message}。内容已保留，可发送「继续队列」重试。`;
+    queuePauses.set(conversationId, reason);
+    saveState();
+    if (announce) await botSend(`⚠️ ${reason}`);
+    else throw new Error(reason);
+  } finally {
+    submitting.delete(conversationId);
   }
 }
 
-function watchRun(conversationId, runId, num) {
+function watchRun(conversationId, runId, num, restored = {}) {
   const entry = {
     runId,
     num,
@@ -368,119 +400,156 @@ function watchRun(conversationId, runId, num) {
     stepMilestone: 0,
     reportEvery: null,
     phasePush: null,
+    ...restored,
+    runId, num,
   };
   activeRuns.set(conversationId, entry);
+  // 运行已确认时，清掉同一队首的派发标记；恢复时不会重复执行它。
+  const queue = taskQueues.get(conversationId);
+  if (entry.queueId && queue?.[0]?.id === entry.queueId) {
+    queue.shift();
+    if (!queue.length) taskQueues.delete(conversationId);
+  }
+  saveState();
+  let polling = false;
   const timer = setInterval(async () => {
-    if (!activeRuns.has(conversationId)) {
-      clearInterval(timer);
-      return;
-    }
-    let run;
+    // 网络/分段发送慢于轮询间隔时，不并发处理同一运行的终态。
+    if (polling || !bot) return;
+    polling = true;
     try {
-      run = await api("GET", `/channel/run/${runId}`);
-      entry.failCount = 0;
-    } catch (error) {
-      // 应用重启会清空运行账本：404 = 任务已不存在，按终态处理并排水队列
-      if (String(error.message).includes("任务不存在")) {
+      if (activeRuns.get(conversationId) !== entry) {
         clearInterval(timer);
-        activeRuns.delete(conversationId);
-        pendingQuestions.delete(conversationId);
-        await botSend(
-          `⚠️ 任务 #${num} 已随应用重启失效（未跑完）。重新派发即可，我先处理排队的任务。`
-        );
-        await drainQueue(conversationId);
         return;
       }
-      entry.failCount = (entry.failCount || 0) + 1;
-      if (entry.failCount >= 60) {
-        // 通道约 10 分钟不可达：放弃监听，避免永久卡住队列
-        clearInterval(timer);
-        activeRuns.delete(conversationId);
+      let run;
+      const controlRevision = entry.controlRevision || 0;
+      try {
+        run = await readRun(api, entry);
+        if (activeRuns.get(conversationId) !== entry) {
+          clearInterval(timer);
+          return;
+        }
+        // 查询发出后回答已送达时，忽略旧快照，避免重新挂回刚回答过的问题。
+        if ((entry.controlRevision || 0) !== controlRevision) return;
+        entry.failCount = 0;
+        entry.offlineNotified = false;
+      } catch (error) {
+        if (activeRuns.get(conversationId) !== entry) {
+          clearInterval(timer);
+          return;
+        }
+        entry.failCount = (entry.failCount || 0) + 1;
+        if (entry.failCount >= 60) {
+          // 通道约 10 分钟不可达：只告警一次，保留监听，避免误报任务已结束
+          if (!entry.offlineNotified) {
+            entry.offlineNotified = true;
+            saveState();
+            await botSend(`⚠️ 通道长时间不可达，任务 #${num} 的状态暂未确认；已保留监听和排队任务，连接恢复后继续核对。`);
+          }
+        }
+        return;
+      }
+      if (run.status === "waiting_human") {
+        if (entry.status !== "waiting_human") {
+          entry.status = "waiting_human";
+          entry.paused_reason = run.paused_reason;
+          entry.waitingSince = Date.now();
+          entry.lastNudge = Date.now();
+          lastSelections.delete(conversationId);
+          pendingQuestions.set(conversationId, { runId, num });
+          saveState();
+          await botSend(
+            `❓ 任务 #${num} 需要你的决定：\n${run.paused_reason || "Agent 请求协助。"}\n\n直接回复即算回答，发送「停止」可中断。`
+          );
+        } else if (Date.now() - entry.lastNudge >= NUDGE_MS) {
+          entry.lastNudge = Date.now();
+          saveState();
+          if (inQuietHours()) return; // 夜间静默：提醒推迟到白天
+          const waitedMinutes = Math.round((Date.now() - entry.waitingSince) / 60000);
+          await botSend(
+            `⏳ 任务 #${num} 已等你 ${waitedMinutes} 分钟：\n${run.paused_reason || ""}\n直接回复即算回答，或发送「停止」。`
+          );
+        }
+        return;
+      }
+      if (run.status === "running") {
+        const notifications = [];
+        entry.status = "running";
+        entry.paused_reason = null;
         pendingQuestions.delete(conversationId);
-        await botSend(
-          `⚠️ 通道长时间不可达，任务 #${num} 的监听已放弃。请发送「状态」确认后重新派发。`
-        );
-        await drainQueue(conversationId);
-      }
-      return;
-    }
-    if (run.status === "waiting_human") {
-      if (entry.status !== "waiting_human") {
-        entry.status = "waiting_human";
-        entry.waitingSince = Date.now();
-        entry.lastNudge = Date.now();
-        pendingQuestions.set(conversationId, { runId, num });
-        await botSend(
-          `❓ 任务 #${num} 需要你的决定：\n${run.paused_reason || "Agent 请求协助。"}\n\n直接回复即算回答，发送「停止」可中断。`
-        );
-      } else if (Date.now() - entry.lastNudge >= NUDGE_MS) {
-        entry.lastNudge = Date.now();
-        if (inQuietHours()) return; // 夜间静默：提醒推迟到白天
-        const waitedMinutes = Math.round((Date.now() - entry.waitingSince) / 60000);
-        await botSend(
-          `⏳ 任务 #${num} 已等你 ${waitedMinutes} 分钟：\n${run.paused_reason || ""}\n直接回复即算回答，或发送「停止」。`
-        );
-      }
-      return;
-    }
-    if (run.status === "running") {
-      entry.status = "running";
-      // 阶段里程碑：环境就绪/失败恢复/外部救援/开始交付时即时汇报（可按会话/任务关闭）
-      const phasePush = entry.phasePush ?? run.phase_push ?? true;
-      if (phasePush && run.phase && run.phase !== entry.phase) {
-        entry.phase = run.phase;
-        if (!inQuietHours()) {
-          await botSend(`▸ 任务 #${num}：${run.phase}`);
+        // 阶段里程碑：环境就绪/失败恢复/外部救援/开始交付时即时汇报（可按会话/任务关闭）
+        const phasePush = entry.phasePush ?? run.phase_push ?? true;
+        if (phasePush && run.phase && run.phase !== entry.phase) {
+          entry.phase = run.phase;
+          if (!inQuietHours()) {
+            notifications.push(`▸ 任务 #${num}：${run.phase}`);
+          }
         }
-      }
-      // 动作里程碑：按任务快照步长（可被会话覆盖）汇报正在干啥
-      const every = entry.reportEvery ?? run.report_every_actions ?? 15;
-      const stepMilestone = every > 0 ? Math.floor((run.event_count || 0) / every) : 0;
-      if (stepMilestone > 0 && stepMilestone > entry.stepMilestone) {
-        entry.stepMilestone = stepMilestone;
-        if (!inQuietHours() && run.last_progress) {
-          await botSend(
-            `▸ 任务 #${num} 已执行 ${run.event_count} 个动作：${run.last_progress}`
-          );
+        // 动作里程碑：按任务快照步长（可被会话覆盖）汇报正在干啥
+        const every = entry.reportEvery ?? run.report_every_actions ?? 15;
+        const stepMilestone = every > 0 ? Math.floor((run.event_count || 0) / every) : 0;
+        if (stepMilestone > 0 && stepMilestone > entry.stepMilestone) {
+          entry.stepMilestone = stepMilestone;
+          if (!inQuietHours() && run.last_progress) {
+            notifications.push(
+              `▸ 任务 #${num} 已执行 ${run.event_count} 个动作：${run.last_progress}`
+            );
+          }
         }
-      }
-      if (Date.now() - entry.lastHeartbeat >= HEARTBEAT_MS) {
-        entry.lastHeartbeat = Date.now();
-        if (!inQuietHours()) {
-          await botSend(
-            `⏳ 任务 #${num} 进行中（已 ${run.event_count} 个动作）。\n${run.last_progress || "正在继续执行……"}`
-          );
+        if (Date.now() - entry.lastHeartbeat >= HEARTBEAT_MS) {
+          entry.lastHeartbeat = Date.now();
+          if (!inQuietHours()) {
+            notifications.push(
+              `⏳ 任务 #${num} 进行中（已 ${run.event_count} 个动作）。\n${run.last_progress || "正在继续执行……"}`
+            );
+          }
         }
+        saveState();
+        for (const notification of notifications) await botSend(notification);
+        return;
       }
-      return;
-    }
-    // 终态
-    clearInterval(timer);
-    activeRuns.delete(conversationId);
-    pendingQuestions.delete(conversationId);
-    console.log(`[bridge] watchRun 检测到任务 #${num} 终态: ${run.status} (hasResult: ${Boolean(run.result)})`);
-    if (run.status === "done") {
-      lastResults.set(conversationId, { num, text: run.result || "" });
-      const artifact = await latestArtifact(run.session_id);
-      const finishText = run.result
-        ? `🏁 任务 #${num} 完成：\n\n${run.result}`
-        : `🏁 任务 #${num} 完成（无文本产出，详情见桌面端会话）。`;
-      if (artifact && artifact.size_bytes > 0 && artifact.size_bytes <= MAX_ARTIFACT_BYTES) {
-        const mediaType = String(artifact.mime_type || "").startsWith("image/") ? "image" : "file";
-        await botSendWithMedia(finishText, {
-          type: mediaType,
-          url: artifact.path,
-          fileName: artifact.display_name,
-        });
-      } else {
-        await botSend(finishText);
+      if (!["done", "failed", "cancelled", "unknown"].includes(run.status)) return;
+      // 先保存终态和完整正文，再发送；发送中断后可用「结果」显式重取，不自动重播。
+      if (run.status === "done") lastResults.set(conversationId, { num, text: run.result || "" });
+      if (run.status === "unknown") queuePauses.set(conversationId, run.error);
+      activeRuns.delete(conversationId);
+      const previousQuestion = pendingQuestions.get(conversationId);
+      pendingQuestions.delete(conversationId);
+      try { saveState(); } catch (error) {
+        activeRuns.set(conversationId, entry);
+        if (previousQuestion) pendingQuestions.set(conversationId, previousQuestion);
+        throw error;
       }
-    } else if (run.status === "failed") {
-      await botSend(`❌ 任务 #${num} 失败：\n${run.error || "未知错误"}`);
-    } else if (run.status === "cancelled") {
-      await botSend(`🛑 任务 #${num} 已停止。`);
+      clearInterval(timer);
+      console.log(`[bridge] watchRun 检测到任务 #${num} 终态: ${run.status} (hasResult: ${Boolean(run.result)})`);
+      if (run.status === "done") {
+        const artifact = await latestArtifact(run.session_id);
+        const finishText = run.result
+          ? `🏁 任务 #${num} 完成：\n\n${run.result}`
+          : `🏁 任务 #${num} 完成（无文本产出，详情见桌面端会话）。`;
+        if (artifact && artifact.size_bytes > 0 && artifact.size_bytes <= MAX_ARTIFACT_BYTES) {
+          const mediaType = String(artifact.mime_type || "").startsWith("image/") ? "image" : "file";
+          await botSendWithMedia(finishText, {
+            type: mediaType,
+            url: artifact.path,
+            fileName: artifact.display_name,
+          });
+        } else {
+          await botSend(finishText);
+        }
+      } else if (run.status === "failed") {
+        await botSend(`❌ 任务 #${num} 失败：\n${run.error || "未知错误"}`);
+      } else if (run.status === "cancelled") {
+        await botSend(`🛑 任务 #${num} 已停止。`);
+      } else if (run.status === "unknown") {
+        await botSend(`⚠️ 任务 #${num}：${run.error}\n未自动重跑；排队任务已保留并暂停。请先在桌面端核对，再发送「继续队列」。`);
+      }
+      await drainQueue(conversationId);
+    } catch (error) {
+      console.error(`[bridge] 任务 #${num} 状态处理失败（未自动重发）: ${error}`);
+    } finally {
+      polling = false;
     }
-    await drainQueue(conversationId);
   }, POLL_INTERVAL_MS);
 }
 
@@ -514,6 +583,9 @@ const agent = {
       return { text: "🔒 该机器人已绑定其他微信账号。" };
     }
 
+    // 显式回答可以使用“状态”等指令词作为答案，不受菜单优先级影响。
+    if (/^回答[：:\s]/.test(text)) lastSelections.delete(conversationId);
+
     // 首次联系：推送帮助
     if (!sender.seen) {
       sender.seen = true;
@@ -527,7 +599,7 @@ const agent = {
       if (!run) return { text: "当前没有进行中的任务。" };
       try {
         await api("POST", `/channel/run/${run.runId}/cancel`);
-        return { text: "🛑 停止请求已发送，将在最近的安全边界停下。" };
+        return { text: "🛑 停止请求已发送，将在最近的安全边界停下。排队任务仍会继续；如需一并取消，请发送「清空队列」。" };
       } catch (error) {
         return { text: `⚠️ 停止失败：${error.message}` };
       }
@@ -563,13 +635,17 @@ const agent = {
     if (/^(清空队列|清空排队)$/i.test(text)) {
       const queue = taskQueues.get(conversationId);
       const count = queue ? queue.length : 0;
+      if (submitting.has(conversationId)) return { text: "正在派发队首任务，请稍后再清空队列。" };
+      if (queue?.[0]?.dispatching) return { text: "队首派发结果未确认，请先在桌面端核对；确认后发送「跳过队首」，再清空队列。" };
       taskQueues.delete(conversationId);
+      queuePauses.delete(conversationId);
+      saveState();
       return { text: count ? `🗑️ 已清空队列中的 ${count} 个任务。` : "队列为空，无需清空。" };
     }
     if (/^(新会话|新对话|\/new)$/i.test(text)) {
-      if (activeRuns.has(conversationId)) {
+      if (activeRuns.has(conversationId) || submitting.has(conversationId) || taskQueues.get(conversationId)?.length) {
         return {
-          text: "当前有任务在执行。请先发送「停止」或等它完成，再新开会话。",
+          text: "当前有执行中或排队的任务。请先结束当前任务并清空队列，再新开会话。",
         };
       }
       try {
@@ -580,35 +656,15 @@ const agent = {
             })
           : await api("POST", "/channel/session", { title: "微信 · 临时" });
         sender.session_id = session.session_id;
-        saveState();
         lastResults.delete(conversationId);
+        pendingQuestions.delete(conversationId);
+        saveState();
         return {
           text: `✅ 已新开会话${sender.project_name ? `（项目：${sender.project_name}）` : "（临时工作区）"}。\n老会话的上下文不再跟随（历史仍在桌面端可查），直接说新需求即可。`,
         };
       } catch (error) {
         return { text: `⚠️ 新开会话失败：${error.message}` };
       }
-    }
-
-    // ① 挂起的 ask_human 提问：这条消息就是答案
-    const pending = pendingQuestions.get(conversationId);
-    if (pending) {
-      pendingQuestions.delete(conversationId);
-      let delivered = false;
-      let lastError = null;
-      for (let attempt = 0; attempt < 3 && !delivered; attempt++) {
-        try {
-          await api("POST", `/channel/run/${pending.runId}/answer`, { text });
-          delivered = true;
-        } catch (error) {
-          lastError = error;
-          if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 2000));
-        }
-      }
-      if (delivered) return { text: "✅ 已收到，任务继续执行。" };
-      return {
-        text: `⚠️ 回答送达失败：${lastError?.message || "未知错误"}\n通道可能正在重启，稍后把这条内容重发一次即可。`,
-      };
     }
 
     // ③ 状态查询（在途任务实时拉取最新阶段明细）
@@ -623,7 +679,8 @@ const agent = {
         );
         if (entry.paused_reason) lines.push(`  ❓ ${entry.paused_reason}`);
         try {
-          const live = await api("GET", `/channel/run/${entry.runId}`);
+          const live = await readRun(api, entry);
+          if (live.status === "waiting_human" && live.paused_reason) lines.push(`  ❓ ${live.paused_reason}`);
           if (live.state_detail) lines.push(`  ▸ 当前阶段：${live.state_detail}`);
           else if (live.last_progress) lines.push(`  ▸ ${live.last_progress}`);
           if (live.event_count) lines.push(`  已执行 ${live.event_count} 个动作`);
@@ -634,7 +691,11 @@ const agent = {
         lines.push("▶ 当前无进行中任务");
       }
       const queue = taskQueues.get(conversationId);
-      if (queue && queue.length) lines.push(`⏳ 排队中：${queue.length} 个任务`);
+      if (queue && queue.length) {
+        lines.push(`⏳ 排队中：${queue.length} 个任务`);
+        queue.forEach((item, i) => lines.push(`  ${i + 1}. ${item.text?.slice(0, 60) || item.media?.fileName || "附件任务"}${item.dispatching ? "（派发回执待确认）" : ""}`));
+      }
+      if (queuePauses.has(conversationId)) lines.push(`⏸ 队列暂停：${queuePauses.get(conversationId)}`);
       lines.push(`📦 绑定：${sender.project_name || "未绑定（临时工作区）"}`);
       return { text: lines.join("\n") };
     }
@@ -695,6 +756,9 @@ const agent = {
       if (!chosen) return { text: "编号无效，请回复列表中的数字。" };
       try {
         if (selection.type === "project") {
+          if (activeRuns.has(conversationId) || submitting.has(conversationId) || taskQueues.get(conversationId)?.length) {
+            return { text: "当前有执行中或排队的任务，请先结束并清空队列，再切换项目。" };
+          }
           const session = await api("POST", "/channel/session", {
             project_id: chosen.id,
             title: `微信 · ${chosen.name}`,
@@ -720,6 +784,9 @@ const agent = {
 
     // ⑧ 解绑
     if (/^解绑$/.test(text)) {
+      if (activeRuns.has(conversationId) || submitting.has(conversationId) || taskQueues.get(conversationId)?.length) {
+        return { text: "当前有执行中或排队的任务，请先结束并清空队列，再解绑项目。" };
+      }
       sender.project_id = null;
       sender.project_name = null;
       sender.session_id = null;
@@ -727,38 +794,88 @@ const agent = {
       return { text: "🔓 已解绑。后续任务将在临时工作区执行；发送「项目」可重新绑定。" };
     }
 
-    // ⑨ 新任务（会话忙则排队）
-    if (!text && !request.media) return { text: "请发送任务内容。" };
-    if (activeRuns.has(conversationId)) {
-      const queue = taskQueues.get(conversationId) || [];
-      if (queue.length >= MAX_QUEUE) {
-        return { text: `⏳ 排队已满（上限 ${MAX_QUEUE}）。可发送「状态」查看进度，或「停止」当前任务。` };
+    if (text === "继续队列") {
+      if (activeRuns.has(conversationId) || submitting.has(conversationId)) return { text: "当前任务尚未结束，队列保持原位。" };
+      const queue = taskQueues.get(conversationId);
+      if (!queue?.length) return { text: "队列为空。" };
+      if (queue[0].dispatching) return { text: "队首派发回执未确认，不会自动重发。请先在桌面端核对，确认后发送「跳过队首」。" };
+      queuePauses.delete(conversationId);
+      saveState();
+      await drainQueue(conversationId);
+      return { text: "" };
+    }
+    if (text === "跳过队首") {
+      if (activeRuns.has(conversationId) || submitting.has(conversationId)) return { text: "当前任务尚未结束，请稍后操作队列。" };
+      const queue = taskQueues.get(conversationId);
+      if (!queue?.length) return { text: "队列为空。" };
+      queue.shift();
+      if (!queue.length) { taskQueues.delete(conversationId); queuePauses.delete(conversationId); }
+      saveState();
+      return { text: "已移除队首的排队记录（不会停止桌面端已启动的任务）。剩余任务可发送「继续队列」启动。" };
+    }
+
+    const supplement = text.match(/^补充[：:\s]([\s\S]*)$/);
+    if (supplement || text === "补充") {
+      const entry = activeRuns.get(conversationId);
+      if (!entry) return { text: "当前没有进行中的任务，请直接发送新任务。" };
+      const content = supplement?.[1]?.trim() || "";
+      if (!content && !request.media) return { text: "请发送「补充：具体要求」。" };
+      try {
+        const body = await buildGoalWithMedia(entry.sessionId || sender.session_id, content, request.media);
+        await api("POST", `/channel/run/${entry.runId}/supplement`, { text: body });
+        return { text: `✅ 补充已送达任务 #${entry.num}，将在后续步骤处理；当前操作继续执行。` };
+      } catch (error) {
+        return { text: `⚠️ 补充未确认送达：${error.message}。未自动重发。` };
       }
-      queue.push({ text, media: request.media });
-      taskQueues.set(conversationId, queue);
-      return { text: `⏳ 当前有任务在执行，已加入队列（第 ${queue.length} 位），完成后自动开始。` };
+    }
+
+    // 查询/菜单/控制指令优先；只有剩余普通消息或显式「回答」才进入应答。
+    const explicitAnswer = text.match(/^回答[：:\s]([\s\S]*)$/);
+    const pending = pendingQuestions.get(conversationId);
+    if (pending || explicitAnswer || text === "回答") {
+      const entry = activeRuns.get(conversationId);
+      const target = pending || (entry && { runId: entry.runId, num: entry.num });
+      if (!target) return { text: "当前没有等待回答的任务。" };
+      const content = explicitAnswer ? explicitAnswer[1].trim() : text === "回答" ? "" : text;
+      if (!content && !request.media) return { text: "回答不能为空，请发送「回答：具体内容」。" };
+      if (answering.has(conversationId)) return { text: "上一条回答正在送达，请稍候。" };
+      answering.add(conversationId);
+      try {
+        const body = await buildGoalWithMedia(entry?.sessionId || sender.session_id, content, request.media);
+        await api("POST", `/channel/run/${target.runId}/answer`, { text: body });
+        if (pendingQuestions.get(conversationId) === pending) pendingQuestions.delete(conversationId);
+        if (entry?.runId === target.runId) {
+          entry.status = "running";
+          entry.controlRevision = (entry.controlRevision || 0) + 1;
+        }
+        saveState();
+        return { text: "✅ 已收到，任务继续执行。" };
+      } catch (error) {
+        // 包括网络回执不明：保留原提问路由，供手动重发；不循环自动投递。
+        return { text: `⚠️ 回答未确认送达：${error.message}。等待记录已保留，可查「状态」后重发「回答：内容」。` };
+      } finally {
+        answering.delete(conversationId);
+      }
+    }
+
+    // 所有任务先入持久队列，派发前留下标记，重启不会重做回执未知的操作。
+    if (!text && !request.media) return { text: "请发送任务内容。" };
+    const busy = activeRuns.has(conversationId) || submitting.has(conversationId);
+    const queue = taskQueues.get(conversationId) || [];
+    if (queue.length >= MAX_QUEUE) return { text: `⏳ 排队已满（上限 ${MAX_QUEUE}）。可发送「状态」查看。` };
+    queue.push({ id: randomUUID(), text, media: request.media });
+    taskQueues.set(conversationId, queue);
+    saveState();
+    if (busy || queuePauses.has(conversationId) || queue.length > 1) {
+      if (!busy && !queuePauses.has(conversationId)) void drainQueue(conversationId).catch((error) => console.error(`[bridge] 队列启动失败: ${error}`));
+      return { text: `⏳ 已加入队列（第 ${queue.length} 位）${queuePauses.has(conversationId) ? "，队列暂停中；请发送「状态」查看原因" : "，轮到后自动开始"}。执行中补充要求请发「补充：内容」。` };
     }
     try {
-      const senderState = senderOf(conversationId);
-      let sessionId = senderState.session_id;
-      if (!sessionId) {
-        const session = await api("POST", "/channel/session", { title: "微信 · 临时" });
-        senderState.session_id = session.session_id;
-        saveState();
-        sessionId = session.session_id;
-      }
-      const goalText = await buildGoalWithMedia(sessionId, text, request.media);
-      const { num, llmRetries } = await submitTask(conversationId, goalText);
+      const task = await drainQueue(conversationId, false);
       const scope = sender.project_name ? `项目：${sender.project_name}` : "临时工作区";
-      const retries = llmRetries != null ? `，重试上限 ${llmRetries}` : "";
-      return {
-        text: `🚀 任务 #${num} 已开始（${scope}${retries}）。\n每 ${Math.round(HEARTBEAT_MS / 60000)} 分钟汇报进度；发送「停止」中断；卡住时我会直接提问，回复即算回答。`,
-      };
+      return { text: `🚀 任务 #${task.num} 已开始（${scope}）。\n执行中可发「补充：要求」；「状态」查看进度；「停止」中断当前任务。` };
     } catch (error) {
-      if (String(error.message).includes("在途任务")) {
-        return { text: "⏳ 已有任务在执行中，已自动转入队列逻辑，请稍候。" };
-      }
-      return { text: `⚠️ 任务派发失败：${error.message}` };
+      return { text: `⚠️ ${error.message}` };
     }
   },
   clearSession(conversationId) {

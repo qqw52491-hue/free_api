@@ -64,6 +64,8 @@ impl SessionRunGuard {
             phase_push,
             phase: None,
             state_detail: None,
+            caller_notifies: existing.as_ref().map(|r| r.caller_notifies).unwrap_or(false),
+            supplements_closed: true,
             source,
         });
         let _ = app.emit(
@@ -174,6 +176,13 @@ impl SessionRunGuard {
     pub(crate) fn finish(self, outcome: &Result<(), String>) {
         let _ = self.app.unlisten(self.event_id);
         let _ = self.app.unlisten(self.state_event_id);
+        // 在写入终态前读取本轮已登记的通知归属，也保留取消状态。
+        let notify_terminal = runs_store()
+            .lock()
+            .expect("runs store poisoned")
+            .get(&self.run_id)
+            .map(RunRecord::application_notifies_terminal)
+            .unwrap_or(true);
         match outcome {
             Ok(()) => {
                 let result = last_assistant_message(&self.app, &self.session_id);
@@ -197,8 +206,8 @@ impl SessionRunGuard {
                     json!({ "run_id": self.run_id, "session_id": self.session_id, "status": "done", "at": now_ts() }),
                 );
 
-                // 若开启了微信通道，主动向主人微信推送任务完成结果
-                if !was_cancelled {
+                // 由应用负责的任务才主动推送；微信桥/定时 watcher 已自行通知。
+                if !was_cancelled && notify_terminal {
                     if let Ok(config) = load_channel_config() {
                         if config.auto_start_bridge {
                             let push_text = completion_notification(result.as_deref());
@@ -220,13 +229,15 @@ impl SessionRunGuard {
                     record.paused_form = None;
                 });
 
-                // 若开启了微信通道，主动向主人微信推送任务失败告警
-                if let Ok(config) = load_channel_config() {
-                    if config.auto_start_bridge {
-                        let push_text = format!("❌ 任务执行失败：\n{}", truncate_chars(&err_msg, 200));
-                        tauri::async_runtime::spawn(async move {
-                            notify_wechat(&config, &push_text).await;
-                        });
+                // 与成功通知共用归属判定；取消的任务不另发失败告警。
+                if notify_terminal {
+                    if let Ok(config) = load_channel_config() {
+                        if config.auto_start_bridge {
+                            let push_text = format!("❌ 任务执行失败：\n{}", truncate_chars(&err_msg, 200));
+                            tauri::async_runtime::spawn(async move {
+                                notify_wechat(&config, &push_text).await;
+                            });
+                        }
                     }
                 }
                 let db = self.app.state::<DbState>();
@@ -270,6 +281,7 @@ pub(crate) fn register_and_spawn_run(
     _action_milestone_steps: u32,
     _phase_push: bool,
     plan_mode: Option<String>,
+    caller_notifies: bool,
 ) -> Result<String, SubmitError> {
     {
         let runs = runs_store().lock().expect("runs store poisoned");
@@ -310,6 +322,8 @@ pub(crate) fn register_and_spawn_run(
         phase: None,
         state_detail: None,
         source: "channel".to_string(),
+        caller_notifies,
+        supplements_closed: true,
     });
 
     // 立即持久化该轮任务初始状态（用户消息气泡由 SessionRunGuard::new 在 channel-run-started 前写入）

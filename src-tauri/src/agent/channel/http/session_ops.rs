@@ -34,6 +34,9 @@ pub(crate) struct TaskReq {
     pub(crate) model_routing: Option<PartialRouting>,
     #[serde(default)]
     pub(crate) plan_mode: Option<String>,
+    /// 只有已经建立终态监听的调用方才设为 true；网页/旧客户端默认应用推送。
+    #[serde(default)]
+    pub(crate) caller_notifies: bool,
 }
 
 pub(crate) async fn handler_projects(
@@ -269,6 +272,7 @@ pub(crate) async fn handler_task(
         config.action_milestone_steps,
         config.phase_pushes,
         req.plan_mode,
+        req.caller_notifies,
     )
     .map_err(|error| match error {
         SubmitError::InFlight => (
@@ -284,4 +288,25 @@ pub(crate) async fn handler_task(
         "workspace": if has_project { "project" } else { "scratch" },
         "llm_retries": effective_retries,
     })))
+}
+
+#[cfg(test)]
+mod notification_owner_tests {
+    use super::TaskReq;
+
+    #[test]
+    fn legacy_and_web_requests_keep_application_notifications() {
+        let request: TaskReq = serde_json::from_value(serde_json::json!({
+            "session_id": "web-session", "goal": "do work"
+        })).unwrap();
+        assert!(!request.caller_notifies);
+    }
+
+    #[test]
+    fn bridge_can_claim_notifications_before_run_starts() {
+        let request: TaskReq = serde_json::from_value(serde_json::json!({
+            "session_id": "wechat-session", "goal": "do work", "caller_notifies": true
+        })).unwrap();
+        assert!(request.caller_notifies);
+    }
 }
