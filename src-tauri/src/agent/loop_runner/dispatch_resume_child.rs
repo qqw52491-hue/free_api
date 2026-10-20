@@ -214,129 +214,35 @@ pub(super) async fn dispatch_resume_child(
                                 }
                             }
 
-                            let db_clone = DbState(ctx.state.0.clone());
-                            let new_child_run_id_clone = new_child_run_id.clone();
-                            let parent_session_id_clone = ctx.final_session_id.to_string();
-                            let mut interrupt_rx_clone = ctx.interrupt_rx.clone();
-                            let _app_clone = ctx.app.clone();
-
-                            tokio::spawn(async move {
-                                let started_at = std::time::Instant::now();
-                                let child_log_suffix = format!("child-{}", new_child_run_id_clone);
-                                let stream_stage_key = format!("child:{}", new_child_run_id_clone);
-                                crate::agent::control::mark_stage(&stream_stage_key, "child_task:llm_call:1");
-                                let mut last_activity_mark = std::time::Instant::now();
-                                let mut on_stream_event = |_: crate::llm::StreamEvent<'_>| -> bool {
-                                    if last_activity_mark.elapsed() >= std::time::Duration::from_secs(5) {
-                                        crate::agent::control::mark_stage(&stream_stage_key, "child_task:stream_output");
-                                        last_activity_mark = std::time::Instant::now();
-                                    }
-                                    true
-                                };
-                                let stream_result = crate::agent::review_stream::stream_review(
-                                    &config, &messages, &reasoning_effort, &mut interrupt_rx_clone,
-                                    None, crate::agent::child_reviewer::child_timeout_secs(&config.model_name),
-                                    &mut on_stream_event,
-                                ).await;
-                                let stream_result = match stream_result {
-                                    Ok(result) => result,
-                                    Err(failure) => {
-                                        failure.log(&parent_session_id_clone, &child_log_suffix, 1, &config, &messages);
-                                        let (status, kind) = if failure.error == crate::llm::STREAM_INTERRUPTED_ERROR {
-                                            ("cancelled", crate::agent::types::ChildErrorKind::Cancelled)
-                                        } else if failure.is_timeout() {
-                                            ("timed_out", crate::agent::types::ChildErrorKind::Timeout)
-                                        } else {
-                                            ("failed", crate::agent::types::ChildErrorKind::RequestOrStream)
-                                        };
-                                        let elapsed_ms = started_at.elapsed().as_millis() as u64;
-                                        crate::agent::child_reviewer::finish_child_run(
-                                            &db_clone, &new_child_run_id_clone, status,
-                                            elapsed_ms, 0, 0, Some(kind.clone()),
-                                            Some(&crate::agent::child_reviewer::child_error_result_json(
-                                                &new_child_run_id_clone, status, &kind, elapsed_ms, 0, 0,
-                                                Some(&failure.description()),
-                                            )),
-                                        );
-                                        return;
-                                    }
-                                };
-
-                                crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
-                                    &parent_session_id_clone,
-                                    &child_log_suffix,
-                                    1,
-                                    &config,
-                                    &messages,
-                                    Some(&stream_result),
-                                    "success",
-                                    None,
-                                );
-
-                                let duration_ms = started_at.elapsed().as_millis() as u64;
-                                let completion_tokens = stream_result.usage.map(|u| u.completion_tokens).unwrap_or(0);
-                                let prompt_tokens = stream_result.usage.map(|u| u.prompt_tokens).unwrap_or(0);
-                                let (findings, confidence, evidence_refs, missing_evidence, routing, objection_verdicts, withdrawn_findings) = 
-                                    match crate::agent::child_reviewer::parse_child_review_rebuttal_output(&stream_result.full_response) {
-                                        Ok(res) => res,
-                                        Err(parse_err) => {
-                                            // 对质解析失败也要落 raw：这是 09-07 pro 实弹 12 条
-                                            // NULL invalid 的来源，丢 raw = 丢唯一诊断证据
-                                            crate::agent::child_reviewer::finish_child_run(
-                                                &db_clone,
-                                                &new_child_run_id_clone,
-                                                "invalid_output",
-                                                duration_ms,
-                                                completion_tokens,
-                                                prompt_tokens,
-                                                Some(crate::agent::types::ChildErrorKind::InvalidOutput),
-                                                Some(&crate::agent::child_reviewer::child_invalid_result_json(
-                                                    &new_child_run_id_clone,
-                                                    duration_ms,
-                                                    completion_tokens,
-                                                    prompt_tokens,
-                                                    &stream_result.full_response,
-                                                    &parse_err,
-                                                )),
-                                            );
-                                            return;
-                                        }
-                                    };
-
-                                let review_res = crate::agent::child_reviewer::ChildReviewResult {
-                                    child_run_id: new_child_run_id_clone.clone(),
-                                    status: "succeeded".to_string(),
-                                    findings,
-                                    confidence,
-                                    evidence_refs,
-                                    missing_evidence,
-                                    duration_ms,
-                                    completion_tokens,
-                                    prompt_tokens,
-                                    error_kind: None,
-                                    raw_result_json: None,
-                                    kind: Some("review".to_string()),
-                                    routing: Some(routing),
-                                    withdrawn_findings,
-                                    objection_verdicts,
-                                    scorecard: None,
-                                    task_id: None,
-                                    attempt_id: None,
-                                };
-
-                                let res_json = serde_json::to_string(&review_res).ok();
-                                crate::agent::child_reviewer::finish_child_run_with_history(
-                                    &db_clone,
-                                    &new_child_run_id_clone,
-                                    "succeeded",
-                                    duration_ms,
-                                    completion_tokens,
-                                    prompt_tokens,
-                                    None,
-                                    res_json.as_deref(),
-                                    serde_json::to_string(&messages).ok().as_deref(),
-                                );
-                            });
+                            let schema = match resume_identity.contract_schema.as_deref()
+                                .map(serde_json::from_str::<crate::agent::protocol::ContractSchema>)
+                                .transpose()
+                            {
+                                Ok(schema) => schema,
+                                Err(error) => {
+                                    let elapsed = 0;
+                                    crate::agent::child_reviewer::finish_child_run(
+                                        ctx.state.inner(), &new_child_run_id, "invalid_output", elapsed,
+                                        0, 0, Some(crate::agent::types::ChildErrorKind::InvalidOutput),
+                                        Some(&crate::agent::child_reviewer::child_invalid_result_json(
+                                            &new_child_run_id, elapsed, 0, 0, "", &format!("宿主保存的审查契约无法解析：{error}"))),
+                                    );
+                                    return Ok(ArmOutcome::Early(DispatchResult { view: None,
+                                        stdout: String::new(), stderr: "审查契约记录无法解析，未发起模型请求；原记录已保留。".into(),
+                                        success: false, route: "resume_child:invalid_saved_schema".into(),
+                                    }));
+                                }
+                            };
+                            if let Some(schema) = schema.as_ref() {
+                                messages.push(json!({"role":"user", "content":format!(
+                                    "请重新提交完整审查结果，不能只提交差异或省略仍适用的必填字段。\n{}",
+                                    schema.render_prompt_instructions())}));
+                            }
+                            tokio::spawn(crate::agent::child_reviewer::run_resumed_review(
+                                DbState(ctx.state.0.clone()), new_child_run_id.clone(),
+                                ctx.final_session_id.to_string(), config, reasoning_effort,
+                                messages, schema, ctx.interrupt_rx.clone(),
+                            ));
 
                             DispatchResult { view: None,
                                 stdout: format!(

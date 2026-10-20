@@ -19,6 +19,11 @@ mod legacy_impact;
 pub(crate) mod retirement_tests;
 mod parse;
 mod poll;
+mod resume;
+#[cfg(test)]
+mod resume_tests;
+pub(crate) use resume::run_resumed_review;
+pub(crate) const MAX_REVIEW_OUTPUT_ATTEMPTS: u32 = 20;
 mod types;
 
 pub use lifecycle::*;
@@ -398,7 +403,7 @@ pub async fn spawn_child_reviewer(
         // 模型恢复即清零继续干活；彻底卡死的审查员最多白烧 MAX 次调用。
         // 次数无"正确值"——实测恢复都在 1 次内完成，给 20 属于刻意放宽。
         let mut non_compliant_strikes: u32 = 0;
-        const MAX_NON_COMPLIANT_STRIKES: u32 = 20;
+        const MAX_NON_COMPLIANT_STRIKES: u32 = MAX_REVIEW_OUTPUT_ATTEMPTS;
         let mut budget_warned = false;
         // 归档计数：本子运行内的第几次 LLM 调用（取证循环每轮一次）
         let mut llm_call_index = 0usize;
@@ -569,22 +574,7 @@ pub async fn spawn_child_reviewer(
                     task_id: None,
                     attempt_id: None,
                 };
-                // 动态合并 LLM 产物中的扩展字段（如 cve_refs, risk_level 等），确保强类型外产物不丢失
-                let mut result_val = serde_json::to_value(&result).unwrap_or_default();
-                if let Some(parsed_val) = serde_json::from_str::<serde_json::Value>(&raw)
-                    .ok()
-                    .or_else(|| extract_json_object(&raw).and_then(|f| serde_json::from_str(f).ok()))
-                {
-                    if let Some(map) = parsed_val.as_object() {
-                        if let Some(res_map) = result_val.as_object_mut() {
-                            for (k, v) in map {
-                                if !res_map.contains_key(k) {
-                                    res_map.insert(k.clone(), v.clone());
-                                }
-                            }
-                        }
-                    }
-                }
+                let mut result_val = merge_review_extensions(&raw, &result);
                 if let Some(res_map) = result_val.as_object_mut() {
                     if let Some(role) = param_role.as_ref() {
                         res_map.insert("role".to_string(), role.clone());
@@ -594,13 +584,7 @@ pub async fn spawn_child_reviewer(
                     }
                 }
 
-                // 所有必填/类型/闭集错误都回到原有纠正循环；通过后才允许交付。
-                if let Some(schema) = custom_schema.as_ref() {
-                    schema
-                        .validate_shape(&result_val)
-                        .map_err(|error| format!("child_reviewer 契约校验失败：{error}"))?;
-                }
-                Ok(result_val)
+                validate_review_delivery(result_val, custom_schema.as_ref())
             });
 
             let submission_error = if tool_request.is_some() {

@@ -77,7 +77,7 @@ impl MockReviewer {
         result
     }
 
-    async fn wait_terminal(&self, id: &str) -> (String, Value) {
+    pub(crate) async fn wait_terminal(&self, id: &str) -> (String, Value) {
         tokio::time::timeout(Duration::from_secs(15), async {
             loop {
                 let (status, result): (String, Option<String>) = self

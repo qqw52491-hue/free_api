@@ -129,15 +129,24 @@ pub(crate) async fn reduce_child_receipt(
                 redispatched_to: Some(new_id), contract_violation, ..Default::default()
             },
             other => {
-                let backup_note = match other {
-                    Err(e) => format!("备用派发失败：{e}"),
+                let backup_note: String = match other {
+                    Err(error) => {
+                        eprintln!("[child-reviewer {}] 备用派发失败：{}", receipt.child_run_id, error);
+                        "已配置备用，但未能启动备用审查；详情已留在诊断记录".into()
+                    }
                     _ if env.reviewer_backup_model.trim().is_empty() => "未配置审查备用模型".into(),
                     _ => "配置的备用已失败或与当前模型相同，不再重派".into(),
                 };
-                let detail: String = receipt.payload.as_ref().map(ToString::to_string).unwrap_or_default().chars().take(1600).collect();
+                let cause = match kind.as_ref().unwrap() {
+                    ChildErrorKind::InvalidOutput => "审查输出经补正后仍未形成有效结果",
+                    ChildErrorKind::ContractViolation(_) => "收到的审查结果缺少契约要求的字段或字段类型不符",
+                    ChildErrorKind::Timeout => "等待审查响应超时，未取得有效结论",
+                    _ => "审查请求或响应传输失败，未取得有效结论",
+                };
+                // 原始输出和具体契约错误留在子任务台账/调用日志；停止说明不拼内部 JSON。
                 checkpoint.pending_task_failure.get_or_insert_with(|| format!(
-                    "审查通道无法继续：child_run_id={}，异常={}；{}。诊断：{}",
-                    receipt.child_run_id, receipt.error_kind.as_deref().unwrap_or("unknown"), backup_note, detail));
+                    "审查未完成，当前无法完成交付：{}；{}。这不代表方案已被否决，也没有取得审查批准。诊断记录：审查任务 {}。",
+                    cause, backup_note, receipt.child_run_id));
             }
         }
     }
@@ -243,6 +252,11 @@ pub(crate) async fn reduce_child_receipt(
             "异常类别: {}（子任务未正常完成，请谨慎对待输出）\n",
             err
         ));
+    }
+    if channel_failed {
+        if let Some(reason) = checkpoint.pending_task_failure.as_ref() {
+            effects.model_text = format!("{}\n请向用户说明当前未完成情况；不能使用成功 finish，也不能把失败审查当成批准。已有改动、证据和未完成事项保留。", reason);
+        }
     }
     effects
 }
@@ -1058,14 +1072,12 @@ mod tests {
             rusqlite::params![run_id],
         ).unwrap();
 
-        // 成功交付但缺必填扩展字段 cve_refs → 契约违规标记透出到模型文本
+        // 成功交付但缺必填扩展字段：保留机器诊断，主运行只收到简明的未完成说明。
         let r = receipt("review", &run_id, None, json!({"findings": [], "confidence": "high"}));
         let effects = reduce_child_receipt(&env, &mut cp, &mut context, &r).await;
-        assert!(
-            effects.model_text.contains("contract_violation"),
-            "契约违规必须在模型可见文本中标记 contract_violation，实际: {}",
-            effects.model_text
-        );
+        assert!(effects.contract_violation.as_deref().unwrap().contains("cve_refs"));
+        assert!(effects.model_text.contains("审查未完成"));
+        assert!(!effects.model_text.contains("\"findings\""));
 
         // 对照组：合规交付（带 cve_refs）不应出现违规标记
         let r2 = receipt(

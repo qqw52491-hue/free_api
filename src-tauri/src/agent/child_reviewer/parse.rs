@@ -214,6 +214,32 @@ pub(crate) fn review_output_rejection_feedback(reason: &str, attempt: u32, limit
     )
 }
 
+/// 保留模型的契约扩展字段；执行状态、规范化 findings 等宿主字段不可被原文覆盖。
+pub(crate) fn merge_review_extensions(raw: &str, result: &ChildReviewResult) -> Value {
+    let mut value = serde_json::to_value(result).unwrap_or_default();
+    if let Some(Value::Object(fields)) = extract_json_object(raw)
+        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+    {
+        if let Some(map) = value.as_object_mut() {
+            for (key, field) in fields {
+                map.entry(key).or_insert(field);
+            }
+        }
+    }
+    value
+}
+
+pub(crate) fn validate_review_delivery(
+    value: Value,
+    schema: Option<&crate::agent::protocol::ContractSchema>,
+) -> Result<Value, String> {
+    if let Some(schema) = schema {
+        schema.validate_shape(&value)
+            .map_err(|error| format!("child_reviewer 契约校验失败：{error}"))?;
+    }
+    Ok(value)
+}
+
 pub(crate) fn parse_controlled_output(
     raw: &str,
     allowed_refs: &[String],
