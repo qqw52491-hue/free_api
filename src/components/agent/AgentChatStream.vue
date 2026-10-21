@@ -1272,9 +1272,6 @@
                 </article>
             </template>
 
-            <!-- 终审观测属于左侧执行流，不固定在聊天区顶部；不伪造 child ID 或猜测派发步骤。 -->
-            <AgentReviewProgress :reviews="reviewProgress" :is-running="isRunning" />
-
             <p v-if="completionPending && isRunning && !completionMessage" class="completion-pending" role="status">
                 ⏳ 正在准备交付与验收，尚未正式交付。
             </p>
@@ -1318,8 +1315,6 @@ import ArtifactList from "../artifacts/ArtifactList.vue";
 import FileIcon from "./FileIcon.vue";
 import { workerRowOwners } from "./workerAssociation";
 import AgentWorkerProgress from "./AgentWorkerProgress.vue";
-import AgentReviewProgress from "./AgentReviewProgress.vue";
-import type { ReviewProgressItem } from "./reviewProgress";
 import { extractSubagentsFromStep } from "./workerUtils";
 import { getWorkerLiveLine } from "./liveThoughtPreview";
 
@@ -1590,7 +1585,6 @@ const props = withDefaults(
         isWaitingForHuman?: boolean;
         isSendingHuman?: boolean;
         teamState?: AgentTeamState;
-        reviewProgress?: ReviewProgressItem[];
         liveShellOutput?: { command: string; tail: string; elapsedMs: number; done: boolean } | null;
     }>(),
     {
@@ -1600,7 +1594,6 @@ const props = withDefaults(
         isWaitingForHuman: false,
         isSendingHuman: false,
         finalArtifacts: () => [],
-        reviewProgress: () => [],
         liveShellOutput: null,
     }
 );
@@ -3506,7 +3499,6 @@ watch(() => props.historyTurns, (turns) => {
     }
 }, { immediate: true });
 watch(() => [timelineEntries.value.length, props.completionMessage, props.historyTurns.length], () => { followLatest(); }, { flush: "post" });
-watch(() => props.reviewProgress.map(review => review.id).join('|'), () => { followLatest(); }, { flush: 'post' });
 watch(() => props.isRunning, (running, wasRunning) => {
     if (running && !wasRunning) {
         typewriterDoneIds.delete('live-completion');

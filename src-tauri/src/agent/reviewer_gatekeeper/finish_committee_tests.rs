@@ -10,24 +10,50 @@ async fn review(
     committee: bool,
     rx: &mut watch::Receiver<u64>,
 ) -> ReviewResult {
-    let context = SandwichContext::new("sys".into(), "只读分析，不修改项目".into());
+    review_task(mock, committee, rx, true, false).await.0
+}
+
+async fn review_task(
+    mock: &MockReviewer,
+    committee: bool,
+    rx: &mut watch::Receiver<u64>,
+    writes: bool,
+    mechanical_only: bool,
+) -> (ReviewResult, Vec<serde_json::Value>) {
+    let mut context = SandwichContext::new("sys".into(), "完成当前任务".into());
+    let baseline = GitBaseline::capture(&mock.root);
+    if writes {
+        std::fs::write(mock.root.join("report.md"), "本轮生成的待审查报告").unwrap();
+        context.record_side_effect(1, "write_file".into(), "report.md".into());
+    }
     let mut routing = ModelRoutingConfig::default();
     routing.stage_review_committee = committee;
     routing.role_models.insert("reviewer".into(), "mock".into());
     let mut triage = crate::agent::triage::TriageVerdict::fallback("fixture");
-    triage.final_review_mode = "mechanical_only".into();
+    triage.final_review_mode = if mechanical_only { "mechanical_only" } else { "artifact_quality" }.into();
     triage.final_review_roles = vec!["review_0".into()];
     let app = tauri::test::mock_app();
-    super::super::evaluate_finish_diff(
+    let session_id = format!("committee-session-{}", uuid::Uuid::new_v4());
+    use tauri::Listener;
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    for channel in [format!("agent-progress-{session_id}"), format!("agent-log-{session_id}")] {
+        let out = events.clone();
+        app.listen(channel, move |event| {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(event.payload()) {
+                out.lock().unwrap().push(value);
+            }
+        });
+    }
+    let result = super::super::evaluate_finish_diff(
         app.handle(),
         &mock.db,
         &context,
         &routing,
         1,
         &mock.root,
-        &GitBaseline::capture(&mock.root),
+        &baseline,
         chrono::Utc::now(),
-        "committee-session",
+        &session_id,
         rx,
         None,
         None,
@@ -40,11 +66,31 @@ async fn review(
         None,
         Some("这是需要核对的完整分析报告"),
     )
-    .await
+    .await;
+    let recorded = events.lock().unwrap().clone();
+    (result, recorded)
 }
 
 #[tokio::test]
-async fn explicit_committee_reviews_read_only_mechanical_task_with_three_independent_contexts() {
+async fn committee_choice_does_not_trigger_reviews_or_member_progress_for_exempt_tasks() {
+    let mock = MockReviewer::new(vec![passed()]).await;
+    crate::agent::review_team::tests::seed_cards(&mock.db, 3);
+    let (_tx, mut rx) = watch::channel(0);
+    for committee in [false, true] {
+        // 包含已有工作区改动时的只读新问答；mechanical_only 则即使有本轮写入仍走既有机械核验。
+        for (writes, mechanical) in [(false, false), (false, true), (true, true)] {
+            let (result, events) = review_task(&mock, committee, &mut rx, writes, mechanical).await;
+            assert!(result.is_passed(), "{result:?}");
+            assert!(result.summary.contains("已跳过"));
+            assert_eq!(mock.requests.lock().unwrap().len(), 0, "人数开关不能新增审查请求");
+            assert!(!events.iter().any(|v| v["type"] == "finish_review_progress"), "免审不能生成成员面板");
+            assert!(!events.iter().any(|v| v.as_str().is_some_and(|s| s.contains("多人终审本轮选择"))));
+        }
+    }
+}
+
+#[tokio::test]
+async fn required_committee_reviews_have_three_independent_contexts() {
     let mock = MockReviewer::concurrent(vec![passed()], 3).await;
     crate::agent::review_team::tests::seed_cards(&mock.db, 3);
     let (_tx, mut rx) = watch::channel(0);
@@ -59,10 +105,12 @@ async fn explicit_committee_reviews_read_only_mechanical_task_with_three_indepen
             .contains(&format!("REVIEW_MEMBER_{i}"))));
     }
     drop(requests);
-    // 默认模式仍尊重原 mechanical_only，不因候选角色多就增加调用。
-    let result = review(&mock, false, &mut rx).await;
+    // 单人夹具不复用三路齐套屏障；相同任务选择单人时只调用一位。
+    let single_mock = MockReviewer::new(vec![passed()]).await;
+    crate::agent::review_team::tests::seed_cards(&single_mock.db, 3);
+    let result = review(&single_mock, false, &mut rx).await;
     assert!(result.is_passed());
-    assert_eq!(mock.requests.lock().unwrap().len(), 3);
+    assert_eq!(single_mock.requests.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]

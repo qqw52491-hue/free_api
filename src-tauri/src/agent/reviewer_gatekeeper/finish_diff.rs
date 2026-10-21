@@ -127,6 +127,33 @@ fn append_contract_claims(
     }
 }
 
+// 人数只决定已需要的审查如何派发，不能把免审任务升级成模型会审。
+// 与单人路径共用原有机械边界；不按提问关键词或回答长短猜测复杂度。
+fn finish_review_bypass(
+    context: &SandwichContext,
+    session_id: &str,
+    run_started_at: chrono::DateTime<chrono::Utc>,
+    triage: Option<&crate::agent::triage::TriageVerdict>,
+    mechanical_anomalies: &[String],
+) -> Option<ReviewResult> {
+    if !mechanical_anomalies.is_empty() {
+        return None;
+    }
+    if triage.is_some_and(|v| v.final_review_mode.eq_ignore_ascii_case("mechanical_only")) {
+        return Some(ReviewResult::mechanical_pass(
+            "任务分流判决：终审仅需机械校验（mechanical_only），已跳过 LLM 审查",
+        ));
+    }
+    if context.side_effects.len() == context.inherited_side_effects_count
+        && collect_session_tmp_material(session_id, run_started_at).is_none()
+    {
+        return Some(ReviewResult::mechanical_pass(
+            "本轮为只读问答（无新增写入、无本轮产物），已跳过终审；工作区已有的未提交改动属于此前任务，不在本次交付范围",
+        ));
+    }
+    None
+}
+
 /// 执行终态审查（Reviewer Gatekeeper）
 pub async fn evaluate_finish_diff<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -156,6 +183,10 @@ pub async fn evaluate_finish_diff<R: tauri::Runtime>(
     finish_summary: Option<&str>,
 ) -> ReviewResult {
     if model_routing.stage_review_committee {
+        let anomalies = sniff_session_tmp_anomalies(session_id);
+        if let Some(result) = finish_review_bypass(context, session_id, run_started_at, triage, &anomalies) {
+            return result;
+        }
         return super::finish_committee::evaluate_committee(app, db, context, model_routing, step_id, workspace, baseline, run_started_at, session_id, interrupt_rx, last_reviewed_hash, last_review_result, stage_carry_over, host_verification, human_waivers, gate_notices, approved_target_files, triage, _plan_mode, finish_summary).await;
     }
     evaluate_finish_diff_single(app, db, context, model_routing, step_id, workspace, baseline, run_started_at, session_id, interrupt_rx, last_reviewed_hash, last_review_result, stage_carry_over, host_verification, human_waivers, gate_notices, approved_target_files, triage, _plan_mode, finish_summary, "finish-review", None).await
@@ -250,27 +281,8 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     // 嗅探对所有分流模式都跑：code_review/artifact_quality 的产物异常
     // 同样注入材料作预警（此前只 mechanical_only 用，其他模式只能碰运气）。
     let mechanical_anomalies: Vec<String> = sniff_session_tmp_anomalies(session_id);
-    if !model_routing.stage_review_committee
-        && triage.is_some_and(|v| v.final_review_mode.eq_ignore_ascii_case("mechanical_only"))
-        && mechanical_anomalies.is_empty()
-    {
-        return ReviewResult::mechanical_pass(
-            "任务分流判决：终审仅需机械校验（mechanical_only），已跳过 LLM 审查",
-        );
-    }
-
-    // 0.5 只读问答直通：本轮没有新增写入副作用、会话 tmp 也没有本轮产物时，
-    // 交付物只是一段回答——工作区里已有的未提交改动属于此前的任务（可能是用户已决定
-    // 不再继续的半成品），不应让终审拿它们去打回一次提问。
-    // 有机械嗅探异常时不直通（物理异常仍升级审查）。
-    if !model_routing.stage_review_committee
-        && mechanical_anomalies.is_empty()
-        && context.side_effects.len() == context.inherited_side_effects_count
-        && collect_session_tmp_material(session_id, run_started_at).is_none()
-    {
-        return ReviewResult::mechanical_pass(
-            "本轮为只读问答（无新增写入、无本轮产物），已跳过终审；工作区已有的未提交改动属于此前任务，不在本次交付范围",
-        );
+    if let Some(result) = finish_review_bypass(context, session_id, run_started_at, triage, &mechanical_anomalies) {
+        return result;
     }
 
     // 1. 提取审查材料（Git Diff 或 非 Git 修改文件/产物清单）；
@@ -933,6 +945,17 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
 #[cfg(test)]
 mod contract_handoff_tests {
     use super::*;
+
+    #[test]
+    fn physical_anomalies_still_override_mechanical_and_read_only_bypass() {
+        let context = SandwichContext::new("sys".into(), "简单问答".into());
+        let mut triage = crate::agent::triage::TriageVerdict::fallback("fixture");
+        triage.final_review_mode = "mechanical_only".into();
+        assert!(finish_review_bypass(&context, "anomaly-fixture", chrono::Utc::now(),
+            Some(&triage), &["产物魔数不符".into()]).is_none());
+        assert!(finish_review_bypass(&context, "anomaly-fixture", chrono::Utc::now(),
+            None, &["产物为零字节".into()]).is_none());
+    }
 
     #[test]
     fn requested_verify_failure_is_blocking_even_if_reviewer_claims_pass() {

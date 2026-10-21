@@ -56,10 +56,13 @@ async function main() {
     assert(!text.includes('PRIVATE_THOUGHT'));
     const panel = fs.readFileSync(path.join(root, 'src/components/AgentPanel.vue'), 'utf8');
     assert(!panel.includes('<AgentReviewProgress'), 'no fixed review card above the chat');
-    assert(panel.includes(':review-progress="session.reviewProgress.value"'), 'pass live observations into left execution flow');
-    assert(fs.readFileSync(path.join(root, 'src/components/agent/AgentChatStream.vue'), 'utf8').includes('<AgentReviewProgress :reviews="reviewProgress"'), 'review entry must be mounted inside execution flow');
+    assert(!panel.includes(':review-progress='), 'standalone review panel is disconnected from main view');
+    const stream = fs.readFileSync(path.join(root, 'src/components/agent/AgentChatStream.vue'), 'utf8');
+    assert(!stream.includes('AgentReviewProgress'), 'large review area must not mount in either view mode');
+    assert(!stream.includes('props.reviewProgress'), 'hidden review area must not trigger follow-scroll');
+    assert(stream.includes('<AgentWorkerProgress') && stream.includes('getAmbientWorkerRows(item.step)'), 'existing compact per-agent execution rows remain connected');
     await emit('channel-run-started', { session_id: 'existing-session', goal: 'next run' });
     assert.equal(s.reviewProgress.value.length, 0, 'new run clears previous review cards');
-    console.log('PASS review progress: live events, heartbeat, tool, format correction, member isolation, fallback/late-event guard, stop, main-view rendering, new-run reset');
+    console.log('PASS review progress: live events, heartbeat, tool, format correction, member isolation, fallback/late-event guard, stop, standalone panel disabled, existing worker rows preserved, new-run reset');
 }
 main().then(() => process.exit(0)).catch(e => { console.error(e); process.exit(1); });
