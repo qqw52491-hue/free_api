@@ -636,7 +636,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                 );
             }
             retry_count += 1;
-            let error_detail = format!("【❌ 执行失败】: {}", dispatch_result.stderr);
+            let mut error_detail = format!("【❌ 执行失败】: {}", dispatch_result.stderr);
             crate::agent::advance_run_state(
                 &app,
                 &final_session_id,
@@ -646,17 +646,23 @@ pub async fn run_call_llm_and_run_tool_phases(
                 },
             )?;
 
-            // 🌟 立即将失败尝试的完整报错写入 SQLite (agent_step_logs & FTS5)，确保错误历史有据可查
-            let _ = crate::agent::run_trace::save_step_output_in_group(
+            // Retry feedback stays bounded, but a partial failure must retain successful
+            // siblings and raw MCP evidence before the next model request is made.
+            let mut archival_result = dispatch_result.clone();
+            let durable_output = crate::agent::dispatcher::take_tool_durable_output(&mut archival_result, &error_detail);
+            let failed_output_id = crate::agent::run_trace::save_step_output_in_group(
                 state.inner(),
                 final_session_id,
                 step_id,
                 &inst.get_tool(),
                 &inst.description,
                 "failed",
-                &error_detail,
+                &durable_output,
                 crate::agent::work_history::WorkGroup::capture(final_session_id, context, step_id).as_ref(),
-            );
+            ).map_err(|e| eprintln!("无法保存失败尝试的原始输出: {e}")).ok();
+            if let Some(id) = &failed_output_id {
+                error_detail.push_str(&format!("\noutput_id: {id}\n完整执行回执已保存，可用 search_step_output 或 get_step_output 按需回查已执行的分支结果。"));
+            }
 
             // 🌟 立即将失败尝试写入复盘轨迹 run_trace_steps 并持久化到 agent_run_traces，保证页面刷新后红色的失败步骤不丢失
             let total_dur = last_thinking_duration_ms + last_tool_duration_ms;
@@ -691,6 +697,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                 "plan_title": plan_title,
                 "status": "failed",
                 "output": error_detail,
+                "output_id": failed_output_id,
                 "metrics": metrics_val.clone(),
                 "duration_ms": total_dur,
                 "timestamp": chrono::Utc::now().timestamp_millis(),
@@ -727,6 +734,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                     "description": inst.description.clone(),
                     "tool": inst.get_tool(),
                     "output": error_detail,
+                    "output_id": failed_output_id,
                     "metrics": metrics_val,
                 }),
             )

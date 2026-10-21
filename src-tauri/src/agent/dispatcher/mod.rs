@@ -37,6 +37,8 @@ mod command_exec;
 
 #[cfg(test)]
 mod action_contract_tests;
+#[cfg(test)]
+mod output_persistence_tests;
 
 pub(crate) use shell_safety::*;
 pub(crate) use tool_events::*;

@@ -557,6 +557,26 @@ pub(crate) fn take_mcp_durable_output(
     })
 }
 
+/// Preserve both streams on failure. Composite MCP sidecars must also retain
+/// native sibling results, rather than replacing the entire batch with MCP-only data.
+pub(crate) fn take_tool_durable_output(result: &mut DispatchResult, fallback: &str) -> String {
+    let complete = if !result.success && !result.stdout.is_empty() {
+        if !result.stderr.is_empty() && result.stdout != result.stderr {
+            format!("--- STDOUT ---\n{}\n--- STDERR ---\n{}", result.stdout, result.stderr)
+        } else {
+            result.stdout.clone()
+        }
+    } else {
+        fallback.to_string()
+    };
+    if (result.route.starts_with("plan_tree_") || result.route.starts_with("pipeline_"))
+        && result.view.as_ref().is_some_and(is_mcp_raw_results_view)
+    {
+        result.view.as_mut().unwrap()["execution_output"] = json!(complete);
+    }
+    take_mcp_durable_output(&mut result.view).unwrap_or(complete)
+}
+
 /// task_store 回查侧投影：持久化的是完整 sidecar，模型回读默认拿到可读形态。
 /// raw=true 时调用方跳过本投影，原始 JSON（含 _meta/二进制）仍可完整取证。
 pub(crate) fn project_mcp_durable_output(raw: &str) -> Option<String> {
@@ -565,6 +585,9 @@ pub(crate) fn project_mcp_durable_output(raw: &str) -> Option<String> {
         return None;
     }
     let items = value.get("items")?.as_array()?;
+    if let Some(output) = value.get("execution_output").and_then(|v| v.as_str()) {
+        return Some(format!("{}\n（原始 MCP 字段仍完整保留；需要原始 JSON 时以 raw=true 回查同一 output_id。）", output));
+    }
     let mut out = String::new();
     out.push_str(&format!("【MCP 证据包投影：{} 次调用】\n", items.len()));
     for (index, item) in items.iter().enumerate() {

@@ -90,7 +90,9 @@ pub async fn execute_plan_tree(
             elapsed_total_ms: elapsed,
             status: "interrupted_by_error".to_string(),
             error_summary: Some(err.clone()),
-            results: json!({ "interrupted_error": err }),
+            // Fail-fast leaves earlier results in Scope. Keep them in the durable
+            // report instead of discarding successful reads when a later leaf fails.
+            results: json!({ "interrupted_error": err, "scope_values": scope.values.read().await.clone() }),
         },
     }
 }

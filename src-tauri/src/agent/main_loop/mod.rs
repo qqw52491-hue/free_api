@@ -2134,9 +2134,8 @@ async fn run_agent_main_loop_in_workspace_inner(
             "failed"
         };
         let model_output_text = output_text.clone();
-        let mcp_evidence = crate::agent::dispatcher::take_mcp_durable_output(&mut result.view);
-        let has_mcp_evidence = mcp_evidence.is_some();
-        let durable_output_text = mcp_evidence.unwrap_or_else(|| model_output_text.clone());
+        let has_mcp_evidence = result.view.as_ref().is_some_and(crate::agent::dispatcher::is_mcp_raw_results_view);
+        let durable_output_text = crate::agent::dispatcher::take_tool_durable_output(&mut result, &model_output_text);
         let output_id = crate::agent::run_trace::save_step_output_in_group(
             state.inner(),
             &final_session_id,

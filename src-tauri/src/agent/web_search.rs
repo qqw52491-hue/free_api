@@ -531,6 +531,14 @@ fn clean_xml_text(text: &str) -> String {
 
 /// 抓取任意 URL 并提纯为干净的 Markdown 正文
 pub async fn fetch_url_markdown(url: &str) -> Result<String, String> {
+    // The attachment UI keeps its existing bounded preview. Agent tools use the
+    // full variant and persist it before the shared context sampler runs.
+    let full = fetch_url_markdown_full(url).await?;
+    if full.chars().count() <= 6000 { return Ok(full); }
+    Ok(format!("{}\n\n*(正文过长，已截断前 6000 字符)*", full.chars().take(6000).collect::<String>()))
+}
+
+async fn fetch_url_markdown_full(url: &str) -> Result<String, String> {
     let target_url = url.trim();
     if target_url.is_empty() {
         return Err("URL 不能为空".to_string());
@@ -542,14 +550,19 @@ pub async fn fetch_url_markdown(url: &str) -> Result<String, String> {
         .build()
         .map_err(|e| e.to_string())?;
 
+    fetch_markdown_from_sources(&client, target_url, Some(&format!("https://r.jina.ai/{}", target_url))).await
+}
+
+async fn fetch_markdown_from_sources(client: &reqwest::Client, target_url: &str, reader_url: Option<&str>) -> Result<String, String> {
     // 优先尝试 Jina Reader 免 Key 高清提取引擎 (https://r.jina.ai/{url})
-    let jina_url = format!("https://r.jina.ai/{}", target_url);
-    if let Ok(resp) = client.get(&jina_url).send().await {
-        if resp.status().is_success() {
-            if let Ok(text) = resp.text().await {
-                let trimmed = text.trim();
-                if !trimmed.is_empty() && !trimmed.contains("AuthenticationRequiredError") {
-                    return Ok(truncate_markdown(trimmed, 6000));
+    if let Some(jina_url) = reader_url {
+        if let Ok(resp) = client.get(jina_url).send().await {
+            if resp.status().is_success() {
+                if let Ok(text) = resp.text().await {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() && !trimmed.contains("AuthenticationRequiredError") {
+                        return Ok(trimmed.to_string());
+                    }
                 }
             }
         }
@@ -566,9 +579,9 @@ pub async fn fetch_url_markdown(url: &str) -> Result<String, String> {
         return Err(format!("网页响应状态异常: {}", resp.status()));
     }
 
-    let html = resp.text().await.unwrap_or_default();
+    let html = resp.text().await.map_err(|e| format!("读取网页正文失败: {e}"))?;
     let cleaned = clean_html_to_markdown(&html);
-    Ok(truncate_markdown(&cleaned, 6000))
+    Ok(cleaned)
 }
 
 /// 本地高效 HTML 清洗与 Markdown 提纯
@@ -636,14 +649,6 @@ pub fn clean_html_to_markdown(html: &str) -> String {
     lines.join("\n\n")
 }
 
-fn truncate_markdown(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_chars).collect();
-        format!("{}\n\n*(正文过长，已截断前 {} 字符)*", truncated, max_chars)
-    }
-}
 
 fn urlencoding(s: &str) -> String {
     let mut encoded = String::new();
@@ -755,7 +760,7 @@ pub fn dispatch(tool: &str, params: &serde_json::Value) -> DispatchResult {
         }
 
         let url_str = url.to_string();
-        match block_on_async(async move { fetch_url_markdown(&url_str).await }) {
+        match block_on_async(async move { fetch_url_markdown_full(&url_str).await }) {
             Ok(content) => DispatchResult { view: None,
                 stdout: format!("### 📄 网页正文提纯 ({})\n\n{}", url, content),
                 stderr: String::new(),
@@ -782,6 +787,29 @@ pub fn dispatch(tool: &str, params: &serde_json::Value) -> DispatchResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn agent_web_fetch_preserves_reader_and_html_fallback_beyond_old_preview_limit() {
+        let body = format!("{}\nWEB_FETCH_END_SENTINEL", "正文 abcdefghijklmnopqrstuvwxyz\n".repeat(600));
+        let reader_body = body.clone();
+        let html_body = format!("<html><body><p>{body}</p></body></html>");
+        let app = axum::Router::new()
+            .route("/reader", axum::routing::get(move || { let text = reader_body.clone(); async move { text } }))
+            .route("/source", axum::routing::get(move || { let text = html_body.clone(); async move { text } }))
+            .route("/unavailable", axum::routing::get(|| async { axum::http::StatusCode::SERVICE_UNAVAILABLE }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        let source = format!("http://{address}/source");
+        for reader in [format!("http://{address}/reader"), format!("http://{address}/unavailable")] {
+            let result = fetch_markdown_from_sources(&client, &source, Some(&reader)).await.unwrap();
+            assert!(result.chars().count() > 6000);
+            assert!(result.contains("WEB_FETCH_END_SENTINEL"));
+            assert!(!result.contains("正文过长，已截断"));
+        }
+        server.abort();
+    }
 
     #[test]
     fn test_clean_html_to_markdown() {
