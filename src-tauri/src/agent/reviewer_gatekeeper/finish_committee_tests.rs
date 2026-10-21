@@ -86,7 +86,7 @@ async fn committee_preserves_one_members_real_blocker_without_score_voting() {
 }
 
 #[tokio::test]
-async fn committee_discloses_fewer_members_and_unavailable_model_cannot_be_approved() {
+async fn committee_excludes_unavailable_members_without_treating_them_as_approvals() {
     let mock = MockReviewer::new(vec![passed()]).await;
     crate::agent::review_team::tests::seed_cards(&mock.db, 1);
     let (_tx, mut rx) = watch::channel(0);
@@ -99,15 +99,66 @@ async fn committee_discloses_fewer_members_and_unavailable_model_cannot_be_appro
         &json!({"name":"review_1","model_id":"missing-model"}),
     )
     .unwrap();
-    let failed = review(&mock, true, &mut rx).await;
-    assert!(!failed.is_passed());
-    assert!(failed.is_service_failure());
-    assert!(failed.summary.contains("通道失败 1 位"));
+    let partial = review(&mock, true, &mut rx).await;
+    assert!(partial.is_passed(), "{partial:?}");
+    assert!(!partial.is_service_failure());
+    assert!(partial.summary.contains("通道失败 1 位"));
+    assert!(partial.summary.contains("有效结论 2 位"));
     assert_eq!(
         mock.requests.lock().unwrap().len(),
         3,
         "一位单审加两位有效模型，无第三方自动换模"
     );
+}
+
+#[tokio::test]
+async fn committee_one_valid_member_can_pass_but_all_unavailable_cannot() {
+    let mock = MockReviewer::new(vec![passed()]).await;
+    crate::agent::review_team::tests::seed_cards(&mock.db, 3);
+    for i in [1, 2] {
+        crate::agent::tools::role_manager::upsert_card(&mock.db,
+            &json!({"name":format!("review_{i}"),"model_id":"missing-model"})).unwrap();
+    }
+    let (_tx, mut rx) = watch::channel(0);
+    let out = review(&mock, true, &mut rx).await;
+    assert!(out.is_passed(), "{out:?}");
+    assert_eq!(out.score, 85);
+    assert!(out.summary.contains("有效结论 1 位"));
+    assert!(out.summary.contains("实际为单人"));
+    assert_eq!(mock.requests.lock().unwrap().len(), 1);
+    crate::agent::tools::role_manager::upsert_card(&mock.db,
+        &json!({"name":"review_0","model_id":"missing-model"})).unwrap();
+    let out = review(&mock, true, &mut rx).await;
+    assert!(!out.is_passed());
+    assert!(out.is_service_failure());
+    assert!(out.summary.contains("有效结论 0 位"));
+    assert_eq!(mock.requests.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn committee_skipped_and_unavailable_are_not_effective_reviews() {
+    // skipped_empty 是既有“无修改直通批准”，不是 skipped 枚举。
+    let mut skipped = ReviewResult::skipped_empty();
+    skipped.verdict = "skipped".into();
+    let out = aggregate_committee_results(vec![
+        ("A".into(), skipped),
+        ("B".into(), ReviewResult::failed_open("timeout", "m", "hash")),
+    ]);
+    assert!(!out.is_passed());
+    assert!(out.is_service_failure());
+    assert_eq!(out.score, 0);
+}
+
+#[test]
+fn committee_partial_pass_is_overridden_by_explicit_stop() {
+    let pass = super::super::parse_reviewer_json(&passed().to_string(), "m", "hash", 1).unwrap();
+    let out = settle_committee_results(vec![
+        ("A".into(), pass),
+        ("B".into(), ReviewResult::failed_open("cancelled", "m", "hash")),
+    ], true);
+    assert!(!out.is_passed());
+    assert!(out.is_service_failure());
+    assert!(out.summary.contains("已停止"));
 }
 
 #[tokio::test]
@@ -147,7 +198,8 @@ fn unit_committee_aggregation_preserves_blocker_and_service_failure() {
             ReviewResult::failed_open("timeout", "m", "hash"),
         ),
     ]);
-    assert!(out.is_service_failure());
+    assert!(!out.is_service_failure());
+    assert_eq!(out.verdict, "rejected");
     assert_eq!(out.blocking_issues.len(), 1);
     assert!(out.summary.contains("通道失败 1 位"));
     out = aggregate_committee_results(vec![("A".into(), pass)]);

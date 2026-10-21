@@ -13,10 +13,13 @@ const moduleObject = { exports: {} };
 vm.runInThisContext('(function(exports){' + ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText + '\n})')(moduleObject.exports);
 const { isReviewTerminal } = moduleObject.exports;
 const component = fs.readFileSync(path.join(root, 'src/components/agent/AgentReviewProgress.vue'), 'utf8');
-const template = component.split('<template>')[1].split('</template>')[0];
+const template = require('@vue/compiler-sfc').parse(component).descriptor.template.content;
+const diagnosticsModule = { exports: {} };
+vm.runInThisContext('(function(require,module,exports){' + ts.transpileModule(fs.readFileSync(path.join(root, 'src/components/agent/reviewDiagnostics.ts'), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText + '\n})')(() => moduleObject.exports, diagnosticsModule, diagnosticsModule.exports);
+const { reviewDiagnosis, reviewStatusLabel } = diagnosticsModule.exports;
 const render = new Function('Vue', require('@vue/compiler-dom').compile(template, { mode: 'function' }).code)(vue);
 async function html(s, running = true) {
-    return renderToString(vue.createSSRApp({ render: () => render({ reviews: s.reviewProgress.value, isRunning: running, isReviewTerminal }, []) }));
+    return renderToString(vue.createSSRApp({ render: () => render({ reviews: s.reviewProgress.value, isRunning: running, isReviewTerminal, reviewDiagnosis, reviewStatusLabel, summaryText: s.reviewProgress.value.map(item => reviewStatusLabel(item, running)).join(' · '), copyDiagnostics: () => {}, copyStatus: '', manualCopy: '', selectDiagnostic: () => {} }, []) }));
 }
 async function main() {
     const s = await session('failed');
@@ -29,6 +32,11 @@ async function main() {
     send({ elapsed_ms: 30000 });
     assert.equal(s.logs.value.length, logs, 'heartbeat updates time without log spam');
     let text = await html(s); assert(text.includes('30 秒')); assert(text.includes('等待模型响应'));
+    send({ phase: 'responding', stream_kind: 'thinking', elapsed_ms: 30001 });
+    assert.equal(s.reviewProgress.value[0].streamKind, 'thinking');
+    assert((await html(s)).includes('正在思考'));
+    send({ phase: 'responding', stream_kind: 'content', elapsed_ms: 30002 });
+    assert((await html(s)).includes('正在生成结论'));
     send({ phase: 'tool', description: '正在取证：read_file（第 1/8 步）', elapsed_ms: 31000 });
     text = await html(s); assert(text.includes('read_file'));
     send({ review_id: 'attempt-B', member_key: 'finish-review-member-2', model: 'other-model', phase: 'format_retry', description: '输出格式不合规，正在纠正', elapsed_ms: 2000 });
@@ -46,7 +54,10 @@ async function main() {
     assert.equal(s.reviewProgress.value.length, 2, 'prior run event must be ignored');
     text = await html(s, false); assert(text.includes('运行已结束')); assert(!text.includes('class="is-active"'), 'stop must not leave activity animation');
     assert(!text.includes('PRIVATE_THOUGHT'));
-    assert(fs.readFileSync(path.join(root, 'src/components/AgentPanel.vue'), 'utf8').includes('<AgentReviewProgress :reviews="session.reviewProgress.value"'), 'component must be mounted in the real main view');
+    const panel = fs.readFileSync(path.join(root, 'src/components/AgentPanel.vue'), 'utf8');
+    assert(!panel.includes('<AgentReviewProgress'), 'no fixed review card above the chat');
+    assert(panel.includes(':review-progress="session.reviewProgress.value"'), 'pass live observations into left execution flow');
+    assert(fs.readFileSync(path.join(root, 'src/components/agent/AgentChatStream.vue'), 'utf8').includes('<AgentReviewProgress :reviews="reviewProgress"'), 'review entry must be mounted inside execution flow');
     await emit('channel-run-started', { session_id: 'existing-session', goal: 'next run' });
     assert.equal(s.reviewProgress.value.length, 0, 'new run clears previous review cards');
     console.log('PASS review progress: live events, heartbeat, tool, format correction, member isolation, fallback/late-event guard, stop, main-view rendering, new-run reset');

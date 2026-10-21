@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const vue = require('vue');
 const { load, session, emit } = require('./test-agent-task-resume.cjs');
 const base = path.resolve(__dirname, '../src/components/agent');
-const { getStepJobIds, getStepWorkers, parseChildJobReceipts, workerDisplayRows } = load(path.join(base, 'workerAssociation.ts'));
+const { getStepJobIds, getStepWorkers, parseChildJobReceipts, workerDisplayRows, workerRowOwners } = load(path.join(base, 'workerAssociation.ts'));
 const { extractSubagentsFromStep } = load(path.join(base, 'workerUtils.ts'));
 const a = '3583c312-31fe-4cf5-94c8-26e1acb57838', b = '6f21b859-56d1-451e-a23e-6dfaebc720cb', c = '9c36b52a-6af8-4f6a-bbe6-1b8c76754541';
 const dispatchText = `[1/4] ✅ 已派发 child_run_id=${a} 任务: 检查源项目\n[2/4] ✅ 已派发 child_run_id=${b} 任务: 检查目标项目\n[3/4] ❌ 派发失败：并发已满\n[4/4] ❌ 派发失败：并发已满`;
@@ -37,6 +37,7 @@ async function main() {
  assert.equal(parseChildJobReceipts(failure).find(r=>r.id===b).status,'failed');
  assert(!parseChildJobReceipts(failure).find(r=>r.id===b).output.includes('故障转移'));
  assert.deepEqual(getStepJobIds(step('step-9','resume_child',{child_run_id:a},`✅ 侦察 worker 追问已成功启动：新 child_run_id=${c}（继承历史）。`)),[c], 'resume params are OLD id');
+ assert.deepEqual(getStepJobIds(step('step-9-review','resume_child',{child_run_id:a},`审查专家对质已启动：child_run_id=${c}。继承原任务上下文；其他成员结论保留。`)),[c]);
  assert.deepEqual(getStepJobIds(step('step-10','child_worker',{},`未派发；任务描述说 child_run_id=${a}`)),[], 'task prose is not a receipt');
  const shellId = 'job-archive-check';
  const shellWait = step('step-shell','wait_jobs',{job_ids:[shellId]},result(shellId,'succeeded','shell'));
@@ -102,7 +103,7 @@ async function main() {
  const ordinary = Array.from({length:35},(_,i)=>step(`step-${i+20}`,'local_shell',{},'ok'));
  const props = vue.reactive({steps:[dispatch,wait,...ordinary],historyTurns:[], get teamState(){return s.teamState.value;}});
  const timeline = vue.computed(()=>[{id:'plan',type:'plan',steps:props.steps}]);
- const ctx = {props,computed:vue.computed,timelineEntries:timeline,extractSubagentsFromStep,workerDisplayRows,
+ const ctx = {props,computed:vue.computed,timelineEntries:timeline,extractSubagentsFromStep,workerRowOwners,
    stepNarrative:st=>st.thought||'',isAmbientKeyStep:()=>true,getAmbientAction:()=>({actionKind:'general'}),pushAmbientInterventions:()=>{}};
  const componentCode = ts.transpileModule(selected.map(n=>n.getText(ast)).join('\n') + '\n({getAmbientDisplayItems,getAmbientWorkerRows,getStepActiveWorkers,ambientWorkerRows});',
    {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
@@ -111,11 +112,28 @@ async function main() {
  const initialWorkerRows = component.ambientWorkerRows.value;
  assert.equal(initialItems.length,37);
  assert.equal(component.getAmbientWorkerRows(props.steps[0]).length,2);
+ assert.equal(component.getAmbientWorkerRows(props.steps[1]).length,0,'wait summary must not duplicate dispatched member cards');
+ const orphanWait = step('step-orphan','wait_jobs',{job_ids:[c]},result(c,'succeeded','child_reviewer'));
+ const repeatWait = step('step-repeat','wait_jobs',{job_ids:[c]},result(c,'succeeded','child_reviewer'));
+ props.steps.push(orphanWait,repeatWait);
+ assert.equal(component.getAmbientWorkerRows(props.steps[props.steps.length-2]).length,1,'first known wait owns a member when formal plan dispatch has no row');
+ assert.equal(component.getAmbientWorkerRows(props.steps[props.steps.length-1]).length,0);
+ props.steps.splice(-2);
+ const historicalDispatch = {...dispatch};
+ const historicalWait = {...wait};
+ props.historyTurns.push({steps:[historicalDispatch,historicalWait]});
+ const history = props.historyTurns[0].steps;
+ assert.equal(component.getAmbientWorkerRows(history[0]).length,2,'history owns its own member rows even with identical synthetic IDs');
+ assert.equal(component.getAmbientWorkerRows(history[1]).length,0);
+ assert.notEqual(component.getAmbientWorkerRows(history[0])[0],component.getAmbientWorkerRows(props.steps[0])[0],'live thoughts cannot leak into history');
+ props.historyTurns.splice(0);
  assert.equal(ordinary.reduce((sum,st)=>sum+component.getAmbientWorkerRows(st).length,0),0);
+ const stableItems = component.getAmbientDisplayItems(timeline.value[0]);
+ const stableRows = component.ambientWorkerRows.value;
  for(let i=0;i<100;i++) {
   progress({type:'child_reviewer_stream',child_run_id:c,stream_type:'thinking',chunk:'live'});
-  assert.equal(component.getAmbientDisplayItems(timeline.value[0]),initialItems,'token stream must not regroup full timeline');
-  assert.equal(component.ambientWorkerRows.value,initialWorkerRows,'token stream must not reproject brief rows');
+  assert.equal(component.getAmbientDisplayItems(timeline.value[0]),stableItems,'token stream must not regroup full timeline');
+  assert.equal(component.ambientWorkerRows.value,stableRows,'token stream must not reproject brief rows');
  }
  // Main-agent narrative and new steps are still allowed to invalidate the cached grouping.
  props.steps[0].thought='new main narrative';

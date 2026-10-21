@@ -24,7 +24,7 @@
             </div>
         </div>
 
-        <div class="stream-centered-content">
+        <div class="stream-centered-content" :class="{ 'is-ambient': streamViewMode === 'ambient' }">
             <section v-if="!currentGoal && !timelineEntries.length && !legacyMessages.length" class="empty-conversation">
                 <div class="empty-logo">
                     <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" stroke="none">
@@ -411,26 +411,12 @@
                                 v-if="getAmbientWorkerRows(item.step).length > 0"
                                 class="ambient-workers-list"
                             >
-                                <article
+                                <AgentWorkerProgress
                                     v-for="worker in getAmbientWorkerRows(item.step)"
                                     :key="worker.id"
-                                    class="ambient-worker-row"
-                                    :class="`status-${worker.status}`"
-                                    @click="$emit('open-team-deck', item.step.id)"
-                                >
-                                    <span class="ambient-worker-lead">
-                                        <span class="ambient-worker-dot">
-                                            <span v-if="worker.status === 'running'" class="manus-spinner mini"></span>
-                                            <span v-else-if="worker.status === 'succeeded'" class="worker-check">✓</span>
-                                            <span v-else-if="worker.status === 'failed'" class="worker-cross">✕</span>
-                                            <span v-else class="worker-dot-icon">○</span>
-                                        </span>
-                                        <span class="action-tag action-tag-subagent">🤖 {{ worker.roleLabel || 'Worker' }}</span>
-                                        <span class="ambient-worker-name">{{ worker.name }}</span>
-                                    </span>
-                                    <span class="ambient-worker-desc">{{ worker.taskDesc }}</span>
-                                    <span v-if="worker.duration" class="ambient-worker-time">{{ worker.duration }}</span>
-                                </article>
+                                    :worker="worker"
+                                    @inspect="$emit('open-team-deck', item.step.id)"
+                                />
                             </div>
 
                             <!-- 命令输出：执行中自动展开实时输出，结束后自动收起；可用箭头手动展开/收起 -->
@@ -570,7 +556,7 @@
                             v-if="entry.status === 'running' && isRunning"
                             class="ambient-live-text-row"
                         >
-                            <div class="ambient-live-text-bar" @click="toggleLiveThoughtExpanded">
+                            <div class="ambient-live-text-bar" @click="getPlanRunningPreview(entry).line3.actionKind === 'think' && toggleLiveThoughtExpanded()">
                                 <span class="live-think-label">
                                     <span class="live-think-square-icon" :class="{ 'is-action': getPlanRunningPreview(entry).line3.actionKind !== 'think' }">
                                         <svg v-if="getPlanRunningPreview(entry).line3.actionKind === 'think'" class="thought-square-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -600,6 +586,7 @@
                                     </Transition>
                                 </div>
                                 <button
+                                    v-if="getPlanRunningPreview(entry).line3.actionKind === 'think'"
                                     type="button"
                                     class="thought-expand-btn"
                                     :title="isLiveThoughtExpanded ? '收起完整思考' : '展开查看完整思考过程'"
@@ -622,9 +609,9 @@
                                 </button>
                             </div>
                             <Transition name="thought-accordion">
-                                <div v-if="isLiveThoughtExpanded" class="ambient-live-thought-expanded">
+                                <div v-if="isLiveThoughtExpanded && getPlanRunningPreview(entry).line3.actionKind === 'think'" class="ambient-live-thought-expanded">
                                     <div class="thought-expanded-header">
-                                        <span class="thought-expanded-title">实时思考推演</span>
+                                        <span class="thought-expanded-title">主 Agent · 思考过程</span>
                                         <span class="thought-char-count">{{ (props.thought || liveThoughtInfo.text || '').length }} 字</span>
                                     </div>
                                     <div class="thought-expanded-body soft-scrollbar">
@@ -1285,6 +1272,9 @@
                 </article>
             </template>
 
+            <!-- 终审观测属于左侧执行流，不固定在聊天区顶部；不伪造 child ID 或猜测派发步骤。 -->
+            <AgentReviewProgress :reviews="reviewProgress" :is-running="isRunning" />
+
             <p v-if="completionPending && isRunning && !completionMessage" class="completion-pending" role="status">
                 ⏳ 正在准备交付与验收，尚未正式交付。
             </p>
@@ -1326,7 +1316,10 @@ import AgentHumanInterventionCard from "./AgentHumanInterventionCard.vue";
 import { toolViewComponents } from "./views";
 import ArtifactList from "../artifacts/ArtifactList.vue";
 import FileIcon from "./FileIcon.vue";
-import { workerDisplayRows, type WorkerDisplayRow } from "./workerAssociation";
+import { workerRowOwners } from "./workerAssociation";
+import AgentWorkerProgress from "./AgentWorkerProgress.vue";
+import AgentReviewProgress from "./AgentReviewProgress.vue";
+import type { ReviewProgressItem } from "./reviewProgress";
 import { extractSubagentsFromStep } from "./workerUtils";
 import { getWorkerLiveLine } from "./liveThoughtPreview";
 
@@ -1597,6 +1590,7 @@ const props = withDefaults(
         isWaitingForHuman?: boolean;
         isSendingHuman?: boolean;
         teamState?: AgentTeamState;
+        reviewProgress?: ReviewProgressItem[];
         liveShellOutput?: { command: string; tail: string; elapsedMs: number; done: boolean } | null;
     }>(),
     {
@@ -1606,6 +1600,7 @@ const props = withDefaults(
         isWaitingForHuman: false,
         isSendingHuman: false,
         finalArtifacts: () => [],
+        reviewProgress: () => [],
         liveShellOutput: null,
     }
 );
@@ -1666,7 +1661,13 @@ const stepWorkersByStep = computed(() => {
 function getStepActiveWorkers(step: AgentStepItem): AgentWorkerItem[] {
     return stepWorkersByStep.value.get(step) || [];
 }
-const ambientWorkerRows = computed(() => workerDisplayRows([...stepWorkersByStep.value.values()].flat()));
+const ambientWorkerRows = computed(() => {
+    const rows = workerRowOwners(props.steps, stepWorkersByStep.value);
+    for (const turn of props.historyTurns) {
+        for (const [step, workers] of workerRowOwners(turn.steps, stepWorkersByStep.value)) rows.set(step, workers);
+    }
+    return rows;
+});
 function getOrchestrationTitle(step: AgentStepItem): string {
     const workers = getStepActiveWorkers(step);
     if (!workers.length) return "并发协作 · 子任务调度记录";
@@ -1674,7 +1675,7 @@ function getOrchestrationTitle(step: AgentStepItem): string {
         ? "并发协作 · 子任务执行中" : "并发协作 · 子任务已结束";
 }
 function getAmbientWorkerRows(step: AgentStepItem) {
-    return getStepActiveWorkers(step).map(w => ambientWorkerRows.value.get(w.id)).filter((row): row is WorkerDisplayRow => !!row);
+    return ambientWorkerRows.value.get(step) || [];
 }
 
 
@@ -1764,28 +1765,11 @@ const liveThoughtInfo = computed(() => {
     return extractActiveThoughtLineInfo(raw || "");
 });
 
-// 收拢态第 3 行：若当前运行步骤是子代理/挂起等待且命中 workerLiveLines，
-// 换成 worker 的实时动作行（与展开态步骤行同源），不再停留于死文案。
-// 仅在非 think 分支生效——活跃思考流的优先级最高，不被覆盖。
-function getLine3WorkerLive(entry: PlanEntry, preview: StageRunningPreview): { key: string; text: string } | undefined {
-    if (preview.line3.actionKind === "think") return undefined;
-    const steps = entry.steps;
-    if (!steps.length) return undefined;
-    // 与 getRunningStagePreview 一致的当前步骤定位：首个 running/pending，否则末位步骤
-    const runningStep = steps.find((s) => s.status === "running" || s.status === "pending") || steps[steps.length - 1];
-    if (!runningStep) return undefined;
-    if (!isSubAgentTool(runningStep.tool) && !isWaitJobsTool(runningStep.tool)) return undefined;
-    return workerLiveLines.value.get(runningStep.id);
-}
-
+// 主进度只展示主 Agent 的动作/思考；子 Agent 流在自己的成员行中展示。
 function getLine3DisplayText(entry: PlanEntry): string {
     const preview = getPlanRunningPreview(entry);
     if (preview.line3.actionKind === "think") {
         return (liveThoughtInfo.value.text || preview.line3.text || "正在深入分析全局上下文与决策规划 …").trim();
-    }
-    const workerLive = getLine3WorkerLive(entry, preview);
-    if (workerLive) {
-        return `⚡ ${workerLive.text}`.trim();
     }
     return (preview.line3.text || "正在执行操作 …").trim();
 }
@@ -1794,10 +1778,6 @@ function getLine3FullText(entry: PlanEntry): string {
     const preview = getPlanRunningPreview(entry);
     if (preview.line3.actionKind === "think") {
         return props.thought || liveThoughtInfo.value.text || preview.line3.text;
-    }
-    const workerLive = getLine3WorkerLive(entry, preview);
-    if (workerLive) {
-        return `⚡ ${workerLive.text}`;
     }
     return preview.line3.text;
 }
@@ -1809,10 +1789,6 @@ function getLine3Key(entry: PlanEntry): string {
         return `think-${entry.id}-${keyId}`;
     }
     // 流式正文原地更新；只有真实动作/输出源切换才翻牌，不跟随隐藏思考行号。
-    const workerLive = getLine3WorkerLive(entry, preview);
-    if (workerLive) {
-        return `worker-${entry.id}-${workerLive.key}`;
-    }
     return `action-${entry.id}-${preview.line3.actionKind}-${preview.line3.text}`;
 }
 
@@ -2997,7 +2973,7 @@ function getRunningProgressText(entry: PlanEntry): string {
 }
 
 function getPlanRunningPreview(entry: PlanEntry): StageRunningPreview {
-    return getRunningStagePreview(entry.steps, entry.isThinking || props.isThinking, props.thought, entry.title || props.currentGoal);
+    return getRunningStagePreview(entry.steps, props.isThinking, props.isThinking ? props.thought : "", entry.title || props.currentGoal);
 }
 
 function getPlanMetaSummary(entry: PlanEntry, digest: PlanDigest): string {
@@ -3530,6 +3506,7 @@ watch(() => props.historyTurns, (turns) => {
     }
 }, { immediate: true });
 watch(() => [timelineEntries.value.length, props.completionMessage, props.historyTurns.length], () => { followLatest(); }, { flush: "post" });
+watch(() => props.reviewProgress.map(review => review.id).join('|'), () => { followLatest(); }, { flush: 'post' });
 watch(() => props.isRunning, (running, wasRunning) => {
     if (running && !wasRunning) {
         typewriterDoneIds.delete('live-completion');

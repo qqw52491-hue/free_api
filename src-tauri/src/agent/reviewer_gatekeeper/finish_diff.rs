@@ -669,6 +669,8 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     let model_config = match ModelConfig::from_db_state(db, &model_id) {
         Ok(cfg) => cfg,
         Err(e) => {
+            let mut progress = super::progress::ReviewProgress::new(app, session_id, log_suffix, &reviewer_label, &model_id);
+            progress.fail("configuration", "审查模型配置加载失败，未发起模型请求");
             return ReviewResult::failed_open(&format!("加载 Reviewer 模型配置失败: {}", e), &model_id, &review_fingerprint);
         }
     };
@@ -724,7 +726,11 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
                     progress.phase("retrying", "响应等待超时，按现有策略重试；尚无审查结论");
                     continue;
                 }
-                progress.fail(if failure.is_timeout() { "审查请求超时，未获得有效结论" } else { "审查请求失败或已停止，未获得有效结论" });
+                let cancelled = failure.error == llm::STREAM_INTERRUPTED_ERROR;
+                progress.fail(
+                    if cancelled { "cancelled" } else if failure.is_timeout() { "timeout" } else { "request" },
+                    if cancelled { "审查收到停止信号，未获得有效结论" } else if failure.is_timeout() { "审查请求超时，未获得有效结论" } else { "审查请求失败，未获得有效结论" },
+                );
                 return ReviewResult::failed_open(
                     &format!("Reviewer 审查{}：{}；{}",
                         if failure.is_timeout() { "超时" } else { "调用失败" },
@@ -771,6 +777,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
         // b. 取证请求：预算内执行并回灌；预算外强制收敛；强制后仍请求 → 判不合规（fail-open）
         if is_tool_request {
             if forced_final {
+                progress.fail("format", "要求最终判决后仍返回取证请求，未获得有效审查结论");
                 return ReviewResult::failed_open(
                     "Reviewer 强制收敛后仍请求取证工具，未获得有效审查结论",
                     &model_id,
@@ -816,11 +823,15 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
                             let _verification_guard = match verification_lock {
                                 Some(lock) => {
                                     if *interrupt_rx.borrow() != cancellation_generation {
+                                        progress.fail("cancelled", "审查收到停止信号，未执行新的宿主复验");
                                         return ReviewResult::failed_open("已收到停止信号，未执行新的宿主复验", &model_id, &review_fingerprint);
                                     }
                                     tokio::select! {
                                         biased;
-                                        _ = interrupt_rx.changed() => return ReviewResult::failed_open("等待宿主复验期间收到停止信号", &model_id, &review_fingerprint),
+                                        _ = interrupt_rx.changed() => {
+                                            progress.fail("cancelled", "等待宿主复验期间收到停止信号，未获得有效结论");
+                                            return ReviewResult::failed_open("等待宿主复验期间收到停止信号", &model_id, &review_fingerprint);
+                                        },
                                         guard = progress.wait(lock.lock()) => Some(guard),
                                     }
                                 }
@@ -870,6 +881,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
                     }
                 };
                 tool_steps_used += 1;
+                progress.tool_completed(tool_steps_used);
                 messages.push(json!({"role": "assistant", "content": raw}));
                 messages.push(json!({
                     "role": "user",
@@ -909,7 +921,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
                     }));
                     continue;
                 }
-                progress.fail("模型输出格式纠正仍失败，未获得有效审查结论");
+                progress.fail("format", "模型输出格式纠正仍失败，未获得有效审查结论");
                 let reason = format!("Reviewer 判决格式错误：{error}；已连续纠正 {format_retries} 次，未获得有效审查结论");
                 return ReviewResult::failed_open(&reason, &model_id, &review_fingerprint);
             }
@@ -1190,8 +1202,32 @@ mod finish_review_regression_tests {
         assert!(phases.contains(&"format_retry"));
         assert!(phases.contains(&"tool"));
         assert_eq!(phases.last(), Some(&"passed"));
+        let last = events.last().unwrap();
+        assert_eq!(last["round"], 3);
+        assert_eq!(last["format_corrections"], 1);
+        assert_eq!(last["tool_steps"], 1);
+        assert_eq!(last["timeout_retries"], 0);
         assert_eq!(mock.requests.lock().unwrap().len(), 3, "progress must not add model calls");
         assert!(!serde_json::to_string(&events).unwrap().contains("INVALID_REVIEW_BODY"));
+    }
+
+    #[tokio::test]
+    async fn finish_diagnostics_distinguish_real_rejection_and_exhausted_format() {
+        let mock = MockReviewer::new(vec![rejected_alias_response()]).await;
+        let (result, _, events) = run_finish_with_progress(&mock, None, false, None, None).await;
+        assert!(!result.is_service_failure() && !result.is_passed());
+        assert_eq!(events.last().unwrap()["phase"], "rejected");
+        assert_eq!(events.last().unwrap()["failure_kind"], "");
+        let mock = MockReviewer::new(vec![json!({"unknown": "PRIVATE_INVALID_BODY"})]).await;
+        let (result, _, events) = run_finish_with_progress(&mock, None, false, None, None).await;
+        assert!(result.is_service_failure());
+        let last = events.last().unwrap();
+        assert_eq!(last["phase"], "failed");
+        assert_eq!(last["failure_kind"], "format");
+        assert_eq!(last["format_corrections"], 5);
+        assert_eq!(last["round"], 6);
+        assert_eq!(mock.requests.lock().unwrap().len(), 6);
+        assert!(!serde_json::to_string(&events).unwrap().contains("PRIVATE_INVALID_BODY"));
     }
 
     fn read_exchange_log(session_id: &str) -> serde_json::Value {

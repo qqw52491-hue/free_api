@@ -15,12 +15,13 @@
 
 /* 居中阅读流容器 (彻底解决左侧靠边偏离问题，更宽敞大方) */
 .stream-centered-content {
+    --stream-entry-gap: 8px;
     width: 100%;
     max-width: 980px;
     margin: 0 auto;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: var(--stream-entry-gap);
 }
 
 /* 浮动跟随最新 */
@@ -1118,6 +1119,11 @@
     margin-top: 0 !important;
 }
 
+/* 连续阶段的动作流沿用内部的 2px 间隔，不叠加对话块的 8px gap。 */
+.stream-centered-content.is-ambient > .ambient-plan-wrapper + .ambient-plan-wrapper {
+    margin-top: calc(2px - var(--stream-entry-gap)) !important;
+}
+
 .stream-sticky-actions {
     position: sticky;
     top: 8px;
@@ -1153,7 +1159,7 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
-    padding: 1px 0 2px;
+    padding: 0;
     width: 100%;
     transition: max-height 0.25s cubic-bezier(0.16, 1, 0.3, 1);
 }
@@ -3812,60 +3818,6 @@ article:hover .msg-header-actions .msg-fork-btn:disabled {
     margin: 4px 0 2px 18px;
     padding: 3px 0 3px 8px;
     border-left: 1.5px solid rgba(148, 163, 184, 0.2);
-}
-
-.ambient-worker-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 11.5px;
-    color: #cbd5e1;
-    line-height: 1.4;
-}
-
-.ambient-worker-row .ambient-worker-dot {
-    font-size: 10px;
-    color: #94a3b8;
-}
-
-.ambient-worker-row.status-running .ambient-worker-dot {
-    color: #38bdf8;
-}
-
-.ambient-worker-row.status-succeeded .ambient-worker-dot {
-    color: #34d399;
-}
-
-.ambient-worker-row.status-failed .ambient-worker-dot {
-    color: #f87171;
-}
-
-.ambient-worker-row .ambient-worker-name {
-    font-weight: 500;
-    color: #f1f5f9;
-}
-
-.ambient-worker-row .ambient-worker-role {
-    font-size: 10.5px;
-    padding: 0 4px;
-    border-radius: 3px;
-    background: rgba(148, 163, 184, 0.15);
-    color: #94a3b8;
-}
-
-.ambient-worker-row .ambient-worker-desc {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: #94a3b8;
-}
-
-.ambient-worker-row .ambient-worker-time {
-    font-size: 10.5px;
-    color: #64748b;
-    font-family: ui-monospace, monospace;
 }
 
 /* 简报流：审查结论胶囊 */

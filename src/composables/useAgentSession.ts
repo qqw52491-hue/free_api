@@ -1099,8 +1099,10 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     }
 
     function handleProgress(payload: Record<string, unknown>) {
-        if (runTerminal.value) return;
-        const usage = normalizeUsage(payload);
+        // 终态通知可能晚于父任务结束；只允许已知尝试补齐诊断，不能重开任务或引入旧成员。
+        const reviewEvent = String(payload.event_type || payload.type || payload.stage || '').toLowerCase() === 'finish_review_progress';
+        if (runTerminal.value && (!reviewEvent || !reviewProgress.value.some(item => item.id === payload.review_id))) return;
+        const usage = runTerminal.value ? undefined : normalizeUsage(payload);
         if (usage) {
             tokenUsage.value = usage;
             if (payload.step_id !== undefined && payload.step_id !== null) {
@@ -1154,7 +1156,6 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             const streamType = toText(payload.stream_type);
             const chunk = toText(payload.chunk);
             const childRunId = toText(payload.child_run_id) || (isWorkerStream ? "worker-1" : "reviewer-1");
-            const shortId = childRunId ? childRunId.slice(0, 8) : "";
             const explicitRoleLabel = toText(payload.role_label) || toText(payload.role);
             
             let worker = childRunId ? teamWorkers.value.find((w) => w.id === childRunId) : undefined;
@@ -1202,13 +1203,9 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 }
             }
             if (streamType === "thinking") {
-                actionPhaseText.value = chunk 
-                    ? `🔍 ${isWorkerStream ? '子侦察' : '子审查'}独立推导中: ${chunk.slice(0, 35)}...` 
-                    : `🔍 ${isWorkerStream ? '子侦察' : '子审查'}代理正在独立推导 (${shortId})...`;
                 worker.thought = (worker.thought || "") + chunk;
                 worker.progress = Math.min(85, worker.progress + 1);
             } else {
-                actionPhaseText.value = `🔍 ${isWorkerStream ? '子侦察' : '子审查'}代理生成结论中 (${shortId})...`;
                 worker.output = (worker.output || "") + chunk;
                 worker.progress = Math.min(95, worker.progress + 1);
             }
@@ -1669,7 +1666,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         }
     }
 
-    function clearSession() {
+    function clearSession(preserveReview = false) {
         runTerminal.value = true;
         clearLiveShellOutput();
         steps.value = [];
@@ -1689,8 +1686,10 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         liveTtft.value = null;
         activeStepNumber.value = 1;
         actionPhaseText.value = "";
-        reviewProgress.value = [];
-        reviewProgressStartedAt.value = 0;
+        if (!preserveReview) {
+            reviewProgress.value = [];
+            reviewProgressStartedAt.value = 0;
+        }
         completionMessage.value = "";
         streamingSummary.value = "";
         finishOutput.value = null;
@@ -1888,7 +1887,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                     }
                     const newest = historyRuns.value[historyRuns.value.length - 1];
                     if (newest && newest.goal === currentGoal.value && ["succeeded", "failed", "cancelled"].includes(newest.status)) {
-                        clearSession();
+                        // 收尾保留本轮终审诊断；下次运行仍完整清空，且不写入真实历史。
+                        clearSession(true);
                         autoScrollToBottom(false);
                     }
                 } catch (syncErr) {

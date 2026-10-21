@@ -234,6 +234,48 @@
     }
 
     #[test]
+    fn one_valid_plan_review_survives_two_unavailable_members_without_losing_its_blockers() {
+        for blocked in [false, true] {
+            let db = setup_test_db();
+            let context = SandwichContext::new("sys".into(), "goal".into());
+            let mut cp = AgentCheckpoint::new("partial-panel".into(), &context);
+            cp.plan_mode = PlanExecutionMode::CrossReview;
+            cp.plan_reviewer_retry_count = 1;
+            cp.submitted_plan = Some(valid_submission());
+            for id in ["a", "b", "c"] {
+                seed_review(&db, id, &cp.run_id, "partial", "running", false);
+            }
+            cp.set_plan_review_batch("partial", 3);
+            let findings = if blocked { serde_json::json!([{
+                "id":"F1", "severity":"blocking", "finality":"regardless",
+                "location":"src/auth.rs:42", "current":"missing guard",
+                "why":"unauthorized access", "suggestion":"add guard", "evidence_strength":"confirmed"
+            }]) } else { serde_json::json!([]) };
+            let delivery: ReviewerDeliveryData = serde_json::from_value(serde_json::json!({
+                "findings":findings, "confidence":"confirmed", "evidence_refs":[], "missing_evidence":[],
+                "decision":"approved", "routing":"certain"
+            })).unwrap();
+            mark_succeeded(&db, "a");
+            cp.record_reviewer_delivery_for_run(&db, Some("a"), &delivery);
+            // 尚未收束的成员不能因一位批准而被静默放弃。
+            assert_eq!(check_pre_write_gatekeeper(&mut cp, &context, &db, "partial-panel", 1, false).unwrap().route,
+                "plan_gatekeeper:need_wait_reviewer_jobs");
+            for id in ["b", "c"] {
+                mark_failed(&db, id, "timed_out");
+                cp.record_reviewer_failure_for_run(&db, id);
+            }
+            assert!(cp.plan_review_batch_complete(&db));
+            let result = check_pre_write_gatekeeper(&mut cp, &context, &db, "partial-panel", 1, false);
+            if blocked {
+                assert_eq!(result.unwrap().route, "plan_gatekeeper:blocking_findings_open");
+            } else {
+                assert!(result.is_none());
+                assert_eq!(cp.plan_phase, PlanPhase::Approved);
+            }
+        }
+    }
+
+    #[test]
     fn test_gate_handles_all_reviewers_failed_without_deadlock() {
         let db = setup_test_db();
         let context = SandwichContext::new("system".to_string(), "goal".to_string());

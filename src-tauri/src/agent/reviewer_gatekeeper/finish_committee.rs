@@ -80,6 +80,7 @@ pub(super) async fn evaluate_committee<R: tauri::Runtime>(
         );
         return result;
     }
+    let interrupt_generation = *interrupt_rx.borrow();
     let verification_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
     let _ = app.emit(&format!("agent-log-{session_id}"), format!(
         "多人终审本轮选择 {} 位候选：{}。各角色独立核验；模型可能相同，实际有效结论数量在最终回执披露。",
@@ -124,7 +125,17 @@ pub(super) async fn evaluate_committee<R: tauri::Runtime>(
         });
     }
     let results = futures::future::join_all(futures).await;
-    aggregate_committee_results(results)
+    settle_committee_results(results, *interrupt_rx.borrow() != interrupt_generation)
+}
+
+fn settle_committee_results(results: Vec<(String, ReviewResult)>, interrupted: bool) -> ReviewResult {
+    let mut merged = aggregate_committee_results(results);
+    // 显式停止不是“不可用成员”：不能靠此前一位通过把停止转换为交付。
+    if interrupted {
+        merged.verdict = "failed_open".into();
+        merged.summary = format!("多人终审已停止，未完成本轮交付判定。\n{}", merged.summary);
+    }
+    merged
 }
 
 fn aggregate_committee_results(results: Vec<(String, ReviewResult)>) -> ReviewResult {
@@ -141,18 +152,23 @@ fn aggregate_committee_results(results: Vec<(String, ReviewResult)>) -> ReviewRe
     let rejected = results
         .iter()
         .any(|(_, r)| !r.is_passed() && !r.is_service_failure() && r.verdict != "skipped");
-    merged.verdict = if failed > 0 {
-        "failed_open"
-    } else if rejected {
+    // 已派发成员全部收束后，仅用有效裁决聚合；不可用不是反对，也不是批准。
+    merged.verdict = if rejected {
         "rejected"
     } else if valid > 0 {
         "passed"
+    } else if failed > 0 {
+        "failed_open"
     } else {
         "skipped"
     }
     .into();
-    merged.score = if count > 0 {
-        results.iter().map(|(_, r)| r.score as u64).sum::<u64>() as u32 / count as u32
+    merged.score = if valid > 0 {
+        (results
+            .iter()
+            .filter(|(_, r)| !r.is_service_failure() && r.verdict != "skipped")
+            .map(|(_, r)| r.score as u64)
+            .sum::<u64>() / valid as u64) as u32
     } else {
         0
     };
@@ -165,16 +181,23 @@ fn aggregate_committee_results(results: Vec<(String, ReviewResult)>) -> ReviewRe
         "多人终审：候选 {} 位，有效结论 {} 位，通道失败 {} 位。",
         count, valid, failed
     )];
-    if count < 2 {
-        summaries.push("仅有一位可用专家，本轮实际为单人审查；未宣称完成多人会审。".into());
+    if failed > 0 {
+        summaries.push("不可用成员已排除，不计为批准；有效成员的阻塞仍然生效。".into());
+    }
+    if valid == 1 {
+        summaries.push("仅有一位有效专家，本轮实际为单人审查；未宣称完成多人会审。".into());
     }
     let mut models = Vec::new();
     let mut hash = sha2::Sha256::new();
     for (label, result) in results {
         summaries.push(format!("【{}】{}", label, result.summary));
+        let effective = !result.is_service_failure() && result.verdict != "skipped";
         models.push(result.model_id);
         hash.update(label.as_bytes());
         hash.update(result.diff_hash.as_bytes());
+        if !effective {
+            continue;
+        }
         for mut issue in result.blocking_issues {
             issue.issue = format!("【{}】{}", label, issue.issue);
             merged.blocking_issues.push(issue);

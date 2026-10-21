@@ -54,6 +54,9 @@ export function parseChildJobReceipts(step: AgentStepItem): ChildJobReceipt[] {
     for (const m of text.matchAll(restarted)) receipts.set(m[2], {
         id: m[2], tool: m[1]?.startsWith("写入") ? "child_writer" : m[1]?.startsWith("侦察") ? "child_worker" : "child_reviewer",
     });
+    for (const m of text.matchAll(/^审查专家对质已启动：child_run_id=([\w-]+)/gm)) {
+        receipts.set(m[1], { id: m[1], tool: "child_reviewer" });
+    }
     const headers = [...text.matchAll(/^-\s*【任务 ID:\s*([\w-]+)\s*\|\s*类型:\s*([^\s】]+)】状态:\s*([\w-]+),\s*耗时:\s*(\d+)ms[^\n]*\n/gm)];
     for (let i = 0; i < headers.length; i++) {
         const m = headers[i];
@@ -83,6 +86,22 @@ export function getStepWorkers(step: AgentStepItem, workers: AgentWorkerItem[]):
     if (!isWorkerStep(step)) return [];
     const ids = new Set(getStepJobIds(step));
     return workers.filter(w => ids.has(w.id) || (ids.size === 0 && w.extra?.parentStepId === step.id && w.extra?.dispatchPlaceholder === true));
+}
+
+// One visible home per physical child in a run. Waits still retain their exact
+// associations for inspection; they do not duplicate the live member presentation.
+export function workerRowOwners(
+    steps: AgentStepItem[], associations: Map<AgentStepItem, AgentWorkerItem[]>,
+): Map<AgentStepItem, AgentWorkerItem[]> {
+    const owners = new Map<string, AgentStepItem>();
+    const isWait = (step: AgentStepItem) => /^(wait_jobs|wait_for_jobs)$/.test(stepWorkerTool(step));
+    for (const step of steps) for (const worker of associations.get(step) || []) {
+        const previous = owners.get(worker.id);
+        if (!previous || (isWait(previous) && !isWait(step))) owners.set(worker.id, step);
+    }
+    return new Map(steps.map(step => [step,
+        (associations.get(step) || []).filter(worker => owners.get(worker.id) === step),
+    ]));
 }
 export interface WorkerDisplayRow {
     id: string; name: string; roleLabel: string; status: AgentToolStatus; taskDesc: string; duration?: string;

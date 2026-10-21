@@ -10,11 +10,15 @@ use tauri::{AppHandle, Emitter, Runtime};
 #[derive(Default)]
 struct ProgressState {
     phase: String,
+    stream_kind: String,
     message: String,
     round: usize,
     tool_steps: u32,
     tool_budget: u32,
     last_notice: String,
+    failure_kind: String,
+    timeout_retries: u32,
+    format_corrections: u32,
 }
 
 pub(super) struct ReviewProgress {
@@ -73,6 +77,8 @@ impl ReviewProgress {
             if matches!(phase, "retrying" | "format_retry") {
                 s.last_notice = message.into();
             }
+            if phase == "retrying" { s.timeout_retries += 1; }
+            if phase == "format_retry" { s.format_corrections += 1; }
         }
         self.emit();
     }
@@ -81,6 +87,7 @@ impl ReviewProgress {
         self.received_chars.store(0, Ordering::Relaxed);
         {
             let mut s = self.state.lock().unwrap();
+            s.stream_kind.clear();
             s.round = round;
             s.tool_steps = steps;
             s.tool_budget = budget;
@@ -89,12 +96,27 @@ impl ReviewProgress {
     }
 
     pub(super) fn observe(&self, event: StreamEvent<'_>) -> bool {
-        let chunk = match event {
-            StreamEvent::Thinking { chunk, .. } | StreamEvent::Content { chunk, .. } => chunk,
+        let (kind, chunk) = match event {
+            StreamEvent::Thinking { chunk, .. } => ("thinking", chunk),
+            StreamEvent::Content { chunk, .. } => ("content", chunk),
         };
         let count = chunk.chars().count();
-        if count > 0 && self.received_chars.fetch_add(count, Ordering::Relaxed) == 0 {
-            self.phase("responding", "已收到模型响应，正在接收（尚未形成审查结论）");
+        if count > 0 {
+            let first = self.received_chars.fetch_add(count, Ordering::Relaxed) == 0;
+            let changed = {
+                let mut s = self.state.lock().unwrap();
+                let changed = s.stream_kind != kind;
+                s.stream_kind = kind.into();
+                changed
+            };
+            // 只发阶段切换与既有心跳，不逐 token 广播，更不转发思考正文。
+            if first || changed {
+                self.phase("responding", if kind == "thinking" {
+                    "正在思考（已收到思考片段，尚未形成审查结论）"
+                } else {
+                    "正在生成结论（尚未形成有效审查结论）"
+                });
+            }
         }
         true
     }
@@ -116,9 +138,16 @@ impl ReviewProgress {
         }
     }
 
-    pub(super) fn fail(&mut self, message: &str) {
+    // 固定枚举由宿主分支给出；不按错误文案猜测，不广播上游原始错误。
+    pub(super) fn fail(&mut self, kind: &str, message: &str) {
         self.terminal = true;
-        self.phase("failed", message);
+        self.state.lock().unwrap().failure_kind = kind.into();
+        self.phase(if kind == "cancelled" { "cancelled" } else { "failed" }, message);
+    }
+
+    pub(super) fn tool_completed(&self, steps: u32) {
+        self.state.lock().unwrap().tool_steps = steps;
+        self.emit();
     }
 
     pub(super) fn finish(&mut self, verdict: &str) {
@@ -138,7 +167,8 @@ impl ReviewProgress {
             "type": "finish_review_progress", "review_id": self.id, "member_key": self.member_key,
             "role_label": self.label, "model": self.model, "started_at_ms": self.started_at_ms,
             "phase": s.phase, "description": s.message, "round": s.round, "tool_steps": s.tool_steps, "tool_budget": s.tool_budget,
-            "last_notice": s.last_notice,
+            "last_notice": s.last_notice, "failure_kind": s.failure_kind, "stream_kind": s.stream_kind,
+            "timeout_retries": s.timeout_retries, "format_corrections": s.format_corrections,
             "elapsed_ms": self.started.elapsed().as_millis() as u64,
             "received_chars": self.received_chars.load(Ordering::Relaxed),
         });
@@ -198,16 +228,53 @@ mod tests {
     }
 
     #[test]
+    fn stream_kind_is_observed_not_guessed_and_resets_per_request() {
+        let (mut p, events) = fixture();
+        p.request(1, 0, 8);
+        p.observe(StreamEvent::Thinking { chunk: "secret", accumulated: "secret" });
+        p.observe(StreamEvent::Thinking { chunk: "more", accumulated: "secretmore" });
+        assert_eq!(events.lock().unwrap().len(), 2);
+        p.observe(StreamEvent::Content { chunk: "answer", accumulated_content: "answer", full_thinking: "secretmore" });
+        assert_eq!(events.lock().unwrap().last().unwrap()["stream_kind"], "content");
+        p.request(2, 0, 8);
+        assert_eq!(events.lock().unwrap().last().unwrap()["stream_kind"], "");
+        p.finish("passed");
+        assert!(!serde_json::to_string(&*events.lock().unwrap()).unwrap().contains("secret"));
+    }
+
+    #[test]
     fn retry_notice_survives_next_request_and_failure_is_terminal() {
         let (mut p, events) = fixture();
         p.request(1, 0, 8);
         p.phase("retrying", "等待超时，正在重试");
         p.request(2, 0, 8);
-        p.fail("审查请求失败，未获得有效结论");
+        p.fail("request", "审查请求失败，未获得有效结论");
         drop(p);
         let e = events.lock().unwrap();
         assert_eq!(e[2]["last_notice"], "等待超时，正在重试");
         assert_eq!(e.last().unwrap()["phase"], "failed");
+        assert_eq!(e.last().unwrap()["failure_kind"], "request");
+        assert_eq!(e.last().unwrap()["timeout_retries"], 1);
+    }
+
+    #[test]
+    fn terminal_diagnostics_keep_counters_and_distinguish_cancellation() {
+        for kind in ["timeout", "request", "format", "configuration", "cancelled"] {
+            let (mut p, events) = fixture();
+            p.request(1, 0, 8);
+            p.phase("format_retry", "纠正格式");
+            p.request(2, 0, 8);
+            p.tool_completed(1);
+            p.fail(kind, "固定诊断说明");
+            drop(p);
+            let e = events.lock().unwrap();
+            let last = e.last().unwrap();
+            assert_eq!(last["phase"], if kind == "cancelled" { "cancelled" } else { "failed" });
+            assert_eq!(last["failure_kind"], kind);
+            assert_eq!(last["format_corrections"], 1);
+            assert_eq!(last["tool_steps"], 1);
+            assert_eq!(last["round"], 2);
+        }
     }
 
     #[tokio::test(start_paused = true)]

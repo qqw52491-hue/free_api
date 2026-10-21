@@ -5,6 +5,7 @@ export interface ReviewProgressItem {
     label: string;
     model: string;
     phase: string;
+    streamKind: string;
     description: string;
     lastNotice: string;
     startedAt: number;
@@ -13,11 +14,16 @@ export interface ReviewProgressItem {
     toolSteps: number;
     toolBudget: number;
     receivedChars: number;
+    failureKind: string;
+    timeoutRetries: number | null;
+    formatCorrections: number | null;
 }
-const phases = new Set(['preparing', 'waiting', 'responding', 'tool', 'verifying', 'retrying', 'format_retry', 'converging', 'passed', 'rejected', 'failed', 'incomplete', 'skipped']);
-const terminal = new Set(['passed', 'rejected', 'failed', 'incomplete', 'skipped']);
+const phases = new Set(['preparing', 'waiting', 'responding', 'tool', 'verifying', 'retrying', 'format_retry', 'converging', 'passed', 'rejected', 'failed', 'incomplete', 'cancelled', 'skipped']);
+const terminal = new Set(['passed', 'rejected', 'failed', 'incomplete', 'cancelled', 'skipped']);
 export function isReviewTerminal(phase: string): boolean { return terminal.has(phase); }
 const number = (value: unknown): number => typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : 0;
+const optionalCount = (value: unknown): number | null => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+const failureKinds = new Set(['timeout', 'request', 'format', 'configuration', 'cancelled']);
 const text = (value: unknown, limit = 200): string => typeof value === 'string' ? value.slice(0, limit) : '';
 
 export function applyReviewProgress(items: ReviewProgressItem[], payload: Record<string, unknown>, runStartedAt: number): ReviewProgressItem[] {
@@ -26,10 +32,13 @@ export function applyReviewProgress(items: ReviewProgressItem[], payload: Record
     if (!id || !memberKey || !phases.has(phase) || startedAt < runStartedAt) return items;
     const next: ReviewProgressItem = {
         id, memberKey, phase, startedAt,
+        streamKind: payload.stream_kind === 'thinking' || payload.stream_kind === 'content' ? payload.stream_kind : '',
         label: text(payload.role_label, 80) || '终审员', model: text(payload.model, 120),
         description: text(payload.description, 300), lastNotice: text(payload.last_notice, 300), elapsedMs: number(payload.elapsed_ms),
         round: number(payload.round), toolSteps: number(payload.tool_steps), toolBudget: number(payload.tool_budget),
         receivedChars: number(payload.received_chars),
+        failureKind: failureKinds.has(String(payload.failure_kind)) ? String(payload.failure_kind) : '',
+        timeoutRetries: optionalCount(payload.timeout_retries), formatCorrections: optionalCount(payload.format_corrections),
     };
     const index = items.findIndex(item => item.memberKey === memberKey);
     if (index < 0) return [...items, next];
