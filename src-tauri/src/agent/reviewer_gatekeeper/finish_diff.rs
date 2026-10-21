@@ -673,6 +673,10 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
         }
     };
 
+    let mut progress = super::progress::ReviewProgress::new(
+        app, session_id, log_suffix, &reviewer_label, &model_config.model_name,
+    );
+
     // 终审取证环：与 child_reviewer 同构——审查者可先请求只读工具核实产物
     // （tmp/ 前缀直达会话产物区），预算用尽后强制收敛为判决 JSON。
     // forensic_budget 已在组装提示词时读取（工具段按预算条件拼接）。
@@ -698,13 +702,14 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     // 语法/结构错误共用格式纠正预算，最多连续纠正 5 次。
     let mut format_retries = 0u32;
 
-    let mut ignore_stream = |_: llm::StreamEvent<'_>| true;
     loop {
         llm_call_index += 1;
-        let stream_result = crate::agent::review_stream::stream_review(
+        progress.request(llm_call_index, tool_steps_used, forensic_budget);
+        let mut observe_stream = |event: llm::StreamEvent<'_>| progress.observe(event);
+        let stream_result = progress.wait(crate::agent::review_stream::stream_review(
             &model_config, &messages, "auto", interrupt_rx,
-            Some(request_attempt_limit), cur_timeout_secs, &mut ignore_stream,
-        ).await;
+            Some(request_attempt_limit), cur_timeout_secs, &mut observe_stream,
+        )).await;
         let output = match stream_result {
             Ok(output) => {
                 timeout_retried = false;
@@ -716,8 +721,10 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
                 if failure.may_retry_timeout() && !timeout_retried && review_retry_allowed() {
                     timeout_retried = true;
                     cur_timeout_secs = review_timeout_secs.saturating_mul(2).min(600);
+                    progress.phase("retrying", "响应等待超时，按现有策略重试；尚无审查结论");
                     continue;
                 }
+                progress.fail(if failure.is_timeout() { "审查请求超时，未获得有效结论" } else { "审查请求失败或已停止，未获得有效结论" });
                 return ReviewResult::failed_open(
                     &format!("Reviewer 审查{}：{}；{}",
                         if failure.is_timeout() { "超时" } else { "调用失败" },
@@ -773,6 +780,9 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
             let req = as_value.unwrap();
             if tool_steps_used < forensic_budget {
                 let tool_name = req.get("tool").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                // 仅显示受限工具名，不广播原始参数、源码、模型思考或工具返回。
+                let display_tool: String = tool_name.chars().take(60).collect();
+                progress.phase("tool", &format!("正在取证：{}（第 {}/{} 步）", display_tool, tool_steps_used + 1, forensic_budget));
                 // verify 工具在环内直接处理：需异步跑宿主执行器 + 访问契约冻结命令，
                 // review_tools::execute 保持同步纯函数
                 let observation = if tool_name == "read_step_output" {
@@ -802,6 +812,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
                             format!("未找到 id 为 {:?} 的可验证义务", want_id.unwrap_or(""))
                         } else {
                             // 多人同时请求复验时，冻结命令串行执行，避免并发改动同一产物。
+                            progress.phase("verifying", "正在等待或执行宿主验证命令（结果以实际回执为准）");
                             let _verification_guard = match verification_lock {
                                 Some(lock) => {
                                     if *interrupt_rx.borrow() != cancellation_generation {
@@ -810,15 +821,14 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
                                     tokio::select! {
                                         biased;
                                         _ = interrupt_rx.changed() => return ReviewResult::failed_open("等待宿主复验期间收到停止信号", &model_id, &review_fingerprint),
-                                        guard = lock.lock() => Some(guard),
+                                        guard = progress.wait(lock.lock()) => Some(guard),
                                     }
                                 }
                                 None => None,
                             };
-                            let results = crate::agent::host_verify::run_obligation_verifications(
+                            let results = progress.wait(crate::agent::host_verify::run_obligation_verifications(
                                 workspace, &target,
-                            )
-                            .await;
+                            )).await;
                             for result in &results {
                                 rechecked_obligations.insert(result.obligation_id.clone(), result.clone());
                             }
@@ -876,6 +886,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
                 "content": "【系统】取证预算已用尽。请立即基于已有证据输出判决 JSON（含 verdict 键），不要再请求取证；未查完的疑点写入 missing_evidence 字段。"
             }));
             forced_final = true;
+            progress.phase("converging", "取证预算已用尽，正在要求输出最终判决");
             continue;
         }
 
@@ -883,10 +894,12 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
         match parsed {
             Ok(mut result) => {
                 enforce_failed_rechecks(&mut result, &rechecked_obligations);
+                progress.finish(&result.verdict);
                 return result;
             },
             Err(error) => {
                 if retry_format {
+                    progress.phase("format_retry", &format!("模型输出格式不合规，正在第 {} 次纠正（不是代码被判不合格）", format_retries));
                     messages.push(json!({"role": "assistant", "content": raw}));
                     messages.push(json!({
                         "role": "user",
@@ -896,6 +909,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
                     }));
                     continue;
                 }
+                progress.fail("模型输出格式纠正仍失败，未获得有效审查结论");
                 let reason = format!("Reviewer 判决格式错误：{error}；已连续纠正 {format_retries} 次，未获得有效审查结论");
                 return ReviewResult::failed_open(&reason, &model_id, &review_fingerprint);
             }
@@ -1027,6 +1041,14 @@ mod finish_review_regression_tests {
         mock: &MockReviewer, cached: Option<&ReviewResult>, read_only_report: bool,
         summary_override: Option<&str>, triage: Option<&crate::agent::triage::TriageVerdict>,
     ) -> (ReviewResult, String) {
+        let (result, session, _) = run_finish_with_progress(mock, cached, read_only_report, summary_override, triage).await;
+        (result, session)
+    }
+
+    async fn run_finish_with_progress(
+        mock: &MockReviewer, cached: Option<&ReviewResult>, read_only_report: bool,
+        summary_override: Option<&str>, triage: Option<&crate::agent::triage::TriageVerdict>,
+    ) -> (ReviewResult, String, Vec<serde_json::Value>) {
         let workspace = mock.root.join("workspace");
         std::fs::create_dir_all(workspace.join("src")).unwrap();
         let changed = workspace.join("src/changed.rs");
@@ -1091,6 +1113,14 @@ mod finish_review_regression_tests {
         let app = tauri::test::mock_app();
         let (_tx, mut rx) = watch::channel(0u64);
         let session_id = format!("review-feedback-{}", uuid::Uuid::new_v4());
+        use tauri::Listener;
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let out = events.clone();
+        app.listen(format!("agent-progress-{session_id}"), move |event| {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(event.payload()) {
+                if value["type"] == "finish_review_progress" { out.lock().unwrap().push(value); }
+            }
+        });
         let run_started_at = chrono::Utc::now();
         if read_only_report {
             let conn = mock.db.0.lock().unwrap();
@@ -1141,7 +1171,27 @@ mod finish_review_regression_tests {
             None,
         )
         .await;
-        (result, session_id)
+        let recorded = events.lock().unwrap().clone();
+        (result, session_id, recorded)
+    }
+
+    #[tokio::test]
+    async fn finish_progress_follows_real_http_format_repair_tool_and_final_verdict() {
+        let mock = MockReviewer::new(vec![
+            json!({"unknown": "INVALID_REVIEW_BODY"}),
+            json!({"tool": "read_file", "path": "src/changed.rs"}),
+            json!({"verdict": "passed", "score": 85, "summary": "核验完成", "blocking_issues": [], "nit_issues": []}),
+        ]).await;
+        let (result, _, events) = run_finish_with_progress(&mock, None, false, None, None).await;
+        assert!(result.is_passed(), "{result:?}");
+        let phases: Vec<_> = events.iter().filter_map(|e| e["phase"].as_str()).collect();
+        assert!(phases.contains(&"waiting"), "{events:?}");
+        assert!(phases.contains(&"responding"));
+        assert!(phases.contains(&"format_retry"));
+        assert!(phases.contains(&"tool"));
+        assert_eq!(phases.last(), Some(&"passed"));
+        assert_eq!(mock.requests.lock().unwrap().len(), 3, "progress must not add model calls");
+        assert!(!serde_json::to_string(&events).unwrap().contains("INVALID_REVIEW_BODY"));
     }
 
     fn read_exchange_log(session_id: &str) -> serde_json::Value {

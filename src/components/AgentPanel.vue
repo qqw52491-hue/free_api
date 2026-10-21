@@ -96,6 +96,7 @@
             :style="{ gridTemplateColumns: inspectorCollapsed ? 'minmax(0, 1fr) 0px 0px' : `minmax(0, 1fr) 6px ${inspectorWidth}px` }"
         >
             <main class="chat-column">
+                <AgentReviewProgress :reviews="session.reviewProgress.value" :is-running="session.isRunning.value" />
                 <!-- 💬 全宽主对话流 (无左侧狭窄侧栏挤压) -->
                 <div class="chat-stream-column">
                     <AgentChatStream
@@ -263,6 +264,7 @@ import { invoke } from "@tauri-apps/api/core";
 import AgentChatStream from "./agent/AgentChatStream.vue";
 import AgentComposer from "./agent/AgentComposer.vue";
 import AgentProgressDeck from "./agent/AgentProgressDeck.vue";
+import AgentReviewProgress from "./agent/AgentReviewProgress.vue";
 import AgentInspector from "./agent/AgentInspector.vue";
 import AgentRecordPreview from "./agent/AgentRecordPreview.vue";
 import AgentSettingsDrawer from "./agent/AgentSettingsDrawer.vue";

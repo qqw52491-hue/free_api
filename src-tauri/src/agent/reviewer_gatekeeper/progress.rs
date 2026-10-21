@@ -1,0 +1,241 @@
+//! 终审只上报宿主可观察的阶段/计时，不转发模型思考或原始响应，不改变请求预算。
+use crate::llm::StreamEvent;
+use serde_json::{json, Value};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Mutex,
+};
+use tauri::{AppHandle, Emitter, Runtime};
+
+#[derive(Default)]
+struct ProgressState {
+    phase: String,
+    message: String,
+    round: usize,
+    tool_steps: u32,
+    tool_budget: u32,
+    last_notice: String,
+}
+
+pub(super) struct ReviewProgress {
+    sink: Box<dyn Fn(Value) + Send + Sync>,
+    id: String,
+    member_key: String,
+    label: String,
+    model: String,
+    started_at_ms: i64,
+    started: std::time::Instant,
+    state: Mutex<ProgressState>,
+    received_chars: AtomicUsize,
+    terminal: bool,
+}
+
+impl ReviewProgress {
+    pub(super) fn new<R: Runtime>(
+        app: &AppHandle<R>,
+        session: &str,
+        member: &str,
+        label: &str,
+        model: &str,
+    ) -> Self {
+        let app = app.clone();
+        let channel = format!("agent-progress-{session}");
+        Self::with_sink(member, label, model, move |value| {
+            let _ = app.emit(&channel, value);
+        })
+    }
+
+    fn with_sink(
+        member: &str,
+        label: &str,
+        model: &str,
+        sink: impl Fn(Value) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            sink: Box::new(sink),
+            id: uuid::Uuid::new_v4().to_string(),
+            member_key: member.into(),
+            label: label.into(),
+            model: model.into(),
+            started_at_ms: chrono::Utc::now().timestamp_millis(),
+            started: std::time::Instant::now(),
+            state: Mutex::new(ProgressState::default()),
+            received_chars: AtomicUsize::new(0),
+            terminal: false,
+        }
+    }
+
+    pub(super) fn phase(&self, phase: &str, message: &str) {
+        {
+            let mut s = self.state.lock().unwrap();
+            s.phase = phase.into();
+            s.message = message.into();
+            if matches!(phase, "retrying" | "format_retry") {
+                s.last_notice = message.into();
+            }
+        }
+        self.emit();
+    }
+
+    pub(super) fn request(&self, round: usize, steps: u32, budget: u32) {
+        self.received_chars.store(0, Ordering::Relaxed);
+        {
+            let mut s = self.state.lock().unwrap();
+            s.round = round;
+            s.tool_steps = steps;
+            s.tool_budget = budget;
+        }
+        self.phase("waiting", "请求已发起，等待模型响应（尚未收到片段）");
+    }
+
+    pub(super) fn observe(&self, event: StreamEvent<'_>) -> bool {
+        let chunk = match event {
+            StreamEvent::Thinking { chunk, .. } | StreamEvent::Content { chunk, .. } => chunk,
+        };
+        let count = chunk.chars().count();
+        if count > 0 && self.received_chars.fetch_add(count, Ordering::Relaxed) == 0 {
+            self.phase("responding", "已收到模型响应，正在接收（尚未形成审查结论）");
+        }
+        true
+    }
+
+    // 定时器与被观察 Future 同生共死：停止/返回后没有后台心跳，也不重复发起 HTTP。
+    pub(super) async fn wait<F: std::future::Future>(&self, future: F) -> F::Output {
+        tokio::pin!(future);
+        let mut tick = tokio::time::interval_at(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(5),
+        );
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut future => return result,
+                _ = tick.tick() => self.emit(),
+            }
+        }
+    }
+
+    pub(super) fn fail(&mut self, message: &str) {
+        self.terminal = true;
+        self.phase("failed", message);
+    }
+
+    pub(super) fn finish(&mut self, verdict: &str) {
+        self.terminal = true;
+        let (phase, message) = match verdict {
+            "passed" => ("passed", "终审通过（不代表整个任务已经完成交付）"),
+            "rejected" => ("rejected", "终审提出阻塞问题，等待主执行者处理"),
+            "skipped" => ("skipped", "本轮未执行模型终审"),
+            _ => ("failed", "未获得有效审查结论，请检查调用诊断"),
+        };
+        self.phase(phase, message);
+    }
+
+    fn emit(&self) {
+        let s = self.state.lock().unwrap();
+        let payload = json!({
+            "type": "finish_review_progress", "review_id": self.id, "member_key": self.member_key,
+            "role_label": self.label, "model": self.model, "started_at_ms": self.started_at_ms,
+            "phase": s.phase, "description": s.message, "round": s.round, "tool_steps": s.tool_steps, "tool_budget": s.tool_budget,
+            "last_notice": s.last_notice,
+            "elapsed_ms": self.started.elapsed().as_millis() as u64,
+            "received_chars": self.received_chars.load(Ordering::Relaxed),
+        });
+        drop(s);
+        (self.sink)(payload);
+    }
+}
+
+impl Drop for ReviewProgress {
+    fn drop(&mut self) {
+        if !self.terminal {
+            self.phase("incomplete", "审查已停止或调用结束，未获得有效结论");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn fixture() -> (ReviewProgress, Arc<Mutex<Vec<Value>>>) {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let out = events.clone();
+        (
+            ReviewProgress::with_sink(
+                "finish-review-member-2",
+                "安全审查",
+                "test-model",
+                move |v| out.lock().unwrap().push(v),
+            ),
+            events,
+        )
+    }
+
+    #[test]
+    fn progress_reports_identity_and_counts_but_never_stream_text() {
+        let (mut p, events) = fixture();
+        p.request(2, 1, 8);
+        p.observe(StreamEvent::Thinking {
+            chunk: "PRIVATE_THOUGHT",
+            accumulated: "PRIVATE_THOUGHT",
+        });
+        p.phase("tool", "正在取证：read_file");
+        p.finish("passed");
+        drop(p);
+        let e = events.lock().unwrap();
+        assert_eq!(e[0]["member_key"], "finish-review-member-2");
+        assert_eq!(e[0]["round"], 2);
+        assert_eq!(e[0]["tool_steps"], 1);
+        assert_eq!(e[1]["phase"], "responding");
+        assert_eq!(e[1]["received_chars"], 15);
+        assert_eq!(e.last().unwrap()["phase"], "passed");
+        assert!(!serde_json::to_string(&*e)
+            .unwrap()
+            .contains("PRIVATE_THOUGHT"));
+    }
+
+    #[test]
+    fn retry_notice_survives_next_request_and_failure_is_terminal() {
+        let (mut p, events) = fixture();
+        p.request(1, 0, 8);
+        p.phase("retrying", "等待超时，正在重试");
+        p.request(2, 0, 8);
+        p.fail("审查请求失败，未获得有效结论");
+        drop(p);
+        let e = events.lock().unwrap();
+        assert_eq!(e[2]["last_notice"], "等待超时，正在重试");
+        assert_eq!(e.last().unwrap()["phase"], "failed");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn silent_request_has_heartbeat_without_restarting_future() {
+        let (mut p, events) = fixture();
+        p.request(1, 0, 8);
+        p.wait(tokio::time::sleep(std::time::Duration::from_secs(12)))
+            .await;
+        p.finish("rejected");
+        let e = events.lock().unwrap();
+        assert!(e.iter().filter(|v| v["phase"] == "waiting").count() >= 3);
+        assert_eq!(e.last().unwrap()["phase"], "rejected");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropped_request_closes_progress_without_orphan_heartbeat() {
+        let (p, events) = fixture();
+        p.request(1, 0, 8);
+        {
+            let waiting = p.wait(std::future::pending::<()>());
+            tokio::pin!(waiting);
+            tokio::select! { _ = &mut waiting => unreachable!(), _ = tokio::time::sleep(std::time::Duration::from_secs(6)) => {} }
+        }
+        drop(p);
+        let count = events.lock().unwrap().len();
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        let e = events.lock().unwrap();
+        assert_eq!(e.len(), count);
+        assert_eq!(e.last().unwrap()["phase"], "incomplete");
+    }
+}

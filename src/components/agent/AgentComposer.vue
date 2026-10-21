@@ -411,22 +411,18 @@
                                                     >
                                                         ⚡ Flash
                                                     </button>
-                                                    <select
-                                                        class="slot-model-select"
+                                                    <ModelSelectDropdown
+                                                        class="slot-model-picker"
                                                         :class="{ active: isCustomSpecificModel('writer') }"
+                                                        :model-value="isCustomSpecificModel('writer') ? getSlotChoice('writer') : ''"
+                                                        :models="allModels"
                                                         :disabled="isRunning"
-                                                        :value="isCustomSpecificModel('writer') ? getSlotChoice('writer') : ''"
-                                                        @change="onSlotSelectChange('writer', ($event.target as HTMLSelectElement).value)"
-                                                    >
-                                                        <option value="">{{ isCustomSpecificModel('writer') ? '✕ 恢复默认' : '更多模型…' }}</option>
-                                                        <option
-                                                            v-for="m in allModels"
-                                                            :key="m.id"
-                                                            :value="m.id"
-                                                        >
-                                                            {{ m.display_name || m.name }}
-                                                        </option>
-                                                    </select>
+                                                        placeholder="搜索并指定写入模型…"
+                                                        size="sm"
+                                                        @update:model-value="onSlotSelectChange('writer', $event)"
+                                                    />
+                                                    <button v-if="isCustomSpecificModel('writer')" type="button" class="slot-choice-pill"
+                                                        :disabled="isRunning" @click="onSlotSelectChange('writer', '')">恢复默认</button>
                                                 </div>
                                             </div>
 
@@ -689,33 +685,30 @@
                                                     >
                                                         ⚡ Flash
                                                     </button>
-                                                    <select
-                                                        class="slot-model-select"
+                                                    <ModelSelectDropdown
+                                                        class="slot-model-picker"
                                                         :class="{ active: isCustomSpecificModel('reviewer') }"
+                                                        :model-value="isCustomSpecificModel('reviewer') ? getSlotChoice('reviewer') : ''"
+                                                        :models="allModels"
                                                         :disabled="isRunning"
-                                                        :value="isCustomSpecificModel('reviewer') ? getSlotChoice('reviewer') : ''"
-                                                        @change="onSlotSelectChange('reviewer', ($event.target as HTMLSelectElement).value)"
-                                                    >
-                                                        <option value="">{{ isCustomSpecificModel('reviewer') ? '✕ 恢复默认' : '更多模型…' }}</option>
-                                                        <option
-                                                            v-for="m in allModels"
-                                                            :key="m.id"
-                                                            :value="m.id"
-                                                        >
-                                                            {{ m.display_name || m.name }}
-                                                        </option>
-                                                    </select>
+                                                        placeholder="搜索并指定审查模型…"
+                                                        size="sm"
+                                                        @update:model-value="onSlotSelectChange('reviewer', $event)"
+                                                    />
+                                                    <button v-if="isCustomSpecificModel('reviewer')" type="button" class="slot-choice-pill"
+                                                        :disabled="isRunning" @click="onSlotSelectChange('reviewer', '')">恢复默认</button>
                                                 </div>
                                             </div>
 
                                             <div class="station-model-bar" title="仅使用你指定的备用；为空不自动换模型。备用失败后停止并保留进度。">
                                                 <span class="station-model-label">审查备用:</span>
-                                                <select class="slot-model-select" :disabled="isRunning"
-                                                    :value="modelRouting.reviewer_backup_model || ''"
-                                                    @change="setReviewerBackup(($event.target as HTMLSelectElement).value)">
-                                                    <option value="">不启用（默认）</option>
-                                                    <option v-for="m in allModels" :key="m.id" :value="m.id">{{ m.display_name || m.name }}</option>
-                                                </select>
+                                                <ModelSelectDropdown class="slot-model-picker"
+                                                    :model-value="modelRouting.reviewer_backup_model || ''"
+                                                    :models="allModels" :disabled="isRunning" size="sm"
+                                                    placeholder="不启用备用（默认）"
+                                                    @update:model-value="setReviewerBackup($event)" />
+                                                <button v-if="modelRouting.reviewer_backup_model" type="button" class="slot-choice-pill"
+                                                    :disabled="isRunning" @click="setReviewerBackup('')">关闭备用</button>
                                                 <span class="reviewer-backup-hint">未配置或备用失败：停止并保留进度</span>
                                             </div>
 
@@ -867,22 +860,18 @@
                                                     >
                                                         ⚡ Flash
                                                     </button>
-                                                    <select
-                                                        class="slot-model-select"
+                                                    <ModelSelectDropdown
+                                                        class="slot-model-picker"
                                                         :class="{ active: isCustomSpecificModel('scout') }"
+                                                        :model-value="isCustomSpecificModel('scout') ? getSlotChoice('scout') : ''"
+                                                        :models="allModels"
                                                         :disabled="isRunning"
-                                                        :value="isCustomSpecificModel('scout') ? getSlotChoice('scout') : ''"
-                                                        @change="onSlotSelectChange('scout', ($event.target as HTMLSelectElement).value)"
-                                                    >
-                                                        <option value="">{{ isCustomSpecificModel('scout') ? '✕ 恢复默认' : '更多模型…' }}</option>
-                                                        <option
-                                                            v-for="m in allModels"
-                                                            :key="m.id"
-                                                            :value="m.id"
-                                                        >
-                                                            {{ m.display_name || m.name }}
-                                                        </option>
-                                                    </select>
+                                                        placeholder="搜索并指定探针模型…"
+                                                        size="sm"
+                                                        @update:model-value="onSlotSelectChange('scout', $event)"
+                                                    />
+                                                    <button v-if="isCustomSpecificModel('scout')" type="button" class="slot-choice-pill"
+                                                        :disabled="isRunning" @click="onSlotSelectChange('scout', '')">恢复默认</button>
                                                 </div>
                                             </div>
 

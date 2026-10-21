@@ -6,6 +6,7 @@ import { usePersistedAgentConversation, type PersistedConversationMessage } from
 import type { ArtifactDescriptor, AgentArtifactInput } from "../types/artifact";
 import { normalizeArtifact, normalizeArtifactList } from "../utils/artifact";
 import { finishSummaryText } from "../utils/agentCompletionText";
+import { applyReviewProgress, type ReviewProgressItem } from "../components/agent/reviewProgress";
 
 export interface AgentHistoryTurn {
     id: string;
@@ -366,6 +367,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
 
     const activeStepNumber = ref<number>(1);
     const actionPhaseText = ref<string>("");
+    const reviewProgress = ref<ReviewProgressItem[]>([]);
+    const reviewProgressStartedAt = ref(0);
     const lastRunTelemetry = ref<AgentSessionTelemetry | null>(null);
     const completionMessage = ref("");
     const streamingSummary = ref("");
@@ -1121,6 +1124,20 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
 
         const eventType = String(payload.event_type || payload.type || payload.stage || "").toLowerCase();
 
+        // 终审独立进度：按成员归属，不冒充主 Agent 思考/最终判决，不用心跳刷满日志。
+        if (eventType === "finish_review_progress") {
+            const next = applyReviewProgress(reviewProgress.value, payload, Math.max(reviewProgressStartedAt.value, runStartedAt.value || 0));
+            if (next !== reviewProgress.value) {
+                const current = next.find(item => item.id === payload.review_id);
+                const previous = reviewProgress.value.find(item => item.memberKey === current?.memberKey);
+                reviewProgress.value = next;
+                if (current && (previous?.phase !== current.phase || previous?.description !== current.description || previous?.id !== current.id)) {
+                    appendLog(`[终审 · ${current.label} · ${current.model}] ${current.description}`);
+                }
+            }
+            return;
+        }
+
         // 动作阶段事件（如同步 MCP、装配系统提示词、等待首字）
         if (eventType === "action_phase") {
             const desc = toText(payload.description || payload.message);
@@ -1672,6 +1689,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         liveTtft.value = null;
         activeStepNumber.value = 1;
         actionPhaseText.value = "";
+        reviewProgress.value = [];
+        reviewProgressStartedAt.value = 0;
         completionMessage.value = "";
         streamingSummary.value = "";
         finishOutput.value = null;
@@ -1719,6 +1738,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             if (payload?.session_id === sid) {
                 // 新一代任务已亮明身份，启动窗口结束；此后属于本代的 done 事件正常重置运行态
                 awaitingRunStart = false;
+                reviewProgress.value = [];
+                reviewProgressStartedAt.value = Date.now();
                 if (payload?.goal) {
                     currentGoal.value = payload.goal;
                 }
@@ -2152,6 +2173,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         thinkingCollapsed,
         thinkingDurationMs,
         actionPhaseText,
+        reviewProgress,
         activeStepNumber,
         logs,
         humanInterventions,
