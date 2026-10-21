@@ -395,7 +395,7 @@ export interface ModelRouting {
     role_models: Record<string, string>;
     /** 阶段审查门禁覆盖：undefined/null/"" = 跟随全局默认；"disabled"/"none" = 免审直通；其他 = 角色卡名称 */
     stage_reviewer_override?: string;
-    /** 阶段审查联合会审模式：true = 并发唤起匹配专家（至多 3 位）；false = 智能自适应单审（默认） */
+    /** 人数选择：方案/终审及适用的阶段审查最多 3 位；保留旧字段名兼容存储。 */
     stage_review_committee?: boolean;
     /** 审查失败时仅尝试此模型；空串/缺省不启用备用 */
     reviewer_backup_model?: string;

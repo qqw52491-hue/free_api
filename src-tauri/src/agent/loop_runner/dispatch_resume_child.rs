@@ -104,155 +104,32 @@ pub(super) async fn dispatch_resume_child(
                             route: "host_rejection:status_not_succeeded".to_string(),
                         }
                     } else if is_review_kind {
-                        // 🌟 Reviewer 纯上下文对质分支：只读审查者无工作区副本，纯继承脱水历史进行反驳研判
-                        let mut messages: Vec<Value> = match hist_json.as_deref() {
-                            Some(raw) => serde_json::from_str(raw).unwrap_or_default(),
-                            None => Vec::new(),
-                        };
-                        crate::agent::child_reviewer::retire_consumer_history(&mut messages);
-                        crate::agent::child_reviewer::refresh_review_instructions(&mut messages);
-                        if messages.is_empty() {
-                            DispatchResult { view: None,
-                                stdout: String::new(),
-                                stderr: "❌ 该审查任务未留存历史对话记录，无法恢复对质。".to_string(),
-                                success: false,
-                                route: "host_rejection:missing_history".to_string(),
-                            }
-                        } else {
-                            messages.push(json!({
-                                "role": "user",
-                                "content": format!(
-                                    "【父 Agent 反驳与对质】\n{}\n\n【对质研判规则】：\n请针对上述反驳与证据进行重新研判，输出更新后的审查 JSON：\n1. 若父 Agent 反驳与测试证据成立，请对该项缺陷进行撤回：在 objection_verdicts 中将该 finding_id 的 verdict 设为 withdraw 并给出裁决理由，或从 findings 中剔除并在 missing_evidence 说明已撤回；\n2. 若仍坚持该缺陷，必须在 why 中给出全新证据与理由，或在 objection_verdicts 中将 verdict 设为 maintain；\n3. 重新推导 routing（certain/needs_alignment/blocked）。",
-                                    followup_msg
-                                )
-                            }));
-
-                            let routing = crate::agent::router::AgentRouter::route_for_role(
-                                ctx.context,
-                                ctx.model_routing,
-                                ctx.step_id,
-                                crate::agent::router::roles::REVIEWER,
-                            );
-                            let model_to_use = if !child_model.is_empty() {
-                                child_model
-                            } else if ctx.model_routing.auto_cross_family_reviewer {
-                                let (preferred, _note) = crate::agent::router::prefer_cross_family_reviewer(
-                                    &*ctx.state.inner().0.lock().unwrap(),
-                                    &routing.model_id,
-                                );
-                                preferred
-                            } else {
-                                routing.model_id.clone()
-                            };
-                            let reasoning_effort = ctx.model_routing.reasoning_effort_for(&routing.tier).to_string();
-
-                            // 对质目标是阶段审查任务时标记 rebuttal 用途；其余继承原任务用途
-                            let is_rebuttal_target = ctx.checkpoint.is_stage_review_target(ctx.state.inner(), target_child_id);
-                            let mut resume_identity = crate::agent::child_reviewer::ChildRunIdentity::inherited(
-                                &prev_identity,
-                                if is_rebuttal_target {
-                                    Some("rebuttal".to_string())
-                                } else {
-                                    prev_identity.purpose.clone().or(Some("review".to_string()))
-                                },
-                            );
-
-                            crate::agent::child_reviewer::retire_consumer_schema_json(
-                                &mut resume_identity.contract_schema,
-                            );
-
-                            let new_child_run_id = match crate::agent::child_reviewer::begin_child_run_extended(
-                                ctx.state.inner(),
-                                ctx.parent_run_id,
-                                ctx.final_session_id,
-                                ctx.workspace_dir,
-                                &model_to_use,
-                                0,
-                                "review",
-                                None,
-                                None,
-                                Some(target_child_id),
-                                &resume_identity,
+                        let routing = crate::agent::router::AgentRouter::route_for_role(
+                            ctx.context, ctx.model_routing, ctx.step_id,
+                            crate::agent::router::roles::REVIEWER,
+                        );
+                        let model_to_use = if !child_model.is_empty() { child_model }
+                            else if ctx.model_routing.auto_cross_family_reviewer {
+                                crate::agent::router::prefer_cross_family_reviewer(
+                                    &*ctx.state.inner().0.lock().unwrap(), &routing.model_id,
+                                ).0
+                            } else { routing.model_id.clone() };
+                        match ModelConfig::from_db_state(ctx.state.inner(), &model_to_use) {
+                            Err(error) => DispatchResult { view: None, success: false,
+                                stdout: String::new(), stderr: format!("加载模型配置失败：{error}"),
+                                route: "host_rejection:model_config_failed".into() },
+                            Ok(config) => match crate::agent::child_reviewer::spawn_review_resume(
+                                ctx.state.inner(), ctx.parent_run_id, ctx.final_session_id,
+                                ctx.workspace_dir, target_child_id, followup_msg, config,
+                                ctx.model_routing.reasoning_effort_for(&routing.tier).to_string(),
+                                ctx.checkpoint, ctx.interrupt_rx.clone(),
                             ) {
-                                Ok(id) => {
-                                    // 对质身份已由台账 purpose='rebuttal' 盖章承担
-                                    //（resume_identity 落库时写入），无需 checkpoint 指针
-                                    let _ = is_rebuttal_target;
-                                    id
-                                }
-                                Err(err) => {
-                                    return Ok(ArmOutcome::Early(DispatchResult { view: None,
-                                        stdout: String::new(),
-                                        stderr: format!("❌ 创建审查对质任务失败: {}", err),
-                                        success: false,
-                                        route: "host_rejection:begin_run_failed".to_string(),
-                                    }));
-                                }
-                            };
-
-                            let mut config = match ModelConfig::from_db_state(ctx.state.inner(), &model_to_use) {
-                                Ok(cfg) => cfg,
-                                Err(err) => {
-                                    return Ok(ArmOutcome::Early(DispatchResult { view: None,
-                                        stdout: String::new(),
-                                        stderr: format!("❌ 加载模型配置失败: {}", err),
-                                        success: false,
-                                        route: "host_rejection:model_config_failed".to_string(),
-                                    }));
-                                }
-                            };
-                            config.max_tokens = 900;
-                            if !ctx.checkpoint.plan_phase.is_approved() {
-                                // 反驳对质同样消耗审查预算：必须走统一预扣，堵住无上限自增旁路
-                                if let Err(reason) = ctx.checkpoint.reserve_plan_review_round() {
-                                    return Ok(ArmOutcome::Early(DispatchResult { view: None,
-                                        stdout: String::new(),
-                                        stderr: format!("【审查轮数已达上限】{}\n{}", reason, crate::agent::gate_messages::reviewer_retry_limit()),
-                                        success: false,
-                                        route: "plan_gatekeeper:reviewer_retry_limit".to_string(),
-                                    }));
-                                }
-                            }
-
-                            let schema = match resume_identity.contract_schema.as_deref()
-                                .map(serde_json::from_str::<crate::agent::protocol::ContractSchema>)
-                                .transpose()
-                            {
-                                Ok(schema) => schema,
-                                Err(error) => {
-                                    let elapsed = 0;
-                                    crate::agent::child_reviewer::finish_child_run(
-                                        ctx.state.inner(), &new_child_run_id, "invalid_output", elapsed,
-                                        0, 0, Some(crate::agent::types::ChildErrorKind::InvalidOutput),
-                                        Some(&crate::agent::child_reviewer::child_invalid_result_json(
-                                            &new_child_run_id, elapsed, 0, 0, "", &format!("宿主保存的审查契约无法解析：{error}"))),
-                                    );
-                                    return Ok(ArmOutcome::Early(DispatchResult { view: None,
-                                        stdout: String::new(), stderr: "审查契约记录无法解析，未发起模型请求；原记录已保留。".into(),
-                                        success: false, route: "resume_child:invalid_saved_schema".into(),
-                                    }));
-                                }
-                            };
-                            if let Some(schema) = schema.as_ref() {
-                                messages.push(json!({"role":"user", "content":format!(
-                                    "请重新提交完整审查结果，不能只提交差异或省略仍适用的必填字段。\n{}",
-                                    schema.render_prompt_instructions())}));
-                            }
-                            tokio::spawn(crate::agent::child_reviewer::run_resumed_review(
-                                DbState(ctx.state.0.clone()), new_child_run_id.clone(),
-                                ctx.final_session_id.to_string(), config, reasoning_effort,
-                                messages, schema, ctx.interrupt_rx.clone(),
-                            ));
-
-                            DispatchResult { view: None,
-                                stdout: format!(
-                                    "✅ 审查专家对质已成功启动：新 child_run_id={}（纯上下文继承唤醒，正在重新研判反驳）。你可以继续执行其他工作，或使用 wait_jobs 等待结果。",
-                                    new_child_run_id
-                                ),
-                                stderr: String::new(),
-                                success: true,
-                                route: "resume_child:reviewer_rebuttal_spawned".to_string(),
-                            }
+                                Ok(id) => DispatchResult { view: None, success: true,
+                                    stdout: format!("审查专家对质已启动：child_run_id={id}。继承原任务上下文；其他成员结论保留，可继续独立工作或 wait_jobs 等待。"),
+                                    stderr: String::new(), route: "resume_child:reviewer_rebuttal_spawned".into() },
+                                Err(error) => DispatchResult { view: None, success: false,
+                                    stdout: String::new(), stderr: error.message, route: error.route.into() },
+                            },
                         }
                     } else {
                         // 校验工作区物理存在性（写入/侦察类 worker 必须依赖工作区副本）

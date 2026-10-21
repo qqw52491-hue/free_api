@@ -25,6 +25,15 @@ fn response() -> Value {
 }
 
 async fn start(mock: &MockReviewer, schema: ContractSchema, rx: watch::Receiver<u64>) -> String {
+    start_with_authority(mock, schema, rx, None).await
+}
+
+async fn start_with_authority(
+    mock: &MockReviewer,
+    schema: ContractSchema,
+    rx: watch::Receiver<u64>,
+    can_finalize: Option<bool>,
+) -> String {
     let identity = ChildRunIdentity {
         purpose: Some("plan_review".into()),
         contract_schema: Some(serde_json::to_string(&schema).unwrap()),
@@ -57,9 +66,24 @@ async fn start(mock: &MockReviewer, schema: ContractSchema, rx: watch::Receiver<
         "auto".into(),
         messages,
         Some(schema),
+        can_finalize,
         rx,
     ));
     id
+}
+
+#[tokio::test]
+async fn resumed_committee_member_cannot_reclaim_plan_finalization() {
+    let mut raw = response();
+    raw["plan_review_can_finalize"] = json!(true);
+    let mock = MockReviewer::new(vec![raw]).await;
+    let (_tx, rx) = watch::channel(0);
+    let id = start_with_authority(&mock, schema(), rx, Some(false)).await;
+    let (status, result) = mock.wait_terminal(&id).await;
+    assert_eq!(status, "succeeded");
+    assert_eq!(result["plan_review_can_finalize"], false);
+    assert_eq!(result["decision"], "approved");
+    assert_eq!(mock.requests.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]

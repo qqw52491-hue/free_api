@@ -10,6 +10,7 @@ use serde_json::json;
 use std::path::Path;
 use tauri::AppHandle;
 use tokio::sync::watch;
+mod team;
 
 /// submit_plan 编排：校验 → 组装 Tech Lead 证据包 → spawn（唯一可失败的外部副作用）
 /// → 成功后由 checkpoint.commit_plan_submission 一次合并全部状态。
@@ -84,7 +85,8 @@ pub async fn handle_submit_plan(
     // 派发链（自动开启审查）；Block 直接拒绝。写入处门禁仍兜底——此处只是把
     // 「撞上才知道要审查」换成「报方案时拿到判定回执」。
     if checkpoint.plan_mode == crate::agent::checkpoint::PlanExecutionMode::Auto {
-        if let Some(verdict) = auto_policy_verdict(checkpoint, submission, workspace_dir, step_id) {
+        if let Some(verdict) = auto_policy_for_review_mode(checkpoint, submission, workspace_dir,
+            step_id, model_routing.stage_review_committee) {
             return verdict;
         }
         // Escalate：auto_policy_verdict 已把模式切换为 CrossReview，
@@ -382,59 +384,17 @@ pub async fn handle_submit_plan(
         snapshot = snapshot.with_specialized_context(spec);
     }
 
-    // ---- 唯一可失败的外部副作用先行；成功后才做一致的状态合并 ----
-    match snapshot
-        .spawn(
-            Some(app.clone()),
-            db,
-            parent_run_id,
-            final_session_id,
-            workspace_dir,
-            interrupt_rx,
-            None,
-        )
-        .await
-    {
-        Ok(child_run_id) => {
-            // 批次锚点 = 快照盖章的 batch_id（子 run 行已写入），
-            // 成员身份此后全部由台账 batch_id+consumed_at 推导
-            let batch_id = snapshot.batch_id.clone().unwrap_or_default();
-            checkpoint.commit_plan_submission(
-                submission.clone(),
-                &batch_id,
-                &snapshot,
-                step_id,
-            );
-            let _ = child_run_id;
-            DispatchResult { view: None,
-                success: true,
-                stdout: if is_revision {
-                    format!(
-                        "【✅ 修订方案已提交并重开审查】原放行状态已撤销，写入门禁重新生效。{} 修订评审已异步派发（child_run_id: {}，第 {} 轮）。\n\
-                         请调用 wait_jobs(job_ids:[\"{}\"]) 挂起等待裁决；结论注入后按 decision 行动：approved 恢复写入、rebuttal 继续修订重审、escalate 按指定专家派联合会审。\n\
-                         【修订轮附带义务】获批后请用 todo_update 对照新方案核对任务台账：作废与新方案无关的待办、补充新工作项；已完成的有效工作保持 done 不受影响。",
-                        card.label, child_run_id, discussion_round, child_run_id
-                    )
-                } else {
-                    format!(
-                        "【✅ 方案已提交并进入审查】结构化方案已落账，{} 方案评审已异步派发（child_run_id: {}，第 {} 轮）。\n\
-                         请调用 wait_jobs(job_ids:[\"{}\"]) 挂起等待裁决；结论注入后按 decision 行动：approved 放行写入、rebuttal 修订后重审、escalate 按指定专家派联合会审。",
-                        card.label, child_run_id, discussion_round, child_run_id
-                    )
-                },
-                stderr: String::new(),
-                route: "submit_plan:dispatched".to_string(),
-            }
-        }
-        Err(error) => reject(
-            format!(
-                "【⚠️ 方案提交失败】Tech Lead 审查任务派发未成功（{}），本次 submit_plan 未落账，方案与预算状态均未变。\n\
-                 请修正后重新 submit_plan，或改用 child_reviewer 手动派发。",
-                error
-            ),
-            "submit_plan:dispatch_failed",
-        ),
-    }
+    let cards = crate::agent::review_team::review_team(
+        db, context, &target_files, &model_routing.disabled_role_cards,
+        model_routing.stage_review_committee, Some(card),
+    );
+    let snapshots = team::prepare_snapshots(
+        db, workspace_dir, model_routing, &routing, snapshot, &cards,
+    ).await;
+    team::dispatch_plan_team(Some(app.clone()), db, parent_run_id, final_session_id,
+        workspace_dir, checkpoint, submission, step_id, discussion_round, is_revision,
+        model_routing.stage_review_committee, snapshots, interrupt_rx).await
+
 }
 
 /// Auto 模式下 submit_plan 的策略预检：把「写入时才跑的判定」前置为正常工具结果。
@@ -445,6 +405,19 @@ pub async fn handle_submit_plan(
 ///   Tech Lead 派发链（自动开启审查，复用整套批次台账/裁决/放行仪式）。
 /// - Block   → 返回拒绝结果（危险命令黑名单级）。
 /// 返回 Some = 终态答复；None = 继续走正常审查派发。
+fn auto_policy_for_review_mode(
+    checkpoint: &mut AgentCheckpoint, submission: &crate::agent::types::PlanSubmission,
+    workspace: &Path, step: usize, committee: bool,
+) -> Option<DispatchResult> {
+    let mut probe = checkpoint.clone();
+    let verdict = auto_policy_verdict(&mut probe, submission, workspace, step);
+    if committee && verdict.as_ref().is_some_and(|v|v.route == "plan_gatekeeper:auto_preflight_fast_pass") {
+        return None;
+    }
+    *checkpoint = probe;
+    verdict
+}
+
 fn auto_policy_verdict(
     checkpoint: &mut AgentCheckpoint,
     submission: &crate::agent::types::PlanSubmission,
@@ -577,5 +550,15 @@ mod tests {
             .expect("empty targets must fast-pass");
         assert!(res.success);
         assert!(cp.approved_target_files.is_none());
+    }
+
+    #[test]
+    fn explicit_committee_cannot_fast_pass_a_formally_submitted_plan() {
+        let mut cp = auto_checkpoint();
+        let submission = PlanSubmission { plan_summary:"只读评估方案但用户明确要求多人审查".into(), ..Default::default() };
+        assert!(auto_policy_for_review_mode(&mut cp,&submission,Path::new("/tmp"),3,true).is_none());
+        assert!(cp.submitted_plan.is_none(),"进入派发前不能提前落免审状态");
+        assert_eq!(cp.plan_mode,PlanExecutionMode::Auto,"人数选择不顺带改变阶段审查模式");
+        assert!(auto_policy_for_review_mode(&mut cp,&submission,Path::new("/tmp"),3,false).is_some());
     }
 }

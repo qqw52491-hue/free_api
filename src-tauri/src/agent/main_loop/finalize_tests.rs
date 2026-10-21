@@ -25,6 +25,7 @@ fn ready(c: &SandwichContext, cp: &AgentCheckpoint) -> FinalizationReceipt {
         ),
         step_id: 42,
         evidence_index_fingerprint: None,
+        review_policy_fingerprint: String::new(),
         frozen_verification_run: None,
         material_notices: vec![],
         verification: ReceiptVerification::Verified {

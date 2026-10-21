@@ -42,6 +42,24 @@
         ModelRoutingConfig::default()
     }
 
+    #[test]
+    fn committee_choice_does_not_add_stage_review_triggers() {
+        let mut context=SandwichContext::new("sys".into(),"goal".into());
+        context.record_side_effect(1,"edit_file".into(),"src/a.rs".into());
+        let mut cp=approved_checkpoint();
+        let (root,db)=mk_db("people-trigger");
+        let instruction=instruction_with_todo_done();
+        let one=default_routing();let mut many=one.clone();many.stage_review_committee=true;
+        assert_eq!(should_fire(&cp,&db,&context,&instruction,&one),should_fire(&cp,&db,&context,&instruction,&many));
+        cp.set_execution_mode(PlanExecutionMode::Auto);
+        assert!(should_fire(&cp,&db,&context,&instruction,&many).is_none());
+        cp.set_execution_mode(PlanExecutionMode::CrossReview);
+        let mut triage=crate::agent::triage::TriageVerdict::fallback("fixture");
+        triage.stage_review_mode="none".into();cp.triage_verdict=Some(triage);
+        assert!(should_fire(&cp,&db,&context,&instruction,&many).is_none());
+        let _=std::fs::remove_dir_all(root);
+    }
+
     /// ── 名单退役版台账夹具：阶段成员身份由 agent_child_runs 的
     /// batch_id+purpose+consumed_at 承担 ──
     fn mk_db(tag: &str) -> (std::path::PathBuf, crate::db::DbState) {

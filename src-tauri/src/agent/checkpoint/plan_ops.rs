@@ -92,6 +92,7 @@ impl AgentCheckpoint {
         self.plan_review_batch_id = Some(batch_id.into());
         self.plan_review_expected_count = member_count as u32;
         self.plan_review_deliveries.clear();
+        self.review_delivery_sources.clear();
         if member_count > 1 {
             // 已并发派发了多个审查员（联合会审），清除升级挂起状态
             self.plan_escalation_required = None;
@@ -296,6 +297,7 @@ impl AgentCheckpoint {
     /// （旧手写名单时代对质续跑不在名单里，标志恒 true 掩盖了在途工作）。
     pub(crate) fn refresh_consumed_flags(&mut self, db: &DbState) {
         self.adopt_legacy_membership(db);
+        self.refresh_review_sources(db);
         if self.plan_review_batch_id.is_some() {
             self.plan_reviewer_consumed = self.plan_review_batch_complete(db);
         }
@@ -362,6 +364,22 @@ impl AgentCheckpoint {
         };
         if !in_batch {
             return;
+        }
+
+        self.refresh_review_sources(db);
+        if let Some(id) = run_id {
+            if self.plan_review_deliveries.contains_key(id) { return; }
+            let source = ReviewDeliverySource::from_run(db, id);
+            let superseded = self.current_review_deliveries(None).iter().any(|(_, current, _)|
+                current.same_task(&source) && current.attempt_id > source.attempt_id);
+            self.review_delivery_sources.insert(id.to_owned(), source);
+            if superseded {
+                // 迟到回执保留为历史，不执行旧批准的定稿/升级等副作用。
+                self.plan_review_deliveries.insert(id.to_owned(), delivery.clone());
+                self.refresh_review_sources(db);
+                self.plan_reviewer_consumed = self.plan_review_batch_complete(db);
+                return;
+            }
         }
 
         let mut delivery = delivery.clone();
@@ -433,7 +451,7 @@ impl AgentCheckpoint {
                     .get_extra_str("decision")
                     .map(|d| d.eq_ignore_ascii_case("approved"))
                     .unwrap_or(false);
-                if still_approved {
+                if still_approved && delivery.extra.get("plan_review_can_finalize").and_then(|v|v.as_bool()) != Some(false) {
                     // Tech Lead 定稿权：approved 携带 revised_* 修订字段时，以审查者版本
                     // 覆盖 submitted_plan 成为最终执行方案（省掉"打回→重提"整轮往返）。
                     if let Some(rev) = Self::plan_revision_from(&delivery) {
@@ -489,10 +507,7 @@ impl AgentCheckpoint {
         self.review_total_maintained += maintained;
 
         // 现场真聚合：blocking 缺陷取并集，四维评分取算术均值
-        self.last_review_blocking_count = self
-            .aggregate_unwithdrawn_blockings()
-            .len() as u32;
-        self.last_review_scorecard = self.aggregate_scorecard();
+        self.refresh_review_sources(db);
 
         // 齐套屏障：台账推导——批次全部成员回执已消费才置 consumed
         if self.plan_review_batch_complete(db) {
@@ -507,45 +522,29 @@ impl AgentCheckpoint {
 
     /// 现场真聚合：提取所有已交付审查员的未撤回 blocking 级缺陷（并集）
     pub fn aggregate_unwithdrawn_blockings(&self) -> Vec<crate::agent::child_reviewer::ReviewFinding> {
-        let mut blockings = Vec::new();
-        for del in self.plan_review_deliveries.values() {
-            for f in &del.findings {
-                if f.severity.eq_ignore_ascii_case("blocking")
-                    && !del.withdrawn_findings.iter().any(|w| w == &f.id)
-                {
-                    blockings.push(f.clone());
-                }
-            }
-        }
-        blockings
+        self.current_review_findings().into_iter().map(|(_, finding)| finding).collect()
     }
 
     /// 同一道审查题的续跑以已落账的最新 attempt 为准；独立审查员的修订裁决各自保留。
     /// 复用台账 task_id/attempt_id，不让历史 rebuttal 在后续 approved 后永久锁住方案。
     pub(crate) fn plan_revisions_required(&self, db: &DbState) -> bool {
-        let mut latest = BTreeMap::new();
-        for (run_id, delivery) in &self.plan_review_deliveries {
-            let identity = crate::agent::child_reviewer::load_run_identity(db, run_id);
-            let (task, attempt) = identity
-                .map(|i| (i.task_id, i.attempt_id))
-                .unwrap_or_else(|| (run_id.clone(), 0));
-            let value = latest.entry(task).or_insert((attempt, delivery));
-            if attempt > value.0 {
-                *value = (attempt, delivery);
-            }
-        }
-        latest.values().any(|(_, delivery)| {
+        self.current_review_deliveries(Some(db)).iter().any(|(_, _, delivery)| {
             delivery.get_extra_str("decision")
-                .is_some_and(|decision| decision.eq_ignore_ascii_case("rebuttal"))
+                .is_some_and(|decision| {
+                    decision.eq_ignore_ascii_case("rebuttal")
+                        // 显式多人批次中，每位成员的升级裁决独立保留，不能由其他成员 approved 清除。
+                        || (decision.eq_ignore_ascii_case("escalate")
+                            && delivery.extra.get("plan_review_can_finalize").and_then(|v| v.as_bool()) == Some(false))
+                })
         })
     }
 
     /// 现场真聚合：计算所有已交付审查员 Scorecard 的算术平均值（真平均）
     pub fn aggregate_scorecard(&self) -> Option<crate::agent::child_reviewer::ReviewScorecard> {
         let scorecards: Vec<&crate::agent::child_reviewer::ReviewScorecard> = self
-            .plan_review_deliveries
-            .values()
-            .filter_map(|d| d.scorecard.as_ref())
+            .current_review_deliveries(None)
+            .into_iter()
+            .filter_map(|(_, _, d)| d.scorecard.as_ref())
             .collect();
         if scorecards.is_empty() {
             return None;
@@ -607,7 +606,7 @@ impl AgentCheckpoint {
         // 齐套投影：批次锚点存在且 consumed 未置位 = 尚有成员在途
         let batch_incomplete = self.plan_review_batch_id.is_some()
             && !self.plan_reviewer_consumed;
-        let delivered_reviewers = self.plan_review_deliveries.len();
+        let delivered_reviewers = self.current_review_deliveries(None).len();
         let expected_reviewers = self.plan_review_expected_count as usize;
         let budget_exhausted = self.plan_reviewer_retry_count >= MAX_PLAN_REVIEWER_RETRIES;
         let human_waived = self.human_waiver_text().is_some();
@@ -615,7 +614,7 @@ impl AgentCheckpoint {
         crate::agent::context::types::PlanGateProjection {
             mode: self.plan_mode.as_str().to_string(),
             phase: self.plan_phase.as_str().to_string(),
-            plan_required: self
+            plan_required: crate::agent::plan_gate::submitted_review_active(self) || self
                 .triage_verdict
                 .as_ref()
                 .map_or(false, |v| v.requires_plan_gate())
@@ -676,8 +675,7 @@ impl AgentCheckpoint {
 
     /// 预扣一轮方案审查预算。已到上限返回 Err（调用方应拒绝派发并引导人工放行）。
     ///
-    /// 所有消耗审查轮次的路径（常规派发、resume_child 反驳对质）都必须走这里，
-    /// 防止旁路无上限自增绕过熔断。
+    /// 只预扣预算和标记在途，不清除其他成员的有效结论。新批次由 set_plan_review_batch 重置。
     pub fn reserve_plan_review_round(&mut self) -> Result<(), String> {
         let max_rounds = max_plan_reviewer_rounds();
         if self.plan_reviewer_retry_count >= max_rounds {
@@ -685,9 +683,6 @@ impl AgentCheckpoint {
         }
         self.plan_reviewer_retry_count += 1;
         self.plan_reviewer_consumed = false;
-        self.last_review_blocking_count = 0;
-        self.last_review_scorecard = None;
-        self.plan_review_deliveries.clear();
         Ok(())
     }
 

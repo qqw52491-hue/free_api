@@ -40,7 +40,8 @@ pub struct ModelRoutingConfig {
     /// 会话级阶段审查门禁覆盖："disabled"（直通免审）| 角色名（如 "frontend_ui_reviewer"）| 空串/缺省（跟随全局默认）
     #[serde(default)]
     pub stage_reviewer_override: Option<String>,
-    /// 阶段审查联合会审模式：true = 并发唤起匹配专家（至多 3 位）；false = 智能自适应单审（默认）
+    /// 审查人数：true = 方案/终审及适用的阶段审查最多 3 位；false = 单审（默认）。
+    /// 保留 stage_review_committee 字段名兼容已有前端配置，不额外触发阶段审查。
     #[serde(default)]
     pub stage_review_committee: bool,
     /// 本会话排除/休眠的角色卡标识列表（无需修改全局工坊，即可在当前会话动态启闭某专家）

@@ -180,6 +180,12 @@ mod tests_inner {
         checkpoint.last_review_scorecard = Some(crate::agent::child_reviewer::ReviewScorecard::new(90, 80, 85, Some(70)));
         approved_review(&mut checkpoint);
         checkpoint.last_review_blocking_count = 2;
+        // 当前门禁从有效发现推导数量，夹具需包含实际缺陷，而不只手改计数器。
+        checkpoint.plan_review_deliveries.get_mut("review-1").unwrap().findings =
+            serde_json::from_value(serde_json::json!([
+                {"id":"F1","severity":"blocking","why":"旧调用仍然不兼容"},
+                {"id":"F2","severity":"blocking","why":"新分支缺少边界处理"}
+            ])).unwrap();
         let rej_blocking = crate::agent::loop_runner::check_pre_write_gatekeeper(
             &mut checkpoint, &context, &db, "test_run", 3, false,
         );
@@ -188,6 +194,8 @@ mod tests_inner {
 
         // 阶段 3c: blocking 异议清零 -> 放行并推进为 Approved
         checkpoint.last_review_blocking_count = 0;
+        checkpoint.plan_review_deliveries.get_mut("review-1").unwrap().withdrawn_findings =
+            vec!["F1".into(), "F2".into()];
         let rej3 = crate::agent::loop_runner::check_pre_write_gatekeeper(
             &mut checkpoint, &context, &db, "test_run", 3, false,
         );

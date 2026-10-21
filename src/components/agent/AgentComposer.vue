@@ -505,8 +505,8 @@
                                         <div class="squad-section gate-section">
                                             <div class="section-head">
                                                 <div class="section-title-wrap">
-                                                    <span class="section-title">🛡️ 阶段门禁策略</span>
-                                                    <span class="section-desc">阶段推进防翻车把关规则 (会话独立)</span>
+                                                    <span class="section-title">🛡️ 审查人数与阶段策略</span>
+                                                    <span class="section-desc">方案与终审共用人数选择；阶段审查另按触发条件</span>
                                                 </div>
                                                 <div
                                                     class="gate-current-status-tag"
@@ -516,11 +516,8 @@
                                                         'status-default': !isStageReviewerDisabled && !isCommitteeMode,
                                                     }"
                                                 >
-                                                    <span v-if="isStageReviewerDisabled">⚡ 免审直通</span>
-                                                    <span v-else-if="isCommitteeMode">👥 联合会审 ({{ activeReviewerCards.length }})</span>
-                                                    <span v-else-if="activeReviewerCards.length === 0">🌐 异构对抗兜底</span>
-                                                    <span v-else-if="activeReviewerCards.length === 1">🎭 专属审查专家</span>
-                                                    <span v-else>🎯 智能自适应 ({{ activeReviewerCards.length }})</span>
+                                                    <span v-if="isCommitteeMode">👥 多人审查 · 最多 3 位</span>
+                                                    <span v-else>👤 自适应单审 · 1 位</span>
                                                 </div>
                                             </div>
 
@@ -532,7 +529,7 @@
                                                             type="button"
                                                             class="gate-mode-pill-btn"
                                                             :class="{ active: currentPlanMode === 'auto' && !isStageReviewerDisabled }"
-                                                            title="智能风控：按策略自动决定是否审查（高危才审）"
+                                                            title="自动模式：方案按策略预检；阶段审查不自动启动。明确选择多人时，正式提交方案仍会派审。"
                                                             :disabled="isRunning"
                                                             @click="setTriggerMode('auto')"
                                                         >
@@ -543,7 +540,7 @@
                                                             type="button"
                                                             class="gate-mode-pill-btn"
                                                             :class="{ active: currentPlanMode === 'cross_review' && !isStageReviewerDisabled }"
-                                                            title="严格把关：强制必定触发专家审查（无视风控策略）"
+                                                            title="交叉审查模式：正式方案交审；阶段审查仍需满足写入或阶段推进等触发条件"
                                                             :disabled="isRunning"
                                                             @click="setTriggerMode('cross_review')"
                                                         >
@@ -554,59 +551,54 @@
                                                             type="button"
                                                             class="gate-mode-pill-btn btn-disabled"
                                                             :class="{ active: isStageReviewerDisabled }"
-                                                            title="极速免审：永久跳过审查"
+                                                            title="仅关闭中途阶段审查，不关闭方案审查和终审"
                                                             :disabled="isRunning"
                                                             @click="setTriggerMode('disabled')"
                                                         >
                                                             <span class="btn-icon">⚡</span>
-                                                            <span>极速免审</span>
+                                                            <span>关闭阶段审查</span>
                                                         </button>
                                                     </div>
                                                 </div>
                                                 
-                                                <div class="gate-config-group" :class="{ 'is-dimmed': isStageReviewerDisabled }">
-                                                    <span class="gate-group-label">并发策略 (Concurrency):</span>
+                                                <div class="gate-config-group">
+                                                    <span class="gate-group-label">审查人数（方案 / 终审 / 已触发的阶段审查）:</span>
                                                     <div class="gate-mode-pills">
                                                         <button
                                                             type="button"
                                                             class="gate-mode-pill-btn"
                                                             :class="{ active: !isCommitteeMode }"
-                                                            title="智能挑单：如果触发审查，则自动挑选 1 位最匹配的专家"
-                                                            :disabled="isRunning || isStageReviewerDisabled"
+                                                            title="每次审查使用 1 位，按角色与材料选择；不会自动升级多人"
+                                                            :disabled="isRunning"
                                                             @click="setConcurrencyMode('adaptive')"
                                                         >
                                                             <span class="btn-icon">👤</span>
-                                                            <span>智能挑单 (单审)</span>
+                                                            <span>自适应单审（1 位）</span>
                                                         </button>
                                                         <button
                                                             type="button"
                                                             class="gate-mode-pill-btn btn-committee"
                                                             :class="{ active: isCommitteeMode }"
-                                                            title="联合会审：如果触发审查，则并发唤起至多 3 位专家会审"
-                                                            :disabled="isRunning || isStageReviewerDisabled"
+                                                            title="明确选择多人：正式方案审查与终审最多 3 位；不额外触发阶段审查。可用专家不足时披露实际人数。"
+                                                            :disabled="isRunning"
                                                             @click="setConcurrencyMode('committee')"
                                                         >
                                                             <span class="btn-icon">👥</span>
-                                                            <span>联合会审 (多审)</span>
+                                                            <span>多人审查（最多 3 位）</span>
                                                         </button>
                                                     </div>
                                                 </div>
 
-                                                <!-- 动态策略说明条 -->
                                                 <div v-if="isStageReviewerDisabled" class="gate-policy-banner disabled">
-                                                    ⚡ <strong>免审直通已生效</strong>：代码写入后跳过阶段审查直接推进（适合轻量原型或文档）。
+                                                    中途阶段审查已关闭；下面的人数选择仍适用于正式方案审查和终审。
                                                 </div>
-                                                <div v-else-if="isCommitteeMode" class="gate-policy-banner committee">
-                                                    👥 <strong>联合会审模式已开启</strong>：阶段推进时并发唤起匹配专家（至多 3 位）独立质检、一票否决汇总，仅计 1 轮审查预算。
-                                                </div>
-                                                <div v-else-if="activeReviewerCards.length === 0" class="gate-policy-banner default">
-                                                    🌐 <strong>异构对抗兜底生效中（跨模型家族严审）</strong>：未启用质检专家时，由系统跨模型家族严格交叉把关。
-                                                </div>
-                                                <div v-else-if="activeReviewerCards.length === 1" class="gate-policy-banner custom">
-                                                    🎭 <strong>审查专家已挂载</strong>：「{{ activeReviewerCards[0].label || activeReviewerCards[0].name }}」{{ activeReviewerCards[0].model_id ? `（锁定 ${getCardModelName(activeReviewerCards[0].model_id)}）` : '（跟随工位算力）' }}：阶段推进时负责把关。
+                                                <div v-if="isCommitteeMode" class="gate-policy-banner committee">
+                                                    <strong>多人审查已选择</strong>：正式方案审查与终审最多 3 位；阶段审查仅在原条件触发时使用多人。
+                                                    当前专家库有 {{ activeReviewerCards.length }} 位候选，并非已派发人数；不足 2 位或派发受限时会说明实际人数。同一模型可承担多个独立审查角色，不保证模型不同。
                                                 </div>
                                                 <div v-else class="gate-policy-banner adaptive">
-                                                    🎯 <strong>智能自适应质检就绪</strong>：已启用 {{ activeReviewerCards.length }} 位审查专家，阶段推进时按改动代码类型自动挑选 1 位把关。
+                                                    <strong>自适应单审已选择</strong>：每次审查挑选 1 位角色，不自动增加人数。
+                                                    当前有 {{ activeReviewerCards.length }} 位候选；没有可用角色卡时按基础审查模型处理。
                                                 </div>
                                             </div>
                                         </div>
@@ -642,7 +634,7 @@
                                                         v-else
                                                         type="button"
                                                         class="squad-action-pill-btn exclude-all"
-                                                        title="审查排除所有角色，阶段验收由系统异构模型兜底"
+                                                        title="排除候选角色；无可用角色时按基础审查模型处理"
                                                         :disabled="isRunning"
                                                         @click="hibernateAllCardsForSlot('reviewer')"
                                                     >
@@ -784,7 +776,7 @@
                                                 <span class="empty-icon">🛡️</span>
                                                 <div class="empty-text">
                                                     <strong>暂无审查验收专属角色卡</strong>
-                                                    <p>当前阶段审查将使用跨模型家族异构对抗兜底。可前往专家工坊创建前端门禁官、后端架构审查等角色卡。</p>
+                                                    <p>当前使用基础审查模型；跨家族优选仅在对应配置开启时生效。可前往专家工坊创建前端门禁官、后端架构审查等角色卡。</p>
                                                 </div>
                                                 <button
                                                     type="button"
@@ -2033,36 +2025,12 @@ const activeReviewerCards = computed(() => {
     return reviewerRoleCards.value.filter((c) => !isCardHibernatedForSlot(c.name, "reviewer"));
 });
 
-const stageReviewerBadgeText = computed(() => {
-    if (isStageReviewerDisabled.value) return "⚡免审";
-    if (isCommitteeMode.value) {
-        return activeReviewerCards.value.length > 0
-            ? `👥会审(${activeReviewerCards.value.length})`
-            : "👥会审";
-    }
-    if (activeReviewerCards.value.length === 0) return "🌐异构";
-    if (activeReviewerCards.value.length === 1) {
-        const c = activeReviewerCards.value[0];
-        const l = c.label || c.name;
-        return `🎭${l.length > 4 ? l.slice(0, 3) + '…' : l}`;
-    }
-    return `🎯自适应(${activeReviewerCards.value.length})`;
-});
+const stageReviewerBadgeText = computed(() => isCommitteeMode.value ? "👥最多3位" : "👤单审");
 
 const modelChipTooltip = computed(() => {
-    let title = `配置模型路由与专家小队 (当前规划: ${currentModelName.value})`;
-    if (isStageReviewerDisabled.value) {
-        title += " | ⚡ 阶段门禁: 免审直通";
-    } else if (isCommitteeMode.value) {
-        title += ` | 👥 阶段门禁: 联合会审(${activeReviewerCards.value.length}位专家并发)`;
-    } else if (activeReviewerCards.value.length === 0) {
-        title += " | 🌐 阶段门禁: 系统异构对抗兜底";
-    } else if (activeReviewerCards.value.length === 1) {
-        title += ` | 🎭 阶段门禁: 专属专家(${activeReviewerCards.value[0].label || activeReviewerCards.value[0].name})`;
-    } else {
-        title += ` | 🎯 阶段门禁: 领域自适应质检(${activeReviewerCards.value.length}位专家)`;
-    }
-    return title;
+    const people = isCommitteeMode.value ? "多人审查，最多3位" : "自适应单审，1位";
+    const stage = isStageReviewerDisabled.value ? "阶段审查关闭" : "阶段审查按触发条件执行";
+    return `当前规划: ${currentModelName.value} | ${people}，候选${activeReviewerCards.value.length}位 | ${stage}。人数选择适用于正式方案审查和终审；实际派发以运行回执为准。`;
 });
 
 function setTriggerMode(mode: "auto" | "cross_review" | "disabled") {

@@ -17,7 +17,7 @@ use tokio::sync::watch;
 
 
 // 验收语义变更时升版：旧裁决不能在新规则下继续复用；Git 基线保持原样。
-const FINISH_REVIEW_RULES_VERSION: &str = "review-search-v7-material-changes";
+const FINISH_REVIEW_RULES_VERSION: &str = "review-search-v8-review-teams";
 const MAX_FINISH_FORMAT_RETRIES: u32 = 5;
 const MAX_FINISH_REQUEST_RETRIES: u32 = 5;
 
@@ -155,8 +155,43 @@ pub async fn evaluate_finish_diff<R: tauri::Runtime>(
     // 调用方已组装 summary + details 的完整交付正文，参与审查与复用指纹。
     finish_summary: Option<&str>,
 ) -> ReviewResult {
+    if model_routing.stage_review_committee {
+        return super::finish_committee::evaluate_committee(app, db, context, model_routing, step_id, workspace, baseline, run_started_at, session_id, interrupt_rx, last_reviewed_hash, last_review_result, stage_carry_over, host_verification, human_waivers, gate_notices, approved_target_files, triage, _plan_mode, finish_summary).await;
+    }
+    evaluate_finish_diff_single(app, db, context, model_routing, step_id, workspace, baseline, run_started_at, session_id, interrupt_rx, last_reviewed_hash, last_review_result, stage_carry_over, host_verification, human_waivers, gate_notices, approved_target_files, triage, _plan_mode, finish_summary, "finish-review", None).await
+}
+
+pub(super) async fn evaluate_finish_diff_single<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    db: &DbState,
+    context: &SandwichContext,
+    model_routing: &ModelRoutingConfig,
+    step_id: usize,
+    workspace: &Path,
+    baseline: &GitBaseline,
+    run_started_at: chrono::DateTime<chrono::Utc>,
+    session_id: &str,
+    interrupt_rx: &mut watch::Receiver<u64>,
+    last_reviewed_hash: Option<&str>,
+    last_review_result: Option<&ReviewResult>,
+    stage_carry_over: &[String],
+    host_verification: Option<&str>,
+    human_waivers: Option<&str>,
+    // 门禁适用域交接：机械门 NotApplicable 跳过的检查项说明（Skip 不静默，
+    // 终审须以命令退出码/终端输出/API 响应等语义证据核验这些项）
+    gate_notices: &[String],
+    approved_target_files: Option<&[String]>,
+    // 任务入口分流判决：mechanical_only 短路、终审角色与产物质量标准分流均由此驱动
+    triage: Option<&crate::agent::triage::TriageVerdict>,
+    // 保留参数：未来"控制面自改"机械升级规则将按模式分流（当前不变量由提示词契约承担）
+    _plan_mode: Option<crate::agent::checkpoint::PlanExecutionMode>,
+    // 调用方已组装 summary + details 的完整交付正文，参与审查与复用指纹。
+    finish_summary: Option<&str>,
+    log_suffix: &str,
+    verification_lock: Option<std::sync::Arc<tokio::sync::Mutex<()>>>,
+) -> ReviewResult {
     let interrupt_generation = *interrupt_rx.borrow();
-    let result = evaluate_finish_diff_once(app, db, context, model_routing, step_id, workspace, baseline, run_started_at, session_id, interrupt_rx, last_reviewed_hash, last_review_result, stage_carry_over, host_verification, human_waivers, gate_notices, approved_target_files, triage, _plan_mode, finish_summary, None).await;
+    let result = evaluate_finish_diff_once(app, db, context, model_routing, step_id, workspace, baseline, run_started_at, session_id, interrupt_rx, last_reviewed_hash, last_review_result, stage_carry_over, host_verification, human_waivers, gate_notices, approved_target_files, triage, _plan_mode, finish_summary, None, log_suffix, verification_lock.as_ref()).await;
     if !result.is_service_failure() || *interrupt_rx.borrow() != interrupt_generation { return result; }
     let backup = match db.0.lock() {
         Ok(conn) => crate::agent::router::configured_reviewer_backup(&conn, &result.model_id, &model_routing.reviewer_backup_model),
@@ -165,7 +200,7 @@ pub async fn evaluate_finish_diff<R: tauri::Runtime>(
     match backup {
         Ok(Some((id, name))) => {
             let _ = app.emit(&format!("agent-log-{session_id}"), format!("终审通道失败；仅尝试用户配置的备用 {name}，不放行交付。"));
-            evaluate_finish_diff_once(app, db, context, model_routing, step_id, workspace, baseline, run_started_at, session_id, interrupt_rx, None, None, stage_carry_over, host_verification, human_waivers, gate_notices, approved_target_files, triage, _plan_mode, finish_summary, Some(&id)).await
+            evaluate_finish_diff_once(app, db, context, model_routing, step_id, workspace, baseline, run_started_at, session_id, interrupt_rx, None, None, stage_carry_over, host_verification, human_waivers, gate_notices, approved_target_files, triage, _plan_mode, finish_summary, Some(&id), log_suffix, verification_lock.as_ref()).await
         }
         Ok(None) => result,
         Err(e) => ReviewResult::failed_open(&format!("{}；备用不可用：{e}", result.summary), &result.model_id, &result.diff_hash),
@@ -201,7 +236,10 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     // 撞在「Diff 未变」缓存上，实弹死循环）。
     finish_summary: Option<&str>,
     model_override: Option<&str>,
+    log_suffix: &str,
+    verification_lock: Option<&std::sync::Arc<tokio::sync::Mutex<()>>>,
 ) -> ReviewResult {
+    let cancellation_generation = *interrupt_rx.borrow();
     let started_at = std::time::Instant::now();
 
     // 0. 分流判决：终审仅需机械校验（mechanical_only）→ 直接通过，不调 LLM。
@@ -212,7 +250,8 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     // 嗅探对所有分流模式都跑：code_review/artifact_quality 的产物异常
     // 同样注入材料作预警（此前只 mechanical_only 用，其他模式只能碰运气）。
     let mechanical_anomalies: Vec<String> = sniff_session_tmp_anomalies(session_id);
-    if triage.is_some_and(|v| v.final_review_mode.eq_ignore_ascii_case("mechanical_only"))
+    if !model_routing.stage_review_committee
+        && triage.is_some_and(|v| v.final_review_mode.eq_ignore_ascii_case("mechanical_only"))
         && mechanical_anomalies.is_empty()
     {
         return ReviewResult::mechanical_pass(
@@ -224,7 +263,8 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     // 交付物只是一段回答——工作区里已有的未提交改动属于此前的任务（可能是用户已决定
     // 不再继续的半成品），不应让终审拿它们去打回一次提问。
     // 有机械嗅探异常时不直通（物理异常仍升级审查）。
-    if mechanical_anomalies.is_empty()
+    if !model_routing.stage_review_committee
+        && mechanical_anomalies.is_empty()
         && context.side_effects.len() == context.inherited_side_effects_count
         && collect_session_tmp_material(session_id, run_started_at).is_none()
     {
@@ -427,7 +467,10 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
         })
         .and_then(|role| resolve_enabled_card(db, &role).ok().flatten())
         .filter(|card| card.allows_kind("reviewer"))
-        .or_else(|| resolve_enabled_card(db, "reviewer").ok().flatten());
+        .or_else(|| resolve_enabled_card(db, "reviewer").ok().flatten())
+        .filter(|card| !crate::agent::tools::role_manager::is_card_disabled_for(
+            &model_routing.disabled_role_cards, &card.name, "reviewer"));
+    let reviewer_label = resolved_card.as_ref().map(|c| c.label.clone()).unwrap_or_else(|| "基础审查员".into());
     let (mut model_id, persona_extra) = if let Some(card) = resolved_card {
         if card.allows_kind("reviewer") {
             let mid = if !card.model_id.trim().is_empty() {
@@ -457,7 +500,9 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
         json!({
             "type": "action_phase",
             "phase": "reviewing",
-            "description": "🧐 专家评审员正在对任务变更与成果进行终审...",
+            "description": if model_routing.stage_review_committee {
+                format!("🧐 多人终审 · {} 正在独立核验（实际结果以收口回执为准）", reviewer_label)
+            } else { "🧐 专家评审员正在对任务变更与成果进行终审...".to_string() },
             "diff_hash": diff_hash
         }),
     );
@@ -667,7 +712,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
                 output
             }
             Err(failure) => {
-                failure.log(session_id, "finish-review", llm_call_index, &model_config, &messages);
+                failure.log(session_id, log_suffix, llm_call_index, &model_config, &messages);
                 if failure.may_retry_timeout() && !timeout_retried && review_retry_allowed() {
                     timeout_retried = true;
                     cur_timeout_secs = review_timeout_secs.saturating_mul(2).min(600);
@@ -698,7 +743,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
         };
         crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
             session_id,
-            "finish-review",
+            log_suffix,
             llm_call_index,
             &model_config,
             &messages,
@@ -756,6 +801,20 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
                         if target.is_empty() {
                             format!("未找到 id 为 {:?} 的可验证义务", want_id.unwrap_or(""))
                         } else {
+                            // 多人同时请求复验时，冻结命令串行执行，避免并发改动同一产物。
+                            let _verification_guard = match verification_lock {
+                                Some(lock) => {
+                                    if *interrupt_rx.borrow() != cancellation_generation {
+                                        return ReviewResult::failed_open("已收到停止信号，未执行新的宿主复验", &model_id, &review_fingerprint);
+                                    }
+                                    tokio::select! {
+                                        biased;
+                                        _ = interrupt_rx.changed() => return ReviewResult::failed_open("等待宿主复验期间收到停止信号", &model_id, &review_fingerprint),
+                                        guard = lock.lock() => Some(guard),
+                                    }
+                                }
+                                None => None,
+                            };
                             let results = crate::agent::host_verify::run_obligation_verifications(
                                 workspace, &target,
                             )
@@ -1078,6 +1137,8 @@ mod finish_review_regression_tests {
             None,
             Some(summary),
             Some("mock"),
+            "finish-review",
+            None,
         )
         .await;
         (result, session_id)

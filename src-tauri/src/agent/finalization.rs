@@ -150,6 +150,9 @@ pub struct FinalizationReceipt {
     /// 可选登记材料变化时重新评估；旧收据无此字段，不据此证明证据仍未变化。
     #[serde(default)]
     pub evidence_index_fingerprint: Option<String>,
+    /// 用户选择的多人审查及专家配置；旧单审收据默认为空。
+    #[serde(default)]
+    pub review_policy_fingerprint: String,
     /// 独立的真实冻结验证执行回执；旧 checkpoint 没有时必须重新验证。
     #[serde(default)]
     pub frozen_verification_run: Option<FrozenVerificationRun>,
@@ -504,6 +507,7 @@ mod tests {
             contract_fingerprint: fingerprint.to_string(),
             acceptance_fingerprint: "test-state".into(),
             evidence_index_fingerprint: None,
+        review_policy_fingerprint: String::new(),
             frozen_verification_run: None,
             material_notices: vec![],
             step_id: 10,

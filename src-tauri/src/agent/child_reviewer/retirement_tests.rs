@@ -27,6 +27,30 @@ impl MockReviewer {
         responses: Vec<Value>,
         on_request: impl Fn() + Send + Sync + 'static,
     ) -> Self {
+        Self::with_response_barrier(responses, on_request, None, None).await
+    }
+
+    /// 所有成员的 HTTP 请求到齐才返回答案，防止串行调用也通过多人并发回归。
+    pub(crate) async fn concurrent(responses: Vec<Value>, members: usize) -> Self {
+        Self::with_response_barrier(
+            responses,
+            || {},
+            Some(Arc::new(tokio::sync::Barrier::new(members))),
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn silent() -> Self {
+        Self::with_response_barrier(vec![json!({})], || {}, None, Some(Duration::from_secs(3_600))).await
+    }
+
+    async fn with_response_barrier(
+        responses: Vec<Value>,
+        on_request: impl Fn() + Send + Sync + 'static,
+        barrier: Option<Arc<tokio::sync::Barrier>>,
+        delay: Option<Duration>,
+    ) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -42,7 +66,14 @@ impl MockReviewer {
                     requests.len() - 1
                 };
                 let output = responses[index.min(responses.len() - 1)].to_string();
+                let barrier = barrier.clone();
                 async move {
+                    if let Some(delay) = delay { tokio::time::sleep(delay).await; }
+                    if let Some(barrier) = barrier {
+                        tokio::time::timeout(Duration::from_secs(10), barrier.wait())
+                            .await
+                            .expect("reviewer requests did not arrive concurrently");
+                    }
                     let chunk = json!({"choices":[{"delta":{"content":output}}]});
                     (
                         [(axum::http::header::CONTENT_TYPE, "text/event-stream")],

@@ -35,6 +35,7 @@ pub mod prompt_assembly;
 pub mod protocol;
 pub mod retrieval;
 pub mod review_contract;
+pub(crate) mod review_team;
 pub mod reviewer_gatekeeper;
 pub mod gate_applicability;
 pub mod gate_messages;

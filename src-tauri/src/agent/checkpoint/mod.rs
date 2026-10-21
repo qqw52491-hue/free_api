@@ -15,6 +15,9 @@ mod durable;
 mod inquiry_ops;
 mod plan_batch;
 mod plan_ops;
+mod review_state;
+#[cfg(test)]
+mod review_state_tests;
 mod task_resume;
 #[cfg(test)]
 mod task_resume_tests;
@@ -23,6 +26,7 @@ mod types;
 pub(crate) use durable::*;
 pub(crate) use plan_batch::*;
 pub(crate) use types::*;
+pub(crate) use review_state::{ReviewDeliverySource, ReviewFindingTodo};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentCheckpoint {
@@ -176,6 +180,12 @@ pub struct AgentCheckpoint {
     /// 幂等去重天然由 HashMap key 承担
     #[serde(default)]
     pub plan_review_deliveries: std::collections::HashMap<String, crate::agent::child_reviewer::ReviewerDeliveryData>,
+    /// 宿主解析的回执来源；供恢复后的无 DB 状态投影使用，模型不能填报。
+    #[serde(default)]
+    pub review_delivery_sources: std::collections::BTreeMap<String, ReviewDeliverySource>,
+    /// 自动审查 TODO 的来源绑定，避免不同任务的 F1 串号；不改变公开 TODO 协议。
+    #[serde(default)]
+    pub review_finding_todos: std::collections::BTreeMap<usize, ReviewFindingTodo>,
     #[serde(default)]
     pub stage_review_batch_id: Option<String>,
     /// ── 旧版手写名单：仅作旧 checkpoint 反序列化入口，加载后经
@@ -381,6 +391,8 @@ impl AgentCheckpoint {
             plan_review_batch_id: None,
             plan_review_expected_count: 0,
             plan_review_deliveries: std::collections::HashMap::new(),
+            review_delivery_sources: Default::default(),
+            review_finding_todos: Default::default(),
             stage_review_batch_id: None,
             plan_escalation_required: None,
             retriage_used: 0,

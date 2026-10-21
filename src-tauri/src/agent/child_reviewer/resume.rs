@@ -1,6 +1,132 @@
 //! 续接审查保留完整契约产物，提交错误沿用首次审查的有界补正语义。
 use super::*;
 
+pub(crate) struct ResumeReviewError {
+    pub route: &'static str,
+    pub message: String,
+}
+
+/// 与界面无关的实际审查对质入口：恢复同一任务、验证输入、预扣预算、落账并派发。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_review_resume(
+    db: &DbState,
+    parent_run: &str,
+    session: &str,
+    workspace: &Path,
+    target: &str,
+    message: &str,
+    mut config: ModelConfig,
+    effort: String,
+    checkpoint: &mut crate::agent::checkpoint::AgentCheckpoint,
+    interrupt: watch::Receiver<u64>,
+) -> Result<String, ResumeReviewError> {
+    let error = |route, message| ResumeReviewError { route, message };
+    let (status, kind, _, history, _, _, previous, identity) =
+        load_child_run_for_resume(db, target, session)
+            .map_err(|e| error("host_rejection:child_not_found", e))?;
+    let invalid_with_findings = status == "invalid_output"
+        && previous
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            .is_some_and(|v| {
+                ["findings", "objection_verdicts"].iter().any(|key| {
+                    v.get(key)
+                        .and_then(Value::as_array)
+                        .is_some_and(|a| !a.is_empty())
+                })
+            });
+    if !matches!(kind.as_str(), "review" | "reviewer")
+        || (status != "succeeded" && !invalid_with_findings)
+    {
+        return Err(error(
+            "host_rejection:status_not_succeeded",
+            "目标不是可续接的审查任务，未派发对质。".into(),
+        ));
+    }
+    let mut messages: Vec<Value> = history
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    retire_consumer_history(&mut messages);
+    refresh_review_instructions(&mut messages);
+    if messages.is_empty() {
+        return Err(error(
+            "host_rejection:missing_history",
+            "该审查任务未留存历史对话记录，无法恢复对质。".into(),
+        ));
+    }
+    let stage = checkpoint.is_stage_review_target(db, target);
+    let mut identity = ChildRunIdentity::inherited(
+        &identity,
+        if stage {
+            Some("rebuttal".into())
+        } else {
+            identity.purpose.clone().or(Some("review".into()))
+        },
+    );
+    retire_consumer_schema_json(&mut identity.contract_schema);
+    let schema = identity
+        .contract_schema
+        .as_deref()
+        .map(serde_json::from_str::<crate::agent::protocol::ContractSchema>)
+        .transpose()
+        .map_err(|e| {
+            error(
+                "resume_child:invalid_saved_schema",
+                format!("审查契约记录无法解析，未发起模型请求；原记录已保留：{e}"),
+            )
+        })?;
+    messages.push(json!({"role":"user","content":format!(
+        "【父 Agent 反驳与对质】\n{message}\n\n【对质研判规则】\n请提交完整的更新审查 JSON。旧问题沿用原 finding_id，新问题使用未用过的编号；编号含义不要改变。\n若反驳或修复证据成立，在 objection_verdicts 中将对应 finding_id 标为 withdraw 并给出理由；仍成立则 maintain。没有提及旧发现不等于撤回，也不要撤回其他审查任务的发现。重新判断 decision 和 routing。" )}));
+    if let Some(schema) = schema.as_ref() {
+        messages.push(json!({"role":"user","content":format!("请重新提交完整审查结果，不能只提交差异或省略仍适用的必填字段。\n{}", schema.render_prompt_instructions())}));
+    }
+    let can_finalize = previous
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .and_then(|v| v.get("plan_review_can_finalize").and_then(Value::as_bool));
+    let old_budget = checkpoint.plan_reviewer_retry_count;
+    let old_consumed = checkpoint.plan_reviewer_consumed;
+    if !checkpoint.plan_phase.is_approved() {
+        checkpoint
+            .reserve_plan_review_round()
+            .map_err(|e| error("plan_gatekeeper:reviewer_retry_limit", e))?;
+    }
+    let id = match begin_child_run_extended(
+        db,
+        parent_run,
+        session,
+        workspace,
+        &config.model_id,
+        0,
+        "review",
+        None,
+        None,
+        Some(target),
+        &identity,
+    ) {
+        Ok(id) => id,
+        Err(e) => {
+            checkpoint.plan_reviewer_retry_count = old_budget;
+            checkpoint.plan_reviewer_consumed = old_consumed;
+            return Err(error("host_rejection:begin_run_failed", e));
+        }
+    };
+    config.max_tokens = 900;
+    tokio::spawn(run_resumed_review(
+        DbState(db.0.clone()),
+        id.clone(),
+        session.into(),
+        config,
+        effort,
+        messages,
+        schema,
+        can_finalize,
+        interrupt,
+    ));
+    Ok(id)
+}
+
 pub(crate) async fn run_resumed_review(
     db: DbState,
     child_id: String,
@@ -9,6 +135,7 @@ pub(crate) async fn run_resumed_review(
     effort: String,
     mut messages: Vec<Value>,
     schema: Option<crate::agent::protocol::ContractSchema>,
+    can_finalize: Option<bool>,
     mut interrupt_rx: watch::Receiver<u64>,
 ) {
     let started = std::time::Instant::now();
@@ -113,7 +240,11 @@ pub(crate) async fn run_resumed_review(
                     task_id: None,
                     attempt_id: None,
                 };
-                validate_review_delivery(merge_review_extensions(raw, &result), schema.as_ref())
+                let mut delivery = merge_review_extensions(raw, &result);
+                if let Some(allowed) = can_finalize {
+                    delivery["plan_review_can_finalize"] = json!(allowed);
+                }
+                validate_review_delivery(delivery, schema.as_ref())
             },
         );
         crate::agent::utils::llm_client::log_auxiliary_llm_exchange(

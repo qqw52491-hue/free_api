@@ -46,6 +46,8 @@ pub const BASELINE_RESERVED_FIELDS: &[&str] = &[
     "objection_verdicts",
     "consumer_verdicts",
     "scorecard",
+    // 宿主派发决定方案定稿权限；不由模型自行授权。
+    "plan_review_can_finalize",
     // 工兵基线
     "changed_files",
     "test_command",

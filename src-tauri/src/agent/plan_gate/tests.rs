@@ -33,6 +33,25 @@
         DbState(Arc::new(Mutex::new(conn)))
     }
 
+    #[test]
+    fn auto_mode_waits_for_a_formally_dispatched_panel_without_enabling_stage_mode() {
+        let db=setup_test_db();
+        let context=SandwichContext::new("sys".into(),"goal".into());
+        let mut cp=AgentCheckpoint::new("session".into(),&context);
+        cp.set_execution_mode(PlanExecutionMode::Auto);
+        cp.submitted_plan=Some(serde_json::from_value(serde_json::json!({"plan_summary":"正式提交待多人审查的方案"})).unwrap());
+        cp.plan_phase=PlanPhase::Reviewing;
+        cp.plan_reviewer_retry_count=1;
+        cp.set_plan_review_batch("batch",2);
+        seed_review(&db,"a","run","batch","running",false);
+        seed_review(&db,"b","run","batch","running",false);
+        let result=check_pre_write_gatekeeper(&mut cp,&context,&db,"run",5,false).unwrap();
+        assert_eq!(result.route,"plan_gatekeeper:need_wait_reviewer_jobs");
+        assert_eq!(cp.plan_mode,PlanExecutionMode::Auto);
+        assert!(!cp.plan_phase.is_approved());
+        assert!(cp.plan_gate_projection().plan_required);
+    }
+
     /// 名单退役版夹具：往台账插一条带 batch/purpose 盖章的审查行。
     /// consumed=true 模拟"回执已被 poll 消费"（reducer 跑在消费之后）。
     fn seed_review(

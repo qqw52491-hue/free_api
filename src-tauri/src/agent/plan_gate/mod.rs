@@ -21,7 +21,8 @@ pub(crate) fn pre_write_plan_required(
     session_id: &str,
     workspace: &std::path::Path,
 ) -> bool {
-    if checkpoint.plan_mode == PlanExecutionMode::PlanApproval
+    if submitted_review_active(checkpoint)
+        || checkpoint.plan_mode == PlanExecutionMode::PlanApproval
         || (checkpoint.triage_verdict.is_some()
             && crate::agent::triage::write_floor_violation(inst, context, session_id).is_some())
     {
@@ -42,6 +43,11 @@ pub(crate) fn pre_write_plan_required(
             &context.new_affected_paths(),
         ),
     }
+}
+
+pub(crate) fn submitted_review_active(checkpoint: &AgentCheckpoint) -> bool {
+    checkpoint.submitted_plan.is_some() && checkpoint.plan_review_batch_id.is_some()
+        && checkpoint.plan_review_expected_count > 0
 }
 
 /// submit_plan 适用性预检（纯 checkpoint 判定，不含 DB 在途行检查）。
@@ -266,6 +272,7 @@ pub(crate) fn check_pre_write_gatekeeper(
     is_resume_child: bool,
 ) -> Option<DispatchResult> {
     // ---- 阶段级审查拦截先于方案门（triage 分流豁免方案门时它仍单独执行）----
+    checkpoint.refresh_review_sources(db);
     if let Some(blocked) = stage_blocker_interception(checkpoint, db) {
         return Some(blocked);
     }
@@ -307,7 +314,12 @@ fn gate_interception(
     step_id: usize,
     is_resume_child: bool,
 ) -> Option<DispatchResult> {
-    match checkpoint.plan_mode {
+    // 正式提交后已派出的审查是事实；Auto 不能在本批未收口时又走免审写入。
+    // 只复用方案门判定，不改变真实 plan_mode，阶段审查触发方式保持不变。
+    let effective_mode = if checkpoint.plan_mode == PlanExecutionMode::Auto && submitted_review_active(checkpoint) {
+        PlanExecutionMode::CrossReview
+    } else { checkpoint.plan_mode };
+    match effective_mode {
         crate::agent::checkpoint::PlanExecutionMode::PlanApproval => {
             let stderr = if is_resume_child {
                 crate::agent::gate_messages::plan_approval_resume_child_blocked()

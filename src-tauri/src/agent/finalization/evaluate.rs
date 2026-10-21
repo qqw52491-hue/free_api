@@ -192,6 +192,7 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
         .unwrap_or_default();
     let registered_evidence = crate::agent::evidence_store::review_digest(db, session_id, run_started_at);
     let state_fp = acceptance_fingerprint(context, checkpoint, &request_payload);
+    let review_policy_fingerprint = crate::agent::review_team::policy_fingerprint(db, model_routing);
     let evidence_index_fingerprint = registered_evidence.as_ref().ok().and_then(|value| value.as_ref()).map(|digest| {
         use sha2::{Digest, Sha256};
         format!("{:x}", Sha256::digest(digest.as_bytes()))
@@ -204,6 +205,7 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
                 && r.is_fresh(&initial_hash, context.resource_scope.revision, &contract_fp)
                 && !r.acceptance_fingerprint.is_empty()
                 && r.acceptance_fingerprint == state_fp
+                && r.review_policy_fingerprint == review_policy_fingerprint
                 && r.evidence_index_fingerprint == evidence_index_fingerprint
         }) {
             let mut receipt = cached.clone();
@@ -437,10 +439,10 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
                 if refresh == 0
                     && result.is_passed()
                     && !interrupted_since(interrupt_rx, generation)
-                    && !checkpoint
+                    && (model_routing.stage_review_committee || !checkpoint
                         .triage_verdict
                         .as_ref()
-                        .is_some_and(|v| v.final_review_mode.eq_ignore_ascii_case("mechanical_only"))
+                        .is_some_and(|v| v.final_review_mode.eq_ignore_ascii_case("mechanical_only")))
                 {
                     let mut notice = after_review.change_notice_since(&review_snapshot);
                     notice.push_str(&format!(
@@ -537,6 +539,7 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
             scope_revision: context.resource_scope.revision,
             contract_fingerprint: contract_fingerprint(context.review_contract.as_ref()),
             acceptance_fingerprint: acceptance_fingerprint(context, checkpoint, &request_payload),
+            review_policy_fingerprint,
             evidence_index_fingerprint,
             frozen_verification_run,
             step_id,

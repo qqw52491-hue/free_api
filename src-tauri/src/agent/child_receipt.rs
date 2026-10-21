@@ -112,6 +112,15 @@ pub(crate) async fn reduce_child_receipt(
     let raw = receipt.raw_text.clone().unwrap_or_else(|| serde_json::to_string(receipt).unwrap_or_default());
     crate::agent::work_history::record_async_result(env.db, env.session_id, &receipt.child_run_id, &receipt.status, &raw);
 
+    if matches!(receipt.kind.as_str(), "review" | "reviewer")
+        && checkpoint.plan_review_batch_id.is_some()
+        && !checkpoint.is_stage_review_target(env.db, &receipt.child_run_id)
+        && !checkpoint.run_belongs_to_plan_batch(env.db, &receipt.child_run_id)
+    {
+        return ReceiptEffects { model_text: format!("审查回执 {} 属于其他批次，已保留历史，不更新当前方案或待办。", receipt.child_run_id),
+            contract_violation, ..Default::default() };
+    }
+
     // 请求/超时/无效结构是审查通道失败，不是“方案不通过”。
     // 必须先处理备用，再进入各类审查聚合；未配置或备用已失败则进入统一失败出口。
     let kind = receipt.error_kind.as_deref().map(ChildErrorKind::parse);
@@ -290,33 +299,6 @@ async fn reduce_reviewer_receipt(
         formatted_findings
     );
 
-    // 只有明确的 blocking 发现进入交付待办；question/suggestion 保留在回执与审查记录中。
-    // （原本只在自动注入路径登记——wait_jobs 收取的 findings 曾不进 todo，
-    // 统一 reducer 后两条通道行为一致。）
-    {
-        let next_id = context
-            .todo_list
-            .iter()
-            .map(|t| t.id)
-            .max()
-            .map_or(0, |m| m + 1);
-        for (offset, f) in findings.iter().enumerate() {
-            if !f.severity.eq_ignore_ascii_case("blocking") {
-                continue;
-            }
-            let desc = format!("[审查发现] {}", f.display_line());
-            if context.todo_list.iter().any(|t| t.description == desc) {
-                continue;
-            }
-            context.todo_list.push(crate::agent::types::TodoItem {
-                id: next_id + offset,
-                status: "pending".to_string(),
-                description: desc,
-                evidence_output_id: None,
-            });
-        }
-    }
-
     let receipt_kind = receipt.error_kind.as_deref().map(ChildErrorKind::parse);
 
     // 基础设施失败（超时/取消/中断/非法输出/请求层失败）不是实质性审查：
@@ -350,26 +332,23 @@ async fn reduce_reviewer_receipt(
     };
 
     checkpoint.record_reviewer_delivery_for_run(env.db, Some(&receipt.child_run_id), &delivery);
+    if checkpoint.sync_review_todos(env.db, context) {
+        text.push_str("\n旧格式审查待办的来源存在歧义，本次未按 F 编号批量关闭；请按具体任务证据核对。\n");
+    }
+    let is_current = checkpoint.current_review_deliveries(None).iter().any(|(id, _, _)| id == &receipt.child_run_id);
+    if !is_current {
+        text.push_str("\n这是已被后续有效尝试取代的历史回执，当前审查结论未倒退。\n");
+        return text;
+    }
     if let Some(decision) = checkpoint.plan_review_deliveries.get(&receipt.child_run_id)
         .and_then(|stored| stored.get_extra_str("decision"))
     {
         text.push_str(&format!("\n方案审查生效裁决: {}\n", decision));
     }
-    // 审查者撤回的异议：同步关闭对应的 [审查发现] 待办，否则 finish 门禁仍会拿已撤回的意见打回。
-    for wid in &delivery.withdrawn_findings {
-        let prefix = format!("[审查发现] [{}]", wid);
-        for t in context.todo_list.iter_mut() {
-            if t.description.starts_with(&prefix)
-                && (t.status == "pending" || t.status == "in_progress")
-            {
-                t.status = "done".to_string();
-            }
-        }
-    }
     // Tech Lead 定稿通知：revised_* 已覆盖 submitted_plan 对应字段，
     // 执行方必须以审查者定稿版本为准。
-    if let Some(rev) =
-        crate::agent::checkpoint::AgentCheckpoint::plan_revision_from(&delivery)
+    if let Some(rev) = crate::agent::checkpoint::AgentCheckpoint::plan_revision_from(&delivery)
+        .filter(|_| delivery.extra.get("plan_review_can_finalize").and_then(|v|v.as_bool()) != Some(false))
     {
         let notice = format!(
             "📝 Tech Lead 已在 1v1 中修订并定稿方案（修订字段: {}）",
@@ -633,6 +612,7 @@ mod tests {
         let mut cp = AgentCheckpoint::new("run-1".into(), &context);
         seed_run(&db, "rev-1", "run-1", "b1", "plan_review", "succeeded", true);
         seed_run(&db, "rev-2", "run-1", "b1", "plan_review", "succeeded", true);
+        db.0.lock().unwrap().execute("UPDATE agent_child_runs SET task_id='same-review', attempt_id=CASE id WHEN 'rev-1' THEN 1 ELSE 2 END WHERE id IN ('rev-1','rev-2')", []).unwrap();
         cp.set_plan_review_batch("b1", 2);
 
         // 第一份：F1 blocking + F2 suggestion。只有 blocking 登记为必须闭合的待办。
