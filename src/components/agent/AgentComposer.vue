@@ -1284,6 +1284,7 @@ const props = defineProps<{
     queuedGoals?: Array<{ id: string; text: string; createdAt: number }>;
     autoPilot?: boolean;
     planMode?: PlanExecutionMode;
+    slotBarHeight?: number | string;
 }>();
 const emit = defineEmits<{
     "update:draft": [value: string];
@@ -2103,6 +2104,15 @@ function calculatePopoverPosition(triggerEl: HTMLElement | null) {
 }
 
 const popoverFixedStyle = computed(() => {
+    const slotHeightValue = (() => {
+        const val = props.slotBarHeight;
+        if (typeof val === "number") return `${val}px`;
+        if (typeof val === "string" && val.trim()) {
+            return /^[0-9]+(\.[0-9]+)?$/.test(val.trim()) ? `${val.trim()}px` : val.trim();
+        }
+        return "28px";
+    })();
+
     if (popoverPlacement.value === "top") {
         return {
             position: "fixed" as const,
@@ -2111,6 +2121,7 @@ const popoverFixedStyle = computed(() => {
             width: `${popoverCoords.value.width}px`,
             maxHeight: `${popoverCoords.value.maxHeight}px`,
             zIndex: 99999,
+            "--station-bar-height": slotHeightValue,
         };
     }
     return {
@@ -2120,6 +2131,7 @@ const popoverFixedStyle = computed(() => {
         width: `${popoverCoords.value.width}px`,
         maxHeight: `${popoverCoords.value.maxHeight}px`,
         zIndex: 99999,
+        "--station-bar-height": slotHeightValue,
     };
 });
 

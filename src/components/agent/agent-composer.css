@@ -2111,11 +2111,12 @@ textarea::placeholder {
 /* 💻 独立工位算力绑定横条 */
 .station-model-bar {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    padding: 6px 10px;
+    padding: 3px 10px;
+    min-height: var(--station-bar-height, 28px);
     background: rgba(0, 0, 0, 0.38);
     border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 7px;
@@ -2136,10 +2137,41 @@ textarea::placeholder {
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     justify-content: flex-end;
     flex: 1;
     min-width: 0;
+}
+
+.station-model-bar .slot-model-picker {
+    width: 200px;
+    max-width: 100%;
+    min-width: 0;
+    flex: 0 1 200px;
+}
+
+.station-model-bar .slot-model-picker :deep(.model-select-trigger) {
+    min-height: 24px;
+    height: 24px;
+    padding: 2px 8px;
+    font-size: 12px;
+}
+
+.station-model-bar .slot-model-picker :deep(.selected-platform-tag) {
+    font-size: 9.5px;
+    padding: 0 5px;
+    max-width: 80px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    line-height: 1.4;
+}
+
+.station-model-bar .slot-choice-pill {
+    height: 24px;
+    line-height: 22px;
+    padding: 0 7px;
+    font-size: 11px;
 }
 
 .squad-section .section-head {
