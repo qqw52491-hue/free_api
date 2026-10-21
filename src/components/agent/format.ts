@@ -257,6 +257,12 @@ const markdownCache = new Map<string, string>();
 const MAX_MARKDOWN_CACHE_SIZE = 800;
 const MAX_CACHEABLE_LENGTH = 60000;
 
+export function resolveMarkdownMediaSource(href: string): string {
+    if (/^file:\/\//i.test(href)) return convertFileSrc(href.replace(/^file:\/\//i, ""));
+    if (href.startsWith("/") || /^[A-Za-z]:[\\/]/.test(href)) return convertFileSrc(href);
+    return href;
+}
+
 export function renderMarkdown(content: string): string {
     if (!content) return "";
     const cached = markdownCache.get(content);
@@ -422,13 +428,7 @@ export function renderMarkdown(content: string): string {
             const safeText = escAttr(text || "");
             const titleAttr = title ? ` title="${escAttr(title)}"` : "";
 
-            let src = href;
-            const isLocalAbs = href.startsWith("/") || /^[A-Za-z]:[\\/]/.test(href);
-            if (/^file:\/\//i.test(href)) {
-                src = convertFileSrc(href.replace(/^file:\/\//i, ""));
-            } else if (isLocalAbs) {
-                src = convertFileSrc(href);
-            }
+            const src = resolveMarkdownMediaSource(href);
             const safeSrc = escAttr(src);
             const cleanHref = href.split(/[?#]/)[0];
             if (/\.(mp4|webm|mov|mkv|avi)$/i.test(cleanHref)) {

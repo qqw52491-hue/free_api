@@ -6,6 +6,10 @@
         class="markdown-segment markdown-content"
         v-html="getBlockHtml(block, idx)"
       ></div>
+      <MarkdownImageGallery
+        v-else-if="block.type === 'images'"
+        :images="block.images || []"
+      />
       <EChartsBlock
         v-else-if="block.type === 'echarts'"
         :code="block.content"
@@ -51,14 +55,17 @@ function renderSegmentMarkdown(segment: string): string {
 <script setup lang="ts">
 import { computed, defineAsyncComponent } from "vue";
 import { marked } from "marked";
+import MarkdownImageGallery from './MarkdownImageGallery.vue';
+import { standaloneImages, type MarkdownImage } from './markdownImages';
 
 const EChartsBlock = defineAsyncComponent(() => import("./EChartsBlock.vue"));
 const MermaidBlock = defineAsyncComponent(() => import("./MermaidBlock.vue"));
 
 interface ContentBlock {
-  type: "markdown" | "echarts" | "mermaid";
+  type: "markdown" | "echarts" | "mermaid" | "images";
   content: string;
   html?: string;
+  images?: MarkdownImage[];
 }
 
 const props = withDefaults(
@@ -159,6 +166,16 @@ const parsedBlocks = computed<ContentBlock[]>(() => {
 
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
+
+    const images = standaloneImages(token);
+    if (images) {
+      flushMarkdown();
+      const previous = blocks[blocks.length - 1];
+      if (previous?.type === 'images') previous.images!.push(...images);
+      else blocks.push({ type: 'images', content: token.raw, images });
+      continue;
+    }
+    if (token.type === 'space' && !accumulatedMarkdown && blocks[blocks.length - 1]?.type === 'images') continue;
 
     // 1. 顶级代码块 token (```lang ... ```)
     if (token.type === "code") {
