@@ -31,6 +31,8 @@ const cases = [
     ['explicit read', { tool:'local_file', action:'read', params:{ path:'a.vue' } }, '读取'],
     ['serialized params', { tool:'local_file', action:'local_file', params:'{"path":"a.vue","action":"list"}' }, '目录'],
     ['nested params', { tool:'local_file', action:'local_file', params:{ command:{action:'read', path:'a.vue'} } }, '读取'],
+    ...['parallel', 'pipeline', 'commands', 'plan_tree'].map(tool =>
+        [tool, { tool, params: {}, description: '检查两项信息' }, '操作集合']),
     ['local shell', { tool:'local_shell', action:'local_shell', params:{command:'pwd'} }, '终端'],
 ];
 for (const [name,step,label] of cases) {
@@ -48,7 +50,7 @@ const code = ts.transpileModule(`${classifier}\nexports.isMcpStep = isMcpStep;`,
     compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}
 }).outputText;
 const box = { exports:{} };vm.runInNewContext(code,box);
-for (const tool of ['local_file','local_shell']) {
+for (const tool of ['local_file','local_shell','parallel','pipeline','commands','plan_tree']) {
     assert.equal(box.exports.isMcpStep({tool,source:'MCP'},{badgeIcon:'🧩'}),false);
 }
 assert.equal(box.exports.isMcpStep({tool:'remote/local_file',source:'MCP'}),true);

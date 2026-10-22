@@ -116,6 +116,16 @@ export function computeFormatStepOperation(step: AgentStepItem): StepOperationDi
         act = String(p.action || "read").toLowerCase();
     }
 
+    // 批次是宿主内部调度容器，不代表 MCP 插件。
+    if (["parallel", "pipeline", "commands", "plan_tree"].includes(t)) {
+        return {
+            badgeIcon: "⚡",
+            badgeLabel: "操作集合",
+            actionText: step.description || "执行多项操作",
+            hasDiff: false,
+        };
+    }
+
     // 1. 读文件 (包含原生 local_file read)
     if (
         (isLocalFile && (act.startsWith("read") || (!act && !p.content && targetContent === undefined))) ||

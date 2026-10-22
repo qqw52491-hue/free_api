@@ -362,6 +362,15 @@
                                         <span v-else-if="item.action.actionKind === 'shell'" class="action-tag action-tag-shell">⚡ 终端</span>
                                         <span v-else-if="item.action.actionKind === 'search'" class="action-tag action-tag-search">🔍 检索</span>
                                         <span v-else-if="item.action.actionKind === 'web'" class="action-tag action-tag-web">{{ item.action.iconEmoji || '🌐' }} 网页</span>
+                                        <span v-else-if="item.action.actionKind === 'batch'" class="action-tag action-tag-batch" title="多项操作组成的执行批次">
+                                            <svg class="batch-operation-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <rect x="3" y="3" width="7" height="7" rx="1.5" />
+                                                <rect x="14" y="3" width="7" height="7" rx="1.5" />
+                                                <rect x="3" y="14" width="7" height="7" rx="1.5" />
+                                                <path d="M14 17.5h7m-3.5-3.5v7" />
+                                            </svg>
+                                            <span>操作集合</span>
+                                        </span>
                                         <span v-else-if="item.action.actionKind === 'mcp'" class="action-tag action-tag-mcp">🧩 MCP</span>
                                         <span v-else class="action-tag action-tag-general">⚡ 操作</span>
 
@@ -375,7 +384,7 @@
                                         />
 
                                         <!-- 1.3 核心文件名或命令 (milestone 类型标题已由动作标签渲染，避免重复；过滤占位名) -->
-                                        <span v-if="item.action.actionKind !== 'milestone' && item.action.capsuleTitle && item.action.capsuleTitle !== '新文件' && item.action.capsuleTitle !== '文件内容' && item.action.capsuleTitle !== '代码变更'" class="chip-file-name">{{ item.action.capsuleTitle }}</span>
+                                        <span v-if="item.action.actionKind !== 'milestone' && item.action.actionKind !== 'batch' && item.action.capsuleTitle && item.action.capsuleTitle !== '新文件' && item.action.capsuleTitle !== '文件内容' && item.action.capsuleTitle !== '代码变更'" class="chip-file-name">{{ item.action.capsuleTitle }}</span>
 
                                         <!-- 1.4 所在目录简写 (如 src/bin/) -->
                                         <span v-if="item.action.filePath && getDirName(item.action.filePath)" class="chip-file-dir">
@@ -505,7 +514,7 @@
                                 </div>
                             </div>
 
-                            <!-- 2.5 连续 MCP 操作智能微折叠卡片 (高信噪比收拢连续工具调用) -->
+                            <!-- 2.5 连续操作的折叠集合；集合本身不表示工具来源 -->
                             <div
                                 v-else-if="item.type === 'mcp-group'"
                                 class="ambient-action-group ambient-mcp-group"
@@ -513,7 +522,15 @@
                             >
                                 <div class="ambient-action-group-header" @click="toggleMcpGroup(item.id)">
                                     <div class="action-group-left">
-                                        <span class="action-tag action-tag-mcp">🧩 MCP</span>
+                                        <span class="action-tag action-tag-batch" title="多项操作组成的执行批次">
+                                            <svg class="batch-operation-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <rect x="3" y="3" width="7" height="7" rx="1.5" />
+                                                <rect x="14" y="3" width="7" height="7" rx="1.5" />
+                                                <rect x="3" y="14" width="7" height="7" rx="1.5" />
+                                                <path d="M14 17.5h7m-3.5-3.5v7" />
+                                            </svg>
+                                            <span>操作集合</span>
+                                        </span>
                                         <span class="action-group-summary">{{ item.summary }}</span>
                                         <span v-if="item.durationBadge" class="chip-duration">{{ item.durationBadge }}</span>
                                     </div>
@@ -528,7 +545,7 @@
                                     </div>
                                 </div>
 
-                                <!-- 展开后的 MCP 明细列表 -->
+                                <!-- 展开后的操作明细列表 -->
                                 <div v-if="isMcpGroupExpanded(item.id)" class="ambient-action-group-list">
                                     <article
                                         v-for="subStep in item.steps"
@@ -1938,7 +1955,7 @@ function hasFileOperation(step: AgentStepItem): boolean {
 }
 
 export interface AmbientActionDisplay {
-    actionKind: 'read' | 'edit' | 'write' | 'shell' | 'search' | 'web' | 'mcp' | 'milestone' | 'subagent' | 'general';
+    actionKind: 'read' | 'edit' | 'write' | 'shell' | 'search' | 'web' | 'mcp' | 'batch' | 'milestone' | 'subagent' | 'general';
     subagentTag?: string;
     capsuleTitle: string;
     fileName?: string;
@@ -2169,7 +2186,7 @@ function buildMcpGroupSummary(steps: AgentStepItem[]): { summary: string } {
     } else if (titles.length > 0) {
         summary = `${titles.slice(0, 2).join('、')} 等 ${steps.length} 项操作`;
     } else {
-        summary = `执行 ${steps.length} 项 MCP 工具操作`;
+        summary = `执行 ${steps.length} 项操作`;
     }
     return { summary };
 }
@@ -2177,7 +2194,7 @@ function buildMcpGroupSummary(steps: AgentStepItem[]): { summary: string } {
 function isMcpStep(step: AgentStepItem, op?: StepOperationDisplay): boolean {
     if (!step) return false;
     const localTool = (step.tool || step.action || '').trim().toLowerCase();
-    if (localTool === 'local_file' || localTool === 'local_shell') return false;
+    if (['local_file', 'local_shell', 'parallel', 'pipeline', 'commands', 'plan_tree'].includes(localTool)) return false;
     if (step.source === 'MCP') return true;
     if (op?.badgeIcon === '🧩' || op?.badgeLabel === 'MCP') return true;
     const t = (step.tool || '').toLowerCase();
@@ -2313,8 +2330,8 @@ function buildAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
             }
         }
 
-        // 连续 MCP 工具微折叠：将连续 >= 2 个无 narrative 的 MCP 操作汇聚收拢
-        if (action.actionKind === 'mcp') {
+        // 连续批次或外部工具可折叠为操作集合；不把集合来源标成 MCP。
+        if (action.actionKind === 'mcp' || action.actionKind === 'batch') {
             const mcpSteps: AgentStepItem[] = [step];
             let j = i + 1;
             while (j < rawSteps.length) {
@@ -2324,7 +2341,7 @@ function buildAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
                     j++;
                     continue;
                 }
-                if (getAmbientAction(nextStep).actionKind === 'mcp' && !stepNarrative(nextStep)) {
+                if (['mcp', 'batch'].includes(getAmbientAction(nextStep).actionKind) && !stepNarrative(nextStep)) {
                     mcpSteps.push(nextStep);
                     j++;
                 } else {
@@ -2609,6 +2626,20 @@ function computeAmbientAction(step: AgentStepItem): AmbientActionDisplay {
             isWarning: false,
             isMilestone: false,
             tooltip: op.filePath ? `读取 ${op.filePath} ${op.lineRange || ''}` : '读取文件',
+        };
+    }
+
+    // 内部批次显示为操作集合，不能由默认拼图图标误判为 MCP。
+    if (op.badgeLabel === '操作集合') {
+        return {
+            actionKind: 'batch',
+            capsuleTitle: '',
+            capsuleBadge: step.metrics?.toolDurationMs != null
+                ? formatDurationSeconds(step.metrics.toolDurationMs) : undefined,
+            explanation: desc && desc !== '执行操作' ? desc : op.actionText,
+            isWarning: false,
+            isMilestone: false,
+            tooltip: op.actionText,
         };
     }
 

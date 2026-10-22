@@ -1227,8 +1227,8 @@
 
 /* 🌟 阶段解说段落 (每阶段开头的统领大白话叙述，间距紧凑自然) */
 .ambient-narrative {
-    margin: 6px 4px 3px;
-    padding: 0 0 0 2px;
+    margin: 6px 0 3px;
+    padding: 0;
     font-size: 13.5px;
     line-height: 1.5;
     font-weight: 500;
@@ -1254,8 +1254,8 @@
 
 /* 解说抑制小行：单行紧凑高信噪比，不产生额外外边距 */
 .ambient-narrative-mini {
-    margin: 0 4px;
-    padding: 0 0 0 6px;
+    margin: 0;
+    padding: 0;
     font-size: 11px;
     line-height: 20px;
     min-height: 20px;
@@ -1394,8 +1394,28 @@
 }
 
 /* 行容器已齐边，首个标签不再内缩图标；命令与用途仍自然跟随。 */
-.ambient-text-row > .ambient-text-content > .ambient-action-lead > .action-tag:first-child {
+.ambient-text-row > .ambient-text-content > .ambient-action-lead > .action-tag:first-child,
+.ambient-search-group-header > .search-group-left > .action-tag:first-child,
+.ambient-action-group-header > .action-group-left > .action-tag:first-child {
     padding-left: 0;
+}
+
+/* 批次用组合图形表达，避免 emoji 字形和文本基线因平台而漂移。 */
+.action-tag.action-tag-batch {
+    gap: 4px;
+    color: #a5b4fc;
+    background: rgba(129, 140, 248, 0.08);
+}
+
+.batch-operation-icon {
+    display: block;
+    width: 13px;
+    height: 13px;
+    flex: none;
+}
+
+.action-tag-batch > span {
+    line-height: inherit;
 }
 
 .action-tag.action-tag-edit {
@@ -1603,8 +1623,8 @@
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    padding: 3.5px 8px;
-    min-height: 28px;
+    padding: 2px 0;
+    min-height: 22px;
     border-radius: 5px;
     cursor: pointer;
     transition: background 0.12s ease;
