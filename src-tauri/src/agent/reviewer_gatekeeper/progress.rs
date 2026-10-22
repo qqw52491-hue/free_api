@@ -19,6 +19,10 @@ struct ProgressState {
     failure_kind: String,
     timeout_retries: u32,
     format_corrections: u32,
+    last_request_round: Option<usize>,
+    last_request_output_tokens: Option<i64>,
+    last_request_ttft_ms: Option<u64>,
+    last_request_tokens_per_second: Option<f64>,
 }
 
 pub(super) struct ReviewProgress {
@@ -93,6 +97,23 @@ impl ReviewProgress {
             s.tool_budget = budget;
         }
         self.phase("waiting", "请求已发起，等待模型响应（尚未收到片段）");
+    }
+
+    // A completed request sample, not a live estimate or an aggregate across tool rounds.
+    // The transport's rate can be character-estimated without usage, so compute only
+    // from provider-reported output tokens and a meaningful observed generation span.
+    pub(super) fn response_completed(&self, output: &crate::llm::StreamResult) {
+        {
+            let mut s = self.state.lock().unwrap();
+            s.last_request_round = Some(s.round);
+            s.last_request_output_tokens = output.usage.filter(|u| u.completion_tokens >= 0).map(|u| u.completion_tokens);
+            s.last_request_ttft_ms = (self.received_chars.load(Ordering::Relaxed) > 0).then_some(output.ttft_ms);
+            let generation_ms = output.total_duration_ms.saturating_sub(output.ttft_ms);
+            s.last_request_tokens_per_second = s.last_request_output_tokens
+                .filter(|tokens| *tokens > 0 && generation_ms > 50 && s.last_request_ttft_ms.is_some())
+                .map(|tokens| tokens as f64 * 1000.0 / generation_ms as f64);
+        }
+        self.emit();
     }
 
     pub(super) fn observe(&self, event: StreamEvent<'_>) -> bool {
@@ -171,6 +192,10 @@ impl ReviewProgress {
             "timeout_retries": s.timeout_retries, "format_corrections": s.format_corrections,
             "elapsed_ms": self.started.elapsed().as_millis() as u64,
             "received_chars": self.received_chars.load(Ordering::Relaxed),
+            "last_request_round": s.last_request_round,
+            "last_request_output_tokens": s.last_request_output_tokens,
+            "last_request_ttft_ms": s.last_request_ttft_ms,
+            "last_request_tokens_per_second": s.last_request_tokens_per_second,
         });
         drop(s);
         (self.sink)(payload);
@@ -225,6 +250,39 @@ mod tests {
         assert!(!serde_json::to_string(&*e)
             .unwrap()
             .contains("PRIVATE_THOUGHT"));
+    }
+
+    #[test]
+    fn request_speed_uses_reported_usage_not_character_estimates() {
+        let (mut p, events) = fixture();
+        p.request(1, 0, 8);
+        p.observe(StreamEvent::Content { chunk: "private", accumulated_content: "private", full_thinking: "" });
+        let mut output = crate::llm::StreamResult {
+            full_response: "private".into(), thinking_text: String::new(),
+            usage: Some(crate::llm::RawUsage { completion_tokens: 100, ..Default::default() }),
+            ttft_ms: 3000, total_duration_ms: 5000, tokens_per_second: 999.0, attempt_count: 1,
+        };
+        p.response_completed(&output);
+        let sample = events.lock().unwrap().last().unwrap().clone();
+        assert_eq!(sample["last_request_round"], 1);
+        assert_eq!(sample["last_request_tokens_per_second"], 50.0);
+        assert_eq!(sample["last_request_output_tokens"], 100);
+        assert_eq!(sample["last_request_ttft_ms"], 3000);
+        p.request(2, 0, 8);
+        assert_eq!(events.lock().unwrap().last().unwrap()["last_request_round"], 1);
+        output.usage = None; // Transport may still carry an estimated nonzero rate.
+        p.response_completed(&output);
+        let missing = events.lock().unwrap().last().unwrap().clone();
+        assert_eq!(missing["last_request_round"], 2);
+        assert!(missing["last_request_tokens_per_second"].is_null());
+        assert!(missing["last_request_output_tokens"].is_null());
+        assert!(missing["last_request_ttft_ms"].is_null(), "no observed fragment in this request");
+        output.usage = Some(crate::llm::RawUsage { completion_tokens: 100, ..Default::default() });
+        output.total_duration_ms = output.ttft_ms + 20;
+        p.response_completed(&output);
+        assert!(events.lock().unwrap().last().unwrap()["last_request_tokens_per_second"].is_null());
+        p.finish("passed");
+        assert!(!serde_json::to_string(&*events.lock().unwrap()).unwrap().contains("private"));
     }
 
     #[test]

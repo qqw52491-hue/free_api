@@ -167,6 +167,7 @@ impl Fixture {
             "auto".into(),
             &mut self.cp,
             self.rx.clone(),
+            None,
         )
     }
 

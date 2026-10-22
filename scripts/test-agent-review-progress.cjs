@@ -29,7 +29,9 @@ async function main() {
     const send = p => emit('agent-progress-existing-session', { ...base, ...p });
     send({}); assert.equal(s.reviewProgress.value.length, 1);
     const logs = s.logs.value.length;
+    const activities = s.reviewProgress.value[0].activities;
     send({ elapsed_ms: 30000 });
+    assert.equal(s.reviewProgress.value[0].activities, activities, 'heartbeat does not append synthetic activity');
     assert.equal(s.logs.value.length, logs, 'heartbeat updates time without log spam');
     let text = await html(s); assert(text.includes('30 秒')); assert(text.includes('等待模型响应'));
     send({ phase: 'responding', stream_kind: 'thinking', elapsed_ms: 30001 });
@@ -56,10 +58,11 @@ async function main() {
     assert(!text.includes('PRIVATE_THOUGHT'));
     const panel = fs.readFileSync(path.join(root, 'src/components/AgentPanel.vue'), 'utf8');
     assert(!panel.includes('<AgentReviewProgress'), 'no fixed review card above the chat');
-    assert(!panel.includes(':review-progress='), 'standalone review panel is disconnected from main view');
+    assert(panel.includes(':review-progress="session.reviewProgress.value"'), 'final progress remains connected to main view');
     const stream = fs.readFileSync(path.join(root, 'src/components/agent/AgentChatStream.vue'), 'utf8');
     assert(!stream.includes('AgentReviewProgress'), 'large review area must not mount in either view mode');
-    assert(!stream.includes('props.reviewProgress'), 'hidden review area must not trigger follow-scroll');
+    assert(stream.includes('getStepReviewRows(item.step)') && stream.includes('getStepReviewRows(step)'), 'both modes anchor final members under their finish step');
+    assert(!stream.includes('v-for="review in reviewProgress"'), 'no trailing standalone list after final answer');
     assert(stream.includes('<AgentWorkerProgress') && stream.includes('getAmbientWorkerRows(item.step)'), 'existing compact per-agent execution rows remain connected');
     await emit('channel-run-started', { session_id: 'existing-session', goal: 'next run' });
     assert.equal(s.reviewProgress.value.length, 0, 'new run clears previous review cards');

@@ -38,6 +38,15 @@ async function main() {
  assert(!parseChildJobReceipts(failure).find(r=>r.id===b).output.includes('故障转移'));
  assert.deepEqual(getStepJobIds(step('step-9','resume_child',{child_run_id:a},`✅ 侦察 worker 追问已成功启动：新 child_run_id=${c}（继承历史）。`)),[c], 'resume params are OLD id');
  assert.deepEqual(getStepJobIds(step('step-9-review','resume_child',{child_run_id:a},`审查专家对质已启动：child_run_id=${c}。继承原任务上下文；其他成员结论保留。`)),[c]);
+ const originalReview = step('step-review-origin','child_reviewer',{role_label:'架构评审专家'},`子审查任务已异步派发，child_run_id: ${a}。`);
+ const resumedReview = step('step-review-resumed','resume_child',{child_run_id:a},`审查专家对质已启动：child_run_id=${c}。继承原任务上下文；其他成员结论保留。`);
+ const resumedWait = step('step-review-wait','wait_jobs',{job_ids:[c]},result(c,'succeeded','child_reviewer'));
+ const restoredReview = extractSubagentsFromStep(resumedReview,[originalReview,resumedReview,resumedWait])[0];
+ assert.equal(restoredReview.id,c);
+ assert.equal(restoredReview.roleLabel,'架构评审专家','history follows exact predecessor identity for display metadata');
+ assert.equal(restoredReview.extra.resumed,true);
+ assert.equal(restoredReview.durationMs,10021,'new attempt retains only its own terminal evidence');
+ assert.equal(extractSubagentsFromStep(resumedReview,[resumedReview])[0].roleLabel,'审查','missing predecessor remains generic, no guessed expert');
  assert.deepEqual(getStepJobIds(step('step-10','child_worker',{},`未派发；任务描述说 child_run_id=${a}`)),[], 'task prose is not a receipt');
  const shellId = 'job-archive-check';
  const shellWait = step('step-shell','wait_jobs',{job_ids:[shellId]},result(shellId,'succeeded','shell'));

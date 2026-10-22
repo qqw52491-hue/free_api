@@ -292,6 +292,9 @@
                         </div>
                     </template>
                 </article>
+                <div v-else-if="entry.type === 'review'" class="ambient-workers-list" :data-tl="entry.id" aria-label="终审进度（未关联步骤）">
+                    <AgentWorkerProgress v-for="review in unplacedReviews" :key="review.id" :review="review" :is-running="isRunning" />
+                </div>
                 <article
                     v-else-if="entry.type === 'plan'"
                     :data-tl="entry.id"
@@ -337,6 +340,7 @@
                                     {
                                         'is-milestone': item.action.isMilestone,
                                         'is-warning': item.action.isWarning,
+                                        'intent-first': !!item.action.explanation && !item.action.isMilestone,
                                         [`finding-${item.step.findingKind}`]: item.action.isMilestone && item.step.findingKind
                                     }
                                 ]"
@@ -415,8 +419,13 @@
                                     v-for="worker in getAmbientWorkerRows(item.step)"
                                     :key="worker.id"
                                     :worker="worker"
+                                    :is-running="isRunning"
                                     @inspect="$emit('open-team-deck', item.step.id)"
                                 />
+                            </div>
+
+                            <div v-if="getStepReviewRows(item.step).length" class="ambient-workers-list review-step-members" :data-review-step="item.step.id" aria-label="终审成员进度">
+                                <AgentWorkerProgress v-for="review in getStepReviewRows(item.step)" :key="review.id" :review="review" :is-running="isRunning" />
                             </div>
 
                             <!-- 命令输出：执行中自动展开实时输出，结束后自动收起；可用箭头手动展开/收起 -->
@@ -892,6 +901,9 @@
                                         <span class="row-status" :class="`status-tag-${step.status}`">{{ isSubAgentTool(step.tool) && step.status === 'running' ? '后台协同中' : (isWaitJobsTool(step.tool) && step.status === 'running' ? '挂起等待' : statusLabel(step.status)) }}</span>
                                         <time>{{ formatClock(step.timestamp) }}</time>
                                     </button>
+                                    <div v-if="getStepReviewRows(step).length" class="ambient-workers-list review-step-members" :data-review-step="step.id" aria-label="终审成员进度">
+                                        <AgentWorkerProgress v-for="review in getStepReviewRows(step)" :key="review.id" :review="review" :is-running="isRunning" />
+                                    </div>
                                     <div class="node-children">
                                         <!-- 1. 思考行 (如果有思考过程) -->
                                         <button v-if="step.thought" class="child-row thought-child" :class="{ selected: step.id === selectedStepId && selectedSubpart === 'thought' }" type="button" @click="$emit('select-step-thought', step.id)">
@@ -986,69 +998,13 @@
                                             @select="$emit('select-step', step.id)"
                                         />
                                     </div>
-                                    <!-- 👥 模式1：内嵌多 Agent 协作微卡片 (轻量清爽，点击直通右侧 Inspector 查看) -->
-                                    <div
-                                        v-if="isSubAgentTool(step.tool) || isWaitJobsTool(step.tool)"
-                                        class="subagent-orchestration-card"
-                                        role="button"
-                                        tabindex="0"
-                                        :title="'点击在右侧抽屉查看多 Agent 协同链路：' + extractSubagentTask(step)"
-                                        @click="$emit('open-team-deck', step.id)"
-                                        @keydown.enter="$emit('open-team-deck', step.id)"
-                                    >
-                                        <!-- 卡片顶栏：标题与右侧查看提示 -->
-                                        <div class="orchestration-header">
-                                            <div class="header-main">
-                                                <span class="team-icon">👥</span>
-                                                <span class="orchestration-title">
-                                                    {{ getOrchestrationTitle(step) }}
-                                                </span>
-                                                <span v-if="getStepActiveWorkers(step).length > 0" class="worker-count-pill">
-                                                    {{ getStepActiveWorkers(step).length }} 个 Worker
-                                                </span>
-                                            </div>
-                                            <div class="header-action">
-                                                <span>在右侧查看详情</span>
-                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                                                    <polyline points="9 18 15 12 9 6" />
-                                                </svg>
-                                            </div>
-                                        </div>
-
-                                        <!-- 卡片内容体：展示 Workers 并行列表或具体子任务 -->
-                                        <div class="orchestration-body">
-                                            <div v-if="getStepActiveWorkers(step).length > 0" class="worker-chips-list">
-                                                <div
-                                                    v-for="worker in getStepActiveWorkers(step)"
-                                                    :key="worker.id"
-                                                    class="worker-chip-item"
-                                                    :class="`status-${worker.status}`"
-                                                >
-                                                    <span class="worker-state-indicator">
-                                                        <span v-if="worker.status === 'running'" class="manus-spinner mini"></span>
-                                                        <span v-else-if="worker.status === 'succeeded'" class="worker-check">✓</span>
-                                                        <span v-else-if="worker.status === 'failed'" class="worker-cross">✕</span>
-                                                        <span v-else class="worker-dot">○</span>
-                                                    </span>
-                                                    <span class="worker-name">{{ worker.name }}</span>
-                                                    <span v-if="worker.roleLabel" class="worker-role-tag">{{ worker.roleLabel }}</span>
-                                                    <span class="worker-task-desc">
-                                                        {{ worker.currentStep || worker.currentTool || (worker.status === 'succeeded' ? '已完成并回传主调度' : '等待派发') }}
-                                                    </span>
-                                                    <span v-if="worker.durationMs" class="worker-duration">
-                                                        {{ (worker.durationMs / 1000).toFixed(1) }}s
-                                                    </span>
-                                                </div>
-                                            </div>
-                                            <div v-else class="single-subagent-task">
-                                                <span class="capsule-pulse-dot" :class="{ 'is-running': step.status === 'running' }"></span>
-                                                <span class="task-desc-text">
-                                                    {{ step.status === 'running' ? '正在独立执行：' : '协同已交付：' }}
-                                                    <strong>{{ extractSubagentTask(step) }}</strong>
-                                                </span>
-                                            </div>
-                                        </div>
+                                    <!-- 与简报共用同一身份归属和紧凑实时成员行，不在等待步骤重复挂载。 -->
+                                    <div v-if="getAmbientWorkerRows(step).length" class="ambient-workers-list" aria-label="子 Agent 进度">
+                                        <AgentWorkerProgress v-for="worker in getAmbientWorkerRows(step)" :key="worker.id" :worker="worker" :is-running="isRunning" @inspect="$emit('open-team-deck', step.id)" />
                                     </div>
+                                    <button v-else-if="(isSubAgentTool(step.tool) || isWaitJobsTool(step.tool)) && !getStepActiveWorkers(step).length" class="child-row" type="button" :title="extractSubagentTask(step)" @click="$emit('open-team-deck', step.id)">
+                                        <span class="child-mark"></span><span>{{ getOrchestrationTitle(step) }}</span><em>查看协作详情</em>
+                                    </button>
                                 </article>
 
                                 <!-- 🌟 正在执行流光呼吸指示器 (Running Shimmer Streamer) -->
@@ -1315,6 +1271,7 @@ import ArtifactList from "../artifacts/ArtifactList.vue";
 import FileIcon from "./FileIcon.vue";
 import { workerRowOwners } from "./workerAssociation";
 import AgentWorkerProgress from "./AgentWorkerProgress.vue";
+import { placeReviewRows, type ReviewProgressItem, type ReviewLocation } from "./reviewProgress";
 import { extractSubagentsFromStep } from "./workerUtils";
 import { getWorkerLiveLine } from "./liveThoughtPreview";
 
@@ -1552,9 +1509,10 @@ async function openDocPreview(att: ParsedAttachment) {
 
 type HistoryMessage = { id: string; role: string; content: string; created_at: string; timestamp: number };
 type HistoryTurn = { id: string; goal: string; status: string; steps: AgentStepItem[]; messages: HistoryMessage[]; summary: string; artifacts: AgentArtifactInput[]; startedAt: number; completedAt: number };
-type PlanEntry = { id: string; type: "plan"; timestamp: number; title: string; status: AgentToolStatus; steps: AgentStepItem[]; isThinking: boolean; thinkingTimestamp?: number; interventions?: StepInterventionRow[] };
+type PlanEntry = { id: string; type: "plan"; runId?: string; timestamp: number; title: string; status: AgentToolStatus; steps: AgentStepItem[]; isThinking: boolean; thinkingTimestamp?: number; interventions?: StepInterventionRow[] };
 type TimelineEntry =
     | PlanEntry
+    | { id: string; type: "review"; timestamp: number }
     | { id: string; type: "user"; timestamp: number; content: string }
     | { id: string; type: "message"; timestamp: number; role: string; content: string; isHuman: boolean; anchorId?: string; question?: string; stepId?: string }
     | { id: string; type: "completion"; timestamp: number; title: string; summary: string; artifacts: AgentArtifactInput[]; failed: boolean }
@@ -1585,6 +1543,7 @@ const props = withDefaults(
         isWaitingForHuman?: boolean;
         isSendingHuman?: boolean;
         teamState?: AgentTeamState;
+        reviewProgress?: ReviewProgressItem[];
         liveShellOutput?: { command: string; tail: string; elapsedMs: number; done: boolean } | null;
     }>(),
     {
@@ -1595,6 +1554,7 @@ const props = withDefaults(
         isSendingHuman: false,
         finalArtifacts: () => [],
         liveShellOutput: null,
+        reviewProgress: () => [],
     }
 );
 
@@ -3209,7 +3169,7 @@ function planStatus(steps: AgentStepItem[], isLiveTaskActive = false): AgentTool
     if (statuses.some((s) => s === "failed")) return "failed";
     return "succeeded";
 }
-function planEntries(steps: AgentStepItem[], prefix: string, active = false): PlanEntry[] {
+function planEntries(steps: AgentStepItem[], prefix: string, active = false, runId?: string): PlanEntry[] {
     const isLive = prefix === "live";
     const isTaskActive = isLive && props.isRunning && !props.finalSummary?.trim() && !props.completionMessage?.trim();
     const rawPlans: PlanEntry[] = [];
@@ -3236,6 +3196,7 @@ function planEntries(steps: AgentStepItem[], prefix: string, active = false): Pl
                 _key: key,
                 id: `${prefix}-plan-${paddedIndex}-${key}`,
                 type: "plan" as const,
+                runId,
                 timestamp: step.timestamp,
                 title: step.planTitle || "执行任务",
                 status: step.status,
@@ -3299,7 +3260,7 @@ const historyTimelineEntries = computed<TimelineEntry[]>(() => {
         timeline.push({ id: `history-user-${turn.id}`, type: "user", timestamp: turn.startedAt, content: turn.goal });
         // 过滤掉最终已由 completion 展示的助手消息，只保留人工干预记录
         const humanMessages = turn.messages.filter((m) => m.role === "user");
-        const plans = planEntries(turn.steps, `history-${turn.id}`);
+        const plans = planEntries(turn.steps, `history-${turn.id}`, false, turn.id);
         const stepToPlan = new Map<string, PlanEntry>();
         for (const p of plans) for (const s of p.steps) stepToPlan.set(s.id, p);
         const middle: TimelineEntry[] = [...plans];
@@ -3393,7 +3354,26 @@ function currentTimeline(): TimelineEntry[] {
     return timeline;
 }
 
-const timelineEntries = computed<TimelineEntry[]>(() => [...historyTimelineEntries.value, ...currentTimeline()]);
+const baseTimelineEntries = computed<TimelineEntry[]>(() => [...historyTimelineEntries.value, ...currentTimeline()]);
+// 只以身份/锚点变更重算位置；心跳和片段计数不重建步骤分组。
+const reviewLocationKey = computed(() => JSON.stringify(props.reviewProgress.map(review => ({ id: review.id, anchor: review.anchor }))));
+const reviewPlacement = computed(() => placeReviewRows(JSON.parse(reviewLocationKey.value) as ReviewLocation[], baseTimelineEntries.value));
+const reviewById = computed(() => new Map(props.reviewProgress.map(review => [review.id, review])));
+const unplacedReviews = computed(() => reviewPlacement.value.unplaced.flatMap(id => reviewById.value.get(id) || []));
+function getStepReviewRows(step: AgentStepItem): ReviewProgressItem[] {
+    return (reviewPlacement.value.owners.get(step.id) || []).flatMap(id => reviewById.value.get(id) || []);
+}
+const timelineEntries = computed<TimelineEntry[]>(() => {
+    const entries = [...baseTimelineEntries.value];
+    if (reviewPlacement.value.unplaced.length) {
+        const liveCompletion = entries.findIndex(entry => entry.id === 'live-completion');
+        const lastCompletion = props.isRunning ? -1 : entries.map(entry => entry.type).lastIndexOf('completion');
+        const index = liveCompletion >= 0 ? liveCompletion : lastCompletion >= 0 ? lastCompletion : entries.length;
+        // 缺少可靠归属时仍放在交付之前的步骤区，绝不粘在答案/产物之后。
+        entries.splice(index, 0, { id: 'unplaced-final-review', type: 'review', timestamp: 0 });
+    }
+    return entries;
+});
 // Cache grouping/operation parsing independently of child-agent token streams.
 const ambientDisplayItems = computed(() => new Map(timelineEntries.value
     .filter((entry): entry is PlanEntry => entry.type === "plan")
@@ -3499,6 +3479,7 @@ watch(() => props.historyTurns, (turns) => {
     }
 }, { immediate: true });
 watch(() => [timelineEntries.value.length, props.completionMessage, props.historyTurns.length], () => { followLatest(); }, { flush: "post" });
+watch(reviewLocationKey, () => { if (props.isRunning && followLiveTail.value) followLatest(); }, { flush: "post" });
 watch(() => props.isRunning, (running, wasRunning) => {
     if (running && !wasRunning) {
         typewriterDoneIds.delete('live-completion');

@@ -752,6 +752,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
                 );
             }
         };
+        progress.response_completed(&output);
         let duration_ms = started_at.elapsed().as_millis() as u64;
 
         let raw = output.full_response.clone();
@@ -1227,6 +1228,10 @@ mod finish_review_regression_tests {
         assert_eq!(phases.last(), Some(&"passed"));
         let last = events.last().unwrap();
         assert_eq!(last["round"], 3);
+        assert_eq!(last["last_request_round"], 3);
+        for round in 1..=3 {
+            assert!(events.iter().any(|event| event["round"] == round && event["last_request_round"] == round), "each completed HTTP round reports its own sample");
+        }
         assert_eq!(last["format_corrections"], 1);
         assert_eq!(last["tool_steps"], 1);
         assert_eq!(last["timeout_retries"], 0);

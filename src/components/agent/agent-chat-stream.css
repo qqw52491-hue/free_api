@@ -3841,6 +3841,16 @@ article:hover .msg-header-actions .msg-fork-btn:disabled {
     border-color: rgba(239, 68, 68, 0.25);
 }
 
+/* 用途在主行，实际工具/命令在次行，避免长指令挤掉执行说明。 */
+.ambient-text-row.intent-first { align-items: flex-start; padding-top: 4px; padding-bottom: 4px; }
+.intent-first > .ambient-text-content { flex-direction: column; align-items: stretch; gap: 2px; }
+.intent-first > .ambient-text-content > .ambient-text-body {
+    order: -1; flex: none; margin: 0; color: #cbd5e1; white-space: normal;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+}
+.intent-first > .ambient-text-content > .ambient-action-lead { max-width: 100%; width: fit-content; opacity: .8; }
+.intent-first > .ambient-text-time { padding-top: 1px; }
+
 /* 候选交付仅显示稳定状态，不渲染仍可能被打回的长总结。 */
 .completion-pending {
     margin: 12px 0;

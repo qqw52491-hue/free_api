@@ -7,6 +7,7 @@
                 'is-compact': compact,
                 'is-clickable': isClickable,
                 'is-warning': stepData.isWarning,
+                'intent-first': !!stepData.explanation,
             }
         ]"
         :title="stepData.tooltip"
@@ -481,4 +482,11 @@ function handleLeadClick() {
     margin-left: auto;
     padding-left: 8px;
 }
+.intent-first { align-items: flex-start; padding-top: 4px; padding-bottom: 4px; }
+.intent-first > .ambient-text-content { flex-direction: column; align-items: stretch; gap: 2px; }
+.intent-first > .ambient-text-content > .ambient-text-body {
+    order: -1; flex: none; margin: 0; color: #cbd5e1; white-space: normal;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+}
+.intent-first > .ambient-text-content > .ambient-action-lead { max-width: 100%; width: fit-content; opacity: .8; }
 </style>

@@ -34,6 +34,16 @@ async fn start_with_authority(
     rx: watch::Receiver<u64>,
     can_finalize: Option<bool>,
 ) -> String {
+    start_with_progress(mock, schema, rx, can_finalize, None).await
+}
+
+async fn start_with_progress(
+    mock: &MockReviewer,
+    schema: ContractSchema,
+    rx: watch::Receiver<u64>,
+    can_finalize: Option<bool>,
+    progress: Option<super::resume::ResumeProgressSink>,
+) -> String {
     let identity = ChildRunIdentity {
         purpose: Some("plan_review".into()),
         contract_schema: Some(serde_json::to_string(&schema).unwrap()),
@@ -68,8 +78,32 @@ async fn start_with_authority(
         Some(schema),
         can_finalize,
         rx,
+        progress,
     ));
     id
+}
+
+#[tokio::test]
+async fn resumed_review_reports_actual_actions_and_streams_under_its_new_child_id() {
+    let mut missing = response();
+    missing.as_object_mut().unwrap().remove("root_cause_verdict");
+    let mock = MockReviewer::new(vec![missing, response()]).await;
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let captured = events.clone();
+    let (_tx, rx) = watch::channel(0);
+    let id = start_with_progress(&mock, schema(), rx, None, Some(std::sync::Arc::new(move |event| {
+        captured.lock().unwrap().push(event);
+    }))).await;
+    let (status, result) = mock.wait_terminal(&id).await;
+    assert_eq!(status, "succeeded");
+    assert_eq!(result["decision"], "approved");
+    let events = events.lock().unwrap();
+    assert!(events.iter().all(|event| event["child_run_id"] == id));
+    let rounds: Vec<_> = events.iter().filter(|e| e["type"] == "child_reviewer_action")
+        .map(|e| e["step"].as_u64().unwrap()).collect();
+    assert_eq!(rounds, vec![1, 2], "contract correction remains visible as a new real request");
+    assert!(events.iter().any(|e| e["stream_type"] == "content" && e["chunk"].as_str().is_some_and(|s| s.contains("root_cause_verdict"))));
+    assert_eq!(mock.requests.lock().unwrap().len(), 2, "observation does not add model calls");
 }
 
 #[tokio::test]

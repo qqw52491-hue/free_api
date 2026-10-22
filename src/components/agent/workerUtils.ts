@@ -523,8 +523,7 @@ export function extractSubagentsFromStep(
     const origins = new Map<string, AgentStepItem>();
     // Resolve metadata/results by ID, not by "the closest dispatch" or the same role.
     for (const source of allSteps) for (const r of parseChildJobReceipts(source)) {
-        if (!related.has(r.id)) continue;
-        receipts.set(r.id, { ...receipts.get(r.id), ...r });
+        if (related.has(r.id)) receipts.set(r.id, { ...receipts.get(r.id), ...r });
         if (r.status == null && stepWorkerTool(source) !== "wait_jobs" && stepWorkerTool(source) !== "wait_for_jobs") origins.set(r.id, source);
     }
     // A wait parameter identifies a job, not its role. Only real child receipts or live
@@ -534,11 +533,26 @@ export function extractSubagentsFromStep(
         if (live) return live;
         const receipt = receipts.get(id);
         const source = origins.get(id) || step;
-        let params: any = source.rawParams ?? source.params;
+        let metadataSource = source;
+        let metadataReceipt = receipt;
+        const seen = new Set<string>([id]);
+        // A resume's input id identifies its predecessor, while its own receipt
+        // identifies the new attempt. Reuse only predecessor metadata, never output/status.
+        while (stepWorkerTool(metadataSource) === "resume_child") {
+            let input: any = metadataSource.rawParams ?? metadataSource.params;
+            if (typeof input === "string") { try { input = JSON.parse(input); } catch { break; } }
+            const previousId = input?.child_run_id || input?.id;
+            const previous = typeof previousId === "string" ? origins.get(previousId) : undefined;
+            if (!previous || seen.has(previousId)) break;
+            seen.add(previousId);
+            metadataSource = previous;
+            metadataReceipt = parseChildJobReceipts(previous).find(r => r.id === previousId);
+        }
+        let params: any = metadataSource.rawParams ?? metadataSource.params;
         if (typeof params === "string") { try { params = JSON.parse(params); } catch { params = {}; } }
-        if (receipt?.dispatchIndex != null && Array.isArray(params?.dispatches)) params = params.dispatches[receipt.dispatchIndex];
+        if (metadataReceipt?.dispatchIndex != null && Array.isArray(params?.dispatches)) params = params.dispatches[metadataReceipt.dispatchIndex];
         const tool = receipt?.tool || (stepWorkerTool(source).startsWith("child_") ? stepWorkerTool(source) : "child_worker");
-        const details = extractWorkerDetails({ ...source, tool, action: tool, params });
+        const details = extractWorkerDetails({ ...metadataSource, tool, action: tool, params });
         const arts = parseWorkerArtifacts(receipt?.output);
         const status = receipt?.status || "pending";
         return { id, name: details.name, role: details.role, roleLabel: details.roleLabel, status,
@@ -547,9 +561,30 @@ export function extractSubagentsFromStep(
             currentTool: tool, progress: status === "succeeded" || status === "failed" ? 100 : 0,
             startedAt: source.timestamp, durationMs: receipt?.durationMs, output: receipt?.output,
             findings: arts.findings, scorecard: arts.scorecard, evidenceRefs: arts.evidenceRefs,
-            confidence: arts.confidence, steps: arts.steps, extra: arts.extra, customSchema: arts.customSchema,
+            confidence: arts.confidence, steps: arts.steps,
+            extra: stepWorkerTool(source) === "resume_child" ? { ...arts.extra, resumed: true } : arts.extra,
+            customSchema: arts.customSchema,
         };
     });
+}
+
+/** Display actual invocation fields, never infer the purpose from command text. */
+export function workerStepInvocation(step: AgentWorkerStep): string {
+    let input: any = step.params;
+    if (typeof input === "string") { try { input = JSON.parse(input); } catch { input = {}; } }
+    const p = input && typeof input === "object" ? input : {};
+    const action = step.action || step.tool || "";
+    const command = typeof p.command === "string" ? p.command
+        : typeof p.cmd === "string" ? p.cmd
+        : step.view?.kind === "terminal" ? step.view.command : "";
+    if (command) return action ? `${action}\n${command}` : command;
+    const parts = [action];
+    if (typeof p.path === "string") parts.push(p.path);
+    const query = p.query ?? p.pattern;
+    if (typeof query === "string") parts.push(query);
+    if (typeof p.start_line === "number") parts.push(`#L${p.start_line}${typeof p.end_line === "number" ? `-${p.end_line}` : ""}`);
+    if (typeof p.output_id === "string") parts.push(`output_id=${p.output_id}`);
+    return parts.filter(Boolean).join(" · ");
 }
 
 export function formatWorkerName(name: string): string {

@@ -6,7 +6,7 @@ import { usePersistedAgentConversation, type PersistedConversationMessage } from
 import type { ArtifactDescriptor, AgentArtifactInput } from "../types/artifact";
 import { normalizeArtifact, normalizeArtifactList } from "../utils/artifact";
 import { finishSummaryText } from "../utils/agentCompletionText";
-import { applyReviewProgress, type ReviewProgressItem } from "../components/agent/reviewProgress";
+import { activeReviewAnchor, applyReviewProgress, type ReviewProgressItem } from "../components/agent/reviewProgress";
 
 export interface AgentHistoryTurn {
     id: string;
@@ -369,6 +369,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     const actionPhaseText = ref<string>("");
     const reviewProgress = ref<ReviewProgressItem[]>([]);
     const reviewProgressStartedAt = ref(0);
+    const reviewRunId = ref('');
     const lastRunTelemetry = ref<AgentSessionTelemetry | null>(null);
     const completionMessage = ref("");
     const streamingSummary = ref("");
@@ -913,6 +914,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             let rawParams = stepItem.rawParams ?? stepItem.params;
             if (typeof rawParams === "string") { try { rawParams = JSON.parse(rawParams); } catch { rawParams = {}; } }
             const params = asRecord(rawParams);
+            const predecessorId = tool === "resume_child" ? toText(params.child_run_id || params.id) : "";
+            const predecessor = predecessorId ? teamWorkers.value.find(w => w.id === predecessorId) : undefined;
             const dispatches = Array.isArray(params.dispatches) ? params.dispatches : [];
             const childParams = receipt?.dispatchIndex != null ? dispatches[receipt.dispatchIndex] : params;
             const details = extractWorkerDetails({ ...stepItem, tool: childTool, action: childTool, params: childParams });
@@ -926,10 +929,11 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             }
             // Dispatch success only means launched; it never completes the child.
             if (receipt && isDispatch) {
-                worker.name = details.name;
-                worker.role = details.role;
-                worker.roleLabel = details.roleLabel;
-                worker.extra = { ...worker.extra, parentStepId: stepItem.id };
+                worker.name = predecessor?.name || details.name;
+                worker.role = predecessor?.role || details.role;
+                worker.roleLabel = predecessor?.roleLabel || details.roleLabel;
+                worker.extra = { ...worker.extra, parentStepId: stepItem.id,
+                    ...(predecessorId ? { predecessorId, resumed: true } : {}) };
             } else if (receipt?.tool) {
                 worker.role = details.role;
                 // A wait receipt identifies the job type, not a replacement for its custom role label.
@@ -1132,6 +1136,13 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             if (next !== reviewProgress.value) {
                 const current = next.find(item => item.id === payload.review_id);
                 const previous = reviewProgress.value.find(item => item.memberKey === current?.memberKey);
+                if (current) {
+                    const activeRuns = historyRuns.value.filter(run => ['running', 'waiting_human'].includes(run.status));
+                    const runId = reviewRunId.value || (activeRuns.length === 1 ? activeRuns[0].id : '');
+                    const anchor = activeReviewAnchor(steps.value, runId);
+                    if (!current.anchor || (previous?.id !== current.id && anchor)) current.anchor = anchor || current.anchor;
+                    else if (!current.anchor.runId && runId) current.anchor = { ...current.anchor, runId };
+                }
                 reviewProgress.value = next;
                 if (current && (previous?.phase !== current.phase || previous?.description !== current.description || previous?.id !== current.id)) {
                     appendLog(`[终审 · ${current.label} · ${current.model}] ${current.description}`);
@@ -1219,6 +1230,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             const stepNum = Number(payload.step) || 1;
             const action = toText(payload.action);
             const params = payload.params;
+            const intent = toText(payload.intent || payload.description).trim();
 
             let worker = childRunId ? teamWorkers.value.find((w) => w.id === childRunId) : undefined;
             if (!worker && (!childRunId || childRunId === "worker-1" || childRunId === "reviewer-1")) {
@@ -1317,6 +1329,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 worker.steps.push({
                     stepNumber: Math.max(stepNum + 1, worker.steps.length + 1),
                     title,
+                    description: intent || undefined,
                     tool: action,
                     action,
                     status: "running",
@@ -1329,7 +1342,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 });
                 // The new concrete action supersedes the preceding model stream.
                 worker.livePreview = undefined;
-                worker.currentStep = title;
+                worker.currentStep = intent || title;
                 worker.currentTool = action;
                 worker.progress = Math.min(90, 20 + worker.steps.length * 15);
             }
@@ -1689,6 +1702,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         if (!preserveReview) {
             reviewProgress.value = [];
             reviewProgressStartedAt.value = 0;
+            reviewRunId.value = '';
         }
         completionMessage.value = "";
         streamingSummary.value = "";
@@ -1739,6 +1753,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 awaitingRunStart = false;
                 reviewProgress.value = [];
                 reviewProgressStartedAt.value = Date.now();
+                reviewRunId.value = toText(payload.run_id);
                 if (payload?.goal) {
                     currentGoal.value = payload.goal;
                 }

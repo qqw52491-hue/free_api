@@ -123,6 +123,11 @@ pub(super) async fn dispatch_resume_child(
                                 ctx.workspace_dir, target_child_id, followup_msg, config,
                                 ctx.model_routing.reasoning_effort_for(&routing.tier).to_string(),
                                 ctx.checkpoint, ctx.interrupt_rx.clone(),
+                                Some(std::sync::Arc::new({
+                                    let app = ctx.app.clone();
+                                    let channel = format!("agent-progress-{}", ctx.final_session_id);
+                                    move |event| { let _ = app.emit(&channel, event); }
+                                })),
                             ) {
                                 Ok(id) => DispatchResult { view: None, success: true,
                                     stdout: format!("审查专家对质已启动：child_run_id={id}。继承原任务上下文；其他成员结论保留，可继续独立工作或 wait_jobs 等待。"),

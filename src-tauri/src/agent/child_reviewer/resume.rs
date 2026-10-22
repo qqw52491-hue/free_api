@@ -1,6 +1,8 @@
 //! 续接审查保留完整契约产物，提交错误沿用首次审查的有界补正语义。
 use super::*;
 
+pub(crate) type ResumeProgressSink = std::sync::Arc<dyn Fn(Value) + Send + Sync>;
+
 pub(crate) struct ResumeReviewError {
     pub route: &'static str,
     pub message: String,
@@ -19,6 +21,7 @@ pub(crate) fn spawn_review_resume(
     effort: String,
     checkpoint: &mut crate::agent::checkpoint::AgentCheckpoint,
     interrupt: watch::Receiver<u64>,
+    progress: Option<ResumeProgressSink>,
 ) -> Result<String, ResumeReviewError> {
     let error = |route, message| ResumeReviewError { route, message };
     let (status, kind, _, history, _, _, previous, identity) =
@@ -123,6 +126,7 @@ pub(crate) fn spawn_review_resume(
         schema,
         can_finalize,
         interrupt,
+        progress,
     ));
     Ok(id)
 }
@@ -137,6 +141,7 @@ pub(crate) async fn run_resumed_review(
     schema: Option<crate::agent::protocol::ContractSchema>,
     can_finalize: Option<bool>,
     mut interrupt_rx: watch::Receiver<u64>,
+    progress: Option<ResumeProgressSink>,
 ) {
     let started = std::time::Instant::now();
     let log_suffix = format!("child-{child_id}");
@@ -145,11 +150,25 @@ pub(crate) async fn run_resumed_review(
     let mut prompt_tokens = 0;
     for attempt in 1..=MAX_REVIEW_OUTPUT_ATTEMPTS {
         crate::agent::control::mark_stage(&stage, &format!("child_task:llm_call:{attempt}"));
+        if let Some(sink) = &progress {
+            sink(json!({"type":"child_reviewer_action", "child_run_id":child_id,
+                "step":attempt, "action":"deliberate", "params":{"round":attempt}}));
+        }
         let mut activity = std::time::Instant::now();
-        let mut on_event = |_: crate::llm::StreamEvent<'_>| {
+        let mut on_event = |event: crate::llm::StreamEvent<'_>| {
             if activity.elapsed() >= Duration::from_secs(5) {
                 crate::agent::control::mark_stage(&stage, "child_task:stream_output");
                 activity = std::time::Instant::now();
+            }
+            if let Some(sink) = &progress {
+                let (kind, chunk) = match event {
+                    crate::llm::StreamEvent::Thinking { chunk, .. } => ("thinking", chunk),
+                    crate::llm::StreamEvent::Content { chunk, .. } => ("content", chunk),
+                };
+                if !chunk.is_empty() {
+                    sink(json!({"type":"child_reviewer_stream", "child_run_id":child_id,
+                        "stream_type":kind, "chunk":chunk}));
+                }
             }
             true
         };
