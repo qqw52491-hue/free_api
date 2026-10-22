@@ -69,26 +69,10 @@ impl PlanNodeObj {
     }
 
     pub fn get_args(&self) -> Result<Value, String> {
-        if self.get_tool().eq_ignore_ascii_case("local_shell") {
-            // args 优先；其余保持树节点 params 优先的既有语义。
-            let (command, params) = if let Some(args) = self.args.as_ref() {
-                (None, Some(args))
-            } else if self.params.is_some() && !self.command.as_ref().is_some_and(Value::is_string) {
-                (None, self.params.as_ref())
-            } else { (self.command.as_ref(), self.params.as_ref()) };
-            return crate::agent::tool_params::resolve_shell_call(command, params,
-                self.extra.iter().map(|(key, value)| (key.as_str(), value)));
-        }
-        if let Some(ref args) = self.args {
-            return Ok(args.clone());
-        }
-        if let Some(ref p) = self.params {
-            return Ok(p.clone());
-        }
-        if let Some(ref c) = self.command {
-            return Ok(c.clone());
-        }
-        Ok(Value::Object(serde_json::Map::new()))
+        crate::agent::tool_params::resolve_tool_call(
+            &self.get_tool(), self.args.as_ref(), self.params.as_ref(), self.command.as_ref(),
+            self.extra.iter().map(|(key, value)| (key.as_str(), value)),
+        )
     }
 
     pub fn get_timeout(&self) -> Duration {

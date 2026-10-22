@@ -846,8 +846,8 @@ impl AgentInstruction {
     /// local_shell 的执行参数与所有前置检查使用同一归一化结果。
     pub(crate) fn resolved_local_shell_params(&self) -> Option<Result<serde_json::Value, String>> {
         if !self.get_tool().eq_ignore_ascii_case("local_shell") { return None; }
-        Some(crate::agent::tool_params::resolve_shell_call(
-            self.command.as_ref(), self.params.as_ref(),
+        Some(crate::agent::tool_params::resolve_tool_call(
+            "local_shell", self.extra_fields.get("args"), self.params.as_ref(), self.command.as_ref(),
             self.extra_fields.iter().map(|(key, value)| (key.as_str(), value)),
         ))
     }
@@ -866,31 +866,18 @@ impl AgentInstruction {
         if let Some(Ok(params)) = self.resolved_local_shell_params() { return params; }
         // 归一化失败的原始参数留给回执/审计；预检与执行入口会返回同一错误，不执行。
 
-        // 发现 AI 有时会将动词（如 "type"）放在 command 字段，把其余参数放在 params 字段
-        let c_is_verb = self.command.as_ref().map_or(false, |c| {
-            c.is_string() && !c.as_str().unwrap().contains(' ') && !c.as_str().unwrap().is_empty()
-        });
-
-        if c_is_verb && self.params.as_ref().map_or(false, |p| p.is_object()) {
-            let mut map = self.params.as_ref().unwrap().as_object().unwrap().clone();
-            map.insert(
-                "command".to_string(),
-                self.command.as_ref().unwrap().clone(),
-            );
-            return serde_json::Value::Object(map);
-        }
-
-        if let Some(ref c) = self.command {
-            if c.is_object() || (c.is_string() && c.as_str().unwrap().contains(' ')) {
-                return c.clone();
+        if self.extra_fields.get("args").is_some_and(|value| !value.is_null())
+            || self.params.as_ref().is_some_and(|value| !value.is_null())
+            || self.command.as_ref().is_some_and(|value| !value.is_null()) {
+            if let Ok(params) = crate::agent::tool_params::resolve_tool_call(
+                &self.get_tool(), self.extra_fields.get("args"), self.params.as_ref(), self.command.as_ref(),
+                self.extra_fields.iter().map(|(key, value)| (key.as_str(), value)),
+            ) {
+                return params;
             }
-            if self.params.is_none() {
-                return c.clone();
-            }
-        }
-
-        if let Some(ref p) = self.params {
-            return p.clone();
+            // 无效 Shell 入参仍保留原件供审计；执行入口会拒绝，不执行。
+            return self.command.clone().or_else(|| self.params.clone())
+                .or_else(|| self.extra_fields.get("args").cloned()).unwrap_or_default();
         }
 
         // 如果都没传，并且提取到了平铺的幻觉参数，则自动组装成 JSON Object 返回给下层
@@ -907,6 +894,7 @@ impl AgentInstruction {
 
         // 把所有的外卡字段都塞进去
         for (k, v) in &self.extra_fields {
+            if k == "args" && v.is_null() { continue; }
             map.insert(k.clone(), v.clone());
         }
 

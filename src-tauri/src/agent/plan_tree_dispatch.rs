@@ -229,17 +229,10 @@ pub(crate) fn parallel_branch_label_from_json(step: &Value) -> String {
     let action_field = step.get("action").and_then(Value::as_str);
     let tool = tool_field.or(action_field).unwrap_or("");
     let explicit_action = if tool_field.is_some() { action_field } else { None };
-    if tool.eq_ignore_ascii_case("local_shell") || tool.eq_ignore_ascii_case("model_manager") {
-        return serde_json::from_value::<crate::agent::plan_tree::PlanNodeObj>(step.clone())
-            .ok().and_then(|node| node.get_args().ok())
-            .map(|params| parallel_branch_label(tool, explicit_action, &[Some(&params)]))
-            .unwrap_or_else(|| tool.to_string());
-    }
-    parallel_branch_label(
-        tool,
-        explicit_action,
-        &[step.get("params"), step.get("args"), step.get("command")],
-    )
+    serde_json::from_value::<crate::agent::plan_tree::PlanNodeObj>(step.clone())
+        .ok().and_then(|node| node.get_args().ok())
+        .map(|params| parallel_branch_label(tool, explicit_action, &[Some(&params)]))
+        .unwrap_or_else(|| tool.to_string())
 }
 
 /// plan_tree 里的分支节点 -> 有效工具名（见 parallel_branch_label）。
@@ -250,16 +243,9 @@ pub(crate) fn parallel_branch_label_from_node(obj: &crate::agent::plan_tree::Pla
     } else {
         None
     };
-    if tool.eq_ignore_ascii_case("local_shell") || tool.eq_ignore_ascii_case("model_manager") {
-        return obj.get_args().map(|params|
-            parallel_branch_label(&tool, explicit_action, &[Some(&params)]))
-            .unwrap_or(tool);
-    }
-    parallel_branch_label(
-        &tool,
-        explicit_action,
-        &[obj.params.as_ref(), obj.args.as_ref(), obj.command.as_ref()],
-    )
+    obj.get_args().map(|params|
+        parallel_branch_label(&tool, explicit_action, &[Some(&params)]))
+        .unwrap_or(tool)
 }
 
 /// 单批并行上限：全部分支都是只读工具时放宽到只读上限，否则维持严格上限。

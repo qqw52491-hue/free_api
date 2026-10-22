@@ -1,5 +1,50 @@
-//! local_shell 的纯参数归一化：只整理明示字段，不猜命令或目录。
+//! 工具调用的纯参数解包：只整理明示容器，不猜动作、命令或目录。
 use serde_json::Value;
+
+/// 单步、流水线和计划树共用。普通工具保留完整 payload，不递归拆包或合并对象。
+/// args > 旧 command 对象 > params > command 其它形态；保留旧动词 + params 组合。
+/// Shell 的 args 数组是进程参数，不是外层工具参数容器。
+/// 外层 null 等同未提供；不改写选定 payload 内的 null 或空字符串。
+pub(crate) fn resolve_tool_call<'a>(
+    tool: &str,
+    args: Option<&Value>,
+    params: Option<&Value>,
+    command: Option<&Value>,
+    extras: impl IntoIterator<Item = (&'a str, &'a Value)>,
+) -> Result<Value, String> {
+    let args = args.filter(|value| !value.is_null());
+    let params = params.filter(|value| !value.is_null());
+    let command = command.filter(|value| !value.is_null());
+    // args 也可能出现在平铺 Shell 选项里；忽略外层占位值后不能再把它搬回。
+    let extras = extras.into_iter().filter(|(key, value)| *key != "args" || !value.is_null());
+    if tool.eq_ignore_ascii_case("local_shell") {
+        if let Some(args) = args.filter(|value| !value.is_array()) {
+            return resolve_shell_call(None, Some(args),
+                extras.into_iter().filter(|(key, _)| *key != "args"));
+        }
+        let mut resolved = resolve_shell_call(command, params, extras)?;
+        if let Some(args) = args.filter(|value| value.is_array()) {
+            let payload = resolved.as_object_mut().expect("normalized Shell parameters are objects");
+            if let Some(existing) = payload.get("args") {
+                if existing != args {
+                    return Err("❌ local_shell 参数冲突：外层 args 数组与参数对象内 args 不一致。本次尚未执行，请只保留一处进程参数。".into());
+                }
+            } else { payload.insert("args".into(), args.clone()); }
+        }
+        return Ok(resolved);
+    }
+    if let Some(args) = args { return Ok(args.clone()); }
+    // 旧单步交付可能同时带正式 command 对象和辅助 params，不能用后者覆盖正文。
+    if let Some(command @ Value::Object(_)) = command { return Ok(command.clone()); }
+    if let (Some(Value::String(verb)), Some(Value::Object(options))) = (command, params) {
+        if !verb.is_empty() && !verb.contains(' ') {
+            let mut payload = options.clone();
+            payload.insert("command".into(), Value::String(verb.clone()));
+            return Ok(Value::Object(payload));
+        }
+    }
+    Ok(params.or(command).cloned().unwrap_or_else(|| serde_json::json!({})))
+}
 
 pub(crate) fn value_type(value: &Value) -> &'static str {
     match value {
@@ -77,6 +122,28 @@ pub(crate) fn resolve_shell_call<'a>(
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn tool_params_ignore_only_outer_null_and_preserve_payload_values() {
+        let payload = json!({
+            "args":null,"params":{"command":null,"empty":""},"command":null,
+            "nullable":null,"empty":"","enabled":false,"count":0
+        });
+        for tool in ["local_file", "local_shell", "remote/example"] {
+            for selected in 0..3 {
+                let mut containers = [Value::Null, Value::Null, Value::Null];
+                containers[selected] = payload.clone();
+                assert_eq!(resolve_tool_call(tool, Some(&containers[0]), Some(&containers[1]),
+                    Some(&containers[2]), std::iter::empty()).unwrap(), payload);
+            }
+        }
+        for value in [json!(""), json!(false), json!(0), json!([]), json!({})] {
+            assert_eq!(resolve_tool_call("remote/example", Some(&value), Some(&payload), None,
+                std::iter::empty()).unwrap(), value, "only null means absent");
+        }
+        assert_eq!(resolve_tool_call("remote/example", Some(&Value::Null), Some(&Value::Null),
+            Some(&Value::Null), std::iter::empty()).unwrap(), json!({}));
+    }
+
     #[test]
     fn shell_params_shorthand_is_lossless_and_idempotent() {
         let raw = json!("  printf '%s' '中文;\\n'  ");

@@ -1139,6 +1139,213 @@ async fn parallel_reversed_read_range_does_not_crash_other_branch() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_params_aliases_execute_identically_in_all_four_modes() {
+    let (root, db, registry) = shell_params_fixture();
+    std::fs::write(root.join("probe.txt"), "container-parity-ok\n").unwrap();
+    for container in ["params", "args", "command"] {
+        let mut leaf = json!({"tool":"local_file"});
+        leaf[container] = json!({"action":"read","path":"probe.txt"});
+        for raw in [leaf.clone(), json!({"commands":[leaf.clone()]}),
+            json!({"parallel":[leaf.clone()]}), json!({"plan_tree":[leaf.clone()]})] {
+            let inst: AgentInstruction = serde_json::from_value(raw).unwrap();
+            let result = run_agent_step(&db, "tool-params-parity", &inst, &registry, Some(&root));
+            assert!(result.success, "{container}: {}", result.stderr);
+            assert!(result.stdout.contains("container-parity-ok"), "{container}: {}", result.stdout);
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_params_null_outer_containers_agree_in_all_four_modes() {
+    let (root, db, registry) = shell_params_fixture();
+    std::fs::write(root.join("probe.txt"), "null-container-ok\n").unwrap();
+    for tool in ["local_file", "local_shell"] {
+        for container in ["params", "args", "command"] {
+            let mut leaf = json!({"tool":tool,"args":null,"params":null,"command":null});
+            leaf[container] = if tool == "local_file" {
+                json!({"action":"read","path":"probe.txt"})
+            } else {
+                json!({"command":"printf null-container-ok"})
+            };
+            for raw in [leaf.clone(), json!({"commands":[leaf.clone()]}),
+                json!({"parallel":[leaf.clone()]}), json!({"plan_tree":[leaf.clone()]})] {
+                let inst: AgentInstruction = serde_json::from_value(raw).unwrap();
+                let result = tokio::task::block_in_place(|| {
+                    run_agent_step(&db, "null-container-parity", &inst, &registry, Some(&root))
+                });
+                assert!(result.success, "{tool}/{container}: {}", result.stderr);
+                assert!(result.stdout.contains("null-container-ok"), "{}", result.stdout);
+            }
+        }
+    }
+    // 字符串命令不能把已忽略的外层 args:null 作为进程参数重新带回。
+    let inst: AgentInstruction = serde_json::from_value(json!({
+        "tool":"local_shell","command":"printf null-container-ok","args":null,"params":null
+    })).unwrap();
+    assert_eq!(inst.get_params(), json!({"command":"printf null-container-ok"}));
+    let leaf = serde_json::to_value(&inst).unwrap();
+    for raw in [leaf.clone(), json!({"commands":[leaf.clone()]}),
+        json!({"parallel":[leaf.clone()]}), json!({"plan_tree":[leaf.clone()]})] {
+        let inst: AgentInstruction = serde_json::from_value(raw).unwrap();
+        let result = tokio::task::block_in_place(|| {
+            run_agent_step(&db, "null-shell-shorthand", &inst, &registry, Some(&root))
+        });
+        assert!(result.success && result.stdout.contains("null-container-ok"), "{}", result.stderr);
+    }
+    // 没有容器时沿用既有平铺参数兼容；null 占位不能遮住 path。
+    let leaf = json!({"tool":"local_file","action":"read","path":"probe.txt",
+        "args":null,"params":null,"command":null});
+    for raw in [leaf.clone(), json!({"commands":[leaf]})] {
+        let inst: AgentInstruction = serde_json::from_value(raw).unwrap();
+        let result = run_agent_step(&db, "null-flat-compatibility", &inst, &registry, Some(&root));
+        assert!(result.success && result.stdout.contains("null-container-ok"), "{}", result.stderr);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_params_inner_null_is_rejected_and_empty_replacement_deletes_in_all_four_modes() {
+    let (root, db, registry) = shell_params_fixture();
+    for mode in 0..4 {
+        let session = format!("inner-null-{mode}");
+        std::fs::write(root.join("probe.txt"), "remove-me\n").unwrap();
+        let read: AgentInstruction = serde_json::from_value(json!({
+            "tool":"local_file","params":{"action":"read","path":"probe.txt"}
+        })).unwrap();
+        assert!(run_agent_step(&db, &session, &read, &registry, Some(&root)).success);
+        for replacement in [serde_json::Value::Null, json!("")] {
+            let leaf = json!({"tool":"local_file","args":null,"params":{
+                "action":"edit","path":"probe.txt","target_content":"remove-me",
+                "replacement_content":replacement
+            }});
+            let raw = match mode {
+                0 => leaf,
+                1 => json!({"commands":[leaf]}),
+                2 => json!({"parallel":[leaf]}),
+                _ => json!({"plan_tree":[leaf]}),
+            };
+            let inst: AgentInstruction = serde_json::from_value(raw).unwrap();
+            let result = run_agent_step(&db, &session, &inst, &registry, Some(&root));
+            if replacement.is_null() {
+                assert!(!result.success, "inner null must not become deletion");
+                assert!(result.stderr.contains("replacement_content"), "{}", result.stderr);
+                assert_eq!(std::fs::read_to_string(root.join("probe.txt")).unwrap(), "remove-me\n");
+            } else {
+                assert!(result.success, "mode {mode}: {}", result.stderr);
+                assert_eq!(std::fs::read_to_string(root.join("probe.txt")).unwrap(), "\n");
+            }
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_params_shell_aliases_and_process_args_agree_in_all_four_modes() {
+    let (root, db, registry) = shell_params_fixture();
+    let mut leaves = Vec::new();
+    for container in ["params", "args", "command"] {
+        let mut leaf = json!({"tool":"local_shell"});
+        leaf[container] = json!({"command":"printf shell-container-ok"});
+        leaves.push(leaf);
+    }
+    leaves.push(json!({"tool":"local_shell","command":"sh","args":["-c","printf shell-container-ok"]}));
+    for leaf in leaves {
+        for raw in [leaf.clone(), json!({"commands":[leaf.clone()]}),
+            json!({"parallel":[leaf.clone()]}), json!({"plan_tree":[leaf.clone()]})] {
+            let inst: AgentInstruction = serde_json::from_value(raw).unwrap();
+            let result = tokio::task::block_in_place(|| {
+                run_agent_step(&db, "tool-params-shell", &inst, &registry, Some(&root))
+            });
+            assert!(result.success, "{}", result.stderr);
+            assert!(result.stdout.contains("shell-container-ok"), "{}", result.stdout);
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn tool_params_video_shape_does_not_guess_edit_and_pipeline_keeps_fail_fast() {
+    let (root, db, registry) = shell_params_fixture();
+    std::fs::write(root.join("probe.txt"), "original\n").unwrap();
+    // 真实视频失败形状：有替换字段却漏 action。解包后由既有预检报动作错误，不猜 edit。
+    let inst: AgentInstruction = serde_json::from_value(json!({"commands":[
+        {"tool":"local_file","params":{"path":"probe.txt","target_content":"original","replacement_content":"changed"}}
+    ]})).unwrap();
+    let result = run_agent_step(&db, "tool-params-default", &inst, &registry, Some(&root));
+    assert!(!result.success, "missing edit action must not execute");
+    assert!(result.stderr.contains("action") && result.stderr.contains("文件未修改"), "{}", result.stderr);
+    assert!(!result.stderr.contains("缺少必填参数 'path'"));
+    assert_eq!(std::fs::read_to_string(root.join("probe.txt")).unwrap(), "original\n");
+    let inst: AgentInstruction = serde_json::from_value(json!({"commands":[
+        {"tool":"local_file","params":{"action":"read","path":"probe.txt"}},
+        {"tool":"local_file","args":{"action":"read"}},
+        {"tool":"local_shell","params":{"command":"touch must-not-run"}}
+    ]})).unwrap();
+    let result = run_agent_step(&db, "tool-params-fail-fast", &inst, &registry, Some(&root));
+    assert!(!result.success && result.route == "pipeline_fail_at_2", "{}", result.stderr);
+    assert!(result.stdout.contains("original") && result.stderr.contains("path"));
+    assert!(!root.join("must-not-run").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn tool_params_explicit_pipeline_edit_keeps_baseline_and_path_boundary() {
+    let (root, db, registry) = shell_params_fixture();
+    std::fs::write(root.join("probe.txt"), "original\n").unwrap();
+    let inst: AgentInstruction = serde_json::from_value(json!({"commands":[
+        {"tool":"local_file","params":{"action":"read","path":"probe.txt"}},
+        {"tool":"local_file","params":{"action":"edit","path":"probe.txt","target_content":"original","replacement_content":"changed"}}
+    ]})).unwrap();
+    let result = run_agent_step(&db, "tool-params-edit", &inst, &registry, Some(&root));
+    assert!(result.success, "{}", result.stderr);
+    assert_eq!(std::fs::read_to_string(root.join("probe.txt")).unwrap(), "changed\n");
+    for container in ["params", "args", "command"] {
+        let mut leaf = json!({"tool":"local_file"});
+        leaf[container] = json!({"action":"read","path":"../outside.txt"});
+        let inst: AgentInstruction = serde_json::from_value(json!({"commands":[leaf]})).unwrap();
+        let result = run_agent_step(&db, "tool-params-boundary", &inst, &registry, Some(&root));
+        assert!(!result.success, "path escape via {container}");
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn tool_params_precedence_and_parallel_classification_use_selected_payload() {
+    let raw = json!({"tool":"local_file","args":{"action":"edit","path":"a","target_content":"x","replacement_content":"y"},
+        "params":{"action":"read","path":"b"},"command":{"action":"list","path":"c"}});
+    let inst: AgentInstruction = serde_json::from_value(raw.clone()).unwrap();
+    let node: crate::agent::plan_tree::PlanNodeObj = serde_json::from_value(raw.clone()).unwrap();
+    assert_eq!(inst.get_params(), node.get_args().unwrap());
+    assert_eq!(inst.get_action(), "edit");
+    assert!(is_write_or_side_effect_tool(&inst));
+    let legacy = json!({"tool":"local_file","command":{"action":"read","path":"formal"},"params":{"action":"edit","path":"auxiliary"}});
+    let instruction: AgentInstruction = serde_json::from_value(legacy.clone()).unwrap();
+    let legacy_node: crate::agent::plan_tree::PlanNodeObj = serde_json::from_value(legacy).unwrap();
+    assert_eq!(instruction.get_params(), json!({"action":"read","path":"formal"}));
+    assert_eq!(instruction.get_params(), legacy_node.get_args().unwrap());
+    assert_eq!(crate::agent::plan_tree_dispatch::parallel_branch_label_from_json(&raw), "local_file/edit");
+    assert_eq!(crate::agent::plan_tree_dispatch::parallel_branch_label_from_node(&node), "local_file/edit");
+    let shell: AgentInstruction = serde_json::from_value(json!({"tool":"local_shell","args":{"command":"git reset --hard"}})).unwrap();
+    assert!(is_write_or_side_effect_tool(&shell));
+    assert_eq!(extract_shell_command_string(&shell).unwrap(), "git reset --hard");
+}
+
+#[test]
+fn tool_params_mcp_payload_and_nested_business_fields_are_preserved() {
+    let payload = json!({"path":"a.txt","params":{"command":"business"},"args":["x"],"command":{"future":true},"secret":"not-logged"});
+    for container in ["params", "args", "command"] {
+        let mut raw = json!({"tool":"remote/example"}); raw[container] = payload.clone();
+        let inst: AgentInstruction = serde_json::from_value(raw.clone()).unwrap();
+        let node: crate::agent::plan_tree::PlanNodeObj = serde_json::from_value(raw).unwrap();
+        assert_eq!(inst.get_params(), payload);
+        assert_eq!(node.get_args().unwrap(), payload);
+        assert_eq!(crate::agent::tool_params::resolve_tool_call("remote/example",
+            node.args.as_ref(), node.params.as_ref(), node.command.as_ref(), std::iter::empty()).unwrap(), payload);
+    }
+}
+
 fn shell_params_fixture() -> (PathBuf,DbState,PluginRegistry) {
     let root=std::env::temp_dir().join(format!("free-api-shell-params-{}",uuid::Uuid::new_v4()));
     std::fs::create_dir_all(root.join("sub")).unwrap();

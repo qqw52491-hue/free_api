@@ -280,7 +280,7 @@ fn run_agent_step_internal(
                 step_idx, step_tool, step_action
             );
 
-            // 本地 shell 与单步共用参数解析；其它工具保留既有透传，不改外部 MCP 契约。
+            // 所有工具共用容器解包；只取外壳，不改写原生或外部 MCP 的 payload。
             let prepared_params = if step_tool.eq_ignore_ascii_case("local_shell") {
                 serde_json::from_value::<AgentInstruction>(cmd_val.clone())
                     .map_err(|error| format!("local_shell 子步骤结构无效：{error}"))
@@ -289,7 +289,20 @@ fn run_agent_step_internal(
                         step.resolved_local_shell_params().unwrap()
                     })
             } else {
-                Ok(cmd_val.get("command").cloned().unwrap_or_else(|| cmd_val.clone()))
+                if ["args", "params", "command"].iter()
+                    .all(|key| cmd_val.get(*key).is_none_or(|value| value.is_null())) {
+                    // 兼容既有平铺参数；不把缺少 action 猜成写动作。
+                    let mut flat = cmd_val.clone();
+                    if let Some(object) = flat.as_object_mut() {
+                        for key in ["args", "params", "command"] { object.remove(key); }
+                    }
+                    Ok(flat)
+                } else {
+                    crate::agent::tool_params::resolve_tool_call(
+                        step_tool, cmd_val.get("args"), cmd_val.get("params"), cmd_val.get("command"),
+                        std::iter::empty(),
+                    )
+                }
             };
             let step_params = match prepared_params {
                 Ok(params) => params,
