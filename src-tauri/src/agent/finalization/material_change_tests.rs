@@ -270,7 +270,8 @@ async fn invalid_review_after_material_change_is_not_treated_as_approval() {
         .as_ref()
         .unwrap()
         .is_service_failure());
-    assert!(scenario.checkpoint.pending_task_failure.is_some());
+    assert!(scenario.checkpoint.pending_task_failure.is_none());
+    assert!(evaluation.receipt.blockers.iter().any(|message| message.contains("ask_human")));
 }
 
 #[tokio::test]

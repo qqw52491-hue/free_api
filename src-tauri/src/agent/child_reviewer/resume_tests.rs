@@ -236,7 +236,8 @@ async fn resumed_review_exhaustion_keeps_diagnostics_without_fabricating_approva
         .unwrap();
     assert!(saved.contains("root_cause_verdict"));
 
-    // 真实回执消费者和主运行失败落账：不输出内部 JSON、不解除未完成事项。
+    // 真实回执消费者：通道故障保留诊断和未完成事项，不自动终止父任务。
+    // 用户随后显式选择停止时，原失败落账入口仍可保存现场。
     let mut context = crate::agent::context::SandwichContext::new("sys".into(), "刷新列表".into());
     context.todo_list.push(crate::agent::types::TodoItem {
         id: 1,
@@ -264,11 +265,11 @@ async fn resumed_review_exhaustion_keeps_diagnostics_without_fabricating_approva
         receipt,
     )
     .await;
-    let reason = checkpoint.pending_task_failure.clone().unwrap();
-    assert!(reason.contains("审查未完成"));
-    assert!(reason.contains("无法完成交付"));
-    assert!(reason.contains(&id));
-    assert!(reason.chars().count() < 300);
+    assert!(checkpoint.pending_task_failure.is_none());
+    assert!(effects.model_text.contains("审查未完成"));
+    assert!(effects.model_text.contains("ask_human"));
+    assert!(effects.model_text.contains(&id));
+    let reason = format!("用户选择停止：审查任务 {} 未取得有效结论。", id);
     for text in [&reason, &effects.model_text] {
         assert!(!text.contains("\"findings\""));
         assert!(!text.contains("\"decision\""));

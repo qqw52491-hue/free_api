@@ -462,7 +462,7 @@ async fn invalid_resume_keeps_both_old_blockers_and_reports_channel_failure() {
     assert_eq!(f.cp.last_review_blocking_count, 2);
     assert_eq!(f.cp.plan_review_deliveries.len(), 3);
     assert!(f.context.todo_list.iter().all(|t| t.status == "pending"));
-    assert!(f.cp.pending_task_failure.is_some());
+    assert!(f.cp.pending_task_failure.is_none());
     assert!(f.gate().is_some());
 }
 
@@ -486,7 +486,7 @@ async fn timed_out_resume_does_not_revoke_any_previous_conclusion() {
     f.consume(&new).await;
     assert_eq!(f.cp.last_review_blocking_count, 2);
     assert!(f.context.todo_list.iter().all(|t| t.status == "pending"));
-    assert!(f.cp.pending_task_failure.is_some());
+    assert!(f.cp.pending_task_failure.is_none());
     assert!(f.gate().is_some());
 }
 

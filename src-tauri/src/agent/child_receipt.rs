@@ -122,7 +122,8 @@ pub(crate) async fn reduce_child_receipt(
     }
 
     // 请求/超时/无效结构是审查通道失败，不是“方案不通过”。
-    // 必须先处理备用，再进入各类审查聚合；未配置或备用已失败则进入统一失败出口。
+    // 先尝试显式备用，再交给批次聚合；单成员不可用不能提前终止父任务或取消其他成员。
+    let mut channel_failure_notice = None;
     let kind = receipt.error_kind.as_deref().map(ChildErrorKind::parse);
     let channel_failed = receipt.kind == "review" && !receipt.is_success()
         && kind.as_ref().is_some_and(|k| k.is_failover_eligible()
@@ -152,10 +153,11 @@ pub(crate) async fn reduce_child_receipt(
                     ChildErrorKind::Timeout => "等待审查响应超时，未取得有效结论",
                     _ => "审查请求或响应传输失败，未取得有效结论",
                 };
-                // 原始输出和具体契约错误留在子任务台账/调用日志；停止说明不拼内部 JSON。
-                checkpoint.pending_task_failure.get_or_insert_with(|| format!(
-                    "审查未完成，当前无法完成交付：{}；{}。这不代表方案已被否决，也没有取得审查批准。诊断记录：审查任务 {}。",
-                    cause, backup_note, receipt.child_run_id));
+                // 故障只属于这一成员，不写 pending_task_failure。有效结论、在途成员和
+                // 全部不可用由既有批次门统一判断；没有有效结论时保留人工处理出口。
+                channel_failure_notice = Some(format!(
+                    "审查成员 {} 本次不可用：{}；{}。该故障不计为否决，也不计为批准，不取消其他在途成员。批次收束后按剩余有效结论判断：至少一位有效通过且没有有效阻塞/待修订裁决即可继续；全部不可用时可重试、换模型，或通过 ask_human 请用户决定。",
+                    receipt.child_run_id, cause, backup_note));
             }
         }
     }
@@ -170,8 +172,9 @@ pub(crate) async fn reduce_child_receipt(
             crate::agent::stage_review::apply_stage_receipt(checkpoint, env.db, receipt, oracle_index);
         return ReceiptEffects {
             model_text: format!(
-                "【📋 阶段审查 (child_run_id: {})】\n{}",
-                receipt.child_run_id, outcome.note
+                "【📋 阶段审查 (child_run_id: {})】\n{}{}",
+                receipt.child_run_id, outcome.note,
+                channel_failure_notice.as_ref().map(|note| format!("\n{note}")).unwrap_or_default()
             ),
             stage_refund_pending: outcome.refund_pending,
             contract_violation,
@@ -262,10 +265,8 @@ pub(crate) async fn reduce_child_receipt(
             err
         ));
     }
-    if channel_failed {
-        if let Some(reason) = checkpoint.pending_task_failure.as_ref() {
-            effects.model_text = format!("{}\n请向用户说明当前未完成情况；不能使用成功 finish，也不能把失败审查当成批准。已有改动、证据和未完成事项保留。", reason);
-        }
+    if let Some(notice) = channel_failure_notice {
+        effects.model_text.push_str(&format!("\n{notice}"));
     }
     effects
 }
@@ -303,10 +304,10 @@ async fn reduce_reviewer_receipt(
 
     // 基础设施失败（超时/取消/中断/非法输出/请求层失败）不是实质性审查：
     // 记录批次失败 + 退还预算（零产出不烧预算）。
-    if receipt.is_infra_failure() {
+    if !receipt.is_success() {
         checkpoint.record_reviewer_failure_for_run(env.db, &receipt.child_run_id);
         checkpoint.refund_infra_failed_review_round(receipt_kind);
-        return text;
+        return format!("【审查未完成：成员 {}（{}）】\n该成员本次没有有效结论，不计为批准或否决；已有有效结论和真实阻塞保持不变，不取消其他在途成员。全部不可用时可重试、换模型或 ask_human。", receipt.child_run_id, receipt.status);
     }
 
     // 正常交付：载荷需能解析为审查交付数据；连 JSON 都解析不出的按损坏登记失败
@@ -950,13 +951,15 @@ mod tests {
 
 
     #[tokio::test]
-    async fn unconfigured_or_exhausted_backup_stops_without_third_model_or_approval() {
+    async fn unconfigured_or_exhausted_backup_keeps_parent_repairable_without_third_model_or_approval() {
         for (configured, current) in [("", "primary"), ("backup", "backup")] {
             let (base, db) = test_db("no-auto-backup");
             let mut env = test_env(&db, &base);
             env.reviewer_backup_model = configured;
             let mut context = SandwichContext::new("sys".into(), "goal".into());
             let mut cp = AgentCheckpoint::new("sess-1".into(), &context);
+            cp.plan_mode = crate::agent::checkpoint::PlanExecutionMode::CrossReview;
+            cp.plan_reviewer_retry_count = 1;
             let phase = cp.plan_phase;
             let identity = crate::agent::child_reviewer::ChildRunIdentity {
                 task_id:"review-task".into(), attempt_id:1, purpose:Some("plan_review".into()),
@@ -969,12 +972,111 @@ mod tests {
             let r = receipt("review",&id,Some("request_or_stream"),json!({"error":"402 insufficient balance"}));
             let effects=reduce_child_receipt(&env,&mut cp,&mut context,&r).await;
             assert!(effects.redispatched_to.is_none());
-            assert!(cp.pending_task_failure.is_some());
+            assert!(cp.pending_task_failure.is_none());
+            assert!(effects.model_text.contains("ask_human"));
+            assert_eq!(crate::agent::plan_gate::check_pre_write_gatekeeper(
+                &mut cp, &context, &db, "run-1", 1, false
+            ).map(|r| r.route), Some("plan_gatekeeper:reviewer_all_failed".into()));
             assert_eq!(cp.plan_phase,phase,"失败不是批准");
             let n:i64=db.0.lock().unwrap().query_row("SELECT COUNT(*) FROM agent_child_runs",[],|r|r.get(0)).unwrap();
             assert_eq!(n,1,"不能自行找第三个模型重派");
             let _=std::fs::remove_dir_all(base);
         }
+    }
+
+    // 经统一 reducer、checkpoint 恢复和实际方案门，覆盖提前失败出口。
+    async fn partial_review_case(status: &str, error: Option<&str>, success_first: bool, decision: &str, blocking: bool) {
+        let (base, db) = test_db("partial-review-channel");
+        let env = test_env(&db, &base);
+        let mut context = SandwichContext::new("sys".into(), "goal".into());
+        let mut cp = AgentCheckpoint::new("run-1".into(), &context);
+        cp.plan_mode = crate::agent::checkpoint::PlanExecutionMode::CrossReview;
+        cp.plan_reviewer_retry_count = 1;
+        cp.submitted_plan = Some(crate::agent::types::PlanSubmission {
+            plan_summary: "按有效结论执行原方案，故障成员不参与裁决".into(), ..Default::default()
+        });
+        for id in ["good", "bad", "cancelled"] {
+            seed_run(&db, id, "run-1", "partial", "plan_review", "running", false);
+        }
+        db.0.lock().unwrap().execute("UPDATE agent_child_runs SET started_at=?1", [chrono::Utc::now().to_rfc3339()]).unwrap();
+        cp.set_plan_review_batch("partial", 3);
+        let order = if success_first { ["good", "bad", "cancelled"] } else { ["bad", "cancelled", "good"] };
+        for (index, id) in order.into_iter().enumerate() {
+            let (state, err) = match id { "good" => ("succeeded", None), "bad" => (status, error), _ => ("cancelled", None) };
+            db.0.lock().unwrap().execute(
+                "UPDATE agent_child_runs SET status=?1,error_kind=?2,consumed_at='done' WHERE id=?3",
+                rusqlite::params![state, err, id]
+            ).unwrap();
+            // 故障载荷即使夹带 approved 也不能计为批准；取消允许缺 error_kind。
+            let mut payload = json!({"decision":decision,"root_cause_verdict":"explains","routing":"certain",
+                "confidence":"confirmed","findings":[],"evidence_refs":[],"missing_evidence":[]});
+            if id == "good" && blocking {
+                payload["findings"] = json!([{"id":"F1","severity":"blocking","finality":"regardless",
+                    "location":"src/auth.rs:1","current":"missing guard","why":"真实阻塞","suggestion":"add guard","evidence_strength":"confirmed"}]);
+            }
+            let mut r = receipt("review", id, err, payload);
+            r.status = state.into();
+            reduce_child_receipt(&env, &mut cp, &mut context, &r).await;
+            assert!(cp.pending_task_failure.is_none(), "{status}/{id}: 不得提前停止父任务");
+            if index < 2 {
+                assert_eq!(crate::agent::plan_gate::check_pre_write_gatekeeper(
+                    &mut cp, &context, &db, "run-1", 1, false
+                ).unwrap().route, "plan_gatekeeper:need_wait_reviewer_jobs");
+                let remaining:i64 = db.0.lock().unwrap().query_row(
+                    "SELECT COUNT(*) FROM agent_child_runs WHERE status='running'", [], |r|r.get(0)
+                ).unwrap();
+                assert_eq!(remaining, (2-index) as i64, "故障不得取消其余成员");
+            }
+        }
+        let mut restored: AgentCheckpoint = serde_json::from_str(&serde_json::to_string(&cp).unwrap()).unwrap();
+        restored.refresh_consumed_flags(&db);
+        assert_eq!(restored.plan_review_deliveries.len(), 1);
+        let gate = crate::agent::plan_gate::check_pre_write_gatekeeper(&mut restored, &context, &db, "run-1", 2, false);
+        if blocking {
+            assert_eq!(gate.unwrap().route, "plan_gatekeeper:blocking_findings_open");
+            assert_eq!(restored.last_review_blocking_count, 1);
+        } else if decision == "rebuttal" {
+            assert_eq!(gate.unwrap().route, "plan_gatekeeper:review_revisions_required");
+        } else {
+            assert!(gate.is_none(), "一位有效通过且无阻塞即可继续");
+            assert!(restored.plan_phase.is_approved());
+        }
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn review_channel_one_valid_approval_survives_unavailable_members_in_either_order() {
+        for (status, error) in [("failed",Some("request_or_stream")), ("timed_out",Some("timeout")),
+            ("invalid_output",Some("invalid_output")), ("cancelled",None), ("interrupted",Some("interrupted"))] {
+            for success_first in [true, false] {
+                partial_review_case(status, error, success_first, "approved", false).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn review_channel_failures_do_not_erase_real_blockers_or_revision_decisions() {
+        partial_review_case("failed",Some("request_or_stream"),true,"approved",true).await;
+        partial_review_case("timed_out",Some("timeout"),false,"rebuttal",false).await;
+    }
+
+    #[tokio::test]
+    async fn review_channel_old_batch_failure_cannot_stop_or_change_current_batch() {
+        let (base, db) = test_db("old-channel-failure");
+        let env = test_env(&db, &base);
+        let mut context = SandwichContext::new("sys".into(), "goal".into());
+        let mut cp = AgentCheckpoint::new("run-1".into(), &context);
+        seed_run(&db,"old","run-1","old-batch","plan_review","failed",true);
+        seed_run(&db,"current","run-1","current-batch","plan_review","running",false);
+        cp.set_plan_review_batch("current-batch",1);
+        let r=receipt("review","old",Some("request_or_stream"),json!({"status":"failed"}));
+        let effects=reduce_child_receipt(&env,&mut cp,&mut context,&r).await;
+        assert!(effects.model_text.contains("其他批次"));
+        assert!(cp.pending_task_failure.is_none());
+        assert!(!cp.plan_reviewer_consumed);
+        assert!(cp.plan_review_deliveries.is_empty());
+        assert!(effects.redispatched_to.is_none());
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[tokio::test]

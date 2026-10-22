@@ -86,7 +86,9 @@ pub(crate) fn submit_plan_rejection(
         ));
     }
     // 已预扣预算但结论未消费 = 审查轮次仍开着，重复提交只会制造无人认领的审查任务
-    if checkpoint.plan_reviewer_retry_count > 0 && !checkpoint.plan_reviewer_consumed {
+    if (checkpoint.plan_reviewer_retry_count > 0 || checkpoint.plan_review_batch_id.is_some())
+        && !checkpoint.plan_reviewer_consumed
+    {
         return Some(
             "【⚠️ submit_plan 已拒绝】已有方案审查任务在途或结论尚未回收（问过 ≠ 听过）。\n\
              请先调用 wait_jobs 收取并研判审查结论；确认需要新一轮评审时再重新提交 submit_plan。"
@@ -344,7 +346,13 @@ fn gate_interception(
             let is_batch_incomplete = checkpoint.plan_review_batch_id.is_some()
                 && !checkpoint.plan_review_batch_complete(db);
 
-            if checkpoint.plan_reviewer_retry_count == 0 {
+            // 预算退款可能归零，但不代表没有派发；真实批次/结论和在途状态优先。
+            if checkpoint.plan_reviewer_retry_count == 0
+                && checkpoint.plan_review_member_count(db) == 0
+                && checkpoint.plan_review_deliveries.is_empty()
+                && !checkpoint.plan_reviewer_consumed
+                && !reviewer_running
+            {
                 Some(DispatchResult { view: None,
                     success: false,
                     stdout: String::new(),

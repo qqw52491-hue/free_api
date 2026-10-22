@@ -453,9 +453,8 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
             break;
         }
         let result = completed_review.expect("bounded review produces a result");
-        if result.is_service_failure() {
-            checkpoint.pending_task_failure = Some(result.summary.clone());
-        }
+        // 审查服务不可用只表示本次尚未取得结论：保留未就绪收据与人工处理出口，
+        // 不把通道故障升级成父任务失败。多人部分不可用已由委员会按有效结论汇总。
         review = review_acceptance(
             &result,
             checkpoint.reviewer_retry_count,
@@ -580,6 +579,9 @@ fn save_successful_obligation_receipt(
 }
 
 fn review_failure_report(result: &ReviewResult, retries: u32) -> String {
+    if result.is_service_failure() {
+        return format!("终审未完成，本次尚未取得有效结论，未提交交付；这不是对产物的否决。\n诊断：{}\n可重试、换用可用审查模型，或调用 ask_human 请用户决定如何继续；不能把不可用当成审查通过，也不必因此调用 fail_task。", result.summary);
+    }
     let issues = result
         .blocking_issues
         .iter()
