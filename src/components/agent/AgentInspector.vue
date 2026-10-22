@@ -348,9 +348,9 @@
                     </section>
 
                     <!-- 调用输入 -->
-                    <details class="data-section payload-accordion">
+                    <details :key="`request-${selectedStep.id}`" class="data-section payload-accordion" open>
                         <summary class="section-title-row" style="cursor: pointer; list-style: none; user-select: none;">
-                            <h4>▶ 调用输入 (Request Payload)</h4>
+                            <h4>调用输入 (Request Payload)</h4>
                             <button type="button" class="btn-copy" @click.stop="copyText(formattedInput, '调用输入')">
                                 {{ copiedKey === '调用输入' ? '已复制 ✓' : '复制参数' }}
                             </button>
@@ -359,9 +359,9 @@
                     </details>
 
                     <!-- 执行输出 -->
-                    <details class="data-section payload-accordion">
+                    <details :key="`output-${selectedStep.id}`" class="data-section payload-accordion" open>
                         <summary class="section-title-row" style="cursor: pointer; list-style: none; user-select: none;">
-                            <h4>▶ 执行输出 (Execution Output)</h4>
+                            <h4>执行输出 (Execution Output)</h4>
                             <button type="button" class="btn-copy" @click.stop="copyText(formattedOutput, '执行输出')">
                                 {{ copiedKey === '执行输出' ? '已复制 ✓' : '复制结果' }}
                             </button>
@@ -1747,6 +1747,8 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
 
 /* 数据段与复制按钮 */
 .data-section { margin-top: 14px; }
+.payload-accordion > summary h4::before { content: '▶ '; }
+.payload-accordion[open] > summary h4::before { content: '▼ '; }
 .section-title-row {
     display: flex;
     align-items: center;
