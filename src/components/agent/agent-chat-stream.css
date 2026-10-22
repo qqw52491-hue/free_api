@@ -1762,6 +1762,61 @@
     font-variant-numeric: tabular-nums;
 }
 
+/* 单行步骤共用行盒，避免小标签、正文和时间因继承行高不同而上下漂移。
+   仅作用于动作行/分组标题/明细行，不改展开正文、思考和终端输出的排版。 */
+.ambient-text-row,
+.ambient-text-row.is-milestone .ambient-text-body,
+.ambient-search-group-header,
+.ambient-action-group-header,
+.ambient-search-sub-row,
+.ambient-action-sub-row {
+    line-height: 18px;
+}
+
+.ambient-text-row .ambient-action-lead,
+.ambient-text-row .ambient-text-body,
+.ambient-text-row .ambient-text-time,
+.ambient-search-group-header .search-group-left,
+.ambient-search-group-header .search-group-right,
+.ambient-search-group-header .ambient-text-time,
+.ambient-action-group-header .action-group-left,
+.ambient-action-group-header .action-group-right,
+.ambient-action-group-header .ambient-text-time,
+.ambient-search-sub-row .search-sub-lead,
+.ambient-search-sub-row .ambient-text-time,
+.ambient-action-sub-row .ambient-text-time {
+    line-height: 18px;
+}
+
+.ambient-text-row .action-tag,
+.ambient-search-group-header .action-tag,
+.ambient-action-group-header .action-tag {
+    min-height: 16px;
+    line-height: 16px;
+    padding-top: 0;
+    padding-bottom: 0;
+}
+
+.ambient-search-group-header .search-group-toggle-btn,
+.ambient-action-group-header .action-group-toggle-btn {
+    line-height: 16px;
+}
+
+.ambient-search-group-header .chip-duration,
+.ambient-action-group-header .chip-duration {
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+
+.ambient-text-row .chip-file-icon,
+.ambient-text-row .ambient-term-chevron svg,
+.ambient-search-group-header .search-group-toggle-btn svg,
+.ambient-action-group-header .action-group-toggle-btn svg,
+.ambient-search-sub-row .chip-file-icon {
+    display: block;
+    flex-shrink: 0;
+}
+
 /* 🌟 实时思考与推进行 (纯净无底色特效、大字号、思考中：带冒号、紧凑无空隙) */
 .ambient-live-text-row {
     display: flex;
