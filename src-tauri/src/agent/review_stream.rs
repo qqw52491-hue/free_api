@@ -155,6 +155,7 @@ impl ReviewStreamFailure {
             None,
             "request_error",
             Some(&diagnostic),
+            None,
         );
     }
 }

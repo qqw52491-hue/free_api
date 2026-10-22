@@ -56,14 +56,21 @@ bash $SKILLS_ROOT/kinetic-reel/scripts/new_project.sh <目标目录>
 ## 3. 渲染与验证
 
 ```bash
-# 接触表抽帧自检（模型当前无图像输入通道——可生成但你看不见，
-# 应在交付时如实披露"画面未经视觉复核"）
+# 本机模板调用前先确认浏览器路径；旧模板的纯编码入口也会检查它。
+export CHROME_PATH=/usr/bin/google-chrome-stable
+# Linux 下用短的独立临时目录，避免会话长路径触发 Chromium socket 长度限制。
+export TMPDIR="$(mktemp -d /tmp/video-render.XXXXXX)"
+# 接触表生成后可用图像查看工具检查。没有实际查看时如实披露，不能把生成图片当成看过。
 node render.mjs --sheet=1,4,7,10 --cols=3 --w=640 --out=out/check/sheet.jpg
 
 # 全量渲染 + 编码
-node render.mjs --frames --workers=4
-node render.mjs --encode --audio=<score.m4a> --out=out/reel.mp4 --fps=30
-ffprobe -v error -show_entries format=duration -i out/reel.mp4  # 核验
+# FPS 要与项目配置一致，渲染与编码共用相同值；此处 24 仅为示例。
+FPS=24
+node render.mjs --frames --workers=4 --fps="$FPS" &&
+node render.mjs --encode --audio=<score.m4a> --out=out/reel.mp4 --fps="$FPS"
+ffprobe -v error -show_entries format=duration -i out/reel.mp4  # 元数据核验，不等于连续播放检查
+# 命令失败时先查原始输出；不要用 "| tail" 或后续 echo 把失败退出码覆盖为成功。
+# 编码失败而帧已经齐全时，修正编码参数后复用帧，不必重新渲染全部帧。
 ```
 
 **Linux 环境已验证的硬坑**（实测血泪，直接照做）：

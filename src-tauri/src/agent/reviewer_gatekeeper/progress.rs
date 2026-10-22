@@ -258,7 +258,7 @@ mod tests {
         p.request(1, 0, 8);
         p.observe(StreamEvent::Content { chunk: "private", accumulated_content: "private", full_thinking: "" });
         let mut output = crate::llm::StreamResult {
-            full_response: "private".into(), thinking_text: String::new(),
+            full_response: "private".into(), thinking_text: String::new(), finish_reason: None,
             usage: Some(crate::llm::RawUsage { completion_tokens: 100, ..Default::default() }),
             ttft_ms: 3000, total_duration_ms: 5000, tokens_per_second: 999.0, attempt_count: 1,
         };

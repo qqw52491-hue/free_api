@@ -118,6 +118,7 @@ pub async fn stream_once_with_key<F: FnMut(StreamEvent) -> bool>(
     let mut thinking_text = String::new();
     let mut line_buf = String::new();
     let mut usage_data: Option<RawUsage> = None;
+    let mut finish_reason = None;
 
     'stream_loop: loop {
         let item = tokio::select! {
@@ -166,6 +167,7 @@ pub async fn stream_once_with_key<F: FnMut(StreamEvent) -> bool>(
                 &mut thinking_text,
                 &mut full_response,
                 &mut usage_data,
+                &mut finish_reason,
                 &mut first_token_instant,
                 on_event,
             ) {
@@ -182,6 +184,7 @@ pub async fn stream_once_with_key<F: FnMut(StreamEvent) -> bool>(
             &mut thinking_text,
             &mut full_response,
             &mut usage_data,
+            &mut finish_reason,
             &mut first_token_instant,
             on_event,
         );
@@ -211,6 +214,7 @@ pub async fn stream_once_with_key<F: FnMut(StreamEvent) -> bool>(
     Ok(StreamResult {
         full_response,
         thinking_text,
+        finish_reason,
         usage: usage_data,
         ttft_ms,
         total_duration_ms,

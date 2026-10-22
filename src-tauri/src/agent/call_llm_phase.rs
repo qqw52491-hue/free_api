@@ -395,15 +395,14 @@ pub async fn run_call_llm_and_run_tool_phases(
                     let _ = app.emit(
                         &format!("agent-log-{}", final_session_id),
                         format!(
-                            "🔄 AI 输出了非结构化文本，正在自动注入引导提示重新生成 ({}/{})...",
+                            "🔄 未获得有效工具指令，正在按错误原因重新生成 ({}/{})...",
                             planning_retry_count, MAX_PLANNING_RETRIES
                         ),
                     );
-                    context.add_error_feedback(&format!(
-                        "你的上一轮输出未能通过 JSON 协议校验（{}）。\n请严格遵循系统契约，仅输出一个合法的 JSON 工具指令（例如 task_store、finish 等）！",
-                        e
-                    ));
-                    checkpoint.record_recoverable_error(format!("规划格式异常: {}", e), &context);
+                    context.add_error_feedback(
+                        &crate::agent::utils::llm_client::instruction_recovery_feedback(&e),
+                    );
+                    checkpoint.record_recoverable_error(format!("规划响应异常: {}", e), &context);
                     save_checkpoint(state.inner(), &mut checkpoint)?;
                     continue;
                 }

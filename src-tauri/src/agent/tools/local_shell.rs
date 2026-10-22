@@ -316,6 +316,17 @@ async fn join_drains(
     .unwrap_or_default()
 }
 
+fn failure_diagnostics(stdout: &str, stderr: &str) -> String {
+    [("stdout", stdout), ("stderr", stderr)].into_iter()
+        .filter(|(_, text)| !text.trim().is_empty())
+        .map(|(label, text)| {
+            let lines: Vec<_> = text.lines().collect();
+            let tail = lines[lines.len().saturating_sub(30)..].join("\n");
+            let start = tail.char_indices().rev().nth(4095).map(|(i, _)| i).unwrap_or(0);
+            format!("[{}{}]\n{}", label, if start > 0 || lines.len() > 30 { " · 尾部节选" } else { "" }, &tail[start..])
+        }).collect::<Vec<_>>().join("\n")
+}
+
 pub fn dispatch(
     db: &DbState,
     session_id: &str,
@@ -621,6 +632,7 @@ fn spawn_background_shell(
         }
     }
 
+    let background_started = std::time::Instant::now();
     let mut child = match c.spawn() {
         Ok(ch) => ch,
         Err(e) => {
@@ -651,6 +663,7 @@ fn spawn_background_shell(
     let log_path_w = log_path.clone();
     std::thread::spawn(move || {
         let status = child.wait();
+        let duration_ms = background_started.elapsed().as_millis() as u64;
         let tail = tail_of_file(&log_path_w, 4096);
         let (status_str, error_kind) = match &status {
             Ok(s) if s.success() => ("succeeded", None),
@@ -668,7 +681,7 @@ fn spawn_background_shell(
             &db_state,
             &job_id_w,
             status_str,
-            0,
+            duration_ms,
             Some(&result.to_string()),
             error_kind.as_deref(),
         );
@@ -1349,7 +1362,7 @@ fn execute_command_blocking(
 
             // 失败时 stderr 必须带真实诊断尾部——重试链路只回传 stderr 字段，
             // 只写"退出码: N"等于让模型盲改（实测：cargo 编译错模型连续重读
-            // 文件找不存在的错因）。stderr 优先，空则退 stdout 尾部（合并诊断）。
+            // 文件找不存在的错因）。分别保留 stdout / stderr 的有界尾部。
             let stderr_field = if success {
                 String::new()
             } else if search_no_match {
@@ -1365,18 +1378,7 @@ fn execute_command_blocking(
                     exit_code, cmd_str
                 )
             } else {
-                let diag = if !stderr_trimmed.is_empty() {
-                    stderr_trimmed.clone()
-                } else {
-                    stdout_trimmed.clone()
-                };
-                let tail: Vec<&str> = diag.lines().collect();
-                let tail_text = tail
-                    .iter()
-                    .skip(tail.len().saturating_sub(60))
-                    .copied()
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                let tail_text = failure_diagnostics(&stdout_trimmed, &stderr_trimmed);
                 let mut msg = format!("命令退出码: {}\n{}", exit_code, tail_text);
                 // shell 里的相对 tmp/ 不会被映射到会话产物区（只有文件工具/MCP 会）——文件找不到时点明
                 if (tail_text.contains("No such file") || tail_text.contains("没有那个文件"))
@@ -1592,6 +1594,27 @@ fn truncate_output(s: &str, max_bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn video_run_shell_failure_keeps_both_diagnostic_streams() {
+        let temp = TempDirGuard::new();
+        let result = dispatch(&test_db(), "video-diagnostic", "exec", &serde_json::json!({
+            "command": "printf 'Chrome not found\\n'; printf 'video.mp4: No such file\\n' >&2; exit 1"
+        }), Some(temp.path()));
+        assert!(!result.success);
+        assert!(result.stderr.contains("Chrome not found"), "{}", result.stderr);
+        assert!(result.stderr.contains("No such file"), "{}", result.stderr);
+        assert!(result.stderr.contains("[stdout]"));
+        assert!(result.stderr.contains("[stderr]"));
+    }
+
+    #[test]
+    fn video_run_shell_diagnostics_are_bounded_and_unicode_safe() {
+        let text = "报错".repeat(10000);
+        let result = super::failure_diagnostics(&text, &text);
+        assert!(result.chars().count() < 8300);
+        assert!(result.contains("尾部节选"));
+    }
+
     use super::*;
 
     #[test]
@@ -2032,6 +2055,12 @@ mod tests {
         assert!(result_json.contains("\"exit_code\":0"), "result_json: {}", result_json);
         assert!(result_json.contains("\"exit_scope\":\"shell_process\""));
         assert!(marker.exists(), "产物文件应由后台进程写出");
+        let duration: i64 = db.0.lock().unwrap().query_row(
+            "SELECT duration_ms FROM agent_background_jobs WHERE id=?1",
+            rusqlite::params![job_id], |row| row.get(0),
+        ).unwrap();
+        assert!(duration >= 900, "sleep 1 的后台任务不应记录为 0ms: {duration}");
+
     }
 
     /// 同步等待窗口到点不杀：进程转后台继续跑完（marker 落盘为证），

@@ -5,6 +5,7 @@ fn result() -> StreamResult {
     StreamResult {
         full_response: "{}".into(),
         thinking_text: String::new(),
+        finish_reason: None,
         usage: None,
         ttft_ms: 0,
         total_duration_ms: 0,
@@ -36,6 +37,7 @@ fn emit(activity: &Arc<Mutex<Activity>>, thinking: bool, text: &str) {
         &line,
         &mut String::new(),
         &mut String::new(),
+        &mut None,
         &mut None,
         &mut None,
         &mut on_event,
@@ -111,6 +113,7 @@ async fn keepalive_and_empty_deltas_do_not_extend_the_idle_deadline() {
                 ": keepalive",
                 &mut String::new(),
                 &mut String::new(),
+                &mut None,
                 &mut None,
                 &mut None,
                 &mut callback,

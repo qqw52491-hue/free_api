@@ -52,13 +52,29 @@ fn replace_with_isolated_json_repair_context(
     append_final_json_output_anchor(api_values);
 }
 
+pub(crate) fn instruction_recovery_feedback(error: &str) -> String {
+    if error.starts_with("[output_incomplete]") {
+        format!("上一轮没有获得完整可执行的正式回复，本次响应未执行（{}）。保留此前已完成的工作，只提交下一项必要操作的完整 JSON；长脚本可以拆成较小的写入操作，不必重新规划整个任务。", error)
+    } else {
+        format!("上一轮指令未通过协议校验，本次响应未执行（{}）。请按系统契约返回一个完整、可执行的 JSON 指令。", error)
+    }
+}
+
+fn parse_instruction_response(content: &str, thinking: &str, finish_reason: Option<&str>) -> Result<AgentInstruction, String> {
+    if matches!(finish_reason, Some("length" | "max_tokens")) {
+        return Err(format!("[output_incomplete] 供应商报告输出达到上限（finish_reason={}）；未执行截断响应。", finish_reason.unwrap()));
+    }
+    if content.trim().is_empty() {
+        return Err(format!("[output_incomplete] 正式回复为空；收到 {} 字符思考文本，思考文本不能作为工具指令。", thinking.chars().count()));
+    }
+    let candidate = extract_json_from_text(content).unwrap_or_else(|| content.to_owned());
+    parse_executable_instruction(&candidate)
+}
+
 fn append_json_regeneration_feedback(api_values: &mut Vec<serde_json::Value>, parse_error: &str) {
     api_values.push(json!({
         "role": "user",
-        "content": format!(
-            "The previous response was not a valid AgentInstruction JSON object ({}).\n请严格遵循系统契约，仅输出一个纯合法的 JSON 对象！\n- 若需调用工具，请输出对应工具的 JSON（如 {{\"tool\": \"task_store\", \"command\": {{...}}}}）；\n- 若任务已全部完成并交付结论，请输出 {{\"description\": \"交付排查结论\", \"tool\": \"finish\", \"command\": {{\"summary\": \"...\"}}}}。\n严禁在 JSON 外部输出任何前缀、闲聊或解释文本！",
-            parse_error
-        ),
+        "content": instruction_recovery_feedback(parse_error),
     }));
     append_final_json_output_anchor(api_values);
 }
@@ -69,7 +85,7 @@ fn append_json_regeneration_feedback(api_values: &mut Vec<serde_json::Value>, pa
 fn parse_executable_instruction(final_json_str: &str) -> Result<AgentInstruction, String> {
     let json_to_parse = repair_json(final_json_str).unwrap_or_else(|| final_json_str.to_string());
     let mut value: serde_json::Value = serde_json::from_str(&json_to_parse)
-        .map_err(|error| format!("基础 JSON 语法错误: {} (处理前: {})", error, final_json_str))?;
+        .map_err(|error| format!("基础 JSON 语法错误: {}", error))?;
     normalize_raw_instruction_value(&mut value);
     normalize_completion_state_updates(&mut value);
     validate_instruction_todo_ids(&mut value)?;
@@ -187,6 +203,7 @@ pub fn log_llm_exchange_to_file(
     token_usage: Option<&TokenUsage>,
     status: &str,
     error: Option<&str>,
+    finish_reason: Option<&str>,
 ) {
     let log_dir = std::env::current_dir()
         .map(|p| p.join("agent_logs"))
@@ -226,6 +243,8 @@ pub fn log_llm_exchange_to_file(
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "usage": usage_val,
         "parse_status": status,
+        "finish_reason": finish_reason,
+        "response_error": error,
         "parse_error": if status == "parse_error" { error } else { None },
         "request_error": if status == "request_error" { error } else { None },
         "thinking_text": thinking_text,
@@ -307,6 +326,7 @@ pub fn log_auxiliary_llm_exchange(
         usage.as_ref(),
         status,
         error,
+        result.and_then(|r| r.finish_reason.as_deref()),
     );
 }
 
@@ -549,6 +569,7 @@ pub async fn call_llm(
                         None,
                         "request_error",
                         Some(&error),
+                        None,
                     );
                 }
                 return Err(error);
@@ -600,21 +621,11 @@ pub async fn call_llm(
             );
         }
 
-        // 7. 尝试从响应中提取 JSON
-        let mut final_json_str_opt = extract_json_from_text(&result.full_response);
-        if final_json_str_opt.is_none() && result.full_response.trim().is_empty() {
-            final_json_str_opt = extract_json_from_text(&result.thinking_text);
-        }
-        let final_json_str = final_json_str_opt.unwrap_or_else(|| {
-            if result.full_response.trim().is_empty() && !result.thinking_text.trim().is_empty() {
-                result.thinking_text.clone()
-            } else {
-                result.full_response.clone()
-            }
-        });
-
-        // 8. 解析并校验可执行 AgentInstruction；任何失败都走同一恢复反馈循环。
-        let parse_result = parse_executable_instruction(&final_json_str);
+        // 只执行正式回复；思考文本独立归档，不能冒充工具指令。
+        let final_json_str = &result.full_response;
+        let parse_result = parse_instruction_response(
+            final_json_str, &result.thinking_text, result.finish_reason.as_deref(),
+        );
 
         match parse_result {
             Ok(inst) => {
@@ -658,6 +669,7 @@ pub async fn call_llm(
                         Some(&token_usage),
                         "success",
                         None,
+                        result.finish_reason.as_deref(),
                     );
                 }
                 let calibration_history_estimate =
@@ -670,6 +682,7 @@ pub async fn call_llm(
                 ));
             }
             Err(e) => {
+                let outcome = if e.starts_with("[output_incomplete]") { "output_incomplete" } else { "parse_error" };
                 // 📊 解析失败行：格式错误的真实成本（请求已发生、token 已消耗）
                 // 各占一行，不再只被最终成功的快照掩盖
                 crate::agent::telemetry::record_llm_call(
@@ -686,7 +699,7 @@ pub async fn call_llm(
                             "regeneration_retry"
                         },
                         usage_source,
-                        outcome: "parse_error",
+                        outcome,
                         request_try: current_try as i64,
                         transport_attempt_count: result.attempt_count as i64,
                         usage: &token_usage,
@@ -704,8 +717,9 @@ pub async fn call_llm(
                     &result.thinking_text,
                     &final_json_str,
                     Some(&token_usage),
-                    "parse_error",
+                    outcome,
                     Some(&e),
+                    result.finish_reason.as_deref(),
                 );
 
                 if let Some(app_handle) = app {
@@ -717,6 +731,8 @@ pub async fn call_llm(
                             "step_id": step_id,
                             "try_index": current_try,
                             "error": &e,
+                            "error_kind": outcome,
+                            "finish_reason": result.finish_reason,
                             "raw_response": &final_json_str,
                             "thinking_text": &result.thinking_text,
                         }),
@@ -724,17 +740,17 @@ pub async fn call_llm(
                     let _ = app_handle.emit(
                         &format!("agent-log-{}", session_id),
                         format!(
-                            "⚠️ [模型格式异常·第{}次尝试] 报错: {}\n📄 模型原始输出:\n{}",
-                            current_try, e, final_json_str
+                            "⚠️ [模型响应异常·第{}次尝试] {}（原始响应已归档）",
+                            current_try, e
                         ),
                     );
                 }
 
                 if current_try >= max_retries {
-                    return Err(format!("{} \n原文: {}", e, final_json_str));
+                    return Err(e);
                 }
                 println!(
-                    "⚠️ 大模型输出了错误的 JSON 格式，开始自动拦截并重试 (第 {} 次 / 共 {} 次): {}",
+                    "⚠️ 未获得有效工具指令，按既有额度重试 (第 {} 次 / 共 {} 次): {}",
                     current_try, max_retries, e
                 );
 
@@ -750,6 +766,37 @@ pub async fn call_llm(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn video_run_reasoning_is_never_an_executable_instruction() {
+        let instruction = r#"{"tool":"local_shell","command":{"command":"echo should-not-run"}}"#;
+        let error = super::parse_instruction_response("", instruction, None).err().unwrap();
+        assert!(error.starts_with("[output_incomplete]"));
+        assert!(!error.contains("should-not-run"));
+        assert!(super::instruction_recovery_feedback(&error).contains("下一项"));
+    }
+
+    #[test]
+    fn video_run_provider_truncation_is_not_repaired_into_an_action() {
+        let instruction = r#"{"tool":"local_shell","command":{"command":"echo ok"}}"#;
+        for reason in ["length", "max_tokens"] {
+            let error = super::parse_instruction_response(instruction, "", Some(reason)).err().unwrap();
+            assert!(error.starts_with("[output_incomplete]"));
+        }
+        assert!(super::parse_instruction_response(instruction, "unrelated reasoning", Some("stop")).is_ok());
+        assert!(super::parse_instruction_response(instruction, "", None).is_ok());
+    }
+
+    #[test]
+    fn video_run_syntax_error_does_not_echo_the_entire_response() {
+        let raw = "not json ".repeat(10000);
+        let error = super::parse_instruction_response(&raw, "", None).err().unwrap();
+        assert!(error.len() < 1000);
+        assert!(!error.starts_with("[output_incomplete]"));
+        let mut messages = vec![serde_json::json!({"role":"user","content":"existing task"})];
+        super::append_json_regeneration_feedback(&mut messages, &error);
+        assert_eq!(messages[0]["content"], "existing task");
+    }
+
     #[test]
     fn unused_parallel_placeholders_do_not_override_model_single_step() {
         // 旧兼容继续成立；[] 和此前的空字符串、false、null 一样表示未使用。
@@ -891,7 +938,9 @@ mod tests {
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0]["content"], "task contract");
         let feedback = messages[1]["content"].as_str().unwrap();
-        assert!(feedback.contains("valid AgentInstruction JSON object"));
+        assert!(feedback.contains("JSON 指令"));
+        assert!(feedback.contains("expected value at line 1 column 1"));
+        assert!(feedback.contains("本次响应未执行"));
         assert!(!feedback.contains("<think>"));
         assert!(!feedback.contains("HTML"));
         assert_eq!(messages[2]["content"], FINAL_JSON_OUTPUT_ANCHOR);

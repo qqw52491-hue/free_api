@@ -48,6 +48,8 @@ pub struct RawUsage {
 pub struct StreamResult {
     pub full_response: String,
     pub thinking_text: String,
+    /// 供应商报告的结束原因；缺失时保持未知。
+    pub finish_reason: Option<String>,
     pub usage: Option<RawUsage>,
     pub ttft_ms: u64,
     pub total_duration_ms: u64,
@@ -141,6 +143,7 @@ pub(crate) fn process_sse_line<F: FnMut(StreamEvent) -> bool>(
     thinking_text: &mut String,
     full_response: &mut String,
     usage_data: &mut Option<RawUsage>,
+    finish_reason: &mut Option<String>,
     first_token_instant: &mut Option<std::time::Instant>,
     on_event: &mut F,
 ) -> bool {
@@ -150,6 +153,9 @@ pub(crate) fn process_sse_line<F: FnMut(StreamEvent) -> bool>(
 
     if let Some(data_str) = line.strip_prefix("data: ") {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(data_str) {
+            if let Some(reason) = json["choices"][0]["finish_reason"].as_str().filter(|s| !s.is_empty()) {
+                *finish_reason = Some(reason.to_owned());
+            }
             let (content, thinking, usage) = parse_sse_delta(&json);
 
             if let Some(t) = thinking {
@@ -189,4 +195,29 @@ pub(crate) fn process_sse_line<F: FnMut(StreamEvent) -> bool>(
         }
     }
     true
+}
+
+#[cfg(test)]
+mod response_end_tests {
+    #[test]
+    fn video_run_finish_reason_survives_usage_only_chunk() {
+        let mut thinking = String::new();
+        let mut content = String::new();
+        let mut usage = None;
+        let mut reason = None;
+        let mut first = None;
+        for line in [
+            r#"data: {"choices":[{"delta":{"reasoning_content":"planning"}}]}"#,
+            r#"data: {"choices":[{"delta":{},"finish_reason":"length"}]}"#,
+            r#"data: {"choices":[],"usage":{"prompt_tokens":7498,"completion_tokens":8192}}"#,
+            "data: [DONE]",
+        ] {
+            super::process_sse_line(line, &mut thinking, &mut content, &mut usage,
+                &mut reason, &mut first, &mut |_| true);
+        }
+        assert_eq!(reason.as_deref(), Some("length"));
+        assert_eq!(thinking, "planning");
+        assert!(content.is_empty());
+        assert_eq!(usage.unwrap().completion_tokens, 8192);
+    }
 }
