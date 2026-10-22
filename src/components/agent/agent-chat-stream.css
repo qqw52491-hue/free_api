@@ -2013,24 +2013,31 @@
 .live-think-label {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    font-size: 13px;
-    font-weight: 600;
+    gap: 4.5px;
+    font-size: 10.5px;
+    font-weight: 500;
     color: #38bdf8;
+    background: rgba(56, 189, 248, 0.08);
+    border: 1px solid rgba(56, 189, 248, 0.2);
+    padding: 1px 6px;
+    border-radius: 4px;
     white-space: nowrap;
     flex-shrink: 0;
     user-select: none;
-    line-height: 1.45;
+    line-height: 1.35;
+    letter-spacing: 0.1px;
 }
 
 .live-think-label.is-action {
     color: #fbbf24;
+    background: rgba(251, 191, 36, 0.08);
+    border-color: rgba(251, 191, 36, 0.2);
 }
 
-/* 思考转圈指示器：复用全量模式的灵动圆环，左侧齐平无凹凸 */
+/* 思考转圈指示器：灵动细微微光环 */
 .live-think-spinner {
-    width: 12px;
-    height: 12px;
+    width: 10px;
+    height: 10px;
     border: 1.5px solid rgba(56, 189, 248, 0.25);
     border-top-color: #38bdf8;
     border-radius: 50%;
@@ -2044,8 +2051,8 @@
 }
 
 .live-think-title {
-    font-size: 13px;
-    font-weight: 600;
+    font-size: 10.5px;
+    font-weight: 500;
     color: inherit;
     letter-spacing: 0.1px;
 }
@@ -2062,12 +2069,12 @@
 }
 
 .ambient-live-scroll-text {
-    font-size: 13.5px;
-    font-weight: 500;
+    font-size: 13px;
+    font-weight: 400;
     line-height: 22px;
     height: 22px;
-    color: #f1f5f9;
-    -webkit-text-fill-color: #f1f5f9;
+    color: #cbd5e1;
+    -webkit-text-fill-color: #cbd5e1;
     background: none;
     display: block;
     width: 100%;
@@ -2105,27 +2112,27 @@
     height: 22px;
 }
 
-/* 展开折叠按钮 */
+/* 展开折叠按钮 (胶囊微互动) */
 .thought-expand-btn {
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    padding: 1.5px 6px;
-    border-radius: 4px;
+    padding: 1.5px 7px;
+    border-radius: 12px;
     background: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.09);
     color: #94a3b8;
     font-size: 10.5px;
     cursor: pointer;
     flex-shrink: 0;
-    transition: all 0.15s ease;
+    transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
     user-select: none;
 }
 
 .thought-expand-btn:hover {
-    color: #e2e8f0;
-    background: rgba(255, 255, 255, 0.08);
-    border-color: rgba(255, 255, 255, 0.16);
+    color: #f1f5f9;
+    background: rgba(255, 255, 255, 0.09);
+    border-color: rgba(255, 255, 255, 0.18);
 }
 
 .thought-expand-btn svg {
@@ -4106,11 +4113,45 @@ article:hover .msg-header-actions .msg-fork-btn:disabled {
     border-color: rgba(239, 68, 68, 0.25);
 }
 
-/* 候选交付仅显示稳定状态，不渲染仍可能被打回的长总结。 */
-.completion-pending {
-    margin: 12px 0;
-    padding: 10px 14px;
-    color: var(--text-secondary, #9ca3af);
-    font-size: 13px;
-    line-height: 1.6;
+/* 候选交付验收进行中横幅 (精致磨砂琥珀金/微光质感) */
+.completion-pending-banner {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 0 14px 0;
+    padding: 5px 12px;
+    border-radius: 6px;
+    background: linear-gradient(135deg, rgba(245, 158, 11, 0.06), rgba(99, 102, 241, 0.04));
+    border: 1px solid rgba(245, 158, 11, 0.18);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+    color: #94a3b8;
+    font-size: 12.5px;
+    line-height: 1.5;
+    animation: fadeIn 0.2s ease;
+}
+
+.completion-pending-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: rgba(245, 158, 11, 0.12);
+    border: 1px solid rgba(245, 158, 11, 0.26);
+    color: #fbbf24;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.15px;
+    flex-shrink: 0;
+}
+
+.pending-spinner-svg {
+    animation: spin 0.85s linear infinite;
+    color: #fbbf24;
+}
+
+.completion-pending-text {
+    color: #cbd5e1;
+    font-size: 12px;
+    letter-spacing: 0.1px;
 }

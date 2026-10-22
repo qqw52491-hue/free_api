@@ -42,32 +42,6 @@ mod tests_inner {
     }
 
     #[test]
-    fn confrontation_maintained_twice_downgrades_blockers_to_final_only() {
-        let context = context::SandwichContext::new("system".to_string(), "goal".to_string());
-        let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);
-        checkpoint.stage_review_blockers_open = 1;
-
-        let blocker = vec!["F2: stage-13 仍为存根，父 Agent 宣称已实现与 diff 不符".to_string()];
-        // 第 1 轮对质被维持：仅计数，不降级
-        assert!(!checkpoint.note_stage_review_confrontation_maintained(blocker.clone(), 2));
-        assert_eq!(checkpoint.stage_review_blockers_open, 1);
-        assert_eq!(checkpoint.stage_review_confrontation_failures, 1);
-
-        // 第 2 轮仍被维持：触发降级——blockers 清零放行写入，账带入 final_only
-        assert!(checkpoint.note_stage_review_confrontation_maintained(blocker.clone(), 2));
-        assert_eq!(checkpoint.stage_review_blockers_open, 0);
-        assert_eq!(checkpoint.stage_review_final_only.len(), 1);
-        assert!(checkpoint.stage_review_final_only[0].contains("对质未撤回自动降级"));
-        assert!(checkpoint.stage_review_final_only[0].contains("F2"));
-        assert_eq!(checkpoint.stage_review_confrontation_failures, 0);
-
-        // 异议被撤回（空 blocker）时重置计数
-        checkpoint.stage_review_confrontation_failures = 1;
-        assert!(!checkpoint.note_stage_review_confrontation_maintained(vec![], 2));
-        assert_eq!(checkpoint.stage_review_confrontation_failures, 0);
-    }
-
-    #[test]
     fn infra_failed_review_rounds_get_refund_with_cap() {
         let context = context::SandwichContext::new("system".to_string(), "goal".to_string());
         let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);

@@ -16,6 +16,7 @@ mod inquiry_ops;
 mod plan_batch;
 mod plan_ops;
 mod review_state;
+mod stage_state;
 #[cfg(test)]
 mod review_state_tests;
 mod task_resume;
@@ -188,6 +189,9 @@ pub struct AgentCheckpoint {
     pub review_finding_todos: std::collections::BTreeMap<usize, ReviewFindingTodo>,
     #[serde(default)]
     pub stage_review_batch_id: Option<String>,
+    /// 带宿主身份的阶段审查观察；阻塞数仅为这份记录的投影。
+    #[serde(default)]
+    pub(crate) stage_review_state: Option<stage_state::StageReviewState>,
     /// ── 旧版手写名单：仅作旧 checkpoint 反序列化入口，加载后经
     /// adopt_legacy_membership 一次性收养进台账并清空；新写入不再序列化。
     #[serde(default, skip_serializing)]
@@ -198,7 +202,7 @@ pub struct AgentCheckpoint {
     pub stage_review_rebuttal_run_id: Option<String>,
     #[serde(default, skip_serializing)]
     pub stage_review_completed_run_ids: Vec<String>,
-    /// 当前正在对质的目标审查任务 ID（用于对质失败计数隔离，防多专家交叉借分）
+    /// 兼容旧检查点的投影：当前有未完对质的批次/逻辑任务键；不再用执行 ID 计数。
     #[serde(default)]
     pub stage_review_confrontation_target: Option<String>,
     /// 覆盖基线：上次成功阶段审查时的副作用台账长度（之后的新增 = 未覆盖写入）
@@ -212,8 +216,8 @@ pub struct AgentCheckpoint {
     ///（实测 goal_anchor：blocker 门禁打出 child_run_id:"" 空串，模型无处可去重试烧光预算）
     #[serde(default)]
     pub stage_review_blocker_source_run_id: Option<String>,
-    /// 同一 blocking 异议连续被审查员维持（对质拒撤回）的次数——达到阈值自动
-    /// 降级为 final_only 记账（吵不赢就降级放行，账要还），防止三方锁死
+    /// 兼容旧检查点的展示投影；各成员的实际对质次数由 stage_review_state 推导。
+    /// 同一任务两轮维持后沿用现有 final_only 移交策略，防止三方锁死
     /// （审查员不撤 + 写入全禁 + 模型无处可去 = 实测死锁形态）。
     #[serde(default)]
     pub stage_review_confrontation_failures: u32,
@@ -409,6 +413,7 @@ impl AgentCheckpoint {
             review_total_withdrawn: 0,
             review_total_maintained: 0,
             stage_review_budget_used: 0,
+            stage_review_state: None,
             stage_review_run_id: None,
             stage_review_run_ids: Vec::new(),
             stage_review_rebuttal_run_id: None,

@@ -809,33 +809,6 @@
     }
 
     #[test]
-    fn test_confrontation_maintained_isolated_per_expert_and_safe_deduction() {
-        let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
-        let mut cp = AgentCheckpoint::new("test-run-isolate".to_string(), &ctx);
-        cp.stage_review_blockers_open = 2;
-
-        let blocker_a = vec!["F1: 专家 A 的问题".to_string()];
-        let blocker_b = vec!["F2: 专家 B 的问题".to_string()];
-
-        // 专家 A 对质失败第 1 次
-        assert!(!cp.note_stage_review_confrontation_maintained_for(Some("expert-a"), blocker_a.clone(), 2));
-        assert_eq!(cp.stage_review_confrontation_failures, 1);
-        assert_eq!(cp.stage_review_confrontation_target.as_deref(), Some("expert-a"));
-
-        // 专家 B 对质失败第 1 次：隔离重置，不借用专家 A 的失败计数！
-        assert!(!cp.note_stage_review_confrontation_maintained_for(Some("expert-b"), blocker_b.clone(), 2));
-        assert_eq!(cp.stage_review_confrontation_failures, 1);
-        assert_eq!(cp.stage_review_confrontation_target.as_deref(), Some("expert-b"));
-
-        // 专家 B 对质失败第 2 次：达到阈值 2，触发专家 B 降级！
-        assert!(cp.note_stage_review_confrontation_maintained_for(Some("expert-b"), blocker_b.clone(), 2));
-        // 安全扣减：只扣减专家 B 降级的 1 条，总数 2 - 1 = 1，专家 A 的 blocker 绝不被清除！
-        assert_eq!(cp.stage_review_blockers_open, 1);
-        assert_eq!(cp.stage_review_final_only.len(), 1);
-        assert!(cp.stage_review_final_only[0].contains("专家 B"));
-    }
-
-    #[test]
     fn test_human_waiver_recording_and_text_aggregation() {
         let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
         let mut cp = AgentCheckpoint::new("test-waiver".to_string(), &ctx);

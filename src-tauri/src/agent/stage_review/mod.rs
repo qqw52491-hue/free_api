@@ -218,7 +218,7 @@ pub async fn dispatch(
     );
 
     // 新一轮阶段审查重置拦截状态（final_only 跨阶段累加 carry-over 到收尾审查，不可清空）
-    checkpoint.stage_review_blockers_open = 0;
+    checkpoint.clear_stage_review_blockers();
 
     // 保留写方线索，不生成自动消费点清单或裁决 refs。
     let write_context = if crate::agent::impact_pack::write_context_enabled() {
@@ -595,6 +595,11 @@ pub fn apply_stage_receipt(
     receipt: &crate::agent::protocol::DeliveryReceipt,
     oracle_index: Option<u32>,
 ) -> StageReceiptOutcome {
+    let source = crate::agent::checkpoint::ReviewDeliverySource::from_run(db, &receipt.child_run_id);
+    if checkpoint.stage_review_batch_id.is_some() && source.batch_id.is_some()
+        && checkpoint.stage_review_batch_id != source.batch_id {
+        return StageReceiptOutcome { note: "该回执属于旧阶段批次，保留历史，不更新当前阶段阻塞。".into(), refund_pending: false };
+    }
     // 对质判定由台账 purpose='rebuttal' 盖章承担（resume 落库时盖戳），
     // 不再需要 checkpoint 维护"当前对质指针"
     let was_rebuttal = checkpoint.is_rebuttal_run(db, &receipt.child_run_id);
@@ -619,7 +624,7 @@ pub fn apply_stage_receipt(
 
     // 基础设施失败：该阶段视为「未审」，会重新触发。
     // 退款不在此内联结算——标记 refund_pending 由调用方批后统一 settle。
-    if receipt.is_infra_failure() {
+    if !receipt.is_success() {
         return StageReceiptOutcome {
             note: "⚠️ 阶段审查任务未正常完成。该阶段视为未审，累计写入达到阈值后将自动重审。".to_string(),
             refund_pending: true,
@@ -630,51 +635,7 @@ pub fn apply_stage_receipt(
     // 否则派发后、消费前的写入会被错误标记为已覆盖。派发后的新写入计入
     // writes_since，由下一次触发（todo 推进/文件数阈值）安排复检。
     let new_blockers = receipt.stage_blocking_open();
-    if was_rebuttal {
-        let (_, stats_withdrawn, _) = receipt.objection_stats();
-        let payload_withdrawn = receipt.as_reviewer_delivery().map(|d| {
-            let direct_withdrawn = d.withdrawn_findings.len() as u32;
-            let verdict_withdrawn = d.objection_verdicts.iter().filter(|v| {
-                v.verdict.eq_ignore_ascii_case("withdraw") || v.verdict.eq_ignore_ascii_case("withdrawn")
-            }).count() as u32;
-            direct_withdrawn.max(verdict_withdrawn)
-        }).unwrap_or(0);
-        let withdrawn = stats_withdrawn.max(payload_withdrawn);
-        checkpoint.stage_review_blockers_open = checkpoint
-            .stage_review_blockers_open
-            .saturating_sub(withdrawn);
-        if checkpoint.stage_review_blockers_open == 0 {
-            checkpoint.stage_review_blocker_source_run_id = None;
-        }
-
-        // 【对质新/维持 blocker 兜底】对质分支中 new_blockers（审查员仍持有或新增的
-        // blocking 异议）不直接加回 blockers_open（避免与其他在途专家的计数双加），
-        // 但必须通过 confrontation 机制跟踪：2 轮对质仍维持/新增 → 自动降级
-        // final_only 记账放行。与 loop_runner.rs 的 wait_jobs 路径保持一致。
-        // 若不跟踪，对质期间审查员新提出的 blocking 问题会被静默丢弃，构成安全漏洞。
-        let blocker_lines: Vec<String> = receipt.findings()
-            .into_iter()
-            .filter(|f| {
-                f.severity.eq_ignore_ascii_case("blocking")
-                    && f.finality != "final_only"
-                    && !receipt.as_reviewer_delivery()
-                        .map(|d| d.withdrawn_findings.contains(&f.id))
-                        .unwrap_or(false)
-            })
-            .map(|f| format!("{}: {}", f.id, f.why))
-            .collect();
-        if checkpoint.note_stage_review_confrontation_maintained_for(Some(&receipt.child_run_id), blocker_lines, 2) {
-            // 降级日志将在调用方 format 输出到 stage_notes
-        }
-    } else {
-        checkpoint.stage_review_blockers_open += new_blockers;
-        if new_blockers > 0 {
-            checkpoint.stage_review_blocker_source_run_id = Some(receipt.child_run_id.clone());
-        }
-        // 新一轮非对质审查交付：上一轮对质遗留的拒撤回计数已失效，清零
-        checkpoint.stage_review_confrontation_failures = 0;
-        checkpoint.stage_review_confrontation_target = None;
-    }
+    let ownership_note = checkpoint.record_stage_review_receipt(db, receipt, was_rebuttal);
 
     // 僵尸 blocker 治理：记录出生阶段索引（无 blocker 时清空，避免陈旧索引干扰）
     if checkpoint.stage_review_blockers_open > 0 {
@@ -715,6 +676,7 @@ pub fn apply_stage_receipt(
     if was_rebuttal {
         text.push_str("（对质复检结论）");
     }
+    text.push_str(&ownership_note);
     append_stage_review_details(&mut text, receipt);
     if checkpoint.stage_review_blockers_open > 0 {
         text.push_str(&format!(

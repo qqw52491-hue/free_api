@@ -827,7 +827,7 @@
                             <div class="ambient-live-text-bar" @click="getPlanRunningPreview(entry).line3.actionKind === 'think' && toggleLiveThoughtExpanded()">
                                 <span class="live-think-label" :class="{ 'is-action': getPlanRunningPreview(entry).line3.actionKind !== 'think' }">
                                     <span class="live-think-spinner" :class="{ 'is-action': getPlanRunningPreview(entry).line3.actionKind !== 'think' }"></span>
-                                    <span class="live-think-title">{{ getPlanRunningPreview(entry).line3.actionKind === 'think' ? '思考中：' : '推进中：' }}</span>
+                                    <span class="live-think-title">{{ getPlanRunningPreview(entry).line3.actionKind === 'think' ? '思考推演' : '实时推进' }}</span>
                                 </span>
                                 <div class="ambient-live-viewport">
                                     <Transition name="ticker-flip">
@@ -1307,7 +1307,7 @@
                             <div class="ambient-live-text-bar" @click="toggleLiveThoughtExpanded">
                                 <span class="live-think-label">
                                     <span class="live-think-spinner"></span>
-                                    <span class="live-think-title">思考中：</span>
+                                    <span class="live-think-title">思考推演</span>
                                 </span>
                                 <div class="ambient-live-viewport">
                                     <Transition name="ticker-flip">
@@ -1474,9 +1474,16 @@
                 </article>
             </template>
 
-            <p v-if="completionPending && isRunning && !completionMessage" class="completion-pending" role="status">
-                ⏳ 正在准备交付与验收，尚未正式交付。
-            </p>
+            <div v-if="completionPending && isRunning && !completionMessage" class="completion-pending-banner" role="status">
+                <span class="completion-pending-tag">
+                    <svg class="pending-spinner-svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                        <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-opacity="0.25" />
+                        <path d="M12 3a9 9 0 0 1 9 9" stroke="currentColor" stroke-linecap="round" />
+                    </svg>
+                    <span>交付验收</span>
+                </span>
+                <span class="completion-pending-text">正在准备交付物并执行自动化验收门禁，尚未正式交付…</span>
+            </div>
 
             <!-- 人工干预/交互选择卡片 (单选/多选/确认/传文件/补充输入) -->
             <AgentHumanInterventionCard

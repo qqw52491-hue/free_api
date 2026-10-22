@@ -728,63 +728,6 @@ impl AgentCheckpoint {
         }
     }
 
-    /// 对质失败自动降级：blocking 异议经对质仍被审查员维持（confirmed 证据拒不撤回）
-    /// 时累计失败次数；达到 threshold 后把未解决 blockers 降级为 final_only 记账
-    /// 带入收尾审查，安全扣减 blockers_open 放行写入。返回 true = 本次触发降级。
-    /// 空行（异议已全部撤回/解决）时重置计数。
-    pub fn note_stage_review_confrontation_maintained(
-        &mut self,
-        blocker_lines: Vec<String>,
-        threshold: u32,
-    ) -> bool {
-        self.note_stage_review_confrontation_maintained_for(None, blocker_lines, threshold)
-    }
-
-    /// 附带目标专家隔离的对质失败自动降级：不同专家独立计数，防止联合会审交叉借分。
-    pub fn note_stage_review_confrontation_maintained_for(
-        &mut self,
-        target_child_id: Option<&str>,
-        blocker_lines: Vec<String>,
-        threshold: u32,
-    ) -> bool {
-        if blocker_lines.is_empty() {
-            self.stage_review_confrontation_failures = 0;
-            self.stage_review_confrontation_target = None;
-            return false;
-        }
-        // 目标切换时，独立重置计数器，防止联合会审中不同专家的失败互相借分
-        if let Some(target) = target_child_id {
-            if self.stage_review_confrontation_target.as_deref() != Some(target) {
-                self.stage_review_confrontation_failures = 0;
-                self.stage_review_confrontation_target = Some(target.to_string());
-            }
-        }
-        self.stage_review_confrontation_failures += 1;
-        if self.stage_review_confrontation_failures < threshold {
-            return false;
-        }
-        let count = blocker_lines.len() as u32;
-        for line in blocker_lines {
-            let tagged = format!("【对质未撤回自动降级】{line}");
-            if !self
-                .stage_review_final_only
-                .iter()
-                .any(|existing| existing == &tagged)
-            {
-                self.stage_review_final_only.push(tagged);
-            }
-        }
-        // 安全扣减：仅扣减当前对质降级的条数，不可无条件全局置 0，防止未对质专家的 blocker 被静默清空
-        self.stage_review_blockers_open = self.stage_review_blockers_open.saturating_sub(count);
-        if self.stage_review_blockers_open == 0 {
-            self.stage_review_blocker_stage = None;
-            self.stage_review_blocker_source_run_id = None;
-        }
-        self.stage_review_confrontation_failures = 0;
-        self.stage_review_confrontation_target = None;
-        true
-    }
-
     /// 僵尸 blocker 清账：blocker 出生阶段已被宿主判分越过 → 该阶段实现已被客观
     /// 判定通过，遗留的阶段审查拦截自动清零并以 final_only 记账带入收尾。
     /// 返回 Some(说明文案) 表示发生了清理。oracle 进度缺失/未越过时不动
@@ -801,7 +744,7 @@ impl AgentCheckpoint {
             "🧟 僵尸 blocker 清账：出生于阶段索引 {born} 的 {} 条 blocking_regardless，在宿主判分推进到索引 {oracle_index} 后仍未清零，自动降级 final_only 带入收尾",
             self.stage_review_blockers_open
         ));
-        self.stage_review_blockers_open = 0;
+        self.clear_stage_review_blockers();
         self.stage_review_blocker_stage = None;
         self.stage_review_blocker_source_run_id = None;
         Some(format!(

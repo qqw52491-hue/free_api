@@ -322,7 +322,7 @@ pub(super) async fn dispatch_ask_human(
                     ctx.checkpoint.gate_human_escape_directed = false;
                     ctx.checkpoint.recent_gate_block_step = None;
                     if ctx.checkpoint.stage_review_blockers_open > 0 {
-                        ctx.checkpoint.stage_review_blockers_open = 0;
+                        ctx.checkpoint.clear_stage_review_blockers();
                         ctx.checkpoint.stage_review_blocker_stage = None;
                     }
                     if ctx.checkpoint.last_review_blocking_count > 0 {
@@ -363,7 +363,7 @@ pub(super) async fn dispatch_ask_human(
                         ctx.checkpoint.gate_human_escape_directed = false;
                         ctx.checkpoint.recent_gate_block_step = None;
                         if ctx.checkpoint.stage_review_blockers_open > 0 {
-                            ctx.checkpoint.stage_review_blockers_open = 0;
+                            ctx.checkpoint.clear_stage_review_blockers();
                             ctx.checkpoint.stage_review_blocker_stage = None;
                         }
                         if ctx.checkpoint.last_review_blocking_count > 0 {
@@ -408,7 +408,7 @@ pub(super) async fn dispatch_ask_human(
                 ctx.checkpoint.last_review_result = None;
                 ctx.checkpoint.reviewer_retry_count = 0;
                 if ctx.checkpoint.stage_review_blockers_open > 0 {
-                    ctx.checkpoint.stage_review_blockers_open = 0;
+                    ctx.checkpoint.clear_stage_review_blockers();
                     ctx.checkpoint.stage_review_blocker_stage = None;
                 }
                 if ctx.checkpoint.last_review_blocking_count > 0 {

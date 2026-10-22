@@ -543,6 +543,9 @@
         // 对质撤回测试：针对 BE-1 进行对质并撤回，blocking 减 1
         // 对质任务 = 台账行 purpose='rebuttal' + 同批次盖章（resume 落库时写入）
         seed_stage_run(&db, &cp.run_id, "sb", "reb-be", "rebuttal", "running", false);
+        db.0.lock().unwrap().execute(
+            "UPDATE agent_child_runs SET task_id='rev-be',attempt_id=2 WHERE id='reb-be'", [],
+        ).unwrap();
         let rebuttal_receipt = DeliveryReceipt {
             child_run_id: "reb-be".to_string(),
             task_id: "stage_rebuttal_1".to_string(),
@@ -583,4 +586,177 @@
         // 验证 final_only 跨阶段累加 carry-over 到收尾审查未被抹除
         assert_eq!(cp.stage_review_final_only.len(), 1);
         assert!(cp.stage_review_final_only[0].contains("历史欠账"));
+    }
+
+    // 用真实台账身份和阶段回执入口覆盖不同执行 ID 的连续对质。
+    fn owned_stage_receipt(
+        db: &crate::db::DbState, cp: &AgentCheckpoint, id: &str,
+        task: &str, attempt: u32, rebuttal: bool, findings: serde_json::Value,
+        withdrawn: &[&str],
+    ) -> crate::agent::protocol::DeliveryReceipt {
+        seed_stage_run(db, &cp.run_id, "owned-stage", id,
+            if rebuttal { "rebuttal" } else { "stage_review" }, "succeeded", true);
+        let payload = json!({"confidence":"confirmed","findings":findings,
+            "withdrawn_findings":withdrawn,"objection_verdicts":[]});
+        db.0.lock().unwrap().execute(
+            "UPDATE agent_child_runs SET task_id=?1,attempt_id=?2,result_json=?3 WHERE id=?4",
+            rusqlite::params![task,attempt,payload.to_string(),id],
+        ).unwrap();
+        crate::agent::protocol::DeliveryReceipt {
+            child_run_id:id.into(), task_id:task.into(), attempt_id:attempt,
+            kind:"review".into(), status:"succeeded".into(), duration_ms:1,
+            completion_tokens:1,prompt_tokens:1,error_kind:None,
+            payload:Some(payload),raw_text:None,
+        }
+    }
+    fn owned_blocking() -> serde_json::Value {
+        json!([{"id":"F1","severity":"blocking","finality":"regardless","why":"仍需修复的问题"}])
+    }
+
+    #[test]
+    fn owned_stage_repeat_withdrawal_cannot_remove_another_members_f1() {
+        let (base, db)=mk_db("owned-withdraw");
+        let mut cp=approved_checkpoint();
+        cp.stage_review_batch_id=Some("owned-stage".into());
+        for (id,task) in [("a","task-a"),("b","task-b")] {
+            let r=owned_stage_receipt(&db,&cp,id,task,1,false,owned_blocking(),&[]);
+            apply_stage_receipt(&mut cp,&db,&r,None);
+        }
+        assert_eq!(cp.stage_review_blockers_open,2);
+        for attempt in [2,3] {
+            let r=owned_stage_receipt(&db,&cp,&format!("a-{attempt}"),"task-a",attempt,true,json!([]),&["F1","F99"]);
+            apply_stage_receipt(&mut cp,&db,&r,None);
+            assert_eq!(cp.stage_review_blockers_open,1,"重复/未知撤回不能扣掉 B 的问题");
+        }
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn owned_stage_different_run_ids_share_task_counter_and_preserve_other_members() {
+        let (base,db)=mk_db("owned-rounds");
+        let mut cp=approved_checkpoint();
+        cp.stage_review_batch_id=Some("owned-stage".into());
+        for (id,task) in [("a","task-a"),("b","task-b")] {
+            let r=owned_stage_receipt(&db,&cp,id,task,1,false,owned_blocking(),&[]);
+            apply_stage_receipt(&mut cp,&db,&r,None);
+        }
+        for (id,task,attempt) in [("a-2","task-a",2),("b-2","task-b",2),("a-3","task-a",3)] {
+            let r=owned_stage_receipt(&db,&cp,id,task,attempt,true,owned_blocking(),&[]);
+            apply_stage_receipt(&mut cp,&db,&r,None);
+        }
+        assert_eq!(cp.stage_review_blockers_open,1,"A 连续两次有效对质应只移交 A 的问题");
+        assert!(cp.stage_review_final_only.iter().any(|s| s.contains("F1")));
+        let r=owned_stage_receipt(&db,&cp,"b-3","task-b",3,true,owned_blocking(),&[]);
+        apply_stage_receipt(&mut cp,&db,&r,None);
+        assert_eq!(cp.stage_review_blockers_open,0,"B 的独立计数也应保留");
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn owned_stage_checkpoint_restore_and_late_receipts_do_not_repeat_rounds() {
+        let (base,db)=mk_db("owned-restore");
+        let mut cp=approved_checkpoint();
+        cp.stage_review_batch_id=Some("owned-stage".into());
+        let initial=owned_stage_receipt(&db,&cp,"initial","task",1,false,owned_blocking(),&[]);
+        apply_stage_receipt(&mut cp,&db,&initial,None);
+        let second=owned_stage_receipt(&db,&cp,"second","task",2,true,owned_blocking(),&[]);
+        apply_stage_receipt(&mut cp,&db,&second,None);
+        apply_stage_receipt(&mut cp,&db,&second,None);
+        assert_eq!(cp.stage_review_blockers_open,1,"重复回执不算第二轮对质");
+        cp=serde_json::from_value(serde_json::to_value(&cp).unwrap()).unwrap();
+        let third=owned_stage_receipt(&db,&cp,"third","task",3,true,owned_blocking(),&[]);
+        apply_stage_receipt(&mut cp,&db,&third,None);
+        assert_eq!(cp.stage_review_blockers_open,0);
+        let lines=cp.stage_review_final_only.clone();
+        apply_stage_receipt(&mut cp,&db,&initial,None);
+        assert_eq!(cp.stage_review_blockers_open,0,"迟到回执不得恢复旧阻塞");
+        assert_eq!(cp.stage_review_final_only,lines,"重放不重复追加移交项");
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn owned_stage_old_checkpoint_rehydrates_known_ownership_but_does_not_guess_unknowns() {
+        let (base,db)=mk_db("owned-legacy");
+        let mut cp=approved_checkpoint();
+        cp.stage_review_batch_id=Some("owned-stage".into());
+        for (id,task) in [("a","task-a"),("b","task-b")] {
+            let r=owned_stage_receipt(&db,&cp,id,task,1,false,owned_blocking(),&[]);
+            apply_stage_receipt(&mut cp,&db,&r,None);
+        }
+        let mut saved=serde_json::to_value(&cp).unwrap();
+        saved.as_object_mut().unwrap().remove("stage_review_state");
+        cp=serde_json::from_value(saved).unwrap();
+        let r=owned_stage_receipt(&db,&cp,"a-withdraw","task-a",2,true,json!([]),&["F1"]);
+        apply_stage_receipt(&mut cp,&db,&r,None);
+        assert_eq!(cp.stage_review_blockers_open,1,"旧记录中 A/B 的归属可从台账恢复");
+        // 只有一个旧计数、没有可核实的旧发现时，撤回不得凭空扣减。
+        let mut unknown=approved_checkpoint();
+        unknown.stage_review_batch_id=Some("owned-stage".into());
+        unknown.stage_review_blockers_open=5;
+        let r=owned_stage_receipt(&db,&unknown,"unknown","task-x",2,true,json!([]),&["F1","missing"]);
+        let note=apply_stage_receipt(&mut unknown,&db,&r,None).note;
+        assert_eq!(unknown.stage_review_blockers_open,5);
+        assert!(note.contains("来源尚无法完整还原"));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn owned_stage_omission_failure_and_explicit_downgrade_have_distinct_effects() {
+        let (base,db)=mk_db("owned-updates");
+        let mut cp=approved_checkpoint();
+        cp.stage_review_batch_id=Some("owned-stage".into());
+        let r=owned_stage_receipt(&db,&cp,"a","task-a",1,false,owned_blocking(),&[]);
+        apply_stage_receipt(&mut cp,&db,&r,None);
+        let omitted=owned_stage_receipt(&db,&cp,"a-2","task-a",2,true,json!([]),&[]);
+        apply_stage_receipt(&mut cp,&db,&omitted,None);
+        assert_eq!(cp.stage_review_blockers_open,1,"漏写不等于撤回");
+        let mut failure=owned_stage_receipt(&db,&cp,"a-3","task-a",3,true,json!([]),&["F1"]);
+        failure.status="cancelled".into(); // 无 error_kind 的取消也不构成有效审查
+        db.0.lock().unwrap().execute("UPDATE agent_child_runs SET status='cancelled' WHERE id='a-3'", []).unwrap();
+        apply_stage_receipt(&mut cp,&db,&failure,None);
+        assert_eq!(cp.stage_review_blockers_open,1,"失败载荷不得解除阻塞或累计对质");
+        let suggestion=json!([{"id":"F1","severity":"suggestion","finality":"regardless","why":"仅作建议"}]);
+        let downgraded=owned_stage_receipt(&db,&cp,"a-4","task-a",4,true,suggestion,&[]);
+        apply_stage_receipt(&mut cp,&db,&downgraded,None);
+        assert_eq!(cp.stage_review_blockers_open,0);
+        assert!(cp.stage_review_final_only.is_empty(),"失败不算一次有效维持");
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn owned_stage_old_batch_and_cleared_receipts_cannot_reopen_blockers() {
+        let (base,db)=mk_db("owned-clear");
+        let mut cp=approved_checkpoint();
+        cp.stage_review_batch_id=Some("owned-stage".into());
+        let r=owned_stage_receipt(&db,&cp,"a","task-a",1,false,owned_blocking(),&[]);
+        apply_stage_receipt(&mut cp,&db,&r,None);
+        cp.clear_stage_review_blockers(); // 人工放行与宿主旧阶段清账共用此入口
+        apply_stage_receipt(&mut cp,&db,&r,None);
+        assert_eq!(cp.stage_review_blockers_open,0);
+        cp.stage_review_batch_id=Some("next-stage".into());
+        let note=apply_stage_receipt(&mut cp,&db,&r,None).note;
+        assert_eq!(cp.stage_review_blockers_open,0);
+        assert!(note.contains("旧阶段批次"));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn owned_stage_out_of_order_withdrawal_and_new_finding_use_the_same_fact_view() {
+        let (base,db)=mk_db("owned-order");
+        let mut cp=approved_checkpoint();
+        cp.stage_review_batch_id=Some("owned-stage".into());
+        let first=owned_stage_receipt(&db,&cp,"a-1","task-a",1,false,owned_blocking(),&[]);
+        apply_stage_receipt(&mut cp,&db,&first,None);
+        let third=owned_stage_receipt(&db,&cp,"a-3","task-a",3,true,json!([]),&["F1"]);
+        apply_stage_receipt(&mut cp,&db,&third,None);
+        let second=owned_stage_receipt(&db,&cp,"a-2","task-a",2,true,owned_blocking(),&[]);
+        apply_stage_receipt(&mut cp,&db,&second,None);
+        assert_eq!(cp.stage_review_blockers_open,0,"晚到旧维持不能推翻较新的撤回");
+        assert!(cp.stage_review_final_only.is_empty());
+
+        let new_finding=json!([{"id":"F2","severity":"blocking","finality":"regardless","why":"对质新发现"}]);
+        let fourth=owned_stage_receipt(&db,&cp,"a-4","task-a",4,true,new_finding,&[]);
+        apply_stage_receipt(&mut cp,&db,&fourth,None);
+        assert_eq!(cp.stage_review_blockers_open,1,"对质新增的问题不能静默丢掉");
+        std::fs::remove_dir_all(base).unwrap();
     }
