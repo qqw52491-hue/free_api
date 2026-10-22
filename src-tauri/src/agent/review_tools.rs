@@ -20,21 +20,23 @@ const MAX_READ_CHARS: usize = 16_000;
 const MAX_GREP_ENTRIES: usize = 50_000;
 const MAX_GREP_FILE_BYTES: u64 = 512 * 1024;
 const SKIP_DIRS: [&str; 6] = [".git", "target", "node_modules", "dist", ".writer-tmp", "build"];
-/// 取证预算默认值与硬上限：每一步都是一次带完整历史的 LLM 调用，
-/// 不设帽时失控配置会把单次审查成本放大到不可接受。
-const DEFAULT_FORENSIC_BUDGET: u32 = 8;
+/// 取证次数只作资源止损，不作调查完成进度。默认沿用安全上限，避免 8 次即提前收口；
+/// 每一步仍有单次调用超时、工具权限和输出预算。
 const MAX_FORENSIC_BUDGET: u32 = 30;
 
 /// reviewer 取证步数预算：channel-config.reviewer_tool_steps。
-/// None = 默认 8；0 = 关闭取证（调用方据此裁剪提示词工具段，回到"瞎子"模式）；
+/// None = 默认 30；0 = 关闭取证（调用方据此裁剪提示词工具段，回到"瞎子"模式）；
 /// 任何取值被 MAX_FORENSIC_BUDGET 封顶。child reviewer 与终审共用。
 pub fn forensic_budget() -> u32 {
-    crate::agent::channel::channel_config_shared()
+    let configured = crate::agent::channel::channel_config_shared()
         .read()
         .ok()
-        .and_then(|cfg| cfg.reviewer_tool_steps)
-        .unwrap_or(DEFAULT_FORENSIC_BUDGET)
-        .min(MAX_FORENSIC_BUDGET)
+        .and_then(|cfg| cfg.reviewer_tool_steps);
+    bounded_forensic_budget(configured)
+}
+
+fn bounded_forensic_budget(configured: Option<u32>) -> u32 {
+    configured.unwrap_or(MAX_FORENSIC_BUDGET).min(MAX_FORENSIC_BUDGET)
 }
 
 /// 允许根集合：工作区 + 可选会话 tmp（均已 canonicalize）。
@@ -840,6 +842,16 @@ fn run_captured(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forensic_budget_defaults_to_safety_cap_and_respects_explicit_config() {
+        assert_eq!(bounded_forensic_budget(None), 30);
+        for value in [0, 1, 8, 20, 30] {
+            assert_eq!(bounded_forensic_budget(Some(value)), value);
+        }
+        assert_eq!(bounded_forensic_budget(Some(31)), 30);
+        assert_eq!(bounded_forensic_budget(Some(u32::MAX)), 30);
+    }
     use serde_json::json;
 
     struct GrepFixture(PathBuf);

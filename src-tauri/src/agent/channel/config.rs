@@ -74,7 +74,7 @@ pub struct ChannelConfig {
     pub stage_review_max_files: Option<u32>,
     /// reviewer 只读取证步数预算（read_file/grep_search/git_diff/git_log/list_dir/
     /// run_command/python；tmp/ 前缀可达会话产物区）。
-    /// 0 = 关闭（回到"瞎子"模式，只评估证据包）；None = 默认 8；上限 30。
+    /// 0 = 关闭（只评估证据包）；None = 默认 30；上限 30；显式较小配置仍有效。
     /// 同时作为终审（finish-review）取证环的预算上限。
     #[serde(default)]
     pub reviewer_tool_steps: Option<u32>,

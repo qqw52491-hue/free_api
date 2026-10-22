@@ -46,8 +46,10 @@ async fn changed_details_reach_real_review_and_cannot_reuse_prepare_receipt() {
     for (index, details) in ["# 原结论\n\n发现问题 A", "# 新结论\n\n问题 A 已解决", "# 新结论\n\n问题 A 已解决"].into_iter().enumerate() {
         let instruction: AgentInstruction = serde_json::from_value(if index == 0 {
             json!({"prepare_finish":{"summary":"检查完成","details":details}})
+        } else if index == 1 {
+            json!({"tool":"finish","command":"","params":{"summary":"检查完成","details":details}})
         } else {
-            json!({"tool":"finish","command":{"summary":"检查完成","details":details}})
+            json!({"tool":"finish","params":{"summary":"检查完成","details":details}})
         }).unwrap();
         let evaluation = evaluate_completion(app.handle(), &mock.db, &mut c, &mut cp,
             "details-run", &session, 10+index, &workspace, &baseline, start, &routing, &mut rx,
@@ -596,7 +598,7 @@ fn evaluation_payload_recovers_only_the_known_finish_frame_and_preserves_the_ins
             })
             .unwrap();
             let original = serde_json::to_value(&instruction).unwrap();
-            let result = payload(&instruction);
+            let result = delivery_payload(&instruction);
             assert_eq!(result["summary"], expected, "{}", fixture["name"]);
             assert_eq!(serde_json::to_value(&instruction).unwrap(), original);
         }

@@ -124,30 +124,6 @@ pub(crate) fn interrupted_since(receiver: &watch::Receiver<u64>, generation: u64
     *receiver.borrow() != generation
 }
 
-fn payload(instruction: &AgentInstruction) -> Value {
-    let mut value = if let Some(request) = instruction.prepare_finish.as_ref() {
-        let mut map = serde_json::Map::new();
-        if let Some(s) = &request.summary {
-            map.insert("summary".into(), json!(s));
-        }
-        if let Some(d) = &request.details {
-            map.insert("details".into(), json!(d));
-        }
-        Value::Object(map)
-    } else {
-        instruction.command.clone().unwrap_or(Value::Null)
-    };
-    // 评估、指纹与正式提交使用同一份正文，不能验收一份再展示另一份。
-    if let Some(object) = value.as_object_mut() {
-        for key in ["summary", "details"] {
-            if let Some(Value::String(text)) = object.get_mut(key) {
-                *text = finish_summary_text(text);
-            }
-        }
-    }
-    value
-}
-
 /// 所有未闭合项使用同一份清单；动态检查每次重跑。
 /// 就绪交付收据与真实冻结验证执行事实分别复用，不让说明修正无故重跑命令。
 #[allow(clippy::too_many_arguments)]
@@ -170,7 +146,7 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
     contract_started: bool,
 ) -> CompletionEvaluation {
     let generation = *interrupt_rx.borrow();
-    let request_payload = payload(instruction);
+    let request_payload = delivery_payload(instruction);
     let body = delivery_body(&request_payload);
     let (mut blockers, mut notices, diff_context) = collect_checks(
         db,

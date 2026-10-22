@@ -315,6 +315,9 @@ async function checkAllWorkerRoles() {
     const budgetHtml = await snapshot([budgetReview]);
     assert(budgetHtml.includes('模型请求 11 次'));
     assert(budgetHtml.includes('取证已用 8 / 上限 8 次'), 'tool cap is not a cap on model requests');
+    const expandedBudgetHtml = await snapshot([{ ...budgetReview, toolSteps: 9, toolBudget: 30 }]);
+    assert(expandedBudgetHtml.includes('取证已用 9 / 上限 30 次'), 'actual backend budget replaces the old default in the rendered row');
+    assert(!expandedBudgetHtml.includes('上限 8 次'));
     const disabledHtml = await snapshot([{ ...budgetReview, toolSteps: 0, toolBudget: 0 }]);
     assert(disabledHtml.includes('取证已关闭'));
     assert(!disabledHtml.includes('0/0'));

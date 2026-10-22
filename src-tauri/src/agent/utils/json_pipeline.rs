@@ -221,78 +221,9 @@ pub fn repair_json(text: &str) -> Option<String> {
         return Some(final_candidate);
     }
 
-    // 4. 终极兜底：针对 finish 工具 summary 内容被截断或混入未转义字符时的救赎逻辑
-    if final_candidate.contains(r#""finish""#) || final_candidate.contains(r#""summary""#) {
-        if let Some(pos) = final_candidate.find(r#""summary""#) {
-            let after = &final_candidate[pos + 9..];
-            if let Some(colon_pos) = after.find(':') {
-                let val_part = after[colon_pos + 1..].trim_start();
-                if val_part.starts_with('"') {
-                    let raw_after_quote = &val_part[1..];
-
-                    // 寻找是否有同级的系统状态更新字段（如 todo_update, review_contract_update 等）
-                    let boundary_keywords = [
-                        r#""todo_update""#,
-                        r#""review_contract_update""#,
-                        r#""change_verification_update""#,
-                        r#""memories_update""#,
-                        r#""progress_summary""#,
-                    ];
-
-                    let mut earliest_boundary: Option<(usize, &str)> = None;
-                    for kw in boundary_keywords {
-                        if let Some(kw_pos) = raw_after_quote.find(kw) {
-                            if earliest_boundary.map(|(p, _)| kw_pos < p).unwrap_or(true) {
-                                earliest_boundary = Some((kw_pos, kw));
-                            }
-                        }
-                    }
-
-                    let (summary_text, tail_part) = if let Some((kw_pos, _)) = earliest_boundary {
-                        let summary_segment = &raw_after_quote[..kw_pos];
-                        let tail_segment = &raw_after_quote[kw_pos..];
-                        (summary_segment, Some(tail_segment))
-                    } else {
-                        (raw_after_quote, None)
-                    };
-
-                    // 切片末尾是 `..."\n  },\n  ` 这类混杂尾巴：先 trim() 再逐字符剥
-                    // 的旧顺序会让前面五次 trim_end_matches 全部空转（末尾是空白不
-                    // 匹配任何目标字符），残留的引号/闭合括号/逗号原样漏进正文。
-                    // 改为闭包字符集循环剥离：空白与结构符号一并从尾部持续剥除。
-                    let clean_summary = summary_text
-                        .trim_end_matches(|c: char| {
-                            c.is_whitespace() || c == '}' || c == ']' || c == ',' || c == '"'
-                        })
-                        .trim();
-
-                    let mut rescued = serde_json::json!({
-                        "tool": "finish",
-                        "command": {
-                            "summary": clean_summary
-                        }
-                    });
-
-                    // 若尾部包含合法的系统字段，尝试将其解析还原进 rescued 对象，避免丢失审查与 Todo 状态
-                    if let Some(tail) = tail_part {
-                        let tail_wrapped = format!("{{{}}}", tail.trim_end_matches('}').trim_end_matches(']'));
-                        if let Ok(tail_val) = serde_json::from_str::<serde_json::Value>(&tail_wrapped) {
-                            if let Some(tail_obj) = tail_val.as_object() {
-                                if let Some(rescued_obj) = rescued.as_object_mut() {
-                                    for (k, v) in tail_obj {
-                                        rescued_obj.insert(k.clone(), v.clone());
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    return Some(rescued.to_string());
-                }
-            }
-        }
-    }
-
+    // Ambiguous string boundaries are a protocol error, not a new finish request.
+    // The caller retains the original response and uses its existing format retry.
+    // Never scrape summary text or promote tools/state updates from malformed JSON.
     None
 }
 
@@ -635,21 +566,14 @@ mod tests {
     }
 
     #[test]
-    fn test_repair_json_summary_strips_mixed_trailing_junk() {
-        // summary 正文含未转义引号导致标准解析失败 → 走终极兜底救赎；
-        // 切片尾巴 `"\n  },\n  ` 曾让五次 trim_end_matches 因末尾空白全部空转，
-        // 残留的 `"`/`}`/`,` 原样漏进 summary 文本（用户可见的多余符号）。
+    fn test_repair_json_ambiguous_summary_does_not_salvage_state_updates() {
+        // Unescaped quotes do not establish where summary ends or state updates begin.
         let broken = concat!(
             "{\"tool\": \"finish\", \"command\": {\"summary\": \"报告引用 \"target_files\" 字段，分析完成。\"\n  },\n  ",
             "\"change_verification_update\": null}"
         );
         assert!(serde_json::from_str::<serde_json::Value>(broken).is_err());
-        let rescued = repair_json(broken).expect("兜底救赎应成功");
-        let v: serde_json::Value = serde_json::from_str(&rescued).unwrap();
-        let summary = v["command"]["summary"].as_str().unwrap();
-        assert_eq!(summary, "报告引用 \"target_files\" 字段，分析完成。");
-        // 尾部系统字段仍被还原，不丢审查状态
-        assert!(v.get("change_verification_update").is_some());
+        assert!(repair_json(broken).is_none());
     }
 }
 

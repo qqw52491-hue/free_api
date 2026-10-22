@@ -63,6 +63,53 @@ fn commit(
 fn context() -> SandwichContext {
     SandwichContext::new("system".into(), "goal".into())
 }
+
+#[tokio::test]
+async fn finish_parameter_aliases_reach_evaluation_receipt_event_and_chat() {
+    use crate::agent::finalization::{evaluate_completion, CompletionMode};
+    use crate::agent::{dispatcher::run_agent_step, mcp::PluginRegistry, types::AgentInstruction};
+    let root = std::env::temp_dir().join(format!("finish-alias-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let baseline = crate::agent::reviewer_gatekeeper::GitBaseline::capture(&root);
+    let app = tauri::test::mock_app();
+    let report = json!({"summary":"摘要", "details":"# 完整正文\n\n**保留 Markdown**"});
+    let expected = "摘要\n\n# 完整正文\n\n**保留 Markdown**";
+    for raw in [
+        json!({"tool":"finish", "command":"", "params":report}),
+        json!({"tool":"finish", "command":"finish", "params":report}),
+        json!({"tool":"finish", "params":report}),
+        json!({"tool":"finish", "command":report}),
+    ] {
+        let db = DbState(Arc::new(Mutex::new(crate::db::init_db(&std::path::PathBuf::from(":memory:")).unwrap())));
+        db.0.lock().unwrap().execute("INSERT INTO chat_sessions (id,title,model_id,created_at,updated_at) VALUES ('s','test','m','now','now')", []).unwrap();
+        let mut raw = raw;
+        crate::agent::utils::normalize_raw_instruction_value(&mut raw);
+        let inst: AgentInstruction = serde_json::from_value(raw.clone()).unwrap();
+        let dispatched = run_agent_step(&db, "s", &inst, &PluginRegistry::new(), Some(&root));
+        let mut c = context();
+        let mut cp = AgentCheckpoint::new("s".into(), &c);
+        let (_tx, mut rx) = tokio::sync::watch::channel(0);
+        let evaluation = evaluate_completion(app.handle(), &db, &mut c, &mut cp,
+            "run", "s", 1, &root, &baseline, chrono::Utc::now(),
+            &crate::agent::router::ModelRoutingConfig::default(), &mut rx, &inst,
+            CompletionMode::Finish, false, false).await;
+        assert!(evaluation.receipt.is_ready(), "{:?}", evaluation.receipt);
+        assert_eq!(evaluation.receipt.finish_payload["details"], report["details"], "{raw}");
+        // 检查点恢复后，正式提交仍使用已评估的同一份完整正文。
+        cp.pending_finalization = Some(evaluation.receipt);
+        let mut cp: AgentCheckpoint = serde_json::from_value(serde_json::to_value(&cp).unwrap()).unwrap();
+        let emitted = commit_completed_run(&db, &mut cp, &mut c, "run", "s", "goal",
+            &[], &dispatched.stdout, "m", None).unwrap();
+        assert_eq!(crate::agent::finalization::delivery_body(&emitted).as_deref(), Some(expected));
+        let conn = db.0.lock().unwrap();
+        let completion: String = conn.query_row("SELECT completion_json FROM agent_run_traces WHERE id='run'", [], |r| r.get(0)).unwrap();
+        let completion: serde_json::Value = serde_json::from_str(&completion).unwrap();
+        assert_eq!(crate::agent::finalization::delivery_body(&completion).as_deref(), Some(expected));
+        let message: String = conn.query_row("SELECT content FROM chat_messages WHERE role='assistant'", [], |r| r.get(0)).unwrap();
+        assert_eq!(message, expected);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
 fn no_terminal_rows(db: &DbState) {
     let conn = db.0.lock().unwrap();
     for table in [

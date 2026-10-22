@@ -474,6 +474,32 @@ async fn incident_severity_requires_explicit_correction_and_alias_text_survives(
 }
 
 #[tokio::test]
+async fn reviewer_default_forensics_passes_eight_calls_and_keeps_the_safety_cap() {
+    for requested in [9usize, 31] {
+        let mut good = verdict(false);
+        good["root_cause_verdict"] = json!("na");
+        let mut responses = vec![json!({"tool":"read_file", "path":"evidence.txt"}); requested];
+        responses.push(good);
+        let mock = MockReviewer::new(responses).await;
+        std::fs::write(mock.root.join("evidence.txt"), "FORENSIC_BUDGET_EVIDENCE").unwrap();
+        let snapshot = PlanReviewerDispatchSnapshot::new("mock", "flash", "auto", "审查者",
+            json!({"question":"核对合成证据", "evidence_excerpt":"synthetic", "plan_review":true}));
+        let (_tx, rx) = watch::channel(0u64);
+        let id = snapshot.spawn(None, &mock.db, "parent", "forensic-budget", &mock.root, rx, None).await.unwrap();
+        let result = mock.wait_child(&id).await;
+        assert_eq!(result["root_cause_verdict"], "na");
+        let requests = mock.requests.lock().unwrap();
+        assert_eq!(requests.len(), requested + 1);
+        let messages = requests.last().unwrap()["messages"].as_array().unwrap();
+        let observations = messages.iter().filter_map(|m| m["content"].as_str())
+            .filter(|s| s.starts_with("【取证结果 step ") && s.contains("FORENSIC_BUDGET_EVIDENCE")).count();
+        assert_eq!(observations, requested.min(30), "有效取证应越过旧 8 次上限，并在 30 次收口");
+        let last = messages.last().unwrap()["content"].as_str().unwrap();
+        assert_eq!(last.contains("取证预算已用尽"), requested > 30);
+    }
+}
+
+#[tokio::test]
 async fn contract_correction_can_still_use_tools_and_explicit_na() {
     let first = verdict(false);
     let mut good = first.clone();

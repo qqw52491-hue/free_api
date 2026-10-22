@@ -1212,6 +1212,31 @@ mod finish_review_regression_tests {
     }
 
     #[tokio::test]
+    async fn finish_default_forensics_passes_eight_calls_and_keeps_the_safety_cap() {
+        for requested in [9usize, 31] {
+            let mut responses = vec![json!({"tool":"read_file", "path":"evidence.txt"}); requested];
+            responses.push(json!({"verdict":"passed", "score":90, "summary":"核对合成证据后通过",
+                "blocking_issues":[], "nit_issues":[]}));
+            let mock = MockReviewer::new(responses).await;
+            std::fs::create_dir_all(mock.root.join("workspace")).unwrap();
+            std::fs::write(mock.root.join("workspace/evidence.txt"), "FORENSIC_BUDGET_EVIDENCE").unwrap();
+            let (result, _, events) = run_finish_with_progress(&mock, None, false, None, None).await;
+            assert!(result.is_passed(), "{result:?}");
+            assert_eq!(events.iter().filter_map(|v| v["tool_steps"].as_u64()).max(), Some(requested.min(30) as u64));
+            let requests = mock.requests.lock().unwrap();
+            assert_eq!(requests.len(), requested + 1);
+            let messages = requests.last().unwrap()["messages"].as_array().unwrap();
+            let observations = messages.iter().filter_map(|m| m["content"].as_str())
+                .filter(|s| s.starts_with("【取证结果 step ") && s.contains("FORENSIC_BUDGET_EVIDENCE")).count();
+            assert_eq!(observations, requested.min(30));
+            let last = messages.last().unwrap()["content"].as_str().unwrap();
+            assert_eq!(last.contains("取证预算已用尽"), requested > 30);
+            assert!(events.iter().filter(|v| v["round"].as_u64().unwrap_or(0) > 0)
+                .all(|v| v["tool_budget"] == 30));
+        }
+    }
+
+    #[tokio::test]
     async fn finish_progress_follows_real_http_format_repair_tool_and_final_verdict() {
         let mock = MockReviewer::new(vec![
             json!({"unknown": "INVALID_REVIEW_BODY"}),

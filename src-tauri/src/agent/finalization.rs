@@ -25,6 +25,35 @@ use tokio::sync::watch;
 mod evaluate;
 pub(crate) use evaluate::*;
 
+/// 交付执行、评估和收据共用的有效参数；与步骤记录采用相同的 command/params 口径。
+pub(crate) fn delivery_payload(instruction: &crate::agent::types::AgentInstruction) -> Value {
+    let mut value = if let Some(request) = instruction.prepare_finish.as_ref() {
+        let mut map = serde_json::Map::new();
+        if let Some(s) = &request.summary {
+            map.insert("summary".into(), json!(s));
+        }
+        if let Some(d) = &request.details {
+            map.insert("details".into(), json!(d));
+        }
+        Value::Object(map)
+    } else {
+        instruction.get_params()
+    };
+    // 只恢复可严格解析的已知外壳，不按正文中的字段名或 Markdown 猜测边界。
+    if let Some(object) = value.as_object_mut() {
+        for key in ["summary", "details"] {
+            if let Some(Value::String(text)) = object.get_mut(key) {
+                *text = finish_summary_text(text);
+            }
+        }
+    }
+    value
+}
+
+pub(crate) fn finish_output(instruction: &crate::agent::types::AgentInstruction) -> String {
+    delivery_body(&delivery_payload(instruction)).unwrap_or_else(|| "任务已完成".into())
+}
+
 /// 恢复已知的残缺 finish 外壳：仅当补回固定外层后可严格解析，才读取正文。
 /// 不执行其中指令、不提升其他字段，也不截取普通文本/代码示例。
 pub(crate) fn finish_summary_text(raw: &str) -> String {

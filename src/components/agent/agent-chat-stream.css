@@ -1384,6 +1384,11 @@
     letter-spacing: 0.1px;
 }
 
+/* 行容器已齐边，首个标签不再内缩图标；命令与用途仍自然跟随。 */
+.ambient-text-row > .ambient-text-content > .ambient-action-lead > .action-tag:first-child {
+    padding-left: 0;
+}
+
 .action-tag.action-tag-edit {
     color: #7dd3fc;
     background: rgba(125, 211, 252, 0.06);

@@ -190,13 +190,7 @@ fn run_agent_step_internal(
     }
     if is_finish_instruction(instruction) {
         return DispatchResult { view: None,
-            stdout: instruction
-                .command
-                .as_ref()
-                .and_then(|value| value.get("summary").or_else(|| value.get("details")))
-                .and_then(|value| value.as_str())
-                .unwrap_or("任务已完成")
-                .to_string(),
+            stdout: crate::agent::finalization::finish_output(instruction),
             stderr: String::new(),
             success: true,
             route: "finish".to_string(),

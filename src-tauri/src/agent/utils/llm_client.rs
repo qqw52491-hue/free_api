@@ -778,6 +778,67 @@ mod tests {
     use super::*;
 
     #[test]
+    fn finish_parameter_aliases_preserve_the_complete_delivery_in_dispatch() {
+        use crate::agent::{dispatcher::run_agent_step, mcp::PluginRegistry};
+        use std::sync::{Arc, Mutex};
+        let db = DbState(Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap())));
+        let report = json!({"summary":"摘要", "details":"# 正文\n\n**结论**\n\n```json\n{\"tool\":\"finish\"}\n```"});
+        let expected = format!("摘要\n\n{}", report["details"].as_str().unwrap());
+        for raw in [
+            json!({"tool":"finish", "command":report}),
+            json!({"tool":"finish", "params":report}),
+            json!({"tool":"finish", "command":null, "params":report}),
+            json!({"tool":"finish", "command":"", "params":report}),
+            json!({"tool":"finish", "command":"finish", "params":report}),
+            json!({"tool":"finish", "command":report.to_string()}),
+            json!({"tool":"finish", "summary":report["summary"], "details":report["details"]}),
+            json!({"tool":"finish", "command":report, "params":{"summary":"不能覆盖正式参数"}}),
+        ] {
+            let inst = parse_executable_instruction(&raw.to_string()).unwrap();
+            assert_eq!(inst.get_params()["details"], report["details"]);
+            let result = run_agent_step(&db, "finish-alias", &inst, &PluginRegistry::new(), None);
+            assert!(result.success);
+            assert_eq!(result.stdout, expected, "{raw}");
+        }
+        let inst = parse_executable_instruction(&json!({"tool":"finish", "command":"",
+            "params":{"summary":"", "details":"# 仅正文"}}).to_string()).unwrap();
+        let result = run_agent_step(&db, "finish-details", &inst, &PluginRegistry::new(), None);
+        assert_eq!(result.stdout, "# 仅正文");
+    }
+
+    #[test]
+    fn malformed_summary_cannot_turn_trailing_protocol_fields_into_delivery_text() {
+        // Synthetic shape of the saved incident; original provider response was not archived.
+        for raw in [
+            r#"{"description":"交付结论","params":{"summary":"报告包含 "引用"，说明完成。"},"plan_title":"评估任务","tool":"finish"}"#,
+            r#"{"tool":"finish","command":{"summary":"报告包含 "引用"。","details":"详细结论"},"todo_update":[{"id":1,"status":"done"}]}"#,
+        ] {
+            assert!(parse_executable_instruction(raw).is_err(), "malformed output must enter existing format correction");
+            assert!(extract_json_from_text(raw).is_none(), "extraction cannot manufacture a different finish instruction");
+        }
+    }
+
+    #[test]
+    fn malformed_summary_in_non_finish_tool_cannot_be_promoted_to_finish() {
+        let raw = r#"{"tool":"local_shell","command":{"summary":"说明包含 "引用"。","command":"printf untouched"}}"#;
+        assert!(parse_executable_instruction(raw).is_err(), "the presence of summary is not a finish request");
+        assert!(extract_json_from_text(raw).is_none());
+    }
+
+    #[test]
+    fn valid_delivery_markdown_and_protocol_examples_remain_opaque() {
+        let summary = "## 结论\n\n保留 **Markdown**、\"引用\"、换行与末尾符号。\n```json\n{\"tool\":\"finish\",\"plan_title\":\"示例\",\"summary\":\"文档\"}\n```\n末尾：\"},]";
+        let details = "详细依据包含 todo_update 与 review_contract_update 字面量。";
+        let raw = json!({"description":"交付", "params":{"summary":summary,"details":details},
+            "plan_title":"当前任务", "tool":"finish", "todo_update":[]}).to_string();
+        let extracted = extract_json_from_text(&raw).unwrap();
+        let inst = parse_executable_instruction(&extracted).unwrap();
+        assert_eq!(inst.get_tool(), "finish");
+        assert_eq!(inst.get_params()["summary"], summary);
+        assert_eq!(inst.get_params()["details"], details);
+    }
+
+    #[test]
     fn appends_final_json_anchor_after_existing_history() {
         let mut messages = vec![json!({"role": "system", "content": "contract"})];
 

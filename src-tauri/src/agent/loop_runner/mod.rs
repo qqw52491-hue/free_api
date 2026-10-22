@@ -407,13 +407,7 @@ pub async fn run_tool_phase(
     // --- B1. 协议终态：finish 不创建 pending、不派发工具，由主循环在终态自检裁决后统一收敛状态与发送事件。 ---
     if is_finish_instruction(inst) {
         let result = DispatchResult { view: None,
-            stdout: inst
-                .command
-                .as_ref()
-                .and_then(|value| value.get("summary").or_else(|| value.get("details")))
-                .and_then(|value| value.as_str())
-                .unwrap_or("任务已完成")
-                .to_string(),
+            stdout: crate::agent::finalization::finish_output(inst),
             stderr: String::new(),
             success: true,
             route: "finish".to_string(),
