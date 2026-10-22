@@ -13,6 +13,9 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let base = std::env::temp_dir().join(format!("directory-access-{}", uuid::Uuid::new_v4()));
+        // 按正式授权的契约使用物理路径，兼容系统临时目录别名和 Windows 路径前缀。
+        std::fs::create_dir_all(&base).unwrap();
+        let base = base.canonicalize().unwrap();
         let primary = base.join("primary");
         let reference = base.join("reference");
         std::fs::create_dir_all(&primary).unwrap();
@@ -372,7 +375,7 @@ fn shell_cwd_requires_write_access_but_this_is_not_script_sandboxing() {
     let f = Fixture::new();
     let db = f.db();
     f.set(DirectoryAccess::ReadOnly);
-    let params = json!({"command":"printf workspace_access_test", "cwd":f.reference});
+    let params = json!({"command":"echo workspace_access_test", "cwd":f.reference});
     let denied =
         crate::agent::tools::local_shell::dispatch(&db, &f.session, "", &params, Some(&f.primary));
     assert_eq!(denied.route, "local_shell:cwd_denied");

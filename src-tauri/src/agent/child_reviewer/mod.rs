@@ -91,6 +91,8 @@ pub async fn spawn_child_reviewer(
     crate::agent::control::mark_stage(parent_session_id, "child_spawn:evidence");
     let (evidence_excerpt, allowed_refs) =
         build_managed_resource_evidence(db, parent_session_id, &request)?;
+    // 配置失败时尚未登记任务，不留下没有执行者的 running 行。
+    let mut config = ModelConfig::from_db_state(db, model_id)?;
     let custom_cap = params.get("max_concurrency").and_then(|v| v.as_i64());
     crate::agent::control::mark_stage(parent_session_id, "child_spawn:begin_run");
     let child_run_id = begin_child_run_extended(
@@ -107,7 +109,6 @@ pub async fn spawn_child_reviewer(
         identity,
     )?;
 
-    let mut config = ModelConfig::from_db_state(db, model_id)?;
     config.max_tokens = if config.max_tokens <= 0 {
         CHILD_MAX_OUTPUT_TOKENS
     } else {

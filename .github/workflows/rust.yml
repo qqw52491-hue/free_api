@@ -36,3 +36,47 @@ jobs:
 
       - name: Run Tests
         run: cargo test --verbose --manifest-path src-tauri/Cargo.toml
+
+  native-directory-permissions:
+    name: Directory Permissions (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install macOS search dependency
+        if: runner.os == 'macOS'
+        run: brew list ripgrep > /dev/null 2>&1 || brew install ripgrep
+
+      - name: Install Windows search dependency
+        if: runner.os == 'Windows'
+        run: choco install ripgrep --yes --no-progress
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      # 使用宿主默认临时目录；不能通过 TMPDIR 绕过路径别名差异。
+      - name: Controlled directory access
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib workspace_access::tests
+
+      - name: Project directory grants
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib commands::projects::directories::tests
+
+      - name: Session directory grants and restoration
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib commands::projects::session_directories::tests
+
+      - name: Scout directory access
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib scout_reads_project_reference_but_keeps_role_scope
+
+      - name: Attachment physical paths
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib unbound_wechat_attachment_is_copied_to_scratch_and_readable_as_a_resource

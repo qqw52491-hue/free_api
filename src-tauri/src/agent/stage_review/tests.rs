@@ -760,3 +760,175 @@
         assert_eq!(cp.stage_review_blockers_open,1,"对质新增的问题不能静默丢掉");
         std::fs::remove_dir_all(base).unwrap();
     }
+
+    #[test]
+    fn owned_stage_new_finding_does_not_borrow_older_findings_rounds() {
+        let (base, db) = mk_db("owned-new-rounds");
+        let mut cp = approved_checkpoint();
+        cp.stage_review_batch_id = Some("owned-stage".into());
+        for attempt in [1, 2] {
+            let r = owned_stage_receipt(&db, &cp, &format!("a-{attempt}"), "task-a", attempt,
+                attempt > 1, owned_blocking(), &[]);
+            apply_stage_receipt(&mut cp, &db, &r, None);
+        }
+        let both = json!([
+            {"id":"F1","severity":"blocking","why":"原有问题"},
+            {"id":"F2","severity":"blocking","why":"本轮新发现"}
+        ]);
+        let r = owned_stage_receipt(&db, &cp, "a-3", "task-a", 3, true, both, &[]);
+        apply_stage_receipt(&mut cp, &db, &r, None);
+        assert_eq!(cp.stage_review_blockers_open, 1, "F2 首次出现，不能借 F1 的两轮对质移交");
+        assert!(!cp.stage_review_final_only.iter().any(|s| s.contains("F2:")));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn owned_stage_omitted_findings_are_preserved_without_counting_as_maintained() {
+        let (base, db) = mk_db("owned-omitted-rounds");
+        let mut cp = approved_checkpoint();
+        cp.stage_review_batch_id = Some("owned-stage".into());
+        let r = owned_stage_receipt(&db, &cp, "a-1", "task-a", 1, false, owned_blocking(), &[]);
+        apply_stage_receipt(&mut cp, &db, &r, None);
+        for attempt in [2, 3] {
+            let r = owned_stage_receipt(&db, &cp, &format!("a-{attempt}"), "task-a", attempt,
+                true, json!([]), &[]);
+            apply_stage_receipt(&mut cp, &db, &r, None);
+        }
+        assert_eq!(cp.stage_review_blockers_open, 1, "没有提及不等于两轮明确维持");
+        assert!(cp.stage_review_final_only.is_empty());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn owned_stage_explicit_maintain_without_repeating_finding_counts_and_withdrawal_resets_it() {
+        let (base, db) = mk_db("owned-explicit-rounds");
+        let mut cp = approved_checkpoint();
+        cp.stage_review_batch_id = Some("owned-stage".into());
+        let r = owned_stage_receipt(&db, &cp, "a-1", "task-a", 1, false, owned_blocking(), &[]);
+        apply_stage_receipt(&mut cp, &db, &r, None);
+        for attempt in [2, 3] {
+            let mut r = owned_stage_receipt(&db, &cp, &format!("a-{attempt}"), "task-a", attempt,
+                true, json!([]), &[]);
+            r.payload.as_mut().unwrap()["objection_verdicts"] = json!([
+                {"finding_id":"F1","verdict":"maintain","reason":"原问题仍然存在"}
+            ]);
+            apply_stage_receipt(&mut cp, &db, &r, None);
+            assert_eq!(cp.stage_review_blockers_open, if attempt == 2 { 1 } else { 0 });
+        }
+        let r = owned_stage_receipt(&db, &cp, "a-4", "task-a", 4, true, json!([]), &["F1"]);
+        apply_stage_receipt(&mut cp, &db, &r, None);
+        let r = owned_stage_receipt(&db, &cp, "a-5", "task-a", 5, true, owned_blocking(), &[]);
+        apply_stage_receipt(&mut cp, &db, &r, None);
+        assert_eq!(cp.stage_review_blockers_open, 1, "撤回后再次明确报告的问题不能继承此前的移交豁免");
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn owned_stage_final_only_same_text_has_separate_owners_and_withdraws_locally() {
+        let (base, db) = mk_db("owned-final-withdraw");
+        let mut cp = approved_checkpoint();
+        cp.stage_review_batch_id = Some("owned-stage".into());
+        let final_only = json!([{"id":"F1","severity":"blocking","finality":"final_only","why":"相同文字"}]);
+        for task in ["task-a", "task-b"] {
+            let r = owned_stage_receipt(&db, &cp, task, task, 1, false, final_only.clone(), &[]);
+            apply_stage_receipt(&mut cp, &db, &r, None);
+        }
+        assert_eq!(cp.stage_review_final_only.len(), 2, "相同 F1/文字不能抹掉独立来源");
+        for (id, task, remaining) in [("a-2", "task-a", 1), ("b-2", "task-b", 0)] {
+            let r = owned_stage_receipt(&db, &cp, id, task, 2, true, json!([]), &["F1"]);
+            apply_stage_receipt(&mut cp, &db, &r, None);
+            assert_eq!(cp.stage_review_final_only.len(), remaining, "明确撤回要更新当前移交项");
+        }
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn owned_stage_auto_deferred_withdrawal_removes_current_carry_after_restore() {
+        let (base, db) = mk_db("owned-deferred-withdraw");
+        let mut cp = approved_checkpoint();
+        cp.stage_review_batch_id = Some("owned-stage".into());
+        for attempt in [1, 2, 3] {
+            let r = owned_stage_receipt(&db, &cp, &format!("a-{attempt}"), "task-a", attempt,
+                attempt > 1, owned_blocking(), &[]);
+            apply_stage_receipt(&mut cp, &db, &r, None);
+        }
+        assert_eq!(cp.stage_review_final_only.len(), 1);
+        cp = serde_json::from_value(serde_json::to_value(&cp).unwrap()).unwrap();
+        let r = owned_stage_receipt(&db, &cp, "a-4", "task-a", 4, true, json!([]), &["F1"]);
+        apply_stage_receipt(&mut cp, &db, &r, None);
+        assert!(cp.stage_review_final_only.is_empty(), "撤回后不能继续把旧欠账作为待处理意见交终审");
+        assert_eq!(cp.stage_review_blockers_open, 0);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn owned_stage_carry_survives_stage_clear_and_unbound_legacy_is_disclosed() {
+        let (base, db) = mk_db("owned-carry-clear");
+        let mut cp = approved_checkpoint();
+        cp.stage_review_batch_id = Some("owned-stage".into());
+        let f = json!([{"id":"F1","severity":"blocking","finality":"final_only","why":"旧阶段仍需核对"}]);
+        let first = owned_stage_receipt(&db, &cp, "a-1", "task-a", 1, false, f, &[]);
+        apply_stage_receipt(&mut cp, &db, &first, None);
+        let carried = cp.stage_review_final_only.clone();
+        cp.clear_stage_review_blockers();
+        cp.stage_review_batch_id = Some("next-stage".into());
+        let new = owned_stage_receipt(&db, &cp, "b-1", "task-b", 1, false, owned_blocking(), &[]);
+        db.0.lock().unwrap().execute("UPDATE agent_child_runs SET batch_id='next-stage' WHERE id='b-1'", []).unwrap();
+        apply_stage_receipt(&mut cp, &db, &new, None);
+        assert_eq!(cp.stage_review_blockers_open, 1);
+        assert_eq!(cp.stage_review_final_only, carried, "跨阶段清阻塞不能丢失仍有效的移交项");
+        let mut saved = serde_json::to_value(&cp).unwrap();
+        saved["stage_review_state"].as_object_mut().unwrap().remove("final_only_projection");
+        cp = serde_json::from_value(saved).unwrap();
+        cp.stage_review_final_only.push("F1: 无法确定归属的旧文字".into());
+        let note = apply_stage_receipt(&mut cp, &db, &new, None).note;
+        assert!(note.contains("历史参考"));
+        assert!(cp.stage_review_final_only.iter().any(|s| s.contains("来源未逐项绑定") && s.contains("无法确定归属")));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn owned_stage_all_receipt_orders_produce_the_same_current_opinions() {
+        let (base, db) = mk_db("owned-permutations");
+        let mut seed = approved_checkpoint();
+        seed.stage_review_batch_id = Some("owned-stage".into());
+        let mut receipts = Vec::new();
+        for attempt in [1, 2, 3] {
+            receipts.push(owned_stage_receipt(&db, &seed, &format!("a-{attempt}"), "task-a", attempt,
+                attempt > 1, owned_blocking(), &[]));
+        }
+        receipts.push(owned_stage_receipt(&db, &seed, "a-4", "task-a", 4, true, json!([]), &["F1"]));
+        receipts.push(owned_stage_receipt(&db, &seed, "b-1", "task-b", 1, false,
+            json!([{"id":"F1","severity":"blocking","finality":"final_only","why":"B 独立移交"}]), &[]));
+        receipts.push(owned_stage_receipt(&db, &seed, "c-1", "task-c", 1, false, owned_blocking(), &[]));
+        fn permutations(items: &mut [usize], at: usize, visit: &mut impl FnMut(&[usize])) {
+            if at == items.len() { visit(items); return; }
+            for i in at..items.len() {
+                items.swap(at, i);
+                permutations(items, at + 1, visit);
+                items.swap(at, i);
+            }
+        }
+        let mut checked = 0;
+        permutations(&mut [0, 1, 2, 3, 4, 5], 0, &mut |order| {
+            let mut cp = seed.clone();
+            for (position, index) in order.iter().enumerate() {
+                apply_stage_receipt(&mut cp, &db, &receipts[*index], None);
+                if position == 2 {
+                    cp = serde_json::from_value(serde_json::to_value(&cp).unwrap()).unwrap();
+                }
+            }
+            assert_eq!(cp.stage_review_blockers_open, 1, "order={order:?}");
+            assert_eq!(cp.stage_review_final_only.len(), 1, "order={order:?}");
+            assert!(cp.stage_review_final_only[0].contains("task-b"), "order={order:?}");
+            let settled = cp.stage_review_final_only.clone();
+            for receipt in &receipts {
+                apply_stage_receipt(&mut cp, &db, receipt, None);
+            }
+            assert_eq!(cp.stage_review_final_only, settled, "重放不能复活 A 的旧移交");
+            assert_eq!(cp.stage_review_blockers_open, 1);
+            checked += 1;
+        });
+        assert_eq!(checked, 720);
+        std::fs::remove_dir_all(base).unwrap();
+    }

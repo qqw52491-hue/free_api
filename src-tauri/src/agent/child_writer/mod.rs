@@ -910,6 +910,8 @@ pub async fn spawn_child_writer(
     let parent = workspace_root
         .canonicalize()
         .map_err(|error| format!("child_writer 工作区不可用: {}", error))?;
+    // 配置失败时尚未登记任务或创建写入副本。
+    let mut config = ModelConfig::from_db_state(db, model_id)?;
     let custom_cap = params.get("max_concurrency").and_then(|v| v.as_i64());
     let effective_writer_cap = match custom_cap {
         Some(cap) if cap > 0 => cap,
@@ -953,7 +955,6 @@ pub async fn spawn_child_writer(
         identity,
     )?;
 
-    let mut config = ModelConfig::from_db_state(db, model_id)?;
     config.max_tokens = if config.max_tokens <= 0 {
         WRITER_MAX_OUTPUT_TOKENS
     } else {

@@ -4,6 +4,9 @@ use crate::agent::{path_guard, workspace_access};
 #[test]
 fn directory_permissions_persist_rebind_revoke_and_cascade_without_touching_files() {
     let base = std::env::temp_dir().join(format!("directory-config-{}", Uuid::new_v4()));
+    // 按正式授权的契约使用物理路径，兼容系统临时目录别名和 Windows 路径前缀。
+    std::fs::create_dir_all(&base).unwrap();
+    let base = base.canonicalize().unwrap();
     let primary = base.join("primary");
     let reference = base.join("reference");
     std::fs::create_dir_all(&primary).unwrap();

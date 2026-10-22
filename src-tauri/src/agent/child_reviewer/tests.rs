@@ -1,4 +1,41 @@
 
+    #[tokio::test]
+    async fn missing_model_rejects_all_child_kinds_without_creating_running_rows_or_copies() {
+        let root = std::env::temp_dir().join(format!("child-preflight-{}", Uuid::new_v4()));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("source.txt"), "baseline").unwrap();
+        let db = DbState(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::db::init_db(&root.join("test.db")).unwrap(),
+        )));
+        let (_tx, rx) = watch::channel(0);
+        for kind in ["review", "writer", "worker"] {
+            let identity = ChildRunIdentity::fresh(kind);
+            let result = match kind {
+                "review" => spawn_child_reviewer(None, &db, "parent", "session", &workspace,
+                    "missing-model", "pro", "auto",
+                    &json!({"question":"核对当前调用逻辑是否正确", "evidence_excerpt":"本地合成证据"}),
+                    "", None, rx.clone(), &identity).await,
+                "writer" => crate::agent::child_writer::spawn_child_writer(None, &db,
+                    "parent", "session", &workspace, "missing-model", "auto",
+                    &json!({"task":"修改本地合成调用", "test_command":"cargo test"}),
+                    String::new(), rx.clone(), &identity).await,
+                _ => crate::agent::child_worker::spawn_child_worker(None, &db,
+                    "parent", "session", &workspace, "missing-model", "auto",
+                    &json!({"task":"读取本地调用证据"}), String::new(), rx.clone(), &identity).await,
+            };
+            assert!(result.is_err(), "{kind}: {result:?}");
+            let count: i64 = db.0.lock().unwrap().query_row(
+                "SELECT COUNT(*) FROM agent_child_runs WHERE parent_run_id='parent'", [], |r| r.get(0),
+            ).unwrap();
+            assert_eq!(count, 0, "{kind} 的配置拒绝不应制造未派发的活任务");
+            assert_eq!(std::fs::read_dir(&workspace).unwrap().count(), 1,
+                "配置拒绝不应创建隔离工作副本");
+        }
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     fn blocking_finding(id: &str) -> ReviewFinding {
         ReviewFinding {
             id: id.to_string(),

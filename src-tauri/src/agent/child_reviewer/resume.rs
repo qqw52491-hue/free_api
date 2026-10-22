@@ -115,6 +115,15 @@ pub(crate) fn spawn_review_resume(
             return Err(error("host_rejection:begin_run_failed", e));
         }
     };
+    if !stage
+        && can_finalize.is_some()
+        && checkpoint.submitted_plan.is_some()
+        && checkpoint.run_belongs_to_plan_batch(db, &id)
+    {
+        // 已批准后的同批复审仍须等新尝试收口；失败会保留旧有效裁决，由原门禁重算。
+        checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Reviewing;
+        checkpoint.plan_reviewer_consumed = false;
+    }
     config.max_tokens = 900;
     tokio::spawn(run_resumed_review(
         DbState(db.0.clone()),

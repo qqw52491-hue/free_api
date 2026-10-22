@@ -12,6 +12,9 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let base = std::env::temp_dir().join(format!("session-directory-{}", Uuid::new_v4()));
+        // 按正式授权的契约使用物理路径，兼容系统临时目录别名和 Windows 路径前缀。
+        std::fs::create_dir_all(&base).unwrap();
+        let base = base.canonicalize().unwrap();
         let primary = base.join("primary");
         let reference = base.join("reference");
         std::fs::create_dir_all(&primary).unwrap();
@@ -286,6 +289,68 @@ fn session_symlink_grants_stay_bound_to_canonical_directory_not_new_link_target(
     .is_err());
 }
 
+// 使用原生临时目录路径作为用户输入：macOS 可含 /var 别名，Windows 可不含 canonicalize 的扩展前缀。
+#[test]
+fn native_directory_spelling_uses_persisted_physical_key_for_restore_and_offline_revocation() {
+    let f = Fixture::new();
+    let raw_base = std::env::temp_dir().join(f.base.file_name().unwrap());
+    let raw_reference = raw_base.join("reference").join(".");
+    let file = f.reference.join("中文 reference.txt");
+    std::fs::write(&file, "native directory evidence").unwrap();
+    let granted = set_row(&f.conn, &f.session, raw_reference.to_str().unwrap(), DirectoryAccess::ReadOnly).unwrap();
+    let key = granted[0].path.clone();
+    assert_eq!(Path::new(&key), f.reference.canonicalize().unwrap());
+    assert!(path_guard::ensure_readable_path(
+        raw_reference.join("中文 reference.txt").to_str().unwrap(),
+        &raw_base.join("primary"), Some(&f.session), false,
+    ).is_ok());
+    assert!(!f.read(&f.other));
+    workspace_access::revoke_session(&f.session);
+    super::super::directories::bind_session_directories(&f.conn, &f.session, &f.primary, false).unwrap();
+    assert!(f.read(&f.session));
+    assert!(path_guard::ensure_allowed_path(file.to_str().unwrap(), &f.primary, Some(&f.session), false).is_err());
+    std::fs::remove_dir_all(&f.reference).unwrap();
+    assert!(remove_row(&f.conn, &f.session, &key).unwrap().is_empty(), "目录离线时仍按保存键撤权");
+    std::fs::create_dir(&f.reference).unwrap();
+    std::fs::write(f.reference.join("keep.txt"), "recreated").unwrap();
+    assert!(!f.read(&f.session), "重建同名目录不能恢复已撤销的授权");
+}
+
+#[cfg(unix)]
+#[test]
+fn retargeting_a_grant_alias_or_its_physical_root_does_not_move_permission_after_rebind() {
+    use std::os::unix::fs::symlink;
+    let f = Fixture::new();
+    let alias = f.base.join("chosen-alias");
+    let outside = f.base.join("ungranted");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("keep.txt"), "ungranted data").unwrap();
+    symlink(&f.reference, &alias).unwrap();
+    let granted = set_row(&f.conn, &f.session, alias.to_str().unwrap(), DirectoryAccess::ReadWrite).unwrap();
+    assert_eq!(Path::new(&granted[0].path), f.reference);
+    std::fs::remove_file(&alias).unwrap();
+    symlink(&outside, &alias).unwrap();
+    let rebind = || {
+        workspace_access::revoke_session(&f.session);
+        super::super::directories::bind_session_directories(&f.conn, &f.session, &f.primary, false).unwrap();
+    };
+    rebind();
+    assert!(f.read(&f.session), "原物理目录的权限保留");
+    assert!(path_guard::ensure_readable_path(alias.join("keep.txt").to_str().unwrap(), &f.primary, Some(&f.session), false).is_err());
+    std::fs::remove_dir_all(&f.reference).unwrap();
+    symlink(&outside, &f.reference).unwrap();
+    rebind();
+    assert!(!f.read(&f.session), "重新绑定时也不能把旧物理目录授权迁移到新链接目标");
+    assert!(!workspace_access::scope_write_authorized(
+        &{
+            let mut context = SandwichContext::new("sys".into(), "goal".into());
+            workspace_access::sync_context(&f.session, &f.primary, &mut context);
+            context.resource_scope.bindings
+        },
+        f.reference.join("new.txt").to_str().unwrap(),
+    ));
+}
+
 #[test]
 fn session_search_revocation_is_checked_before_cached_evidence_is_returned() {
     use serde_json::json;
@@ -353,7 +418,7 @@ fn session_file_image_and_shell_cwd_tools_use_the_shared_permission_table() {
         &f.session
     )
     .is_ok());
-    let command = json!({"command":"printf session_directory_test", "cwd":f.reference});
+    let command = json!({"command":"echo session_directory_test", "cwd":f.reference});
     let shell =
         crate::agent::tools::local_shell::dispatch(&db, &f.session, "", &command, Some(&f.primary));
     assert_eq!(shell.route, "local_shell:cwd_denied");

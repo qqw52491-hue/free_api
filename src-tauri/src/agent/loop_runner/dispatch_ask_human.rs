@@ -332,7 +332,7 @@ pub(super) async fn dispatch_ask_human(
                     let clean_reply = strip_plan_decision_marker(&reply);
                     ctx.checkpoint.approved_plan_summary =
                         Some(clean_reply.chars().take(500).collect());
-                    ctx.checkpoint.record_human_waiver(&format!("问: {} → 答: {}", waiver_question, clean_reply));
+                    ctx.checkpoint.record_human_review_waiver(ctx.state.inner(), ctx.context, &format!("问: {} → 答: {}", waiver_question, clean_reply));
                     ctx.checkpoint.last_reviewed_diff_hash = None;
                     ctx.checkpoint.last_review_result = None;
                     ctx.checkpoint.reviewer_retry_count = 0;
@@ -372,7 +372,7 @@ pub(super) async fn dispatch_ask_human(
                         let clean_reply = strip_plan_decision_marker(&reply);
                         ctx.checkpoint.approved_plan_summary =
                             Some(clean_reply.chars().take(500).collect());
-                        ctx.checkpoint.record_human_waiver(&format!("问: {} → 答: {}", waiver_question, clean_reply));
+                        ctx.checkpoint.record_human_review_waiver(ctx.state.inner(), ctx.context, &format!("问: {} → 答: {}", waiver_question, clean_reply));
                         ctx.checkpoint.last_reviewed_diff_hash = None;
                         ctx.checkpoint.last_review_result = None;
                         ctx.checkpoint.reviewer_retry_count = 0;
@@ -403,7 +403,7 @@ pub(super) async fn dispatch_ask_human(
                 || reply_lower.contains("确认执行")
                 || (reply_lower.contains("保留") && reply_lower.contains("调试"));
             if has_explicit_waiver_intent {
-                ctx.checkpoint.record_human_waiver(&format!("问: {} → 答: {}", waiver_question, clean_reply));
+                ctx.checkpoint.record_human_review_waiver(ctx.state.inner(), ctx.context, &format!("问: {} → 答: {}", waiver_question, clean_reply));
                 ctx.checkpoint.last_reviewed_diff_hash = None;
                 ctx.checkpoint.last_review_result = None;
                 ctx.checkpoint.reviewer_retry_count = 0;

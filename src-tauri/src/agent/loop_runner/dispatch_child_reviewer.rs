@@ -357,6 +357,10 @@ pub(super) async fn dispatch_child_reviewer(
                 }
             }
 
+            if is_batch {
+                // 与正式方案多人入口一致：成员审同一版本，不按到达先后独立定稿。
+                effective_params["plan_review_can_finalize"] = json!(false);
+            }
             let mut snapshot = crate::agent::child_reviewer::PlanReviewerDispatchSnapshot::new(
                 &reviewer_model,
                 &model_tier,

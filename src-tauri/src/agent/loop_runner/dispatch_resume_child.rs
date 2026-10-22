@@ -185,36 +185,6 @@ pub(super) async fn dispatch_resume_child(
                                 };
                                 let reasoning_effort = ctx.model_routing.reasoning_effort_for(&routing.tier).to_string();
 
-                                // 追问续跑继承原任务逻辑身份：task_id/batch 不变，
-                                // attempt 由落库侧按同 task_id 自动递增
-                                let resume_identity = crate::agent::child_reviewer::ChildRunIdentity::inherited(
-                                    &prev_identity,
-                                    None,
-                                );
-                                let new_child_run_id = match crate::agent::child_reviewer::begin_child_run_extended(
-                                    ctx.state.inner(),
-                                    ctx.parent_run_id,
-                                    ctx.final_session_id,
-                                    ctx.workspace_dir,
-                                    &model_to_use,
-                                    0,
-                                    &kind,
-                                    None,
-                                    Some(ws_path.to_string_lossy().as_ref()),
-                                    Some(target_child_id),
-                                    &resume_identity,
-                                ) {
-                                    Ok(id) => id,
-                                    Err(err) => {
-                                        return Ok(ArmOutcome::Early(DispatchResult { view: None,
-                                            stdout: String::new(),
-                                            stderr: format!("❌ 创建追问子任务失败: {}", err),
-                                            success: false,
-                                            route: "host_rejection:begin_run_failed".to_string(),
-                                        }));
-                                    }
-                                };
-
                                 let config = match ModelConfig::from_db_state(ctx.state.inner(), &model_to_use) {
                                     Ok(cfg) => cfg,
                                     Err(err) => {
@@ -275,7 +245,40 @@ pub(super) async fn dispatch_resume_child(
                                         );
                                         return Ok(ArmOutcome::Early(rejection));
                                     }
+                                }
 
+                                // 所有可拒绝的配置/写入预检完成后才登记 running，避免留下未派发的活行。
+                                // 追问续跑继承原任务逻辑身份：task_id/batch 不变，
+                                // attempt 由落库侧按同 task_id 自动递增
+                                let resume_identity = crate::agent::child_reviewer::ChildRunIdentity::inherited(
+                                    &prev_identity,
+                                    None,
+                                );
+                                let new_child_run_id = match crate::agent::child_reviewer::begin_child_run_extended(
+                                    ctx.state.inner(),
+                                    ctx.parent_run_id,
+                                    ctx.final_session_id,
+                                    ctx.workspace_dir,
+                                    &model_to_use,
+                                    0,
+                                    &kind,
+                                    None,
+                                    Some(ws_path.to_string_lossy().as_ref()),
+                                    Some(target_child_id),
+                                    &resume_identity,
+                                ) {
+                                    Ok(id) => id,
+                                    Err(err) => {
+                                        return Ok(ArmOutcome::Early(DispatchResult { view: None,
+                                            stdout: String::new(),
+                                            stderr: format!("❌ 创建追问子任务失败: {}", err),
+                                            success: false,
+                                            route: "host_rejection:begin_run_failed".to_string(),
+                                        }));
+                                    }
+                                };
+
+                                if kind == "writer" {
                                     let inherited_test_cmd = prev_result_json
                                         .as_deref()
                                         .and_then(|raw| serde_json::from_str::<Value>(raw).ok())

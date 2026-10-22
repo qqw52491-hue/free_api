@@ -644,8 +644,7 @@ pub fn apply_stage_receipt(
         checkpoint.stage_review_blocker_stage = None;
     }
 
-    let receipt_final_only = receipt.stage_final_only_lines();
-    checkpoint.stage_review_final_only.extend(receipt_final_only);
+    // 当前移交项由带来源的观察视图更新，不能再次把本次原始文字累加回去。
     checkpoint.stage_review_final_only.sort();
     checkpoint.stage_review_final_only.dedup();
 

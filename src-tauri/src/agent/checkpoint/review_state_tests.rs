@@ -281,6 +281,145 @@ async fn identical_f1_text_from_two_tasks_is_not_deduplicated_or_withdrawn_toget
 }
 
 #[tokio::test]
+async fn approved_plan_resume_waits_and_honors_a_new_revision_decision() {
+    let mut updated = verdict(Some("续审发现的权限缺口"));
+    updated["findings"][0]["id"] = json!("F2");
+    let mock = MockReviewer::new(vec![withdrawn(), updated]).await;
+    let mut f = Fixture::with_a_problem(mock, true, None).await;
+    let b = f.b.clone();
+    let resolved = f.resume(&b).unwrap_or_else(|e| panic!("{}", e.message));
+    f.mock.wait_terminal(&resolved).await;
+    f.consume(&resolved).await;
+    assert!(f.gate().is_none());
+    assert!(f.cp.plan_phase.is_approved());
+    let c = f.c.clone();
+    let next = f.resume(&c).unwrap_or_else(|e| panic!("{}", e.message));
+    assert_eq!(f.gate().expect("复审在途不能沿用旧批准直接写入").route,
+        "plan_gatekeeper:need_wait_reviewer_jobs");
+    f.mock.wait_terminal(&next).await;
+    f.consume(&next).await;
+    f.cp = serde_json::from_value(serde_json::to_value(&f.cp).unwrap()).unwrap();
+    assert_eq!(f.gate().expect("复审的新阻塞必须生效").route,
+        "plan_gatekeeper:blocking_findings_open");
+}
+
+#[tokio::test]
+async fn approved_plan_resume_failure_preserves_its_previous_valid_approval() {
+    let mut invalid = verdict(None);
+    invalid.as_object_mut().unwrap().remove("root_cause_verdict");
+    let mut f = Fixture::with_a_problem(MockReviewer::new(vec![withdrawn(), invalid]).await, true, None).await;
+    let b = f.b.clone();
+    let resolved = f.resume(&b).unwrap_or_else(|e| panic!("{}", e.message));
+    f.mock.wait_terminal(&resolved).await;
+    f.consume(&resolved).await;
+    assert!(f.gate().is_none());
+    let c = f.c.clone();
+    let next = f.resume(&c).unwrap_or_else(|e| panic!("{}", e.message));
+    assert!(f.gate().is_some());
+    assert_eq!(f.mock.wait_terminal(&next).await.0, "invalid_output");
+    f.consume(&next).await;
+    assert_eq!(f.cp.last_review_blocking_count, 0);
+    assert!(f.gate().is_none(), "失败尝试不构成撤销已有有效批准的证据");
+    assert!(f.cp.plan_phase.is_approved());
+}
+
+#[tokio::test]
+async fn stage_rebuttal_does_not_reopen_the_approved_plan_review() {
+    let mut f = Fixture::new(MockReviewer::new(vec![verdict(None)]).await, true).await;
+    f.cp.plan_phase = PlanPhase::Approved;
+    f.cp.stage_review_batch_id = Some("stage-batch".into());
+    f.mock.db.0.lock().unwrap().execute(
+        "UPDATE agent_child_runs SET purpose='stage_review',batch_id='stage-batch' WHERE id=?1",
+        [&f.c],
+    ).unwrap();
+    let c = f.c.clone();
+    let next = f.resume(&c).unwrap_or_else(|e| panic!("{}", e.message));
+    assert!(f.cp.plan_phase.is_approved(), "阶段复检不能变成方案重审");
+    assert_eq!(f.mock.wait_terminal(&next).await.0, "succeeded");
+    f.consume(&next).await;
+    assert!(f.cp.plan_phase.is_approved());
+}
+
+#[tokio::test]
+async fn supplementary_review_resume_does_not_create_a_plan_approval_requirement() {
+    let mut f = Fixture::new(MockReviewer::new(vec![verdict(None)]).await, true).await;
+    f.cp.plan_phase = PlanPhase::Approved;
+    f.cp.plan_mode = PlanExecutionMode::Auto;
+    f.cp.submitted_plan = None;
+    let c = f.c.clone();
+    let next = f.resume(&c).unwrap_or_else(|e| panic!("{}", e.message));
+    assert!(f.cp.plan_phase.is_approved(), "附加审查不能新建方案审批义务");
+    f.mock.wait_terminal(&next).await;
+    f.consume(&next).await;
+    assert!(f.cp.plan_phase.is_approved());
+}
+
+#[tokio::test]
+async fn human_waiver_closes_only_bound_current_review_todos_without_forging_withdrawals() {
+    let mut f = Fixture::new(MockReviewer::new(vec![verdict(Some("B 新一轮明确维持"))]).await, true).await;
+    assert_eq!(f.context.todo_list.len(), 2);
+    f.cp.plan_phase = PlanPhase::Approved;
+    f.cp.last_review_blocking_count = 0;
+    f.cp.record_human_review_waiver(&f.mock.db, &mut f.context,
+        "人工批准：这两项已知风险放行，原意见保留供终审参考");
+    assert!(crate::agent::finish_guard::open_todo_descriptions(&f.context.todo_list).is_empty(),
+        "人工已明确放行，自动审查待办不能继续把交付锁住");
+    assert_eq!(f.cp.aggregate_unwithdrawn_blockings().len(), 2, "人工裁决不能改写审查员的原始判断");
+    f.cp.sync_review_todos(&f.mock.db, &mut f.context);
+    assert!(f.context.todo_list.iter().all(|t| t.status == "done"), "相同观察重放不能重新开启已人工核销的待办");
+    f.cp = serde_json::from_value(serde_json::to_value(&f.cp).unwrap()).unwrap();
+    let b = f.b.clone();
+    let next = f.resume(&b).unwrap_or_else(|e| panic!("{}", e.message));
+    // 后来的有效新阻塞不能自动继承对旧问题的核销。
+    f.mock.wait_terminal(&next).await;
+    f.consume(&next).await;
+    assert!(f.context.todo_list.iter().any(|t| t.status == "pending" && t.description.contains("B 新一轮")));
+}
+
+#[tokio::test]
+async fn human_review_waiver_keeps_user_edits_and_other_batches_open() {
+    let mut f = Fixture::new(MockReviewer::new(vec![verdict(None)]).await, true).await;
+    let edited = f.context.todo_list[0].id;
+    f.context.todo_list[0].description = "用户改写的 F1 任务".into();
+    f.context.todo_list.push(TodoItem { id:100, description:"用户自己的 F1 检查".into(), status:"pending".into(), evidence_output_id:None });
+    f.context.todo_list.push(TodoItem { id:101, description:"旧批次的 F1 待办".into(), status:"pending".into(), evidence_output_id:None });
+    let mut old_binding = f.cp.review_finding_todos.values().next().unwrap().clone();
+    old_binding.description = "旧批次的 F1 待办".into();
+    old_binding.source.batch_id = Some("old-batch".into());
+    f.cp.review_finding_todos.insert(101, old_binding);
+    f.cp.record_human_review_waiver(&f.mock.db, &mut f.context, "仅接受当前审查指出的已知风险");
+    for id in [edited, 100, 101] {
+        assert_eq!(f.context.todo_list.iter().find(|t| t.id == id).unwrap().status, "pending");
+    }
+    assert!(f.context.todo_list.iter().filter(|t| t.id != edited && t.id != 100 && t.id != 101).all(|t| t.status == "done"));
+}
+
+#[tokio::test]
+async fn multi_member_receipts_cannot_overwrite_the_shared_plan_even_with_legacy_finalization_flags() {
+    for reverse in [false, true] {
+        let mut f = Fixture::new(MockReviewer::new(vec![verdict(None)]).await, true).await;
+        let original = serde_json::to_value(&f.cp.submitted_plan).unwrap();
+        let mut ids = Vec::new();
+        for summary in ["A 的独立修订建议", "B 的冲突修订建议"] {
+            let mut raw = verdict(None);
+            raw["plan_review_can_finalize"] = json!(true);
+            raw["revised_plan_summary"] = json!(summary);
+            ids.push(Fixture::seed(&f.mock, raw, "manual-team-batch"));
+        }
+        f.cp.set_plan_review_batch("manual-team-batch", 2);
+        if reverse { ids.reverse(); }
+        for id in ids {
+            let text = f.consume(&id).await;
+            assert_eq!(serde_json::to_value(&f.cp.submitted_plan).unwrap(), original,
+                "多人批次必须审同一份方案，不能由回执先后决定执行版本");
+            assert!(!text.contains("请按定稿版本执行"));
+            assert_eq!(f.cp.plan_review_deliveries[&id].extra["plan_review_can_finalize"], false);
+        }
+        assert!(f.cp.plan_finalized_by.is_none());
+    }
+}
+
+#[tokio::test]
 async fn downgraded_finding_updates_todo_and_no_longer_blocks_finish() {
     for severity in ["suggestion", "question"] {
         let mut updated = verdict(Some("B 的缓存问题"));

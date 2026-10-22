@@ -383,6 +383,10 @@ impl AgentCheckpoint {
         }
 
         let mut delivery = delivery.clone();
+        if self.plan_review_expected_count > 1 {
+            // 已登记为多人批次时，旧格式/错误标记也不能赋予单个成员覆盖共同方案的权限。
+            delivery.extra.insert("plan_review_can_finalize".into(), serde_json::json!(false));
+        }
         // 🌟 1v1 Tech Lead 方案评审扩展契约解析与定级联动
         if let Some(dec) = delivery.get_extra_str("decision") {
             if dec.eq_ignore_ascii_case("escalate") {

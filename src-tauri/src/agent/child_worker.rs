@@ -843,6 +843,8 @@ pub async fn spawn_child_worker(
     let workspace = workspace_root
         .canonicalize()
         .map_err(|error| format!("child_worker 工作区不可用: {}", error))?;
+    // 配置失败时尚未登记任务，不留下没有执行者的 running 行。
+    let mut config = ModelConfig::from_db_state(db, model_id)?;
     let custom_cap = params.get("max_concurrency").and_then(|v| v.as_i64());
     let child_run_id = crate::agent::child_reviewer::begin_child_run_extended(
         db,
@@ -857,7 +859,6 @@ pub async fn spawn_child_worker(
         None,
         identity,
     )?;
-    let mut config = ModelConfig::from_db_state(db, model_id)?;
     config.max_tokens = if config.max_tokens <= 0 {
         WORKER_MAX_OUTPUT_TOKENS
     } else {
@@ -1140,6 +1141,9 @@ mod tests {
 async fn scout_reads_project_reference_but_keeps_role_scope() {
     use crate::agent::workspace_access::{bind_session, DirectoryAccess, ProjectDirectory, update_project};
     let base = std::env::temp_dir().join(format!("scout-reference-{}", uuid::Uuid::new_v4()));
+    // 按正式授权的契约使用物理路径，兼容系统临时目录别名和 Windows 路径前缀。
+    std::fs::create_dir_all(&base).unwrap();
+    let base = base.canonicalize().unwrap();
     let primary = base.join("primary"); let reference = base.join("reference");
     std::fs::create_dir_all(&primary).unwrap(); std::fs::create_dir_all(&reference).unwrap();
     let file = reference.join("probe.txt"); std::fs::write(&file, "reference").unwrap();

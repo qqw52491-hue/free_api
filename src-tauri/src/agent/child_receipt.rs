@@ -348,8 +348,10 @@ async fn reduce_reviewer_receipt(
     }
     // Tech Lead 定稿通知：revised_* 已覆盖 submitted_plan 对应字段，
     // 执行方必须以审查者定稿版本为准。
-    if let Some(rev) = crate::agent::checkpoint::AgentCheckpoint::plan_revision_from(&delivery)
-        .filter(|_| delivery.extra.get("plan_review_can_finalize").and_then(|v|v.as_bool()) != Some(false))
+    if let Some(rev) = checkpoint.plan_review_deliveries.get(&receipt.child_run_id)
+        .filter(|stored| stored.get_extra_str("decision").is_some_and(|d| d.eq_ignore_ascii_case("approved"))
+            && stored.extra.get("plan_review_can_finalize").and_then(|v|v.as_bool()) != Some(false))
+        .and_then(crate::agent::checkpoint::AgentCheckpoint::plan_revision_from)
     {
         let notice = format!(
             "📝 Tech Lead 已在 1v1 中修订并定稿方案（修订字段: {}）",
@@ -408,6 +410,31 @@ mod tests {
         assert!(!text.contains("合格放行"));
         let failing = crate::agent::child_reviewer::ReviewScorecard::new(80, 40, 80, None);
         assert!(review_scorecard_description(&failing).contains("仅供参考，不作为放行条件"));
+    }
+
+    #[tokio::test]
+    async fn rejected_plan_revision_is_not_announced_as_finalized() {
+        let (base, db) = test_db("revision-notice");
+        let env = test_env(&db, &base);
+        let mut context = SandwichContext::new("sys".into(), "goal".into());
+        let mut cp = AgentCheckpoint::new("run-1".into(), &context);
+        cp.submitted_plan = Some(crate::agent::types::PlanSubmission {
+            plan_summary: "原方案保持等待修订".into(), ..Default::default()
+        });
+        cp.set_plan_review_batch("batch", 1);
+        seed_run(&db, "revision", "run-1", "batch", "plan_review", "succeeded", true);
+        for (decision, root) in [("rebuttal", "explains"), ("approved", "insufficient")] {
+            cp.plan_review_deliveries.clear();
+            let r = receipt("review", "revision", None, json!({
+                "decision":decision,"root_cause_verdict":root,"confidence":"supported",
+                "revised_plan_summary":"仅为修订建议，尚未定稿", "findings":[]
+            }));
+            let effects = reduce_child_receipt(&env, &mut cp, &mut context, &r).await;
+            assert_eq!(cp.submitted_plan.as_ref().unwrap().plan_summary, "原方案保持等待修订");
+            assert!(effects.ui_notices.is_empty(), "没有定稿不能广播已切换执行方案");
+            assert!(!effects.model_text.contains("请按定稿版本执行"));
+        }
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[tokio::test]
@@ -842,6 +869,10 @@ mod tests {
         });
         for (id, purpose) in [("detail-stage", "stage_review"), ("detail-maintain", "rebuttal")] {
             seed_run(&db, id, "run-1", "details-batch", purpose, "succeeded", true);
+            db.0.lock().unwrap().execute(
+                "UPDATE agent_child_runs SET task_id='detail-task',attempt_id=?1 WHERE id=?2",
+                rusqlite::params![if purpose == "rebuttal" { 2 } else { 1 }, id],
+            ).unwrap();
             let mut body = payload.clone();
             if purpose == "rebuttal" {
                 body["objection_verdicts"] = json!([
@@ -871,6 +902,9 @@ mod tests {
             assert!(context.todo_list.is_empty(), "参考意见不应因展示而生成强制待办");
         }
         seed_run(&db, "detail-withdraw", "run-1", "details-batch", "rebuttal", "succeeded", true);
+        db.0.lock().unwrap().execute(
+            "UPDATE agent_child_runs SET task_id='detail-task',attempt_id=3 WHERE id='detail-withdraw'", [],
+        ).unwrap();
         let r = receipt("review", "detail-withdraw", None, json!({
             "confidence":"confirmed", "findings":[], "withdrawn_findings":["F1"],
             "objection_verdicts":[{"finding_id":"F1", "verdict":"withdraw", "reason":"已复核两条路径均已补正"}]

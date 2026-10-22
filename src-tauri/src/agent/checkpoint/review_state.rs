@@ -40,6 +40,29 @@ pub struct ReviewFindingTodo {
 }
 
 impl AgentCheckpoint {
+    /// 人工接受已知风险不会伪造审查撤回；仅核销本批、来源及内容仍匹配的自动待办。
+    pub(crate) fn record_human_review_waiver(
+        &mut self,
+        db: &DbState,
+        context: &mut SandwichContext,
+        waiver: &str,
+    ) {
+        self.refresh_review_sources(db);
+        let ambiguous = self.sync_review_todos(db, context);
+        for todo in &mut context.todo_list {
+            if self.review_finding_todos.get(&todo.id).is_some_and(|binding| {
+                binding.source.batch_id == self.plan_review_batch_id
+                    && binding.description == todo.description
+            }) && matches!(todo.status.as_str(), "pending" | "in_progress") {
+                todo.status = "done".into();
+            }
+        }
+        self.record_human_waiver(waiver);
+        if ambiguous {
+            context.add_error_feedback("人工放行已留痕；部分旧审查待办的来源存在歧义，未按 F 编号批量核销，请按具体任务核对。");
+        }
+    }
+
     pub(crate) fn refresh_review_sources(&mut self, db: &DbState) {
         for id in self.plan_review_deliveries.keys() {
             self.review_delivery_sources

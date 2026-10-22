@@ -421,6 +421,7 @@ mod file_transfer_tests {
     fn unbound_wechat_attachment_is_copied_to_scratch_and_readable_as_a_resource() {
         let base = std::env::temp_dir().join(format!("wechat-files-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&base).unwrap();
+        let base = base.canonicalize().unwrap();
         let conn = crate::db::init_db(&base.join("test.db")).unwrap();
         let session = crate::commands::projects::create_plain_session_row(&conn, "微信 · 临时", "model").unwrap();
         let incoming = base.join("source.txt");
