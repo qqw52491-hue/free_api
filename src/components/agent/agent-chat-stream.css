@@ -1,4 +1,13 @@
 /* 从 AgentChatStream.vue 原样抽出，仅文件位置变化 */
+.agent-stream-shell {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
 .process-tree {
     position: relative;
     display: flex;

@@ -1,4 +1,6 @@
 <template>
+    <div class="agent-stream-shell">
+        <AgentQuestionNav :marks="questionMarks" :active-id="activeQuestionId" @select="jumpToQuestion" />
     <div ref="streamElement" class="process-tree" :class="{ 'is-running': isRunning }" aria-label="Agent 分层执行过程" @scroll.passive="onStreamScroll">
         <div class="stream-sticky-actions">
             <button v-if="isRunning && !followLiveTail" type="button" class="follow-latest" @click="resumeLiveFollow">跟随最新输出</button>
@@ -37,7 +39,7 @@
 
             <!-- 早期对话记录 -->
             <section v-if="legacyMessages.length" class="conversation-history" aria-label="早期对话记录">
-                <article v-for="message in legacyMessages" :key="message.id" class="saved-message" :class="message.role === 'user' ? 'from-user' : 'from-agent'">
+                <article v-for="message in legacyMessages" :key="message.id" :ref="el => setQuestionAnchor(`legacy-${message.id}`, el)" :data-tl="`legacy-${message.id}`" class="saved-message" :class="message.role === 'user' ? 'from-user' : 'from-agent'">
                     <template v-if="message.role === 'agent' || message.role === 'assistant'">
                         <div class="agent-msg-header">
                             <span class="agent-logo-pill">⚡ Free API</span>
@@ -130,7 +132,7 @@
             </section>
 
             <template v-for="entry in timelineEntries" :key="entry.id">
-                <article v-if="entry.type === 'user'" class="user-message" :data-tl="entry.id">
+                <article v-if="entry.type === 'user'" :ref="el => setQuestionAnchor(entry.id, el)" class="user-message" :data-tl="entry.id">
                     <!-- 📎 附件缩略图与文件卡片预览托盘 (完全复用 AttachmentCard) -->
                     <div v-if="parseUserMessageAttachments(entry.content).attachments.length > 0" class="stream-attachments-tray">
                         <AttachmentCard
@@ -201,7 +203,7 @@
                     >↩</button>
                     <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
                 </div>
-                <article v-else-if="entry.type === 'message'" :data-tl="entry.id" class="saved-message" :class="entry.role === 'user' ? 'from-user' : 'from-agent'" @click="entry.isHuman && $emit('select-human', entry.id)">
+                <article v-else-if="entry.type === 'message'" :ref="el => setQuestionAnchor(entry.id, el)" :data-tl="entry.id" class="saved-message" :class="entry.role === 'user' ? 'from-user' : 'from-agent'" @click="entry.isHuman && $emit('select-human', entry.id)">
                     <template v-if="entry.role === 'agent' || entry.role === 'assistant'">
                         <div class="agent-msg-header">
                             <span class="agent-logo-pill">⚡ Free API</span>
@@ -1251,6 +1253,7 @@
             @close-doc="previewDocModal = null"
         />
     </div>
+    </div>
 </template>
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowReactive, watch } from "vue";
@@ -1270,6 +1273,8 @@ import ArtifactList from "../artifacts/ArtifactList.vue";
 import FileIcon from "./FileIcon.vue";
 import { workerRowOwners } from "./workerAssociation";
 import AgentWorkerProgress from "./AgentWorkerProgress.vue";
+import AgentQuestionNav from "./AgentQuestionNav.vue";
+import { buildQuestionMarks, type QuestionNavigationEntry } from "./questionNavigation";
 import { placeReviewRows, type ReviewProgressItem, type ReviewLocation } from "./reviewProgress";
 import { extractSubagentsFromStep } from "./workerUtils";
 import { getWorkerLiveLine } from "./liveThoughtPreview";
@@ -1426,8 +1431,11 @@ const stepInterventions = computed<Map<string, StepInterventionRow[]>>(() => {
 });
 
 function scrollToTimelineEntry(id: string) {
-    const el = document.querySelector(`[data-tl="${CSS.escape(id)}"]`);
+    const el = streamElement.value?.querySelector(`[data-tl="${CSS.escape(id)}"]`);
     if (!el) return;
+    navigationLeavingBottom = true;
+    followLiveTail.value = false;
+    if (scrollRafId !== null) { cancelAnimationFrame(scrollRafId); scrollRafId = null; }
     el.scrollIntoView({ behavior: "smooth", block: "center" });
     // 短暂高亮锚定目标，让"跳到的是哪步"肉眼可辨
     el.classList.add("tl-anchor-flash");
@@ -1683,8 +1691,46 @@ function handleDownloadArtifact(_artifact: ArtifactDescriptor) {
     // 下载逻辑由 ArtifactCard 自带处理，此处保留钩子
 }
 const streamElement = ref<HTMLElement | null>(null);
+const activeQuestionId = ref<string | null>(null);
+const questionAnchors = new Map<string, HTMLElement>();
+let questionNavRaf: number | null = null;
+let questionNavDisposed = false;
+function updateActiveQuestion() {
+    questionNavRaf = null;
+    const root = streamElement.value;
+    if (!root) return;
+    const readingLine = root.getBoundingClientRect().top + root.clientHeight * 0.5;
+    let active = questionMarks.value[0]?.id || null;
+    for (const mark of questionMarks.value) {
+        const anchor = questionAnchors.get(mark.id);
+        if (anchor && anchor.getBoundingClientRect().top <= readingLine) active = mark.id;
+    }
+    if (root.scrollHeight > root.clientHeight + 8 && isNearBottom(root)) {
+        active = questionMarks.value[questionMarks.value.length - 1]?.id || null;
+    }
+    activeQuestionId.value = active;
+}
+function scheduleQuestionPosition() {
+    if (!questionNavDisposed && questionNavRaf === null) questionNavRaf = requestAnimationFrame(updateActiveQuestion);
+}
+function setQuestionAnchor(id: string, element: unknown) {
+    if (element instanceof HTMLElement) questionAnchors.set(id, element);
+    else questionAnchors.delete(id);
+    scheduleQuestionPosition();
+}
+function jumpToQuestion(id: string) {
+    scrollToTimelineEntry(id);
+    activeQuestionId.value = id;
+}
+onBeforeUnmount(() => {
+    questionNavDisposed = true;
+    questionAnchors.clear();
+    if (questionNavRaf !== null) cancelAnimationFrame(questionNavRaf);
+});
 const activeThoughtStartedAt = ref<number | null>(null);
 const followLiveTail = ref(true);
+// Smooth navigation starts inside the bottom threshold; those scroll events must not reattach follow.
+let navigationLeavingBottom = false;
 const planExpandedState = reactive<Record<string, boolean>>({});
 const isLiveThoughtExpanded = ref(false);
 
@@ -2979,8 +3025,18 @@ function followLatest() {
         });
     }
 }
-function onStreamScroll(event: Event) { followLiveTail.value = isNearBottom(event.currentTarget as HTMLElement); }
-function resumeLiveFollow() { followLiveTail.value = true; followLatest(); }
+function onStreamScroll(event: Event) {
+    const nearBottom = isNearBottom(event.currentTarget as HTMLElement);
+    if (navigationLeavingBottom) {
+        followLiveTail.value = false;
+        // Once away from the bottom, a later return can use the normal resume behavior.
+        if (!nearBottom) navigationLeavingBottom = false;
+    } else {
+        followLiveTail.value = nearBottom;
+    }
+    scheduleQuestionPosition();
+}
+function resumeLiveFollow() { navigationLeavingBottom = false; followLiveTail.value = true; followLatest(); }
 let thoughtScrollRaf: number | null = null;
 let thoughtScrollRetries = 0;
 // 用户手动上翻过的思考面板：脱离自动追尾，滚回底部附近时恢复
@@ -3373,6 +3429,26 @@ const timelineEntries = computed<TimelineEntry[]>(() => {
     }
     return entries;
 });
+// 只投影已显示的用户提问和回答；子任务心跳、取证与人工确认不生成额外刻度。
+// 稳定的字符串投影避免每个思考片段都重新生成全部问答预览。
+const questionNavigationKey = computed(() => {
+    const entries: QuestionNavigationEntry[] = [];
+    for (const message of props.legacyMessages) {
+        if (message.role === 'user') entries.push({ id: `legacy-${message.id}`, kind: 'question', text: message.content });
+        else if (['agent', 'assistant'].includes(message.role)) entries.push({ id: `legacy-${message.id}`, kind: 'answer', text: message.content });
+    }
+    for (const entry of timelineEntries.value) {
+        if (entry.type === 'user') entries.push({ id: entry.id, kind: 'question', text: entry.content, pending: entry.id === 'live-user-goal' && props.isRunning });
+        else if (entry.type === 'message' && !entry.isHuman) {
+            if (entry.role === 'user') entries.push({ id: entry.id, kind: 'question', text: entry.content });
+            else if (['agent', 'assistant'].includes(entry.role)) entries.push({ id: entry.id, kind: 'answer', text: entry.content });
+        } else if (entry.type === 'completion') entries.push({ id: entry.id, kind: 'answer', text: entry.summary });
+    }
+    return JSON.stringify(entries);
+});
+const questionMarks = computed(() => buildQuestionMarks(JSON.parse(questionNavigationKey.value)));
+watch(questionMarks, scheduleQuestionPosition, { flush: 'post' });
+watch(streamViewMode, scheduleQuestionPosition, { flush: 'post' });
 // Cache grouping/operation parsing independently of child-agent token streams.
 const ambientDisplayItems = computed(() => new Map(timelineEntries.value
     .filter((entry): entry is PlanEntry => entry.type === "plan")
@@ -3484,6 +3560,7 @@ watch(() => props.isRunning, (running, wasRunning) => {
         typewriterDoneIds.delete('live-completion');
         delete typewriterTexts['live-completion'];
         typewriterTargets.delete('live-completion');
+        navigationLeavingBottom = false;
         followLiveTail.value = true;
         followLatest();
     }
