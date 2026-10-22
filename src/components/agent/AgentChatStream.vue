@@ -294,7 +294,15 @@
                         </div>
                     </template>
                 </article>
-                <div v-else-if="entry.type === 'review'" class="ambient-workers-list" :data-tl="entry.id" aria-label="终审进度（未关联步骤）">
+                <div v-else-if="entry.type === 'review'" class="ambient-workers-list review-step-members" :data-tl="entry.id" aria-label="终审进度（未关联步骤）">
+                    <div v-if="unplacedReviews.length > 1" class="review-panel-header">
+                        <span class="review-panel-title">
+                            <svg class="review-shield-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                            </svg>
+                            <span>多模型并发审查 ({{ unplacedReviews.length }} 位成员)</span>
+                        </span>
+                    </div>
                     <AgentWorkerProgress v-for="review in unplacedReviews" :key="review.id" :review="review" :is-running="isRunning" />
                 </div>
                 <article
@@ -355,24 +363,150 @@
                                         :title="item.action.tooltip"
                                         @click.stop="handleAmbientChipClick(item.step, item.action)"
                                     >
-                                        <!-- 1.1 动作类型微标 (有特定业务意图才显示，无修改不加'编辑'标签，通用操作统一兜底保证左侧垂直扫描对齐) -->
-                                        <span v-if="item.action.actionKind === 'subagent'" class="action-tag action-tag-subagent">{{ item.action.subagentTag || '🤖 子代理' }}</span>
-                                        <span v-else-if="item.action.actionKind === 'write'" class="action-tag action-tag-write">📄 新建</span>
-                                        <span v-else-if="item.action.actionKind === 'read'" class="action-tag action-tag-read">📖 读取</span>
-                                        <span v-else-if="item.action.actionKind === 'shell'" class="action-tag action-tag-shell">⚡ 终端</span>
-                                        <span v-else-if="item.action.actionKind === 'search'" class="action-tag action-tag-search">🔍 检索</span>
-                                        <span v-else-if="item.action.actionKind === 'web'" class="action-tag action-tag-web">{{ item.action.iconEmoji || '🌐' }} 网页</span>
-                                        <span v-else-if="item.action.actionKind === 'batch'" class="action-tag action-tag-batch" title="多项操作组成的执行批次">
+                                        <!-- 1.1 动作类型微标 (全矢量语义图标，专业标准命名) -->
+                                        <span v-if="item.action.actionKind === 'subagent'" class="action-tag action-tag-subagent" :title="item.action.tooltip">
+                                            <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <rect x="3" y="11" width="18" height="10" rx="2" />
+                                                <circle cx="12" cy="5" r="2" />
+                                                <path d="M12 7v4" />
+                                                <line x1="8" y1="16" x2="8" y2="16" />
+                                                <line x1="16" y1="16" x2="16" y2="16" />
+                                            </svg>
+                                            <span>{{ item.action.subagentTag?.replace(/^🤖\s*/, '') || '子智能体' }}</span>
+                                        </span>
+                                        <span v-else-if="item.action.actionKind === 'deliver'" class="action-tag action-tag-deliver" title="完成最终交付物">
+                                            <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+                                                <polyline points="22 4 12 14.01 9 11.01" />
+                                            </svg>
+                                            <span>终态交付</span>
+                                        </span>
+                                        <span v-else-if="item.action.actionKind === 'edit'" class="action-tag action-tag-edit" title="修改现有代码文件">
+                                            <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                                                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                                            </svg>
+                                            <span>代码修改</span>
+                                        </span>
+                                        <span v-else-if="item.action.actionKind === 'write'" class="action-tag action-tag-write" title="创建或写入文件">
+                                            <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                                <polyline points="14 2 14 8 20 8" />
+                                                <line x1="12" y1="18" x2="12" y2="12" />
+                                                <line x1="9" y1="15" x2="15" y2="15" />
+                                            </svg>
+                                            <span>代码新建</span>
+                                        </span>
+                                        <span v-else-if="item.action.actionKind === 'read'" class="action-tag action-tag-read" :title="item.action.tooltip || '读取或查阅内容'">
+                                            <svg v-if="item.action.capsuleTitle === '目录' || item.action.iconKind === 'folder'" class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                                            </svg>
+                                            <svg v-else class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
+                                                <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
+                                            </svg>
+                                            <span>{{ (item.action.capsuleTitle === '目录' || item.action.iconKind === 'folder') ? '目录查阅' : '文件读取' }}</span>
+                                        </span>
+                                        <span v-else-if="item.action.actionKind === 'shell'" class="action-tag action-tag-shell" title="执行终端命令行">
+                                            <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <polyline points="4 17 10 11 4 5" />
+                                                <line x1="12" y1="19" x2="20" y2="19" />
+                                            </svg>
+                                            <span>终端执行</span>
+                                        </span>
+                                        <span v-else-if="item.action.actionKind === 'search'" class="action-tag action-tag-search" title="检索代码或内容">
+                                            <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <circle cx="11" cy="11" r="8" />
+                                                <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                                            </svg>
+                                            <span>代码检索</span>
+                                        </span>
+                                        <span v-else-if="item.action.actionKind === 'web'" class="action-tag action-tag-web" title="网页抓取与全网检索">
+                                            <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <circle cx="12" cy="12" r="10" />
+                                                <line x1="2" y1="12" x2="22" y2="12" />
+                                                <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1 4-10z" />
+                                            </svg>
+                                            <span>全网检索</span>
+                                        </span>
+                                        <span v-else-if="item.action.actionKind === 'recall'" class="action-tag action-tag-recall" title="提取历史步骤输出原文">
+                                            <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+                                                <rect x="8" y="2" width="8" height="4" rx="1" ry="1" />
+                                                <path d="M9 14l2 2 4-4" />
+                                            </svg>
+                                            <span>历史取证</span>
+                                        </span>
+                                        <span v-else-if="item.action.actionKind === 'artifact'" class="action-tag action-tag-artifact" title="交付产物管理">
+                                            <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+                                                <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+                                                <line x1="12" y1="22.08" x2="12" y2="12" />
+                                            </svg>
+                                            <span>交付产物</span>
+                                        </span>
+                                        <span v-else-if="item.action.actionKind === 'human'" class="action-tag action-tag-human" title="呈报人工问询或确认">
+                                            <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                                                <line x1="12" y1="8" x2="12" y2="12" />
+                                                <line x1="12" y1="16" x2="12.01" y2="16" />
+                                            </svg>
+                                            <span>人工交互</span>
+                                        </span>
+                                        <span v-else-if="item.action.actionKind === 'model'" class="action-tag action-tag-model" title="模型平台与配置管理">
+                                            <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <rect x="4" y="4" width="16" height="16" rx="2" />
+                                                <rect x="9" y="9" width="6" height="6" />
+                                                <line x1="9" y1="1" x2="9" y2="4" />
+                                                <line x1="15" y1="1" x2="15" y2="4" />
+                                                <line x1="9" y1="20" x2="9" y2="23" />
+                                                <line x1="15" y1="20" x2="15" y2="23" />
+                                                <line x1="20" y1="9" x2="23" y2="9" />
+                                                <line x1="20" y1="14" x2="23" y2="14" />
+                                                <line x1="1" y1="9" x2="4" y2="9" />
+                                                <line x1="1" y1="14" x2="4" y2="14" />
+                                            </svg>
+                                            <span>模型配置</span>
+                                        </span>
+                                        <span v-else-if="item.action.actionKind === 'parallel'" class="action-tag action-tag-parallel" title="多项操作并行并发执行">
+                                            <svg class="batch-operation-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <line x1="4" y1="7" x2="18" y2="7" />
+                                                <polyline points="14 4 18 7 14 10" />
+                                                <line x1="4" y1="17" x2="18" y2="17" />
+                                                <polyline points="14 14 18 17 14 20" />
+                                            </svg>
+                                            <span>并行执行</span>
+                                        </span>
+                                        <span v-else-if="item.action.actionKind === 'pipeline'" class="action-tag action-tag-pipeline" title="按顺序流水线执行多项操作">
+                                            <svg class="batch-operation-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <rect x="3" y="4" width="6" height="6" rx="1.5" />
+                                                <rect x="15" y="14" width="6" height="6" rx="1.5" />
+                                                <path d="M9 7h4a2 2 0 0 1 2 2v5" />
+                                                <polyline points="12 11 15 14 18 11" />
+                                            </svg>
+                                            <span>串行执行</span>
+                                        </span>
+                                        <span v-else-if="item.action.actionKind === 'batch'" class="action-tag action-tag-batch" title="多项操作组成的执行集合">
                                             <svg class="batch-operation-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                                 <rect x="3" y="3" width="7" height="7" rx="1.5" />
                                                 <rect x="14" y="3" width="7" height="7" rx="1.5" />
                                                 <rect x="3" y="14" width="7" height="7" rx="1.5" />
                                                 <path d="M14 17.5h7m-3.5-3.5v7" />
                                             </svg>
-                                            <span>操作集合</span>
+                                            <span>任务规划</span>
                                         </span>
-                                        <span v-else-if="item.action.actionKind === 'mcp'" class="action-tag action-tag-mcp">🧩 MCP</span>
-                                        <span v-else class="action-tag action-tag-general">⚡ 操作</span>
+                                        <span v-else-if="item.action.actionKind === 'mcp'" class="action-tag action-tag-mcp" title="调用外部 MCP 插件工具">
+                                            <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48l2.83-2.83" />
+                                            </svg>
+                                            <span>MCP 插件</span>
+                                        </span>
+                                        <span v-else class="action-tag action-tag-general" :title="item.action.tooltip || '常规工具'">
+                                            <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+                                            </svg>
+                                            <span>{{ (item.action.capsuleTitle && !['操作', '工具', '常规工具', '终态交付', '交付'].includes(item.action.capsuleTitle) && !item.action.capsuleTitle.startsWith('⚡')) ? item.action.capsuleTitle : '常规工具' }}</span>
+                                        </span>
 
                                         <!-- 1.2 专属语言/文件矢量图标 (FileIcon，过滤占位文件名避免出现假标签) -->
                                         <FileIcon
@@ -383,16 +517,16 @@
                                             class="chip-file-icon"
                                         />
 
-                                        <!-- 1.3 核心文件名或命令 (milestone 类型标题已由动作标签渲染，避免重复；过滤占位名) -->
-                                        <span v-if="item.action.actionKind !== 'milestone' && item.action.actionKind !== 'batch' && item.action.capsuleTitle && item.action.capsuleTitle !== '新文件' && item.action.capsuleTitle !== '文件内容' && item.action.capsuleTitle !== '代码变更'" class="chip-file-name">{{ item.action.capsuleTitle }}</span>
+                                        <!-- 1.3 核心文件名或命令 (只有当确实是文件名/命令/ID且不重复动作名时才渲染) -->
+                                        <span v-if="shouldShowCapsuleTitle(item.action)" class="chip-file-name">{{ item.action.capsuleTitle }}</span>
 
                                         <!-- 1.4 所在目录简写 (如 src/bin/) -->
                                         <span v-if="item.action.filePath && getDirName(item.action.filePath)" class="chip-file-dir">
                                             {{ getDirName(item.action.filePath) }}
                                         </span>
 
-                                        <!-- 1.5 行号或耗时 (如 #L70-120, 0.5s，排除重复的 'MCP'/'新建'/'修改' 标签) -->
-                                        <span v-if="item.action.capsuleBadge && item.action.capsuleBadge !== 'MCP' && item.action.capsuleBadge !== '新建' && item.action.capsuleBadge !== '修改'" class="chip-line-range">
+                                        <!-- 1.5 行号 (如 #L70-120，排除重复标签与耗时，耗时一律统一后置) -->
+                                        <span v-if="item.action.capsuleBadge && item.action.capsuleBadge !== 'MCP' && item.action.capsuleBadge !== '新建' && item.action.capsuleBadge !== '修改' && !item.action.capsuleBadge.endsWith('s')" class="chip-line-range">
                                             {{ item.action.capsuleBadge }}
                                         </span>
 
@@ -406,6 +540,9 @@
                                     <span v-if="item.action.explanation" class="ambient-text-body" :class="{ 'is-milestone': item.action.isMilestone }">
                                         {{ item.action.explanation }}
                                     </span>
+
+                                    <!-- 1.8 耗时微标 (统一放在说明文字之后、时钟时间之前) -->
+                                    <span v-if="item.action.durationBadge" class="chip-duration">{{ item.action.durationBadge }}</span>
                                 </span>
                                 <button
                                     v-if="hasAmbientTerm(item.step, item.action)"
@@ -435,6 +572,14 @@
                             </div>
 
                             <div v-if="getStepReviewRows(item.step).length" class="ambient-workers-list review-step-members" :data-review-step="item.step.id" aria-label="终审成员进度">
+                                <div v-if="getStepReviewRows(item.step).length > 1" class="review-panel-header">
+                                    <span class="review-panel-title">
+                                        <svg class="review-shield-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                                        </svg>
+                                        <span>多模型并发审查 ({{ getStepReviewRows(item.step).length }} 位成员)</span>
+                                    </span>
+                                </div>
                                 <AgentWorkerProgress v-for="review in getStepReviewRows(item.step)" :key="review.id" :review="review" :is-running="isRunning" />
                             </div>
 
@@ -472,7 +617,13 @@
                             >
                                 <div class="ambient-search-group-header" @click="toggleSearchGroup(item.id)">
                                     <div class="search-group-left">
-                                        <span class="action-tag action-tag-search">🔍 检索</span>
+                                        <span class="action-tag action-tag-search" title="检索代码或内容">
+                                            <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <circle cx="11" cy="11" r="8" />
+                                                <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                                            </svg>
+                                            <span>检索</span>
+                                        </span>
                                         <span class="search-group-summary">{{ item.summary }}</span>
                                         <span v-if="item.targetFiles.length > 0" class="search-group-files">
                                             · {{ item.targetFiles.slice(0, 3).join(', ') }}{{ item.targetFiles.length > 3 ? ' 等' : '' }}
@@ -509,20 +660,43 @@
                                             <span class="search-sub-title">{{ getAmbientAction(subStep).capsuleTitle }}</span>
                                         </span>
                                         <span class="search-sub-body">{{ getAmbientAction(subStep).explanation }}</span>
+                                        <span v-if="getAmbientAction(subStep).durationBadge" class="chip-duration">{{ getAmbientAction(subStep).durationBadge }}</span>
                                         <time class="ambient-text-time mini">{{ formatClock(subStep.timestamp) }}</time>
                                     </article>
                                 </div>
                             </div>
 
-                            <!-- 2.5 连续操作的折叠集合；集合本身不表示工具来源 -->
+                            <!-- 2.5 连续操作的折叠集合（支持并行、串行、MCP与通用集合） -->
                             <div
                                 v-else-if="item.type === 'mcp-group'"
                                 class="ambient-action-group ambient-mcp-group"
-                                :class="{ 'is-expanded': isMcpGroupExpanded(item.id) }"
+                                :class="[
+                                    `ambient-${item.groupKind || 'batch'}-group`,
+                                    { 'is-expanded': isMcpGroupExpanded(item.id) }
+                                ]"
                             >
                                 <div class="ambient-action-group-header" @click="toggleMcpGroup(item.id)">
                                     <div class="action-group-left">
-                                        <span class="action-tag action-tag-batch" title="多项操作组成的执行批次">
+                                        <span v-if="item.groupKind === 'parallel'" class="action-tag action-tag-parallel" title="多项操作并行并发执行">
+                                            <svg class="batch-operation-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <line x1="4" y1="7" x2="18" y2="7" />
+                                                <polyline points="14 4 18 7 14 10" />
+                                                <line x1="4" y1="17" x2="18" y2="17" />
+                                                <polyline points="14 14 18 17 14 20" />
+                                            </svg>
+                                            <span>并行</span>
+                                        </span>
+                                        <span v-else-if="item.groupKind === 'pipeline'" class="action-tag action-tag-pipeline" title="按顺序流水线执行多项操作">
+                                            <svg class="batch-operation-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <rect x="3" y="4" width="6" height="6" rx="1.5" />
+                                                <rect x="15" y="14" width="6" height="6" rx="1.5" />
+                                                <path d="M9 7h4a2 2 0 0 1 2 2v5" />
+                                                <polyline points="12 11 15 14 18 11" />
+                                            </svg>
+                                            <span>串行</span>
+                                        </span>
+                                        <span v-else-if="item.groupKind === 'mcp'" class="action-tag action-tag-mcp">🧩 MCP</span>
+                                        <span v-else class="action-tag action-tag-batch" title="多项操作组成的执行集合">
                                             <svg class="batch-operation-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                                 <rect x="3" y="3" width="7" height="7" rx="1.5" />
                                                 <rect x="14" y="3" width="7" height="7" rx="1.5" />
@@ -536,7 +710,7 @@
                                     </div>
                                     <div class="action-group-right">
                                         <button type="button" class="action-group-toggle-btn" @click.stop="toggleMcpGroup(item.id)">
-                                            <span>{{ isMcpGroupExpanded(item.id) ? '收起明细' : `展开 ${item.count} 项操作` }}</span>
+                                            <span>{{ isMcpGroupExpanded(item.id) ? '收起明细' : `展开 ${item.count} 项${item.groupKind === 'parallel' ? '并行操作' : (item.groupKind === 'pipeline' ? '串行操作' : (item.groupKind === 'mcp' ? 'MCP 操作' : '操作'))}` }}</span>
                                             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" :class="{ 'rotate-180': isMcpGroupExpanded(item.id) }">
                                                 <polyline points="6 9 12 15 18 9" />
                                             </svg>
@@ -553,10 +727,77 @@
                                         class="ambient-action-sub-row"
                                         @click="$emit('select-step', subStep.id)"
                                     >
-                                        <span class="action-sub-bullet">·</span>
-                                        <span class="action-sub-title">{{ getAmbientAction(subStep).capsuleTitle }}</span>
-                                        <span v-if="getAmbientAction(subStep).capsuleBadge" class="chip-line-range mini">{{ getAmbientAction(subStep).capsuleBadge }}</span>
+                                        <span class="action-sub-lead" :class="`sub-action-${getAmbientAction(subStep).actionKind}`">
+                                            <svg v-if="getAmbientAction(subStep).actionKind === 'parallel'" class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <line x1="4" y1="7" x2="18" y2="7" />
+                                                <polyline points="14 4 18 7 14 10" />
+                                                <line x1="4" y1="17" x2="18" y2="17" />
+                                                <polyline points="14 14 18 17 14 20" />
+                                            </svg>
+                                            <svg v-else-if="getAmbientAction(subStep).actionKind === 'pipeline'" class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <rect x="3" y="4" width="6" height="6" rx="1.5" />
+                                                <rect x="15" y="14" width="6" height="6" rx="1.5" />
+                                                <path d="M9 7h4a2 2 0 0 1 2 2v5" />
+                                                <polyline points="12 11 15 14 18 11" />
+                                            </svg>
+                                            <svg v-else-if="getAmbientAction(subStep).actionKind === 'batch'" class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <rect x="3" y="3" width="7" height="7" rx="1.5" />
+                                                <rect x="14" y="3" width="7" height="7" rx="1.5" />
+                                                <rect x="3" y="14" width="7" height="7" rx="1.5" />
+                                                <path d="M14 17.5h7m-3.5-3.5v7" />
+                                            </svg>
+                                            <svg v-else-if="getAmbientAction(subStep).actionKind === 'search'" class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <circle cx="11" cy="11" r="8" />
+                                                <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                                            </svg>
+                                            <svg v-else-if="getAmbientAction(subStep).actionKind === 'web'" class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <circle cx="12" cy="12" r="10" />
+                                                <line x1="2" y1="12" x2="22" y2="12" />
+                                            </svg>
+                                            <svg v-else-if="getAmbientAction(subStep).actionKind === 'read'" class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
+                                                <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
+                                            </svg>
+                                            <svg v-else-if="getAmbientAction(subStep).actionKind === 'edit'" class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                                                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                                            </svg>
+                                            <svg v-else-if="getAmbientAction(subStep).actionKind === 'write'" class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                                <polyline points="14 2 14 8 20 8" />
+                                            </svg>
+                                            <svg v-else-if="getAmbientAction(subStep).actionKind === 'shell'" class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <polyline points="4 17 10 11 4 5" />
+                                                <line x1="12" y1="19" x2="20" y2="19" />
+                                            </svg>
+                                            <svg v-else-if="getAmbientAction(subStep).actionKind === 'recall'" class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+                                                <path d="M9 14l2 2 4-4" />
+                                            </svg>
+                                            <svg v-else-if="getAmbientAction(subStep).actionKind === 'artifact'" class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+                                            </svg>
+                                            <svg v-else-if="getAmbientAction(subStep).actionKind === 'deliver'" class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+                                                <polyline points="22 4 12 14.01 9 11.01" />
+                                            </svg>
+                                            <svg v-else-if="getAmbientAction(subStep).actionKind === 'mcp'" class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83M2 12h4m12 0h4" />
+                                            </svg>
+                                            <svg v-else class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+                                            </svg>
+                                        </span>
+                                        <FileIcon
+                                            v-if="getAmbientAction(subStep).fileName"
+                                            :name="getAmbientAction(subStep).fileName || ''"
+                                            :size="12"
+                                            class="chip-file-icon"
+                                        />
+                                        <span v-if="shouldShowCapsuleTitle(getAmbientAction(subStep))" class="action-sub-title">{{ getAmbientAction(subStep).capsuleTitle }}</span>
+                                        <span v-if="getAmbientAction(subStep).capsuleBadge && !getAmbientAction(subStep).capsuleBadge?.endsWith('s')" class="chip-line-range mini">{{ getAmbientAction(subStep).capsuleBadge }}</span>
                                         <span class="action-sub-body">{{ getAmbientAction(subStep).explanation }}</span>
+                                        <span v-if="getAmbientAction(subStep).durationBadge" class="chip-duration">{{ getAmbientAction(subStep).durationBadge }}</span>
                                         <time class="ambient-text-time mini">{{ formatClock(subStep.timestamp) }}</time>
                                     </article>
                                 </div>
@@ -584,20 +825,8 @@
                             class="ambient-live-text-row"
                         >
                             <div class="ambient-live-text-bar" @click="getPlanRunningPreview(entry).line3.actionKind === 'think' && toggleLiveThoughtExpanded()">
-                                <span class="live-think-label">
-                                    <span class="live-think-square-icon" :class="{ 'is-action': getPlanRunningPreview(entry).line3.actionKind !== 'think' }">
-                                        <svg v-if="getPlanRunningPreview(entry).line3.actionKind === 'think'" class="thought-square-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                            <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
-                                            <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
-                                            <path d="M12 5v13"/>
-                                            <path d="M15.5 8.5a4 4 0 0 0-7 0"/>
-                                            <path d="M16 12a4 4 0 0 0-8 0"/>
-                                            <path d="M15.5 15.5a4 4 0 0 0-7 0"/>
-                                        </svg>
-                                        <svg v-else class="thought-square-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                                            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
-                                        </svg>
-                                    </span>
+                                <span class="live-think-label" :class="{ 'is-action': getPlanRunningPreview(entry).line3.actionKind !== 'think' }">
+                                    <span class="live-think-spinner" :class="{ 'is-action': getPlanRunningPreview(entry).line3.actionKind !== 'think' }"></span>
                                     <span class="live-think-title">{{ getPlanRunningPreview(entry).line3.actionKind === 'think' ? '思考中：' : '推进中：' }}</span>
                                 </span>
                                 <div class="ambient-live-viewport">
@@ -920,6 +1149,14 @@
                                         <time>{{ formatClock(step.timestamp) }}</time>
                                     </button>
                                     <div v-if="getStepReviewRows(step).length" class="ambient-workers-list review-step-members" :data-review-step="step.id" aria-label="终审成员进度">
+                                        <div v-if="getStepReviewRows(step).length > 1" class="review-panel-header">
+                                            <span class="review-panel-title">
+                                                <svg class="review-shield-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                                                </svg>
+                                                <span>多模型并发审查 ({{ getStepReviewRows(step).length }} 位成员)</span>
+                                            </span>
+                                        </div>
                                         <AgentWorkerProgress v-for="review in getStepReviewRows(step)" :key="review.id" :review="review" :is-running="isRunning" />
                                     </div>
                                     <div class="node-children">
@@ -1069,16 +1306,7 @@
                         <div class="ambient-live-text-row">
                             <div class="ambient-live-text-bar" @click="toggleLiveThoughtExpanded">
                                 <span class="live-think-label">
-                                    <span class="live-think-square-icon">
-                                        <svg class="thought-square-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                            <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
-                                            <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
-                                            <path d="M12 5v13"/>
-                                            <path d="M15.5 8.5a4 4 0 0 0-7 0"/>
-                                            <path d="M16 12a4 4 0 0 0-8 0"/>
-                                            <path d="M15.5 15.5a4 4 0 0 0-7 0"/>
-                                        </svg>
-                                    </span>
+                                    <span class="live-think-spinner"></span>
                                     <span class="live-think-title">思考中：</span>
                                 </span>
                                 <div class="ambient-live-viewport">
@@ -1954,8 +2182,27 @@ function hasFileOperation(step: AgentStepItem): boolean {
     return !!(parsed.chips.length > 0 || parsed.chip || parsed.readFiles.length > 0 || op.fileName || (op.hasDiff && op.filePath));
 }
 
+function shouldShowCapsuleTitle(action?: AmbientActionDisplay): boolean {
+    if (!action || !action.capsuleTitle) return false;
+    if (['milestone', 'batch', 'parallel', 'pipeline', 'deliver', 'human', 'model'].includes(action.actionKind)) return false;
+    const t = action.capsuleTitle.trim();
+    if (!t) return false;
+    if ([
+        '新文件', '文件内容', '代码变更', '代码修改', '代码新建',
+        '文件读取', '目录', '目录查阅',
+        '网页抓取', '抓取网页', '全网检索', '网页读取', '网页访问', '网络抓取', '网络请求', '全网搜索',
+        '终态交付', '交付', '工具', '操作', '常规工具', '终端命令', '命令',
+        '人工交互', '模型配置', '模型管理',
+        '代码检索', '全局检索', '历史取证', '历史输出', '交付产物',
+    ].includes(t)) {
+        return false;
+    }
+    if (action.subagentTag && t.includes(action.subagentTag.replace(/^🤖\s*/, ''))) return false;
+    return true;
+}
+
 export interface AmbientActionDisplay {
-    actionKind: 'read' | 'edit' | 'write' | 'shell' | 'search' | 'web' | 'mcp' | 'batch' | 'milestone' | 'subagent' | 'general';
+    actionKind: 'read' | 'edit' | 'write' | 'shell' | 'search' | 'web' | 'mcp' | 'parallel' | 'pipeline' | 'batch' | 'milestone' | 'subagent' | 'recall' | 'artifact' | 'human' | 'model' | 'deliver' | 'general';
     subagentTag?: string;
     capsuleTitle: string;
     fileName?: string;
@@ -1963,6 +2210,7 @@ export interface AmbientActionDisplay {
     iconKind?: string;
     iconEmoji?: string;
     capsuleBadge?: string;
+    durationBadge?: string;
     additions?: number;
     deletions?: number;
     isIntercepted?: boolean;
@@ -1996,6 +2244,7 @@ export interface AmbientSearchGroupDisplay {
 export interface AmbientMcpGroupDisplay {
     type: 'mcp-group';
     id: string;
+    groupKind?: 'parallel' | 'pipeline' | 'mcp' | 'batch';
     steps: AgentStepItem[];
     count: number;
     summary: string;
@@ -2162,7 +2411,7 @@ function buildSearchGroupSummary(steps: AgentStepItem[]): { summary: string; tar
     return { summary, targetFiles, querySample };
 }
 
-function buildMcpGroupSummary(steps: AgentStepItem[]): { summary: string } {
+function buildMcpGroupSummary(steps: AgentStepItem[], groupKind?: 'parallel' | 'pipeline' | 'mcp' | 'batch'): { summary: string } {
     const titles: string[] = [];
     const explanations: string[] = [];
 
@@ -2177,16 +2426,18 @@ function buildMcpGroupSummary(steps: AgentStepItem[]): { summary: string } {
         }
     }
 
+    const typeSuffix = groupKind === 'parallel' ? '并行操作' : (groupKind === 'pipeline' ? '串行操作' : (groupKind === 'mcp' ? 'MCP 操作' : '操作'));
+
     let summary = '';
     if (explanations.length > 0) {
         summary = explanations[0];
         if (steps.length > 1) {
-            summary += ` 等 ${steps.length} 项操作`;
+            summary += ` 等 ${steps.length} 项${typeSuffix}`;
         }
     } else if (titles.length > 0) {
-        summary = `${titles.slice(0, 2).join('、')} 等 ${steps.length} 项操作`;
+        summary = `${titles.slice(0, 2).join('、')} 等 ${steps.length} 项${typeSuffix}`;
     } else {
-        summary = `执行 ${steps.length} 项操作`;
+        summary = `执行 ${steps.length} 项${typeSuffix}`;
     }
     return { summary };
 }
@@ -2330,9 +2581,10 @@ function buildAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
             }
         }
 
-        // 连续批次或外部工具可折叠为操作集合；不把集合来源标成 MCP。
-        if (action.actionKind === 'mcp' || action.actionKind === 'batch') {
-            const mcpSteps: AgentStepItem[] = [step];
+        // 连续批次、并行、串行或外部工具折叠收拢
+        const groupableKinds = ['mcp', 'batch', 'parallel', 'pipeline'];
+        if (groupableKinds.includes(action.actionKind)) {
+            const groupSteps: AgentStepItem[] = [step];
             let j = i + 1;
             while (j < rawSteps.length) {
                 const nextStep = rawSteps[j];
@@ -2341,33 +2593,42 @@ function buildAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
                     j++;
                     continue;
                 }
-                if (['mcp', 'batch'].includes(getAmbientAction(nextStep).actionKind) && !stepNarrative(nextStep)) {
-                    mcpSteps.push(nextStep);
+                const nextKind = getAmbientAction(nextStep).actionKind;
+                if (groupableKinds.includes(nextKind) && !stepNarrative(nextStep)) {
+                    groupSteps.push(nextStep);
                     j++;
                 } else {
                     break;
                 }
             }
 
-            if (mcpSteps.length >= 2) {
-                const groupId = `mcp-group-${entry.id}-${step.id}-${mcpSteps.length}`;
-                const { summary } = buildMcpGroupSummary(mcpSteps);
+            if (groupSteps.length >= 2) {
+                const groupId = `action-group-${entry.id}-${step.id}-${groupSteps.length}`;
+                const firstKind = getAmbientAction(groupSteps[0]).actionKind;
+                const allSame = groupSteps.every(s => getAmbientAction(s).actionKind === firstKind);
+                const groupKind: 'parallel' | 'pipeline' | 'mcp' | 'batch' =
+                    allSame && (firstKind === 'parallel' || firstKind === 'pipeline' || firstKind === 'mcp')
+                        ? firstKind
+                        : 'batch';
+
+                const { summary } = buildMcpGroupSummary(groupSteps, groupKind);
 
                 let totalDurationMs = 0;
-                for (const s of mcpSteps) {
+                for (const s of groupSteps) {
                     if (s.metrics?.toolDurationMs) totalDurationMs += s.metrics.toolDurationMs;
                 }
 
                 items.push({
                     type: 'mcp-group',
                     id: groupId,
-                    steps: mcpSteps,
-                    count: mcpSteps.length,
+                    groupKind,
+                    steps: groupSteps,
+                    count: groupSteps.length,
                     summary,
                     durationBadge: totalDurationMs > 0 ? formatDurationSeconds(totalDurationMs) : undefined,
-                    timestamp: mcpSteps[mcpSteps.length - 1].timestamp || step.timestamp,
+                    timestamp: groupSteps[groupSteps.length - 1].timestamp || step.timestamp,
                 });
-                for (const s of mcpSteps) pushAmbientInterventions(s, items);
+                for (const s of groupSteps) pushAmbientInterventions(s, items);
                 i = j;
                 continue;
             }
@@ -2413,6 +2674,10 @@ function getAmbientAction(step: AgentStepItem): AmbientActionDisplay {
     const hit = ambientActionMemo.get(step);
     if (hit) return hit;
     const action = computeAmbientAction(step);
+    // 耗时统一后置微标：如果底层 metrics 提供了 toolDurationMs，统一写入 durationBadge
+    if (!action.durationBadge && step.metrics?.toolDurationMs != null) {
+        action.durationBadge = formatDurationSeconds(step.metrics.toolDurationMs);
+    }
     // 步骤内部思考/重试原因保留挂载在 tooltip 中，悬停即可查看完整详情
     const thought = (step.thought || '').trim();
     if (thought && thought !== action.explanation && !action.tooltip?.includes(thought)) {
@@ -2535,6 +2800,14 @@ function computeAmbientAction(step: AgentStepItem): AmbientActionDisplay {
             actualKind = 'read';
         } else if (toolLower.includes('write') || toolLower.includes('create') || op.badgeLabel === '写入') {
             actualKind = 'write';
+        } else if (toolLower === 'finish' || toolLower.includes('finish') || toolLower.includes('deliver') || op.badgeLabel === '终态交付' || op.badgeLabel === '交付') {
+            actualKind = 'deliver';
+        } else if (toolLower.includes('get_step_output') || op.badgeLabel === '输出取回') {
+            actualKind = 'recall';
+        } else if (toolLower.includes('artifact') || op.badgeLabel === '交付产物') {
+            actualKind = 'artifact';
+        } else if (toolLower.includes('ask_human') || toolLower.includes('human') || op.badgeLabel === '人工交互') {
+            actualKind = 'human';
         }
 
         return {
@@ -2553,8 +2826,8 @@ function computeAmbientAction(step: AgentStepItem): AmbientActionDisplay {
     }
 
     // 3. 代码修改 (Edit / Diff)
-    if (chip && ((chip.additions || 0) > 0 || (chip.deletions || 0) > 0)) {
-        const fileName = chip.fileName || op.fileName || '代码变更';
+    if ((chip && ((chip.additions || 0) > 0 || (chip.deletions || 0) > 0)) || op.badgeLabel === '修改' || toolLower.includes('replace') || toolLower.includes('edit_file') || toolLower.includes('patch') || actionLower.startsWith('edit')) {
+        const fileName = chip?.fileName || op.fileName || '代码变更';
         let reason = (step.explanation || desc).trim();
         const escapedFn = fileName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         // 去除开头重复的 "修改/编辑/写入 xxx (以/为了/来/用于/关于/针对)"
@@ -2568,8 +2841,8 @@ function computeAmbientAction(step: AgentStepItem): AmbientActionDisplay {
             fileName,
             filePath: op.filePath || chip?.path,
             iconKind: 'code',
-            additions: chip.additions,
-            deletions: chip.deletions,
+            additions: chip?.additions || op.diffStat?.additions,
+            deletions: chip?.deletions || op.diffStat?.deletions,
             hasDiff: true,
             chip,
             capsuleBadge: op.lineRange || undefined,
@@ -2606,40 +2879,67 @@ function computeAmbientAction(step: AgentStepItem): AmbientActionDisplay {
         };
     }
 
-    // 5. 查看 / 读取文件 (Read)
-    if (toolLower.includes('read') || toolLower.includes('view') || toolLower.includes('cat') || op.badgeLabel === '读取') {
-        const fileName = op.fileName || '文件内容';
+    // 5. 查看 / 读取文件与目录 (Read / List)
+    if (toolLower.includes('read') || toolLower.includes('view') || toolLower.includes('cat') || op.badgeLabel === '读取' || op.badgeLabel === '目录' || toolLower.includes('list_dir')) {
+        const isDir = op.badgeLabel === '目录' || toolLower.includes('list_dir') || toolLower.includes('tree');
+        const fileName = isDir ? '目录' : (op.fileName || '文件内容');
         let reason = (step.explanation || desc).trim();
-        const escapedFn = fileName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        reason = reason.replace(new RegExp(`^(读取|查看|检查|分析|浏览)\\s*(${escapedFn}|[^\\s，,以为了]+)?\\s*(\\d+[-~到至]\\d+\\s*行)?\\s*(以|为了|来|用于|关于|针对|：|:)?\\s*`, 'i'), '').trim();
+        const escapedFn = (op.fileName || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        reason = reason.replace(new RegExp(`^(读取|查看|检查|分析|浏览|列出)\\s*(${escapedFn}|[^\\s，,以为了]+)?\\s*(\\d+[-~到至]\\d+\\s*行)?\\s*(以|为了|来|用于|关于|针对|：|:)?\\s*`, 'i'), '').trim();
         reason = reason.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
-        if (reason === fileName || reason === '读取文件内容' || reason === '执行操作') reason = '';
+        if (reason === fileName || reason === '读取文件内容' || reason === '查看目录' || reason === '执行操作') reason = '';
 
         return {
             actionKind: 'read',
             capsuleTitle: fileName,
-            fileName,
+            fileName: isDir ? undefined : op.fileName,
             filePath: op.filePath || chip?.path,
-            iconKind: 'read',
+            iconKind: isDir ? 'folder' : 'read',
             capsuleBadge: op.lineRange || undefined,
             explanation: reason,
             isWarning: false,
             isMilestone: false,
-            tooltip: op.filePath ? `读取 ${op.filePath} ${op.lineRange || ''}` : '读取文件',
+            tooltip: isDir ? (op.actionText || '查看目录') : (op.filePath ? `读取 ${op.filePath} ${op.lineRange || ''}` : '读取文件'),
         };
     }
 
-    // 内部批次显示为操作集合，不能由默认拼图图标误判为 MCP。
-    if (op.badgeLabel === '操作集合') {
+    // 5.5 内部调度容器：并行 (Parallel)、串行 (Pipeline/Commands)、操作集合 (Batch/PlanTree)
+    if (op.badgeLabel === '并行' || toolLower === 'parallel' || actionLower === 'parallel') {
         return {
-            actionKind: 'batch',
+            actionKind: 'parallel',
             capsuleTitle: '',
-            capsuleBadge: step.metrics?.toolDurationMs != null
+            durationBadge: step.metrics?.toolDurationMs != null
                 ? formatDurationSeconds(step.metrics.toolDurationMs) : undefined,
             explanation: desc && desc !== '执行操作' ? desc : op.actionText,
             isWarning: false,
             isMilestone: false,
-            tooltip: op.actionText,
+            tooltip: op.actionText || '并行执行多项操作',
+        };
+    }
+
+    if (op.badgeLabel === '串行' || ['pipeline', 'commands'].includes(toolLower) || ['pipeline', 'commands'].includes(actionLower)) {
+        return {
+            actionKind: 'pipeline',
+            capsuleTitle: '',
+            durationBadge: step.metrics?.toolDurationMs != null
+                ? formatDurationSeconds(step.metrics.toolDurationMs) : undefined,
+            explanation: desc && desc !== '执行操作' ? desc : op.actionText,
+            isWarning: false,
+            isMilestone: false,
+            tooltip: op.actionText || '串行流水线执行',
+        };
+    }
+
+    if (op.badgeLabel === '操作集合' || toolLower === 'plan_tree' || actionLower === 'plan_tree') {
+        return {
+            actionKind: 'batch',
+            capsuleTitle: '',
+            durationBadge: step.metrics?.toolDurationMs != null
+                ? formatDurationSeconds(step.metrics.toolDurationMs) : undefined,
+            explanation: desc && desc !== '执行操作' ? desc : op.actionText,
+            isWarning: false,
+            isMilestone: false,
+            tooltip: op.actionText || '操作集合',
         };
     }
 
@@ -2674,7 +2974,7 @@ function computeAmbientAction(step: AgentStepItem): AmbientActionDisplay {
             capsuleTitle: shortCmd,
             filePath: op.filePath,
             iconKind: 'terminal',
-            capsuleBadge: durationBadge || undefined,
+            durationBadge: durationBadge || undefined,
             explanation,
             isWarning: false,
             isMilestone: false,
@@ -2696,14 +2996,22 @@ function computeAmbientAction(step: AgentStepItem): AmbientActionDisplay {
                 query = p.trim();
             }
         }
-        const isFetch = toolLower.includes('fetch');
-        const capsuleTitle = isFetch ? '网页抓取' : (query ? (query.length > 16 ? query.slice(0, 14) + '…' : query) : '全网检索');
-        let explanation = desc && desc !== '执行操作' ? desc : (query ? `查询 "${query.length > 35 ? query.slice(0, 32) + '…' : query}"` : '');
+        const isFetch = toolLower.includes('fetch') || toolLower.includes('read_url');
+        let domainOrTarget = '';
+        if (query) {
+            try {
+                if (query.startsWith('http://') || query.startsWith('https://')) {
+                    const u = new URL(query);
+                    domainOrTarget = u.hostname;
+                }
+            } catch {}
+        }
+        let explanation = desc && desc !== '执行操作' ? desc : (query ? (isFetch ? `抓取 ${query.length > 35 ? query.slice(0, 32) + '…' : query}` : `查询 "${query.length > 35 ? query.slice(0, 32) + '…' : query}"`) : '');
         explanation = explanation.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
 
         return {
             actionKind: 'web',
-            capsuleTitle,
+            capsuleTitle: domainOrTarget,
             iconEmoji: isFetch ? '🌍' : '🌐',
             explanation,
             isWarning: false,
@@ -2748,6 +3056,107 @@ function computeAmbientAction(step: AgentStepItem): AmbientActionDisplay {
         };
     }
 
+    // 8.5 取回历史截断输出 (Recall / Step output)
+    if (toolLower.includes('get_step_output') || toolLower.includes('search_step_output') || op.badgeLabel === '输出取回') {
+        const p: any = step.params || step.rawParams;
+        let outputId = '';
+        if (p && typeof p === 'object') {
+            outputId = String(p.output_id || p.id || '').trim();
+        } else if (typeof p === 'string') {
+            try {
+                const parsed = JSON.parse(p);
+                outputId = String(parsed.output_id || parsed.id || '').trim();
+            } catch {}
+        }
+        return {
+            actionKind: 'recall',
+            capsuleTitle: outputId ? `#${outputId}` : '历史输出',
+            explanation: desc && desc !== '执行操作' ? desc : (outputId ? `提取步骤 #${outputId} 输出` : '提取历史步骤输出'),
+            isWarning: false,
+            isMilestone: false,
+            tooltip: outputId ? `提取步骤输出 #${outputId}` : '提取历史步骤输出',
+        };
+    }
+
+    // 8.6 交付产物管理 (Artifact)
+    if (toolLower.includes('artifact') || op.badgeLabel === '交付产物') {
+        const p: any = step.params || step.rawParams;
+        let title = '';
+        if (p && typeof p === 'object') {
+            title = String(p.title || p.name || '').trim();
+        }
+        return {
+            actionKind: 'artifact',
+            capsuleTitle: title || op.fileName || '交付产物',
+            fileName: op.fileName,
+            filePath: op.filePath,
+            iconKind: op.fileName ? 'code' : undefined,
+            explanation: desc && desc !== '执行操作' ? desc : op.actionText,
+            isWarning: false,
+            isMilestone: false,
+            tooltip: op.actionText || '交付产物管理',
+        };
+    }
+
+    // 8.7 人工交互与问询 (Human Question / Confirm)
+    if (toolLower.includes('ask_human') || toolLower.includes('ask_question') || toolLower.includes('human') || op.badgeLabel === '人工交互') {
+        const p: any = step.params || step.rawParams;
+        let question = '';
+        if (p && typeof p === 'object') {
+            question = String(p.question || p.message || p.prompt || '').trim();
+        }
+        return {
+            actionKind: 'human',
+            capsuleTitle: '人工交互',
+            explanation: question ? `呈报问询: "${question.slice(0, 36)}"` : (desc && desc !== '执行操作' ? desc : '请求人工决策'),
+            isWarning: false,
+            isMilestone: false,
+            tooltip: question || '请求人工决策/交互',
+        };
+    }
+
+    // 8.8 模型与平台管理 (Model Manager)
+    if (toolLower.includes('model_manager') || op.badgeLabel === '模型管理') {
+        return {
+            actionKind: 'model',
+            capsuleTitle: '模型配置',
+            explanation: desc && desc !== '执行操作' ? desc : op.actionText,
+            isWarning: false,
+            isMilestone: false,
+            tooltip: op.actionText || '模型配置管理',
+        };
+    }
+
+    // 8.9 任务终态交付 (Deliver / Finish)
+    if (toolLower === 'finish' || toolLower.includes('finish') || toolLower.includes('deliver') || op.badgeLabel === '终态交付' || op.badgeLabel === '交付') {
+        const p: any = step.params || step.rawParams;
+        let summary = '';
+        if (p && typeof p === 'object') {
+            summary = String(p.summary || p.final_summary || p.message || '').trim();
+        } else if (typeof p === 'string') {
+            try {
+                const parsed = JSON.parse(p);
+                summary = String(parsed.summary || parsed.final_summary || parsed.message || '').trim();
+            } catch {
+                summary = p.trim();
+            }
+        }
+        let cleanText = summary || desc || op.actionText || '完成任务交付';
+        cleanText = cleanText.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌🏁🎉]\s*/, '').trim();
+        // 彻底清除冗余的 "交付："、"终态交付：" 等前缀，因为左侧标签已标明终态交付
+        cleanText = cleanText.replace(/^(终态交付|完成交付|任务交付|最终交付|交付)[：:\s]*/i, '').trim();
+        cleanText = cleanText.replace(/^["'“”](.*)["'“”]$/, '$1').trim();
+
+        return {
+            actionKind: 'deliver',
+            capsuleTitle: '', // 留空，避免在标签后面重复渲染
+            explanation: cleanText,
+            isWarning: false,
+            isMilestone: true,
+            tooltip: '完成最终交付物',
+        };
+    }
+
     // 9. MCP 工具调用
     if (isMcpStep(step, op)) {
         const title = op.badgeLabel || step.tool || 'MCP 工具';
@@ -2763,7 +3172,7 @@ function computeAmbientAction(step: AgentStepItem): AmbientActionDisplay {
             actionKind: 'mcp',
             capsuleTitle: title,
             iconEmoji: '🧩',
-            capsuleBadge: durationBadge || undefined,
+            durationBadge: durationBadge || undefined,
             explanation,
             isWarning: false,
             isMilestone: false,
@@ -2771,13 +3180,16 @@ function computeAmbientAction(step: AgentStepItem): AmbientActionDisplay {
         };
     }
 
-    // 10. 常规兜底动作
+    // 10. 常规兜底动作 (纯净优雅降级，杜绝千篇一律的闪电操作)
     let text = desc && desc !== '执行操作' ? desc : op.actionText || '执行操作';
     text = text.replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
+    const cleanTitle = (op.badgeLabel && op.badgeLabel !== '操作' && !op.badgeLabel.startsWith('⚡'))
+        ? op.badgeLabel
+        : ((step.tool && step.tool !== 'call_tool') ? step.tool : '工具');
     return {
         actionKind: 'general',
-        capsuleTitle: op.badgeLabel || step.tool || '操作',
-        iconEmoji: '⚡',
+        capsuleTitle: cleanTitle,
+        iconEmoji: '🔧',
         explanation: text,
         isWarning: false,
         isMilestone: false,

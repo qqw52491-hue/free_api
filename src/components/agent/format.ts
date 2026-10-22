@@ -476,7 +476,7 @@ export function getToolIcon(tool?: string, action?: string): { emoji: string; co
 
     // 2. 终端命令与脚本 (包含 local_shell)
     if (t.includes("local_shell") || t.includes("bash") || t.includes("shell") || t.includes("exec") || t.includes("cmd") || t.includes("terminal") || a.includes("exec")) {
-        return { emoji: "⚡", color: "#facc15" };
+        return { emoji: "💻", color: "#38bdf8" };
     }
 
     // 3. 原生本地文件操作 (local_file 动作分支)

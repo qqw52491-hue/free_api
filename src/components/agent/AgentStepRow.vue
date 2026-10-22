@@ -65,6 +65,11 @@
             <span v-if="stepData.explanation" class="ambient-text-body">
                 {{ stepData.explanation }}
             </span>
+
+            <!-- 8. 耗时微标 (统一放在说明文字之后、时钟时间之前) -->
+            <span v-if="stepData.durationBadge" class="chip-duration">
+                {{ stepData.durationBadge }}
+            </span>
         </span>
 
         <!-- 8. 时间戳 -->
@@ -121,11 +126,12 @@ const stepData = computed(() => {
     const isWorker = "stepNumber" in s;
 
     let actionKind: "read" | "edit" | "write" | "shell" | "search" | "general" = "general";
-    let tagLabel = "⚡ 操作";
+    let tagLabel = "🔧 工具";
     let displayTitle = "";
     let fileName: string | undefined = s.fileName;
     let filePath: string | undefined = s.filePath || s.path;
     let capsuleBadge: string | undefined = s.lineRange;
+    let durationBadge: string | undefined;
     let additions = s.additions;
     let deletions = s.deletions;
     let isIntercepted = !!s.isIntercepted;
@@ -141,24 +147,27 @@ const stepData = computed(() => {
         tagLabel = "📖 审查";
     } else if (s.badgeLabel === "交付") {
         actionKind = "write";
-        tagLabel = "⚡ 交付";
+        tagLabel = "🎉 交付";
     } else if (tool.includes("read") || tool.includes("view") || s.badgeLabel === "读取") {
         actionKind = "read";
         tagLabel = "📖 读取";
     } else if (tool.includes("shell") || tool.includes("bash") || tool.includes("command") || tool.includes("terminal") || s.badgeLabel === "终端") {
         actionKind = "shell";
-        tagLabel = "⚡ 终端";
+        tagLabel = "💻 终端";
     } else if (tool.includes("search") || tool.includes("grep") || tool.includes("find") || s.badgeLabel === "检索") {
         actionKind = "search";
         tagLabel = "🔍 检索";
+    } else if (tool.includes("web_search") || tool.includes("web_fetch") || tool.includes("duckduckgo") || tool.includes("bing") || s.badgeLabel?.includes("全网") || s.badgeLabel?.includes("抓取")) {
+        actionKind = "general";
+        tagLabel = tool.includes("fetch") || tool.includes("read_url") ? "🌍 抓取" : "🌐 检索";
     } else if (tool.includes("write") || tool.includes("create") || s.badgeLabel === "新建") {
         actionKind = "write";
         tagLabel = "📄 新建";
     } else if (tool.includes("edit") || tool.includes("patch") || tool.includes("diff") || (additions && additions > 0) || (deletions && deletions > 0)) {
         actionKind = "edit";
-        tagLabel = "⚡ 操作";
+        tagLabel = "✏️ 修改";
     } else if (s.badgeLabel) {
-        tagLabel = s.badgeLabel.startsWith("⚡") || s.badgeLabel.startsWith("📖") || s.badgeLabel.startsWith("🛡️") ? s.badgeLabel : `⚡ ${s.badgeLabel}`;
+        tagLabel = s.badgeLabel.replace(/^⚡\s*/, "");
     }
 
     // 2. 参数结构化提取
@@ -173,14 +182,14 @@ const stepData = computed(() => {
             }
         } else if (s.view.kind === "terminal") {
             actionKind = "shell";
-            tagLabel = "⚡ 终端";
+            tagLabel = "💻 终端";
             displayTitle = s.view.command || "";
             if (s.view.duration_ms) {
-                capsuleBadge = `${(s.view.duration_ms / 1000).toFixed(1)}s`;
+                durationBadge = `${(s.view.duration_ms / 1000).toFixed(1)}s`;
             }
         } else if (s.view.kind === "diff") {
             actionKind = "edit";
-            tagLabel = "⚡ 操作";
+            tagLabel = "✏️ 修改";
             fileName = s.view.path?.split("/").pop();
             filePath = s.view.path;
             additions = s.view.added_lines?.length || additions;
@@ -210,9 +219,20 @@ const stepData = computed(() => {
     if (!displayTitle && s.title) {
         displayTitle = s.title;
     }
+    const genericTitles = new Set([
+        '新文件', '文件内容', '代码变更', '代码修改', '代码新建',
+        '文件读取', '目录', '目录查阅',
+        '网页抓取', '抓取网页', '全网检索', '网页读取', '网页访问', '网络抓取', '网络请求', '全网搜索',
+        '终态交付', '交付', '工具', '操作', '常规工具', '终端命令', '命令',
+        '人工交互', '模型配置', '模型管理',
+        '代码检索', '全局检索', '历史取证', '历史输出', '交付产物',
+    ]);
+    if (displayTitle && genericTitles.has(displayTitle.trim())) {
+        displayTitle = "";
+    }
 
     if (s.durationMs) {
-        capsuleBadge = `${(s.durationMs / 1000).toFixed(1)}s`;
+        durationBadge = `${(s.durationMs / 1000).toFixed(1)}s`;
     }
 
     // 清理 explanation 中与 displayTitle 重复的词汇
@@ -233,6 +253,7 @@ const stepData = computed(() => {
         filePath,
         dirName,
         capsuleBadge,
+        durationBadge,
         additions,
         deletions,
         isIntercepted,
@@ -424,7 +445,7 @@ function handleLeadClick() {
     letter-spacing: -0.2px;
 }
 
-/* 行号与耗时微标 (#L70-120, 0.5s) */
+/* 行号微标 (#L70-120) */
 .chip-line-range {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 10.5px;
@@ -434,6 +455,15 @@ function handleLeadClick() {
     padding: 0.5px 4px;
     border-radius: 3px;
     line-height: 1.25;
+}
+
+/* 耗时微标 (统一置于右侧说明文字之后) */
+.chip-duration {
+    font-size: 10.5px;
+    color: #eab308;
+    font-weight: 500;
+    flex-shrink: 0;
+    margin-left: 2px;
 }
 
 /* Diff 增删行微标 (+22 -163，鲜明优雅) */

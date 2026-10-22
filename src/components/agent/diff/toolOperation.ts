@@ -116,12 +116,30 @@ export function computeFormatStepOperation(step: AgentStepItem): StepOperationDi
         act = String(p.action || "read").toLowerCase();
     }
 
-    // 批次是宿主内部调度容器，不代表 MCP 插件。
-    if (["parallel", "pipeline", "commands", "plan_tree"].includes(t)) {
+    // 内部调度容器（并行、串行、操作集合），不代表外部 MCP 插件
+    if (t === "parallel" || act === "parallel") {
         return {
-            badgeIcon: "⚡",
+            badgeIcon: "⇶",
+            badgeLabel: "并行",
+            actionText: step.description || "并行执行多项操作",
+            hasDiff: false,
+        };
+    }
+
+    if (["pipeline", "commands"].includes(t) || ["pipeline", "commands"].includes(act)) {
+        return {
+            badgeIcon: "⤹",
+            badgeLabel: "串行",
+            actionText: step.description || "串行执行多项操作",
+            hasDiff: false,
+        };
+    }
+
+    if (t === "plan_tree" || act === "plan_tree") {
+        return {
+            badgeIcon: "⚏",
             badgeLabel: "操作集合",
-            actionText: step.description || "执行多项操作",
+            actionText: step.description || "执行任务规划",
             hasDiff: false,
         };
     }
@@ -201,7 +219,7 @@ export function computeFormatStepOperation(step: AgentStepItem): StepOperationDi
             hasDiff: false,
         };
     }
-    if (t === "web_fetch" || t.includes("web_fetch") || t.includes("fetch_url")) {
+    if (t === "web_fetch" || t.includes("web_fetch") || t.includes("fetch_url") || t.includes("read_url")) {
         const url = String(p.url || p.Url || "").trim();
         return {
             badgeIcon: "🌍",
@@ -249,7 +267,7 @@ export function computeFormatStepOperation(step: AgentStepItem): StepOperationDi
         }
         const action = cmd ? `$ ${cmd}` : "执行终端命令";
         return {
-            badgeIcon: "⚡",
+            badgeIcon: "💻",
             badgeLabel: "终端",
             actionText: action,
             hasDiff: false,
@@ -344,11 +362,12 @@ export function computeFormatStepOperation(step: AgentStepItem): StepOperationDi
 
     // 8.2 任务终态交付
     if (t === "finish" || t.includes("finish") || t.includes("deliver")) {
-        const summary = String(p.summary || p.final_summary || p.message || "").trim();
+        let summary = String(p.summary || p.final_summary || p.message || "").trim();
+        summary = summary.replace(/^(终态交付|完成交付|任务交付|最终交付|交付)[：:\s]*/i, "").trim();
         return {
-            badgeIcon: "🎉",
+            badgeIcon: "🏁",
             badgeLabel: "终态交付",
-            actionText: summary ? `交付: "${summary.slice(0, 45)}"` : "提交最终交付物与总结",
+            actionText: summary ? (summary.length > 50 ? summary.slice(0, 48) + "…" : summary) : "提交最终交付物与总结",
             hasDiff: false,
         };
     }

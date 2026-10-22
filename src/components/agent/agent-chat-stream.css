@@ -1400,11 +1400,25 @@
     padding-left: 0;
 }
 
-/* 批次用组合图形表达，避免 emoji 字形和文本基线因平台而漂移。 */
+/* 批次/集合用组合图形表达，避免 emoji 字形和文本基线因平台而漂移。 */
 .action-tag.action-tag-batch {
     gap: 4px;
     color: #a5b4fc;
     background: rgba(129, 140, 248, 0.08);
+}
+
+/* 并行：电光青 / 天蓝，表达多轨并发流 */
+.action-tag.action-tag-parallel {
+    gap: 4px;
+    color: #38bdf8;
+    background: rgba(56, 189, 248, 0.08);
+}
+
+/* 串行：流水线琥珀橙 / 暖金，表达顺序工序流 */
+.action-tag.action-tag-pipeline {
+    gap: 4px;
+    color: #fbbf24;
+    background: rgba(245, 158, 11, 0.08);
 }
 
 .batch-operation-icon {
@@ -1414,7 +1428,9 @@
     flex: none;
 }
 
-.action-tag-batch > span {
+.action-tag-batch > span,
+.action-tag-parallel > span,
+.action-tag-pipeline > span {
     line-height: inherit;
 }
 
@@ -1448,9 +1464,43 @@
     background: rgba(103, 232, 249, 0.06);
 }
 
+.action-tag-icon {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    flex-shrink: 0;
+    vertical-align: -1.5px;
+}
+
 .action-tag.action-tag-mcp {
     color: #c4b5fd;
     background: rgba(196, 181, 253, 0.06);
+}
+
+.action-tag.action-tag-deliver {
+    color: #34d399;
+    background: rgba(52, 211, 153, 0.08);
+    border: 1px solid rgba(52, 211, 153, 0.2);
+}
+
+.action-tag.action-tag-recall {
+    color: #c084fc;
+    background: rgba(192, 132, 252, 0.08);
+}
+
+.action-tag.action-tag-artifact {
+    color: #fb923c;
+    background: rgba(251, 146, 60, 0.08);
+}
+
+.action-tag.action-tag-human {
+    color: #f472b6;
+    background: rgba(244, 114, 182, 0.08);
+}
+
+.action-tag.action-tag-model {
+    color: #a78bfa;
+    background: rgba(167, 139, 250, 0.08);
 }
 
 .action-tag.action-tag-subagent {
@@ -1605,6 +1655,8 @@
     font-size: 10.5px;
     color: #eab308;
     font-weight: 500;
+    flex-shrink: 0;
+    margin-left: 2px;
 }
 
 /* 🌟 连续动作智能微折叠卡片 (高信噪比收拢连续搜索与连续 MCP 工具调用) */
@@ -1710,9 +1762,9 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
-    padding: 2px 0 3px 18px;
-    margin-left: 12px;
-    border-left: 1.5px solid rgba(255, 255, 255, 0.06);
+    padding: 2px 0 2px 8px;
+    margin-left: 6px;
+    border-left: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .ambient-search-sub-row,
@@ -1720,7 +1772,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 2px 6px;
+    padding: 2px 4px;
     border-radius: 4px;
     font-size: 11.5px;
     color: #94a3b8;
@@ -1730,7 +1782,7 @@
 
 .ambient-search-sub-row:hover,
 .ambient-action-sub-row:hover {
-    background: rgba(255, 255, 255, 0.03);
+    background: rgba(255, 255, 255, 0.04);
     color: #cbd5e1;
 }
 
@@ -1746,6 +1798,97 @@
     align-items: center;
     gap: 4px;
     flex-shrink: 0;
+}
+
+/* 子步骤动作微图标：替代生硬圆点，准确反映子项工具 */
+.action-sub-lead {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+    line-height: 1;
+}
+
+.action-sub-lead.sub-action-parallel {
+    color: #38bdf8;
+}
+
+.action-sub-lead.sub-action-pipeline {
+    color: #fbbf24;
+}
+
+.action-sub-lead.sub-action-batch {
+    color: #a5b4fc;
+}
+
+.action-sub-lead.sub-action-search {
+    color: #c084fc;
+}
+
+.action-sub-lead.sub-action-web {
+    color: #38bdf8;
+}
+
+.action-sub-lead.sub-action-shell {
+    color: #e2e8f0;
+}
+
+.action-sub-lead.sub-action-read {
+    color: #94a3b8;
+}
+
+.action-sub-lead.sub-action-edit {
+    color: #7dd3fc;
+}
+
+.action-sub-lead.sub-action-write {
+    color: #86efac;
+}
+
+.action-sub-lead.sub-action-recall {
+    color: #c084fc;
+}
+
+.action-sub-lead.sub-action-artifact {
+    color: #fb923c;
+}
+
+.action-sub-lead.sub-action-human {
+    color: #f472b6;
+}
+
+.action-sub-lead.sub-action-model {
+    color: #a78bfa;
+}
+
+.action-sub-lead.sub-action-mcp {
+    color: #c4b5fd;
+}
+
+.action-sub-lead.sub-action-subagent {
+    color: #a5b4fc;
+}
+
+.action-sub-lead.sub-action-deliver {
+    color: #34d399;
+}
+
+.action-sub-lead.sub-action-general {
+    color: #94a3b8;
+}
+
+.sub-action-icon {
+    display: block;
+    width: 12px;
+    height: 12px;
+    flex: none;
+}
+
+.sub-action-glyph {
+    font-size: 11px;
+    line-height: 1;
 }
 
 .search-sub-title,
@@ -1765,7 +1908,11 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    color: #64748b;
+    color: #94a3b8;
+}
+
+.ambient-action-sub-row:hover .action-sub-body {
+    color: #cbd5e1;
 }
 
 .ambient-text-time.mini {
@@ -1804,6 +1951,7 @@
 .ambient-action-group-header .ambient-text-time,
 .ambient-search-sub-row .search-sub-lead,
 .ambient-search-sub-row .ambient-text-time,
+.ambient-action-sub-row .action-sub-lead,
 .ambient-action-sub-row .ambient-text-time {
     line-height: 18px;
 }
@@ -1850,9 +1998,9 @@
 .ambient-live-text-bar {
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: 6px;
     width: 100%;
-    padding: 2px 4px;
+    padding: 2px 0;
     border-radius: 4px;
     cursor: pointer;
     transition: background 0.12s ease;
@@ -1865,8 +2013,8 @@
 .live-think-label {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    font-size: 13.5px;
+    gap: 5px;
+    font-size: 13px;
     font-weight: 600;
     color: #38bdf8;
     white-space: nowrap;
@@ -1875,38 +2023,30 @@
     line-height: 1.45;
 }
 
-.live-think-square-icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 18px;
-    height: 18px;
-    border-radius: 4px;
-    background: rgba(56, 189, 248, 0.12);
-    border: 1px solid rgba(56, 189, 248, 0.26);
-    color: #38bdf8;
-    flex-shrink: 0;
-    box-sizing: border-box;
-    transition: all 0.15s ease;
+.live-think-label.is-action {
+    color: #fbbf24;
 }
 
-.live-think-square-icon.is-action {
-    background: rgba(234, 179, 8, 0.1);
-    border-color: rgba(234, 179, 8, 0.26);
-    color: #e2b340;
+/* 思考转圈指示器：复用全量模式的灵动圆环，左侧齐平无凹凸 */
+.live-think-spinner {
+    width: 12px;
+    height: 12px;
+    border: 1.5px solid rgba(56, 189, 248, 0.25);
+    border-top-color: #38bdf8;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
 }
 
-.thought-square-svg {
-    width: 11px;
-    height: 11px;
-    stroke: currentColor;
-    flex-shrink: 0;
+.live-think-spinner.is-action {
+    border-color: rgba(251, 191, 36, 0.25);
+    border-top-color: #fbbf24;
 }
 
 .live-think-title {
-    font-size: 13.5px;
+    font-size: 13px;
     font-weight: 600;
-    color: #38bdf8;
+    color: inherit;
     letter-spacing: 0.1px;
 }
 
@@ -3899,7 +4039,6 @@ article:hover .msg-header-actions .msg-fork-btn:disabled {
 .ambient-term-box { margin: 2px 6px 4px 6px; }
 .ambient-term-body { max-height: 160px; }
 
-/* 简报流：多 Agent 并发协同行与子代理展开项 (每一个 agent 一行) */
 .ambient-workers-list {
     display: flex;
     flex-direction: column;
@@ -3907,6 +4046,43 @@ article:hover .msg-header-actions .msg-fork-btn:disabled {
     margin: 4px 0 2px 18px;
     padding: 3px 0 3px 8px;
     border-left: 1.5px solid rgba(148, 163, 184, 0.2);
+}
+
+/* 多模型并发审查专属联合面板 */
+.ambient-workers-list.review-step-members {
+    margin: 5px 0 4px 12px;
+    padding: 6px 10px;
+    background: rgba(15, 23, 42, 0.42);
+    border: 1px solid rgba(99, 102, 241, 0.16);
+    border-left: 2.5px solid #818cf8;
+    border-radius: 6px;
+    gap: 4px;
+    backdrop-filter: blur(8px);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+}
+
+.review-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-bottom: 4px;
+    margin-bottom: 2px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.review-panel-title {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #a5b4fc;
+    letter-spacing: 0.15px;
+}
+
+.review-shield-icon {
+    color: #818cf8;
+    flex-shrink: 0;
 }
 
 /* 简报流：审查结论胶囊 */

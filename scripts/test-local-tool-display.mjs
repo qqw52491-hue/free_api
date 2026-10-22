@@ -31,8 +31,10 @@ const cases = [
     ['explicit read', { tool:'local_file', action:'read', params:{ path:'a.vue' } }, '读取'],
     ['serialized params', { tool:'local_file', action:'local_file', params:'{"path":"a.vue","action":"list"}' }, '目录'],
     ['nested params', { tool:'local_file', action:'local_file', params:{ command:{action:'read', path:'a.vue'} } }, '读取'],
-    ...['parallel', 'pipeline', 'commands', 'plan_tree'].map(tool =>
-        [tool, { tool, params: {}, description: '检查两项信息' }, '操作集合']),
+    ['parallel', { tool:'parallel', params:{}, description:'检查两项信息' }, '并行'],
+    ['pipeline', { tool:'pipeline', params:{}, description:'检查两项信息' }, '串行'],
+    ['commands', { tool:'commands', params:{}, description:'检查两项信息' }, '串行'],
+    ['plan_tree', { tool:'plan_tree', params:{}, description:'检查两项信息' }, '操作集合'],
     ['local shell', { tool:'local_shell', action:'local_shell', params:{command:'pwd'} }, '终端'],
 ];
 for (const [name,step,label] of cases) {
