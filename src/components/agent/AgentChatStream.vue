@@ -340,7 +340,6 @@
                                     {
                                         'is-milestone': item.action.isMilestone,
                                         'is-warning': item.action.isWarning,
-                                        'intent-first': !!item.action.explanation && !item.action.isMilestone,
                                         [`finding-${item.step.findingKind}`]: item.action.isMilestone && item.step.findingKind
                                     }
                                 ]"

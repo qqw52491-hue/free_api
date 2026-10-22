@@ -52,11 +52,15 @@
                 <div v-for="row in workerActionRows" :key="row.step.stepNumber" class="review-activity-event worker-action-event">
                     <span class="worker-step-index">{{ row.step.stepNumber }}</span>
                     <div class="worker-action-content">
-                        <p class="worker-action-purpose">{{ row.step.description || row.step.title || row.step.tool }}<span v-if="row.step.durationMs != null" class="worker-action-duration"> · {{ (row.step.durationMs / 1000).toFixed(1) }}s</span></p>
-                        <details v-if="row.invocation && row.invocation !== (row.step.description || row.step.title)" class="worker-command">
-                            <summary :title="row.invocation"><code>{{ row.invocation }}</code></summary>
+                        <details v-if="row.invocation" class="worker-command" :class="{ 'has-purpose': !!row.explanation }">
+                            <summary>
+                                <code :title="row.invocation">{{ row.invocation }}</code>
+                                <span v-if="row.explanation" class="worker-action-purpose" :title="row.explanation">{{ row.explanation }}</span>
+                                <span v-if="row.step.durationMs != null" class="worker-action-duration">{{ (row.step.durationMs / 1000).toFixed(1) }}s</span>
+                            </summary>
                             <pre class="worker-command-full">{{ row.invocation }}</pre>
                         </details>
+                        <p v-else class="worker-action-purpose" :title="row.explanation">{{ row.explanation }}</p>
                     </div>
                 </div>
                 <p v-if="!workerSteps.length || worker.livePreview || !memberActive" class="worker-current-action">{{ activity }}</p>
@@ -87,7 +91,10 @@ watch(() => props.review?.id || props.worker?.id, () => { manualExpanded.value =
 watch(memberActive, (active, previous) => { if (!active && previous) { manualExpanded.value = null; fullThoughtOpen.value = false; } });
 watch(expanded, value => { if (!value) fullThoughtOpen.value = false; });
 const workerSteps = computed(() => props.worker?.steps?.slice(-4) || []);
-const workerActionRows = computed(() => workerSteps.value.map(step => ({ step, invocation: workerStepInvocation(step) })));
+const workerActionRows = computed(() => workerSteps.value.map(step => {
+    const invocation = workerStepInvocation(step);
+    return { step, invocation, explanation: step.description || (step.title !== invocation ? step.title : '') || '' };
+}));
 // Only real thinking, never raw structured output; keep the default DOM bounded.
 const workerThoughtPreview = computed(() => (props.worker?.thought || (props.worker?.livePreview?.streamType === 'thinking' ? props.worker.livePreview.text : '')).slice(-4000));
 const activityPane = ref<HTMLElement | null>(null);
@@ -163,17 +170,18 @@ button { font: inherit; cursor: pointer; border-radius: 3px; }
 .worker-thought-toggle { flex-shrink: 0; padding: 1px 4px; border: 0; background: transparent; color: #94a3b8; }
 button:hover { color: #f1f5f9; background: rgba(255,255,255,.08); }
 button:focus-visible { outline: 1px solid #818cf8; outline-offset: 2px; }
-.worker-activity-scroll { max-height: 112px; }
+.worker-activity-scroll { max-height: 66px; }
 .worker-activity-scroll .review-activity-event { padding: 0; line-height: 22px; }
-.worker-action-event { margin-bottom: 5px; }
+.worker-action-event { margin-bottom: 1px; }
 .worker-action-content { min-width: 0; flex: 1; }
-.worker-action-purpose { margin: 0; line-height: 19px; color: #d1d8e3; overflow-wrap: anywhere; }
-.worker-action-duration { color: #718198; font-size: 10px; }
+.worker-action-purpose { flex: 1; min-width: 0; margin: 0; line-height: 22px; color: #a8b4c6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.worker-action-duration { flex-shrink: 0; color: #718198; font-size: 10px; }
 .worker-command { min-width: 0; color: #7e8fa7; }
-.worker-command summary { display: flex; align-items: center; gap: 4px; cursor: pointer; min-width: 0; line-height: 17px; }
+.worker-command summary { display: flex; align-items: center; gap: 7px; cursor: pointer; min-width: 0; line-height: 22px; }
 .worker-command summary::before { content: '›'; flex-shrink: 0; }
 .worker-command[open] summary::before { content: '⌄'; }
-.worker-command code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 10.5px/17px ui-monospace, monospace; }
+.worker-command code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 10.5px/22px ui-monospace, monospace; color: #bdc9dc; }
+.worker-command.has-purpose code { flex: 0 1 auto; max-width: 45%; }
 .worker-command-full { margin: 3px 0; padding: 5px 7px; max-height: 120px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 10.5px/1.6 ui-monospace, monospace; background: rgba(0,0,0,.14); border-radius: 4px; user-select: text; }
 .worker-step-index { flex-shrink: 0; min-width: 18px; color: #94a3b8; font-size: 10px; font-variant-numeric: tabular-nums; }
 .worker-current-action, .worker-thought-fragment { margin: 0; padding: 0; line-height: 22px; color: #cbd5e1; overflow-wrap: anywhere; }

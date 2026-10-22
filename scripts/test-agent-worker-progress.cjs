@@ -97,12 +97,13 @@ async function main() {
     assert.equal(purposeWorker.currentStep, '核对授权失效后是否仍会跳转登录页');
     assert.equal(purposeWorker.steps.at(-1).description, purposeWorker.currentStep, 'host intent survives composable projection');
     const purposeLine = all(purposeCard, el => el.props.class === 'worker-action-purpose').at(-1);
-    const commandBlock = all(purposeCard, el => el.props.class === 'worker-command').at(-1);
+    const commandBlock = all(purposeCard, el => String(el.props.class).split(' ').includes('worker-command')).at(-1);
     assert.equal(text(purposeLine), purposeWorker.currentStep);
     assert.equal(all(commandBlock, el => el.type === 'code')[0].text, 'run_command\n' + fullCommand);
     assert.equal(all(commandBlock, el => el.type === 'pre')[0].text, 'run_command\n' + fullCommand, 'expandable source preserves complete multiline command');
     assert(!commandBlock.props.open, 'full command starts collapsed');
-    assert(text(purposeCard).indexOf(purposeWorker.currentStep) < text(purposeCard).indexOf('run_command\n'));
+    const commandSummary = all(commandBlock, el => el.type === 'summary')[0];
+    assert(text(commandSummary).indexOf('run_command\n') < text(commandSummary).indexOf(purposeWorker.currentStep), 'child invocation is followed by its explanation on the same summary row');
     assert(!text(purposeCard).includes('DO_NOT_RENDER_UNRELATED_ARGS'), 'do not dump arbitrary parameters into the command line');
     assert.equal(all(purposeCard, el => el.type === 'not-an-html-tag').length, 0, 'command renders as text');
     progress({ type: 'child_worker_action', child_run_id: 'purpose-worker', step: 2, action: 'read_file', params: { path: 'src/login.vue', start_line: 10, end_line: 30 } });
