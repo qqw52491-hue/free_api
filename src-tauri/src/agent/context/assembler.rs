@@ -50,14 +50,15 @@ impl SandwichContext {
         // 随着任务一步步向后追加，无动态插入，完美覆盖主流大模型的前缀缓存
         // ════════════════════════════════════════════════════════════════
         // 若 turns_history 首条消息与 M1 静态目标完全相同，则跳过首条，避免 M1 与历史首条合并产生重复目标
-        let history_slice = if let Some(first) = self.turns_history.first() {
+        let projected_history = crate::agent::attachment_vision::project_history(self);
+        let history_slice = if let Some(first) = projected_history.first() {
             if first.role == "user" && first.content.as_str() == Some(&self.user_goal) {
-                &self.turns_history[1..]
+                &projected_history[1..]
             } else {
-                &self.turns_history[..]
+                &projected_history[..]
             }
         } else {
-            &self.turns_history[..]
+            &projected_history[..]
         };
 
         // 🥩 中间夹心：纯 Append-only 线性历史，组装时绝不改写历史字节。

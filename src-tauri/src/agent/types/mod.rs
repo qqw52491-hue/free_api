@@ -4,6 +4,46 @@ use serde::{Deserialize, Serialize};
 
 pub const RUN_INTERRUPTED_ROUTE: &str = "run_interrupted";
 
+/// 已由内层执行过指令生成补正时，将耗尽事实传给外层，避免重新开启同一预算。
+/// 仅携带本次调用已有的尝试次数，不增加运行期计数器或模型字段。
+#[derive(Debug)]
+pub enum StepExecutionError {
+    Other(String),
+    InstructionRecoveryExhausted { reason: String, attempts: usize },
+}
+
+impl StepExecutionError {
+    pub fn instruction_recovery_exhausted(&self) -> bool {
+        matches!(self, Self::InstructionRecoveryExhausted { .. })
+    }
+
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Other(message) => message,
+            Self::InstructionRecoveryExhausted { reason, .. } => reason,
+        }
+    }
+}
+
+impl From<String> for StepExecutionError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
+impl std::fmt::Display for StepExecutionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Other(message) => f.write_str(message),
+            Self::InstructionRecoveryExhausted { reason, attempts } => {
+                write!(f, "模型指令恢复已用完 {attempts} 次尝试；未取得可执行指令：{reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for StepExecutionError {}
+
 /// 顶层 parallel: [] 是未使用的占位，不应覆盖同一条指令中的单步动作。
 /// 在反序列化入口归一，覆盖模型解析、直接调用与检查点恢复；非空分支原样保留。
 fn deserialize_optional_parallel<'de, D>(

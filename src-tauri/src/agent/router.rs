@@ -597,16 +597,7 @@ impl AgentRouter {
         if !context.pending_view_images.is_empty() {
             return true;
         }
-        for msg in context.turns_history.iter().rev() {
-            if let Some(arr) = msg.content.as_array() {
-                for item in arr {
-                    if item.get("type").and_then(|t| t.as_str()) == Some("image_url") {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
+        crate::agent::attachment_vision::history_requires_vision(context)
     }
 }
 

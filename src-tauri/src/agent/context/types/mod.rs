@@ -249,6 +249,9 @@ pub struct SandwichContext {
     // ════════════════════════════════════════════════════════════════════
     /// 历史对话回合流 (仅包含 action_brief 与脱水采样后的 execution feedback)
     pub turns_history: Vec<ChatMessage>,
+    /// 附件图片的宿主观察回执；原图历史不改，发送投影由此决定。
+    #[serde(default)]
+    pub(crate) image_observations: BTreeMap<String, crate::agent::attachment_vision::ImageObservation>,
     /// 已导入聊天的位置不随摘要/脱水变化；不发送给模型。
     #[serde(default)]
     pub conversation_cursor: Option<crate::agent::conversation::ConversationCursor>,
@@ -473,6 +476,7 @@ impl SandwichContext {
             block_manager: crate::agent::target_block::BlockManager::new(),
             change_verification: None,
             turns_history: Vec::new(),
+            image_observations: BTreeMap::new(),
             conversation_cursor: None,
             acknowledged_chat_ids: BTreeSet::new(),
             current_observation: String::new(),

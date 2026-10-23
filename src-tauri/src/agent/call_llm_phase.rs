@@ -1,5 +1,8 @@
 //! CallLlm 阶段执行器：模型规划、结构化决策确认与工具派发编排。
-//! 从 loop_runner.rs 原样抽出，行为不变。
+//! 指令补正耗尽时保留错误类型上传，工具纠错与传输恢复独立处理。
+
+#[cfg(test)]
+mod tests;
 
 use crate::agent::checkpoint::{save_checkpoint, AgentCheckpoint};
 use crate::agent::child_reviewer::result_as_dispatch_output;
@@ -10,7 +13,7 @@ use crate::agent::dispatcher::{
 };
 use crate::agent::mcp::PluginRegistry;
 use crate::agent::run_state::{AgentRunEvent, AgentRunMachine};
-use crate::agent::types::{AgentInstruction, DispatchResult, RUN_INTERRUPTED_ROUTE};
+use crate::agent::types::{AgentInstruction, DispatchResult, StepExecutionError, RUN_INTERRUPTED_ROUTE};
 use crate::agent::utils::call_llm;
 use crate::db::DbState;
 use crate::llm::ModelConfig;
@@ -128,7 +131,7 @@ pub async fn run_call_llm_and_run_tool_phases(
     interrupt_rx: &mut watch::Receiver<u64>,
     resume_instruction: Option<AgentInstruction>,
     run_trace_steps: &mut Vec<serde_json::Value>,
-) -> Result<StepExecutionOutcome, String> {
+) -> Result<StepExecutionOutcome, StepExecutionError> {
     // 【shell 批改探针·前】步骤开始前快照 git 脏文件数；主循环在步骤结束后取差值。
     // 覆盖单发/批量派发/重试所有路径，防止 shell_exec 批量改文件绕过阶段审查。
     context.shell_probe_pre_dirty_paths =
@@ -269,6 +272,59 @@ pub async fn run_call_llm_and_run_tool_phases(
         )?;
     }
 
+    // 附件观察先落检查点，再按实际发送投影选择规划模型。
+    // 用户主动 view_image 仍走原有一次性队列，不在此处转述。
+    if crate::agent::attachment_vision::has_unobserved_images(context) {
+        let _ = app.emit(
+            &format!("agent-log-{final_session_id}"),
+            "正在观察新附件图片，保存结果后继续任务。",
+        );
+    }
+    let observation_started = Instant::now();
+    let image_directory =
+        crate::agent::path_guard::get_session_tmp_dir(final_session_id).join("image-observations");
+    match crate::agent::attachment_vision::prepare(
+        state.inner(),
+        context,
+        model_routing,
+        final_session_id,
+        step_id,
+        &image_directory,
+        interrupt_rx,
+    )
+    .await
+    {
+        Ok(true) => {
+            checkpoint.refresh_context(context);
+            save_checkpoint(state.inner(), checkpoint)?;
+            let note = if crate::agent::attachment_vision::history_requires_vision(context) {
+                "附件图片观察未完成，已保留原图并继续原有视觉处理。"
+            } else {
+                "附件图片观察已保存，后续按任务阶段选择模型；原图可随时回看。"
+            };
+            let _ = app.emit(&format!("agent-log-{final_session_id}"), note);
+        }
+        Ok(false) => {}
+        Err(error) if error == crate::llm::STREAM_INTERRUPTED_ERROR => {
+            return Ok(StepExecutionOutcome {
+                instruction: AgentInstruction::default(),
+                result: DispatchResult {
+                    view: None,
+                    success: true,
+                    stdout: take_pending_interrupt(rx)
+                        .unwrap_or_else(|| "用户请求中断图片观察。".into()),
+                    stderr: String::new(),
+                    route: RUN_INTERRUPTED_ROUTE.into(),
+                },
+                token_usage: None,
+                thinking_duration_ms: observation_started.elapsed().as_millis() as u64,
+                tool_duration_ms: 0,
+                thinking_text: String::new(),
+            });
+        }
+        Err(error) => return Err(error.into()),
+    }
+
     let (instruction, result) = loop {
         // --- 🚦 调用网关：动态路由 ---
         let routing =
@@ -336,7 +392,7 @@ pub async fn run_call_llm_and_run_tool_phases(
             Err(_elapsed) => Err(format!(
                 "LLM 调用看门狗超时（{}s 无任何产出）——请求可能僵死，已按失败处理避免会话冻结。",
                 llm_watchdog_secs
-            )),
+            ).into()),
             Ok(r) => r,
         }
         .map(|r| {
@@ -351,7 +407,7 @@ pub async fn run_call_llm_and_run_tool_phases(
         context.pending_view_images.clear();
         let (mut inst, token_usage, thinking_text, history_estimate_at_request) = match llm_call_result
         {
-            Err(e) if e == crate::llm::STREAM_INTERRUPTED_ERROR => {
+            Err(e) if e.message() == crate::llm::STREAM_INTERRUPTED_ERROR => {
                 let reason = take_pending_interrupt(rx)
                     .unwrap_or_else(|| "用户请求中断当前模型输出。".to_string());
                 return Ok(StepExecutionOutcome {
@@ -369,6 +425,18 @@ pub async fn run_call_llm_and_run_tool_phases(
                 });
             }
             Err(e) => {
+                // 指令补正已在 call_llm 内消耗完；保留类型传给主循环，
+                // 本层及整阶段重试都不能重新开启同一生成预算。
+                if e.instruction_recovery_exhausted() {
+                    crate::agent::advance_run_state(
+                        &app,
+                        final_session_id,
+                        &mut run_machine,
+                        AgentRunEvent::PlanningFailed { reason: e.to_string() },
+                    )?;
+                    return Err(e);
+                }
+                let e = e.to_string();
                 // 🛑 如果是网络/API 传输层彻底失败，直接快速终止
                 if e.contains("LLM 请求最终失败")
                     || e.contains("请求失败")
@@ -380,7 +448,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                         &mut run_machine,
                         AgentRunEvent::PlanningFailed { reason: e.clone() },
                     )?;
-                    return Err(format!("❌ LLM 请求失败 (已达重试上限): {}", e));
+                    return Err(format!("❌ LLM 请求失败 (已达重试上限): {}", e).into());
                 }
 
                 // 🛡️ 容错自愈：对于模型自言自语/纯文本格式异常，允许在对话上下文中进行 1 次严格引导重试
@@ -417,7 +485,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                     &format!("agent-log-{}", final_session_id),
                     format!("❌ AI 规划失败: {}", e),
                 );
-                return Err(format!("❌ AI 规划失败: {}", e));
+                return Err(format!("❌ AI 规划失败: {}", e).into());
             }
             Ok(r) => r,
         };

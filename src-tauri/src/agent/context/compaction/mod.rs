@@ -255,7 +255,7 @@ impl<'a> Summarizer for HybridSummarizer<'a> {
 impl SandwichContext {
     /// 计算当前属于历史的有效 Token 估算量（采用悲观防御型 Token 计量）
     pub fn history_estimated_tokens(&self) -> usize {
-        self.turns_history
+        crate::agent::attachment_vision::project_history(self)
             .iter()
             .map(|m| match &m.content {
                 serde_json::Value::String(s) => conservative_token_estimate(s),
@@ -301,7 +301,9 @@ impl SandwichContext {
         // 历史下会吞掉全部消息导致空转；低水位路径用固定小额覆盖即时消费窗口。
         let mut protected_from_back = 0usize;
         let mut back_tokens = 0usize;
-        for msg in self.turns_history.iter().rev() {
+        let projected_history =
+            crate::agent::attachment_vision::project_messages(self, &self.turns_history);
+        for msg in projected_history.iter().rev() {
             back_tokens += match &msg.content {
                 serde_json::Value::String(s) => conservative_token_estimate(s),
                 other => conservative_token_estimate(&other.to_string()),
@@ -356,6 +358,10 @@ impl SandwichContext {
     /// 5. 轮次成对对齐：严格按照 (assistant, user) 轮次对切除，彻底杜绝孤立工具调用报错；
     /// 6. 绝对不爆窗底线：若极端情况下近期保护区仍超出上限，自动将最老步骤降级为 output_id 句柄。
     pub fn maybe_compact_history(&mut self) {
+        // 新附件先完成一次观察/失败落账，避免 base64 体积触发归档后无图可看。
+        if crate::agent::attachment_vision::has_unobserved_images(self) {
+            return;
+        }
         let budget = self.current_budget();
         let mut current_tokens = self.history_estimated_tokens();
 
@@ -397,7 +403,9 @@ impl SandwichContext {
             * ContextBudget::RECENT_PROTECTED_RATIO) as usize;
         let mut protected_from_back = 0;
         let mut back_tokens = 0;
-        for msg in self.turns_history.iter().rev() {
+        let projected_history =
+            crate::agent::attachment_vision::project_messages(self, &self.turns_history);
+        for msg in projected_history.iter().rev() {
             let t = match &msg.content {
                 serde_json::Value::String(s) => conservative_token_estimate(s),
                 other => conservative_token_estimate(&other.to_string()),
@@ -432,7 +440,9 @@ impl SandwichContext {
         // ── 2. 从前往后确定需要切除的轮次数 (compact_count) ──
         let mut running_tokens: usize = 0;
         let mut compact_count = 0;
-        for (i, msg) in self.turns_history.iter().enumerate() {
+        let projected_history =
+            crate::agent::attachment_vision::project_messages(self, &self.turns_history);
+        for (i, msg) in projected_history.iter().enumerate() {
             if i >= max_compact_limit && compact_count > 0 {
                 break;
             }
@@ -473,7 +483,10 @@ impl SandwichContext {
             user_goal: Some(&goal_before_promotion),
         };
         let archive_text = summarizer
-            .summarize(&to_compact)
+            .summarize(&crate::agent::attachment_vision::project_messages(
+                self,
+                &to_compact,
+            ))
             .unwrap_or_else(|_| "- [历史执行记录已安全落盘 SQLite]".to_string());
 
         if !archive_text.is_empty() {

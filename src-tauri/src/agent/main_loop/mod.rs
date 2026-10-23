@@ -1470,7 +1470,7 @@ async fn run_agent_main_loop_in_workspace_inner(
         // 统一重试循环：整个"规划 + 执行"作为一个原子操作，失败就重试
         // （2026-09-13 夜实弹教训：单次 call_llm 硬失败——反代僵死挂 13min、claude 400/流错误
         //   0s 即死——直接 mark_failed 整轮判死。此处把注释承诺的外层重试落地，共 3 次机会；
-        //   用户主动中断不重试。）
+        //   用户主动中断、内层已耗尽的指令补正不在此重开预算。）
         // ================================================================
         let mut resume_instruction_opt = resume_instruction;
         let mut phases_failure_count: u32 = 0;
@@ -1501,12 +1501,14 @@ async fn run_agent_main_loop_in_workspace_inner(
                 Ok(res) => break Ok(res),
                 Err(error) => error,
             };
-            if phases_err.contains(crate::llm::STREAM_INTERRUPTED_ERROR) {
-                break Err(phases_err);
+            if phases_err.instruction_recovery_exhausted()
+                || phases_err.message().contains(crate::llm::STREAM_INTERRUPTED_ERROR)
+            {
+                break Err(phases_err.to_string());
             }
             phases_failure_count += 1;
             if phases_failure_count >= 3 {
-                break Err(phases_err);
+                break Err(phases_err.to_string());
             }
             let backoff_secs = 5u64 * phases_failure_count as u64;
             let retry_warn = format!(

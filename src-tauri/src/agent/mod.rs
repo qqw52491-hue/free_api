@@ -1,5 +1,6 @@
 pub mod agent_policy;
 pub mod artifact_manager;
+pub(crate) mod attachment_vision;
 pub mod capability_index;
 pub mod change_verification;
 pub mod channel;

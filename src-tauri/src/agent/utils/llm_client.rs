@@ -1,7 +1,7 @@
 use crate::{
     agent::{
         context::{ChatMessage, SandwichContext},
-        types::{AgentInstruction, TokenUsage},
+        types::{AgentInstruction, StepExecutionError, TokenUsage},
         utils::{
             extract_json_from_text, extract_streaming_json_field, normalize_raw_instruction_value,
             repair_json,
@@ -343,7 +343,7 @@ pub async fn call_llm(
     reasoning_effort: &str,
     _can_early_challenge_finish: bool,
     interrupt_rx: &mut watch::Receiver<u64>,
-) -> Result<(AgentInstruction, TokenUsage, String, Option<usize>), String> {
+) -> Result<(AgentInstruction, TokenUsage, String, Option<usize>), StepExecutionError> {
     // 1. 从数据库解析模型配置
     let config = ModelConfig::from_db(state, &model_id)?;
     config.log_platform_info();
@@ -572,7 +572,7 @@ pub async fn call_llm(
                         None,
                     );
                 }
-                return Err(error);
+                return Err(error.into());
             }
         };
 
@@ -747,7 +747,10 @@ pub async fn call_llm(
                 }
 
                 if current_try >= max_retries {
-                    return Err(e);
+                    return Err(StepExecutionError::InstructionRecoveryExhausted {
+                        reason: e,
+                        attempts: current_try,
+                    });
                 }
                 println!(
                     "⚠️ 未获得有效工具指令，按既有额度重试 (第 {} 次 / 共 {} 次): {}",

@@ -35,6 +35,9 @@ pub struct DurableAgentContext {
     pub change_verification: Option<ChangeVerification>,
     pub turns_history: Vec<ChatMessage>,
     #[serde(default)]
+    pub(crate) image_observations:
+        BTreeMap<String, crate::agent::attachment_vision::ImageObservation>,
+    #[serde(default)]
     pub conversation_cursor: Option<crate::agent::conversation::ConversationCursor>,
     #[serde(default)]
     pub acknowledged_chat_ids: BTreeSet<String>,
@@ -90,6 +93,7 @@ impl DurableAgentContext {
             review_contract: context.review_contract.clone(),
             change_verification: context.change_verification.clone(),
             turns_history: context.turns_history.clone(),
+            image_observations: context.image_observations.clone(),
             conversation_cursor: context.conversation_cursor.clone(),
             acknowledged_chat_ids: context.acknowledged_chat_ids.clone(),
             failed_attempts: context.failed_attempts.clone(),
@@ -135,6 +139,7 @@ impl DurableAgentContext {
         context.review_contract = self.review_contract.clone();
         context.change_verification = self.change_verification.clone();
         context.turns_history = self.turns_history.clone();
+        context.image_observations = self.image_observations.clone();
         context.conversation_cursor = self.conversation_cursor.clone();
         context.acknowledged_chat_ids = self.acknowledged_chat_ids.clone();
         context.failed_attempts = self.failed_attempts.clone();
@@ -212,6 +217,16 @@ impl DurableAgentContext {
         }
         let chat_tail = std::mem::take(&mut context.turns_history);
         context.turns_history = self.turns_history.clone();
+        // 同会话新任务继承历史附件观察，身份映射到新任务；不再次发送旧原图。
+        let old_prefix = format!("{}:", self.history_task_id);
+        for (key, record) in &self.image_observations {
+            if let Some(source) = key.strip_prefix(&old_prefix) {
+                context.image_observations.insert(
+                    format!("{}:{source}", context.history_task_id),
+                    record.clone(),
+                );
+            }
+        }
         context.turns_history.extend(chat_tail);
         if context.conversation_cursor.is_none() {
             context.conversation_cursor = self.conversation_cursor.clone();

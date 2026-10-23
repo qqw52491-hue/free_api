@@ -565,7 +565,6 @@ onBeforeUnmount(() => {
   flex-direction: column;
   overflow: hidden;
   backdrop-filter: blur(16px);
-  animation: popoverFadeIn 0.18s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .model-dropdown-popover.align-right {
@@ -576,29 +575,6 @@ onBeforeUnmount(() => {
 .model-dropdown-popover.placement-top {
   top: auto;
   bottom: calc(100% + 6px);
-  animation: popoverFadeInUp 0.18s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-@keyframes popoverFadeIn {
-  from {
-    opacity: 0;
-    transform: translateY(-4px) scale(0.98);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-}
-
-@keyframes popoverFadeInUp {
-  from {
-    opacity: 0;
-    transform: translateY(4px) scale(0.98);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
 }
 
 /* Search Header */
