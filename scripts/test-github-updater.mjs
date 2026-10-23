@@ -4,6 +4,9 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
 import { createRequire } from 'node:module';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync, execFileSync } from 'node:child_process';
 import { mergeManifests, targets } from './merge-updater-manifests.mjs';
 import { createManifest } from './create-updater-manifest.mjs';
 const require = createRequire(import.meta.url);
@@ -159,5 +162,25 @@ let count = 0;
     assert.throws(() => createManifest({ ...options, paths: [...files, files[0]] }));
     assert.throws(() => createManifest({ ...options, readSignature: () => '' }));
   }
+}
+{
+  const yaml = require('yaml');
+  const workflow = yaml.parse(fs.readFileSync('.github/workflows/release.yml', 'utf8'));
+  const script = workflow.jobs['release-config'].steps.find(step => step.id === 'version').run;
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'free-api-release-config-'));
+  try {
+    const version = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8')).version;
+    const output = path.join(temp, 'output');
+    const run = spawnSync('bash', ['-c', script], { encoding: 'utf8', env: { ...process.env, RELEASE_TAG: `v${version}`, GITHUB_OUTPUT: output } });
+    assert.equal(run.status, 0, run.stderr);
+    const fields = Object.fromEntries(fs.readFileSync(output, 'utf8').trim().split('\n').map(line => line.split('=')));
+    assert.equal(fields.tag, `v${version}`);
+    assert.equal(fields.commit, execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim());
+    assert.match(fields.commit, /^[0-9a-f]{40}$/);
+    const action = workflow.jobs['publish-tauri'].steps.find(step => step.uses === 'tauri-apps/tauri-action@v1');
+    assert.equal(action.with.releaseCommitish, '${{ needs.release-config.outputs.commit }}');
+    const invalid = spawnSync('bash', ['-c', script], { encoding: 'utf8', env: { ...process.env, RELEASE_TAG: 'main', GITHUB_OUTPUT: output } });
+    assert.notEqual(invalid.status, 0);
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 }
 console.log('GitHub updater: concurrent checks, network errors, progress, duplicate installation, signature failure, restart recovery, native-package fallback and manifest merging passed.');

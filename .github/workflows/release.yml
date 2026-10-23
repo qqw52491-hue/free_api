@@ -23,6 +23,7 @@ jobs:
     runs-on: ubuntu-22.04
     outputs:
       tag: ${{ steps.version.outputs.tag }}
+      commit: ${{ steps.version.outputs.commit }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -38,6 +39,7 @@ jobs:
         run: |
           node --input-type=module <<'JS'
           import fs from 'node:fs';
+          import { execFileSync } from 'node:child_process';
           const tag = process.env.RELEASE_TAG;
           const version = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8')).version;
           const frontend = JSON.parse(fs.readFileSync('package.json', 'utf8')).version;
@@ -46,7 +48,8 @@ jobs:
           if (!/^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(tag || '') || tag !== `v${version}` || version !== frontend || version !== rust) {
             throw new Error('发布标签必须为 v<项目版本>，且 tauri.conf.json、package.json、Cargo.toml 版本须一致。');
           }
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `tag=${tag}\n`);
+          const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `tag=${tag}\ncommit=${commit}\n`);
           JS
 
   publish-tauri:
@@ -124,7 +127,7 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: '1'
         with:
           tagName: ${{ needs.release-config.outputs.tag }}
-          releaseCommitish: ${{ needs.release-config.outputs.tag }}
+          releaseCommitish: ${{ needs.release-config.outputs.commit }}
           releaseName: 'Free API Chat v__VERSION__'
           releaseBody: 'macOS: 按处理器架构选择 .dmg；Windows: .msi 或 .exe；Linux: .deb、.rpm 或 AppImage。应用更新直接通过本 Release 的 latest.json 和签名产物分发。当前未配置 Apple 公证及 Windows 发布者证书，系统可能显示开发者验证提示。'
           releaseDraft: true

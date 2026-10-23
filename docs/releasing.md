@@ -41,6 +41,8 @@ git push origin v0.1.0
 
 手动运行：在 Actions 中打开 Release，选择 **Run workflow**，填入已经推送的版本标签。工作流会检出并构建该标签，不会把 `main` 分支名当作版本号。
 
+创建 Release 时，`releaseCommitish` 使用检出后的完整提交 SHA；`tagName` 仍是版本标签。GitHub 创建 Release 的 `target_commitish` 参数不能直接使用这里的 `v0.1.0` 标签名，首轮远端构建已复现 `Validation Failed: target_commitish`，工作流已按真实回执修正。已有标签无需移动。
+
 ## 3. 查看构建与草稿
 
 打开 Actions 检查四个构建任务的日志，再到 Releases 打开对应版本草稿，核对安装包与架构：
