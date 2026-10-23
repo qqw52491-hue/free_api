@@ -9,6 +9,7 @@ export interface ChildJobReceipt {
     durationMs?: number;
     description?: string;
     output?: string;
+    model?: string;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -63,9 +64,20 @@ export function parseChildJobReceipts(step: AgentStepItem): ChildJobReceipt[] {
         if (!/^child_(worker|reviewer|writer)$/.test(m[2])) continue;
         // Do not include host failover notices in the child's output/artifacts.
         const section = text.slice((m.index || 0) + m[0].length, headers[i + 1]?.index ?? text.length).split(/^🔁/m)[0];
+        const output = section.match(/^\s*输出:\s*([\s\S]*)/m)?.[1]?.trim();
+        let model: string | undefined = undefined;
+        if (output) {
+            try {
+                const parsed = JSON.parse(output);
+                if (parsed && typeof parsed === "object" && typeof parsed.model === "string") {
+                    model = parsed.model;
+                }
+            } catch {}
+        }
         receipts.set(m[1], { id: m[1], tool: m[2], status: jobStatus(m[3]), durationMs: Number(m[4]),
             description: section.match(/^\s*描述:\s*([^\n]*)/m)?.[1]?.trim(),
-            output: section.match(/^\s*输出:\s*([\s\S]*)/m)?.[1]?.trim(),
+            output,
+            model,
         });
     }
     return [...receipts.values()];

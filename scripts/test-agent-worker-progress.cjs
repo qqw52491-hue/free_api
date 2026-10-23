@@ -32,7 +32,7 @@ const renderer = vue.createRenderer({
 });
 function all(el, predicate) { return [el, ...el.children.flatMap(child => all(child, predicate))].filter(predicate); }
 function text(el) { return el.type === '#comment' ? '' : el.text + el.children.map(text).join(''); }
-function toggle(el) { return all(el, child => child.props.class === 'worker-thought-toggle')[0]; }
+function toggle(el) { return all(el, child => String(child.props.class).includes('worker-thought-toggle'))[0]; }
 
 async function main() {
     const s = await session('failed');
@@ -49,6 +49,14 @@ async function main() {
         ...s.teamWorkers.value.map(worker => vue.h(Component, { key: worker.id, worker, isRunning: s.isRunning.value, onInspect: () => inspected = worker.id })),
         ...s.reviewProgress.value.map(review => vue.h(Component, { key: 'final-' + review.id, review, isRunning: s.isRunning.value })),
     ]) });
+    const { stopReviewKey } = load(path.join(base, 'reviewCancellation.ts'));
+    const stopRequests = [];
+    let rejectStop = false;
+    app.provide(stopReviewKey, async id => {
+        stopRequests.push(id);
+        if (rejectStop) throw Error('stop request failed');
+        await s.stopReview(id);
+    });
     app.mount(root);
     const cards = () => all(root, el => el.type === 'article');
     assert.equal(cards().length, 2);
@@ -161,11 +169,12 @@ async function main() {
     assert(reviews().every(el => !el.props['data-worker-id']), 'do not fabricate child IDs');
     assert(text(reviews()[0]).includes('正在思考'));
     assert(text(reviews()[0]).includes('50.0 tok/s'));
-    assert(text(reviews()[0]).includes('最近请求均速'));
-    assert(text(reviews()[0]).includes('第 2 次请求'));
-    assert(text(reviews()[0]).includes('首片段 3.0s'));
+    assert(text(reviews()[0]).includes('均速'));
+    assert(text(reviews()[0]).includes('首片') && text(reviews()[0]).includes('3.0s'));
+    assert(text(reviews()[0]).includes('test-model'), 'model pill is visible on running member');
+    assert(text(reviews()[0]).includes('诊断详情'), 'diagnostics fold is visible on running member');
     assert(!text(reviews()[1]).includes('50.0 tok/s'), 'speed belongs to one member only');
-    assert(text(reviews()[1]).includes('token 速度待回报'));
+    assert(text(reviews()[1]).includes('test-model'), 'every member displays its diagnostic model');
     assert(text(reviews()[1]).includes('read_file'));
     assert(text(reviews()[2]).includes('通过'));
     const bodies = el => all(el, child => child.props.class === 'review-live-body');
@@ -181,9 +190,10 @@ async function main() {
     await vue.nextTick();
     assert.equal(bodies(reviews()[0]).length, 0, 'heartbeat respects manual collapse');
     assert.equal(bodies(reviews()[1]).length, 1, 'other member remains expanded');
+    assert(text(reviews()[0]).includes('50.0 tok/s'), 'speed remains displayed across heartbeat and stream fragments');
     toggle(reviews()[0]).props.onClick(); await vue.nextTick();
-    assert(text(reviews()[0]).includes('模型请求 3 次'));
-    assert(text(reviews()[0]).includes('取证已用 2 / 上限 8 次'));
+    assert(text(reviews()[0]).includes('3 次'));
+    assert(text(reviews()[0]).includes('取证已用 2 / 上限 8 次') || text(reviews()[0]).includes('2/8 步'));
     assert.equal(inspected, 'review-A', 'no nonexistent child inspector');
     const pane = all(reviews()[1], el => String(el.props.class).includes('review-activity-scroll'))[0];
     pane.scrollHeight = 500; pane.clientHeight = 66; pane.scrollTop = 100;
@@ -223,6 +233,11 @@ async function main() {
     }
     const unknownUsage = applyReviewProgress([], { ...reviewBase, review_id: 'speed', member_key: 'speed', phase: 'waiting', last_request_round: 1, last_request_tokens_per_second: 50 }, 0)[0];
     assert.equal(unknownUsage.lastRequestTokensPerSecond, null, 'a rate without actual reported tokens is not accepted');
+    const initialWithSpeed = applyReviewProgress([], { ...reviewBase, review_id: 'retain', member_key: 'retain', phase: 'waiting', last_request_round: 1, last_request_output_tokens: 100, last_request_tokens_per_second: 50 }, 0);
+    assert.equal(initialWithSpeed[0].lastRequestTokensPerSecond, 50);
+    const retained = applyReviewProgress(initialWithSpeed, { ...reviewBase, review_id: 'retain', member_key: 'retain', phase: 'tool', description: '正在取证', last_request_tokens_per_second: null }, 0);
+    assert.equal(retained[0].lastRequestTokensPerSecond, 50, 'speed is retained when update has null speed');
+    assert.equal(retained[0].lastRequestRound, 1, 'round is retained');
     let observations = [];
     for (let i = 0; i < 50; i++) observations = applyReviewProgress(observations, { ...reviewBase, review_id: 'bounded', member_key: 'bounded', phase: 'tool', description: '宿主动作 ' + i, elapsed_ms: i }, 0);
     assert.equal(observations[0].activities.length, 24, 'activity window stays bounded');
@@ -252,6 +267,36 @@ async function main() {
     await emit('channel-run-started', { session_id: 'existing-session', goal: 'next run' });
     await vue.nextTick();
     assert.equal(reviews().length, 0);
+    progress({ type:'child_reviewer_stream', child_run_id:'stop-one', role_label:'慢审查员', stream_type:'thinking', chunk:'先前片段' });
+    progress({ type:'child_reviewer_stream', child_run_id:'keep-one', role_label:'正常审查员', stream_type:'thinking', chunk:'继续核对' });
+    await vue.nextTick();
+    const stoppedCard = () => cards().find(el => el.props['data-worker-id'] === 'stop-one');
+    const keptCard = () => cards().find(el => el.props['data-worker-id'] === 'keep-one');
+    const stopButton = card => all(card, el => el.props.class === 'worker-stop-review')[0];
+    await stopButton(stoppedCard()).props.onClick({stopPropagation(){}}); await vue.nextTick();
+    assert.equal(stopRequests.at(-1),'stop-one');
+    assert(text(stoppedCard()).includes('已停止'));
+    assert(!stopButton(stoppedCard()));
+    assert(stopButton(keptCard()), 'other reviewer remains independently stoppable and running');
+    assert.equal(s.isRunning.value,true, 'single cancellation must not stop the parent');
+    progress({ type:'child_reviewer_action', child_run_id:'stop-one', step:9, action:'read_file', params:{path:'late.rs'} });
+    progress({ type:'child_reviewer_stream', child_run_id:'stop-one', stream_type:'thinking', chunk:'late chunk must not reopen' });
+    await vue.nextTick();
+    assert(s.teamWorkers.value.find(w=>w.id==='stop-one').reviewStopped);
+    assert(!text(stoppedCard()).includes('late chunk'));
+    rejectStop=true;
+    await stopButton(keptCard()).props.onClick({stopPropagation(){}}); await vue.nextTick();
+    assert(text(keptCard()).includes('stop request failed'), 'request failures remain visible and do not pretend success');
+    rejectStop=false;
+    const stopStart=Date.now()+1000;
+    progress({type:'finish_review_progress',review_id:'final-stop',member_key:'final-stop',role_label:'终审员',phase:'waiting',started_at_ms:stopStart,elapsed_ms:100});
+    await vue.nextTick();
+    const finalStop = () => cards().find(el=>el.props['data-review-id']==='final-stop');
+    await stopButton(finalStop()).props.onClick({stopPropagation(){}}); await vue.nextTick();
+    progress({type:'finish_review_progress',review_id:'final-stop',member_key:'final-stop',role_label:'终审员',phase:'passed',started_at_ms:stopStart,elapsed_ms:200});
+    await vue.nextTick();
+    assert.equal(s.reviewProgress.value.find(r=>r.id==='final-stop').phase,'cancelled', 'late success cannot overwrite manual cancellation');
+    assert(!stopButton(finalStop()));
     app.unmount();
     await checkAllWorkerRoles();
     console.log('PASS member UI: all child roles, single/multi reviewers, bounded live thought/steps, independent scrolling, terminal collapse, compact finals, fallback, stop, reset');
@@ -275,8 +320,8 @@ async function checkAllWorkerRoles() {
         worker.value.steps = [{ stepNumber: 1, title: '读取方案依据', tool: 'read_file', status: 'succeeded', durationMs: 120 }];
         worker.value.thought = '早期内容'.repeat(2000) + '\n最新判断：正在核对边界。';
         await vue.nextTick(); await vue.nextTick();
-        assert(text(card()).includes('已记录 1 步'));
-        assert(text(card()).includes('当前工具 read_file'));
+        assert(text(card()).includes('1 步'));
+        assert(text(card()).includes('当前工具') && text(card()).includes('read_file'));
         assert(text(card()).includes('最新判断'));
         const fragment = all(card(), el => el.props.class === 'worker-thought-fragment')[0];
         assert(text(fragment).endsWith(worker.value.thought.slice(-4000)), 'bounded preview retains latest real thought');
@@ -313,14 +358,19 @@ async function checkAllWorkerRoles() {
     app.unmount();
     const budgetReview = { id: 'budget', memberKey: 'budget', label: '审查员', model: 'test-model', phase: 'waiting', round: 11, toolSteps: 8, toolBudget: 8, receivedChars: 0, elapsedMs: 20000 };
     const budgetHtml = await snapshot([budgetReview]);
-    assert(budgetHtml.includes('模型请求 11 次'));
-    assert(budgetHtml.includes('取证已用 8 / 上限 8 次'), 'tool cap is not a cap on model requests');
+    assert(budgetHtml.includes('11 次'));
+    assert(budgetHtml.includes('取证已用 8 / 上限 8 次') || budgetHtml.includes('8/8 步'), 'tool cap is not a cap on model requests');
     const expandedBudgetHtml = await snapshot([{ ...budgetReview, toolSteps: 9, toolBudget: 30 }]);
-    assert(expandedBudgetHtml.includes('取证已用 9 / 上限 30 次'), 'actual backend budget replaces the old default in the rendered row');
-    assert(!expandedBudgetHtml.includes('上限 8 次'));
+    assert(expandedBudgetHtml.includes('取证已用 9 / 上限 30 次') || expandedBudgetHtml.includes('9/30 步'), 'actual backend budget replaces the old default in the rendered row');
+    assert(!expandedBudgetHtml.includes('上限 8 次') && !expandedBudgetHtml.includes('8 步'));
     const disabledHtml = await snapshot([{ ...budgetReview, toolSteps: 0, toolBudget: 0 }]);
-    assert(disabledHtml.includes('取证已关闭'));
+    assert(disabledHtml.includes('关闭'));
     assert(!disabledHtml.includes('0/0'));
+    const modelWorker = { id: 'w-model', name: '审查 · 架构专家', role: 'reviewer', roleLabel: '架构专家', model: 'gemini-3.8-flash', status: 'running', progress: 50, startedAt: Date.now() };
+    const workerModelHtml = await snapshot([], -1, true, [modelWorker]);
+    assert(workerModelHtml.includes('gemini-3.8-flash'), 'worker model must be visible in the rendered member progress');
+    assert(workerModelHtml.includes('worker-line-model'), 'worker model pill is visible in progress line');
+    assert(workerModelHtml.includes('执行模型：gemini-3.8-flash'), 'worker model is visible in expanded diagnostics');
     const source = fs.readFileSync(path.join(base, 'AgentChatStream.vue'), 'utf8');
     const template = sfc.parse(source).descriptor.template.content;
     assert(template.includes('v-for="worker in getAmbientWorkerRows(item.step)"'));

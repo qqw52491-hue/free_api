@@ -24,6 +24,8 @@ pub(crate) fn spawn_review_resume(
     progress: Option<ResumeProgressSink>,
 ) -> Result<String, ResumeReviewError> {
     let error = |route, message| ResumeReviewError { route, message };
+    crate::agent::review_control::ensure_allowed(db, session, &config.model_id)
+        .map_err(|message| error("host_rejection:reviewer_excluded", message))?;
     let (status, kind, _, history, _, _, previous, identity) =
         load_child_run_for_resume(db, target, session)
             .map_err(|e| error("host_rejection:child_not_found", e))?;
@@ -152,6 +154,16 @@ pub(crate) async fn run_resumed_review(
     mut interrupt_rx: watch::Receiver<u64>,
     progress: Option<ResumeProgressSink>,
 ) {
+    let registration = match crate::agent::review_control::register(&db, &session_id, &child_id, &config.model_id, true, interrupt_rx.clone()) {
+        Ok(registration) => registration,
+        Err(_) => {
+            if let Ok(conn) = db.0.lock() { let _ = crate::agent::review_control::cancel_child_on(&conn, &child_id); }
+            crate::agent::job_engine::notify_job_state_changed();
+            return;
+        }
+    };
+    interrupt_rx = registration.interrupt();
+    let _registration = registration;
     let started = std::time::Instant::now();
     let log_suffix = format!("child-{child_id}");
     let stage = format!("child:{child_id}");
@@ -176,7 +188,7 @@ pub(crate) async fn run_resumed_review(
                 };
                 if !chunk.is_empty() {
                     sink(json!({"type":"child_reviewer_stream", "child_run_id":child_id,
-                        "stream_type":kind, "chunk":chunk}));
+                        "stream_type":kind, "chunk":chunk, "model": &config.model_name}));
                 }
             }
             true
@@ -269,6 +281,7 @@ pub(crate) async fn run_resumed_review(
                     attempt_id: None,
                 };
                 let mut delivery = merge_review_extensions(raw, &result);
+                delivery["model"] = json!(config.model_name);
                 if let Some(allowed) = can_finalize {
                     delivery["plan_review_can_finalize"] = json!(allowed);
                 }

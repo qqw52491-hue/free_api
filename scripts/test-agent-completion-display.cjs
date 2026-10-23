@@ -9,11 +9,26 @@ const {session, emit} = require('./test-agent-task-resume.cjs');
 const component = fs.readFileSync(path.resolve(__dirname, '../src/components/agent/AgentChatStream.vue'), 'utf8');
 const source = component.split('<script setup lang="ts">')[1].split('</script>')[0];
 // Compile the actual pending-status element rather than inventing a parallel view model.
-const pendingTemplate = component.match(/<p v-if="completionPending[^>]+>[\s\S]*?<\/p>/)?.[0];
+const compiler = require('@vue/compiler-dom');
+const templateAst = compiler.parse(require('@vue/compiler-sfc').parse(component).descriptor.template.content);
+function findPending(node) {
+    if (node.type === 1 && node.props.some(p => p.type === 7 && p.name === 'if' && p.exp?.content === 'completionPending && isRunning && !completionMessage')) return node;
+    for (const child of node.children || []) {
+        const found = findPending(child);
+        if (found) return found;
+    }
+}
+const pendingNode = findPending(templateAst);
+const pendingTemplate = pendingNode?.loc.source;
 assert(pendingTemplate, 'pending status must be mounted in the real template');
-const pendingRender = new Function('Vue', require('@vue/compiler-dom').compile(pendingTemplate, {mode:'function'}).code)(vue);
+const pendingRender = new Function('Vue', compiler.compile(pendingTemplate, {mode:'function'}).code)(vue);
 const pendingView = (s, overrides={}) => pendingRender({completionPending:s.completionPending.value,
     isRunning:s.isRunning.value,completionMessage:s.completionMessage.value,...overrides}, []);
+function viewText(node) {
+    if (typeof node === 'string') return node;
+    if (Array.isArray(node)) return node.map(viewText).join('');
+    return node?.type === vue.Comment ? '' : viewText(node?.children || '');
+}
 const ast = ts.createSourceFile('component.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 const projection = ast.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === 'currentTimeline');
 assert(projection, 'test must execute the real currentTimeline');
@@ -71,9 +86,9 @@ async function main() {
     }
     draft(long);
     assert.equal(s.completionPending.value, true);
-    assert.equal(pendingView(s).type, 'p');
-    assert(pendingView(s).children.includes('尚未正式交付'));
-    assert(!pendingView(s).children.includes(long), 'status never interpolates the long candidate body');
+    assert.equal(pendingView(s).type, pendingNode.tag);
+    assert(viewText(pendingView(s)).includes('尚未正式交付'));
+    assert(!viewText(pendingView(s)).includes(long), 'status never interpolates the long candidate body');
     assert.equal(pendingView(s,{isRunning:false}).type, vue.Comment);
     assert.equal(pendingView(s,{completionMessage:'已提交'}).type, vue.Comment);
     assert.equal(summaryChanges, 0);

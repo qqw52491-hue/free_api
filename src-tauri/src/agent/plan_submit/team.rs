@@ -10,9 +10,10 @@ pub(super) async fn prepare_snapshots(
     workspace: &Path,
     routing_config: &crate::agent::router::ModelRoutingConfig,
     routing: &crate::agent::router::RoutingDecision,
-    primary: PlanReviewerDispatchSnapshot,
+    mut primary: PlanReviewerDispatchSnapshot,
     cards: &[RoleCard],
 ) -> Vec<PlanReviewerDispatchSnapshot> {
+    primary.params["model"] = json!(primary.model);
     let mut snapshots = vec![primary.clone()];
     for card in cards.iter().skip(1) {
         let mut snapshot = primary.clone();
@@ -38,6 +39,7 @@ pub(super) async fn prepare_snapshots(
             + &crate::agent::tools::role_manager::skills_block(db, card);
         snapshot.params["role"] = json!(card.name);
         snapshot.params["role_label"] = json!(card.label);
+        snapshot.params["model"] = json!(snapshot.model);
         snapshot.custom_schema = card.parse_custom_schema().unwrap_or_default();
         // 输入约束不凭主审的卡片推断；无法承接相同材料的专家在派发时披露。
         let inputs = snapshot.params.get("custom_inputs").cloned();
@@ -105,7 +107,9 @@ pub(super) async fn dispatch_plan_team(
             .and_then(|v| v.as_str())
             .unwrap_or("审查员")
             .to_owned();
-        let spawned = if let Some(error) = snapshot
+        let spawned = if let Err(error) = crate::agent::review_control::ensure_allowed(db, session, &snapshot.model) {
+            Err(error)
+        } else if let Some(error) = snapshot
             .params
             .get("host_input_error")
             .and_then(|v| v.as_str())

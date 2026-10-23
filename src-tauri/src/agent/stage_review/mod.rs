@@ -250,12 +250,14 @@ pub async fn dispatch(
                 router::prefer_cross_family_reviewer(&conn, &routing.model_id)
             }
         };
+        crate::agent::review_control::ensure_allowed(db, session_id, &model_to_use)?;
 
         let evidence = build_stage_evidence(context, workspace, None, &extras);
         let question = "阶段级写入审查：审查当前阶段变更是否满足阶段目标且无 blocking 缺陷".to_string();
         let params = json!({
             "role": "stage_reviewer",
             "role_label": "🛡️ 阶段综合审查官",
+            "model": &model_to_use,
             "question": question,
             "evidence_excerpt": evidence,
         });
@@ -318,6 +320,10 @@ pub async fn dispatch(
                 routing.model_id.clone()
             }
         };
+        if let Err(note) = crate::agent::review_control::ensure_allowed(db, session_id, &model_to_use) {
+            let _ = app.emit(&format!("agent-log-{session_id}"), format!("{}：{note}", card.label));
+            continue;
+        }
 
         let focus_context = {
             let domains = card.parse_focus_domains();
@@ -342,6 +348,7 @@ pub async fn dispatch(
         let params = json!({
             "role": card.name,
             "role_label": card.label,
+            "model": &model_to_use,
             "question": question,
             "evidence_excerpt": evidence,
         });
@@ -382,6 +389,9 @@ pub async fn dispatch(
             &format!("agent-log-{}", session_id),
             format!("📋 阶段审查已派发 ({}) (挂载专家: {})", child_run_id, card.label),
         );
+    }
+    if dispatched_run_ids.is_empty() {
+        return Err("本轮阶段审查没有启动可用成员；用户排除的模型未重新派发，尚无新的阶段审查结论。".into());
     }
     // 预算语义：整轮联合会审无论派发 1 位还是多位，仅计 1 轮
     checkpoint.stage_review_budget_used += 1;

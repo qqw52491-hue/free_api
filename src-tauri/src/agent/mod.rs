@@ -11,6 +11,7 @@ pub mod checkpoint;
 pub mod context;
 pub mod context_collector;
 pub mod control;
+pub(crate) mod review_control;
 pub mod conversation;
 pub mod dispatcher;
 pub mod evaluation;

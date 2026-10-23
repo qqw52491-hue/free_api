@@ -145,6 +145,7 @@ fn aggregate_committee_results(results: Vec<(String, ReviewResult)>) -> ReviewRe
         .iter()
         .filter(|(_, r)| r.is_service_failure())
         .count();
+    let cancelled = results.iter().filter(|(_, r)| r.verdict == "cancelled").count();
     let valid = results
         .iter()
         .filter(|(_, r)| !r.is_service_failure() && r.verdict != "skipped")
@@ -178,8 +179,8 @@ fn aggregate_committee_results(results: Vec<(String, ReviewResult)>) -> ReviewRe
         .max()
         .unwrap_or(0);
     let mut summaries = vec![format!(
-        "多人终审：候选 {} 位，有效结论 {} 位，通道失败 {} 位。",
-        count, valid, failed
+        "多人终审：候选 {} 位，有效结论 {} 位，通道失败 {} 位，人工停止或本任务排除 {} 位。",
+        count, valid, failed - cancelled, cancelled
     )];
     if failed > 0 {
         summaries.push("不可用成员已排除，不计为批准；有效成员的阻塞仍然生效。".into());

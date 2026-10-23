@@ -5,6 +5,24 @@ fn passed() -> serde_json::Value {
     json!({"verdict":"passed","score":85,"summary":"独立核对完成","blocking_issues":[],"nit_issues":[]})
 }
 
+#[test]
+fn individually_cancelled_member_neither_approves_nor_erases_other_members_blockers() {
+    let cancelled = ReviewResult::cancelled("人工停止，本任务排除", "slow", "hash");
+    let mut approved = ReviewResult::skipped_empty();
+    approved.model_id = "fast".into();
+    let merged = aggregate_committee_results(vec![("slow".into(), cancelled.clone()), ("fast".into(), approved.clone())]);
+    assert!(merged.is_passed());
+    assert!(merged.summary.contains("有效结论 1 位"));
+    assert!(merged.summary.contains("通道失败 0 位"));
+    assert!(merged.summary.contains("人工停止或本任务排除 1 位"));
+    approved.verdict = "rejected".into();
+    approved.blocking_issues.push(BlockingIssue { file:"src/a.rs".into(), issue:"真实权限缺口".into(), requirement:"修复".into() });
+    let rejected = aggregate_committee_results(vec![("slow".into(),cancelled.clone()),("fast".into(),approved)]);
+    assert!(!rejected.is_passed());
+    assert_eq!(rejected.blocking_issues.len(), 1);
+    assert!(!aggregate_committee_results(vec![("slow".into(),cancelled)]).is_passed(), "全取消不能当批准");
+}
+
 async fn review(
     mock: &MockReviewer,
     committee: bool,

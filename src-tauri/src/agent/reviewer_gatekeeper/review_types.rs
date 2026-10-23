@@ -42,7 +42,14 @@ impl ReviewResult {
     }
 
     pub fn is_service_failure(&self) -> bool {
-        self.verdict == "failed_open"
+        matches!(self.verdict.as_str(), "failed_open" | "cancelled")
+    }
+
+    pub(crate) fn cancelled(reason: &str, model_id: &str, diff_hash: &str) -> Self {
+        let mut result = Self::failed_open(reason, model_id, diff_hash);
+        result.verdict = "cancelled".into();
+        result.summary = reason.into();
+        result
     }
 
     pub fn skipped_empty() -> Self {

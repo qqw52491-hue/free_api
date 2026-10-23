@@ -395,6 +395,10 @@ fn commit_terminal_inner(
     let now = Utc::now().to_rfc3339();
     let tx = conn.transaction().map_err(|error| error.to_string())?;
 
+    // 与普通 checkpoint 保存同口径：终审等待时人工停止可独立追加排除，
+    // 必须在本次事务内合并，既不丢用户决定，也不覆盖其他执行者的版本。
+    crate::agent::review_control::merge_exclusions_on(&tx, checkpoint)?;
+
     // 1) checkpoint：乐观锁一次尝试；冲突整体回滚
     checkpoint.updated_at = now.clone();
     let previous_version = checkpoint.version;

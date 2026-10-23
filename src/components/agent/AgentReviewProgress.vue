@@ -27,7 +27,10 @@
             </div>
             <p v-if="review.lastNotice && review.lastNotice !== review.description" class="review-notice">最近异常：{{ review.lastNotice }}</p>
             <details class="diagnostic-details">
-                <summary>查看诊断详情</summary>
+                <summary>
+                    <span>查看诊断详情</span>
+                    <span v-if="review.model" class="review-model-pill">{{ review.model }}</span>
+                </summary>
                 <div class="review-expanded">
                 <p class="review-model">模型：{{ review.model || '未知' }}</p>
                 <dl>
@@ -97,7 +100,8 @@ i.is-passed { background: #27804d; }
 .diagnostic-button:hover { background: #64748b14; }
 .diagnostic-button:focus-visible, summary:focus-visible, textarea:focus-visible { outline: 2px solid #2783de; outline-offset: 2px; }
 summary { cursor: pointer; align-content: center; }
-.diagnostic-details > summary { min-height: 44px; color: var(--review-muted); }
+.diagnostic-details > summary { min-height: 44px; color: var(--review-muted); display: flex; align-items: center; gap: 8px; }
+.review-model-pill { display: inline-block; padding: 1px 6px; background: rgba(167, 139, 250, 0.12); border: 1px solid rgba(167, 139, 250, 0.25); border-radius: 3px; color: #a78bfa; font-size: 11px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
 dl { margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 16px; }
 dl > div { display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; }
 dt { color: var(--review-muted); } dd { margin: 0; font-variant-numeric: tabular-nums; }

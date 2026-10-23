@@ -269,8 +269,8 @@
                 </div>
                 <template v-else>
                     <div class="selected-step-heading">
-                        <span>{{ selectedStep.source }} · 步骤 {{ selectedStep.stepId + 1 }}</span>
-                        <h3>{{ selectedStep.tool || 'Agent 操作' }}</h3>
+                        <span>{{ selectedStep.source }} · 步骤 {{ selectedStep.stepId + 1 }}<template v-if="selectedStep.view?.kind === 'read'"> · {{ selectedStep.tool }}</template></span>
+                        <h3>{{ selectedStep.view?.kind === 'read' ? '文件读取' : (selectedStep.tool || 'Agent 操作') }}</h3>
                         <p>{{ selectedStep.description || selectedStep.action }}</p>
                         <div class="step-meta">
                             <b :class="`status-${selectedStep.status}`">{{ statusLabel(selectedStep.status) }}</b>
@@ -687,6 +687,8 @@ const currentStepSubagents = computed(() => {
 });
 
 const selectedAgentId = ref<string>("master");
+// immediate 监听可能在首次挂载时就读取页签，须先完成初始化。
+const activeTab = ref<"preview" | "detail" | "diff" | "team" | "context" | "resources">("detail");
 
 const displayedWorkersList = computed(() => {
     if (props.selectedStep) {
@@ -733,7 +735,6 @@ watch(
     }
 );
 
-const activeTab = ref<"preview" | "detail" | "diff" | "team" | "context" | "resources">("detail");
 const customDiffPayload = ref<FileDiffPayload | null>(null);
 
 const stepDiffPayload = computed<FileDiffPayload | null>(() => {
@@ -1549,10 +1550,10 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
 .detail-placeholder h3 { margin: 0; color: #e4e4e7; font-size: 13px; font-weight: 600; }
 .detail-placeholder p { max-width: 240px; margin: 6px auto 0; color: #71717a; font-size: 11.5px; line-height: 1.6; }
 
-.selected-step-heading { padding-bottom: 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+.selected-step-heading { padding: 2px 0 16px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
 .selected-step-heading > span { color: #71717a; font-size: 10px; font-weight: 700; }
-.selected-step-heading h3 { margin: 6px 0 3px; color: #f4f4f5; font-size: 14px; font-weight: 650; word-break: break-word; }
-.selected-step-heading p { margin: 0; color: #a1a1aa; font-size: 11px; line-height: 1.45; }
+.selected-step-heading h3 { margin: 6px 0 4px; color: #f4f4f5; font-size: 14px; font-weight: 600; word-break: break-word; }
+.selected-step-heading p { margin: 0; color: #a1a1aa; font-size: 11px; line-height: 1.6; }
 
 /* 🤖 本步骤派发的子 Agent 概览卡片 */
 .subagents-step-deck {
@@ -1703,8 +1704,8 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     margin-left: 2px;
 }
 
-.step-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; color: #71717a; font-size: 10px; }
-.step-meta b { padding: 2px 5px; border-radius: 3px; font-weight: 650; }
+.step-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; color: #a1a1aa; font-size: 10.5px; }
+.step-meta b { padding: 2px 7px; border-radius: 5px; font-weight: 500; }
 .step-meta .status-running { color: #f4f4f5; background: #27272a; }
 .step-meta .status-succeeded { color: #2ed573; background: rgba(46, 213, 115, 0.12); }
 .step-meta .status-failed { color: #ff4757; background: rgba(255, 71, 87, 0.12); }

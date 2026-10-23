@@ -449,7 +449,7 @@ export function parseWorkerArtifacts(raw: unknown): {
     };
 }
 
-export function extractWorkerDetails(step: AgentStepItem): { name: string; taskDesc: string; role: "reviewer" | "coder" | "worker"; roleLabel: string } {
+export function extractWorkerDetails(step: AgentStepItem): { name: string; taskDesc: string; role: "reviewer" | "coder" | "worker"; roleLabel: string; model?: string } {
     const isReviewer = step.tool === "child_reviewer" || step.action === "child_reviewer";
     const isWriter = step.tool === "child_writer" || step.action === "child_writer";
     const role: "reviewer" | "coder" | "worker" = isReviewer ? "reviewer" : isWriter ? "coder" : "worker";
@@ -459,6 +459,7 @@ export function extractWorkerDetails(step: AgentStepItem): { name: string; taskD
     let taskDesc = "";
     let explicitRoleLabel = "";
     let explicitRole = "";
+    let model = "";
 
     const params = step.params || (step as any).params_summary;
     if (params) {
@@ -470,7 +471,11 @@ export function extractWorkerDetails(step: AgentStepItem): { name: string; taskD
             taskDesc = String(p.task || p.question || p.goal || p.instruction || p.command || "").trim();
             explicitRoleLabel = String(p.role_label || p.roleLabel || p.card_label || "").trim();
             explicitRole = String(p.role || p.role_name || p.roleName || "").trim();
+            model = String(p.model || p.model_id || p.modelId || "").trim();
         }
+    }
+    if (!model && (step as any).modelTier) {
+        model = String((step as any).modelTier).trim();
     }
     if (!taskDesc && step.description && step.description !== "执行操作") {
         taskDesc = step.description.trim();
@@ -503,6 +508,7 @@ export function extractWorkerDetails(step: AgentStepItem): { name: string; taskD
         taskDesc: taskDesc || (isReviewer ? "深入审查代码变更与安全隐患" : isWriter ? "在隔离沙箱中编写代码与测试" : "在工作区执行独立侦察与分析"),
         role,
         roleLabel,
+        model: model || undefined,
     };
 }
 
@@ -555,7 +561,9 @@ export function extractSubagentsFromStep(
         const details = extractWorkerDetails({ ...metadataSource, tool, action: tool, params });
         const arts = parseWorkerArtifacts(receipt?.output);
         const status = receipt?.status || "pending";
-        return { id, name: details.name, role: details.role, roleLabel: details.roleLabel, status,
+        return { id, name: details.name, role: details.role, roleLabel: details.roleLabel,
+            model: details.model || arts.extra?.model || receipt?.model || undefined,
+            status,
             currentStep: status === "succeeded" ? "任务已完成并回收结论" : status === "failed" ? "子任务失败，查看错误详情"
                 : receipt?.description || details.taskDesc || "尚未收到子任务结论",
             currentTool: tool, progress: status === "succeeded" || status === "failed" ? 100 : 0,

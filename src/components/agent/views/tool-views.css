@@ -454,3 +454,156 @@
     font-family: ui-monospace, monospace;
     font-size: 10px;
 }
+
+/* 读取详情：文件身份、范围和操作分层，窄抽屉内不争抢同一行。 */
+.read-view-card.is-detail {
+    min-width: 0;
+    margin: 12px 0;
+    padding: 0;
+    overflow: hidden;
+    border-color: var(--border-1, rgba(255, 255, 255, 0.08));
+    border-radius: 10px;
+    background: var(--bg-0, #141416);
+    text-align: left;
+}
+
+.read-view-card.is-detail:hover {
+    background: var(--bg-0, #141416);
+    border-color: var(--border-1, rgba(255, 255, 255, 0.08));
+}
+
+.read-file-heading {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 11px 12px;
+    background: var(--surface-1, rgba(255, 255, 255, 0.03));
+}
+
+.read-file-icon { flex-shrink: 0; margin-top: 2px; }
+.read-file-heading > .tool-view-badge { margin-top: 2px; }
+.read-file-identity { flex: 1; min-width: 0; }
+.read-file-identity strong {
+    display: block;
+    color: var(--text-1, #f4f4f5);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+.read-file-identity > span {
+    display: block;
+    margin-top: 3px;
+    color: var(--text-2, #a1a1aa);
+    font: 10.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    overflow-wrap: anywhere;
+}
+
+.read-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 6px 10px;
+    border-block: 1px solid var(--border-1, rgba(255, 255, 255, 0.08));
+}
+.read-range { color: var(--text-2, #a1a1aa); font-size: 10.5px; }
+.read-range > span { color: var(--text-3, #71717a); }
+.read-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-left: auto; }
+.read-actions button {
+    padding: 4px 7px;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--text-2, #a1a1aa);
+    font: inherit;
+    font-size: 10.5px;
+    cursor: pointer;
+}
+.read-actions button:hover,
+.read-actions button.active {
+    background: var(--surface-2, rgba(255, 255, 255, 0.06));
+    color: var(--text-1, #f4f4f5);
+}
+.read-actions button:focus-visible {
+    outline: 2px solid var(--accent-light, #8b83ff);
+    outline-offset: 2px;
+}
+
+.read-view-card.is-detail .tool-view-preview.detail-body {
+    max-height: 480px;
+    padding: 12px;
+    border-radius: 0;
+    background: transparent;
+    color: var(--text-1, #e4e4e7);
+    font: 11px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    text-align: left;
+    direction: ltr;
+    tab-size: 4;
+    white-space: pre;
+    overflow-wrap: normal;
+    word-break: normal;
+    text-overflow: clip;
+    scrollbar-width: thin;
+    scrollbar-color: var(--bg-4, #3f3f46) transparent;
+}
+.read-view-card.is-detail .tool-view-preview.wrap-lines {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.read-code-body {
+    max-height: 480px;
+    overflow: auto;
+    padding: 10px 0;
+    font: 11px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    direction: ltr;
+    tab-size: 4;
+    scrollbar-width: thin;
+    scrollbar-color: var(--bg-4, #3f3f46) transparent;
+}
+.read-code-lines { width: max-content; min-width: 100%; }
+.read-code-line { display: flex; }
+.read-code-line:hover { background: var(--surface-1, rgba(255, 255, 255, 0.03)); }
+.read-line-number {
+    position: sticky;
+    left: 0;
+    flex: 0 0 42px;
+    padding: 0 10px 0 6px;
+    border-right: 1px solid var(--border-1, rgba(255, 255, 255, 0.08));
+    background: var(--bg-0, #141416);
+    color: var(--text-3, #71717a);
+    text-align: right;
+    user-select: none;
+}
+.read-line-text {
+    display: block;
+    padding: 0 10px;
+    color: var(--text-1, #e4e4e7);
+    font: inherit;
+    white-space: pre;
+}
+.read-code-body.wrap-lines .read-code-lines { width: 100%; }
+.read-code-body.wrap-lines .read-line-text { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.read-output-note .read-line-text { color: var(--text-2, #a1a1aa); }
+
+/* 柔和的编辑器配色，只作用于读取详情。 */
+.read-view-card.is-detail :deep(.hljs-comment),
+.read-view-card.is-detail :deep(.hljs-quote) { color: #7f8997; }
+.read-view-card.is-detail :deep(.hljs-keyword),
+.read-view-card.is-detail :deep(.hljs-selector-tag),
+.read-view-card.is-detail :deep(.hljs-literal) { color: #c8a5e8; }
+.read-view-card.is-detail :deep(.hljs-tag) { color: #a8b2c1; }
+.read-view-card.is-detail :deep(.hljs-name),
+.read-view-card.is-detail :deep(.hljs-title),
+.read-view-card.is-detail :deep(.hljs-built_in) { color: #8ebcf0; }
+.read-view-card.is-detail :deep(.hljs-attr),
+.read-view-card.is-detail :deep(.hljs-attribute),
+.read-view-card.is-detail :deep(.hljs-property) { color: #d5b5e8; }
+.read-view-card.is-detail :deep(.hljs-string),
+.read-view-card.is-detail :deep(.hljs-regexp) { color: #a6cb91; }
+.read-view-card.is-detail :deep(.hljs-number),
+.read-view-card.is-detail :deep(.hljs-symbol) { color: #dfbd83; }
+.read-view-card.is-detail :deep(.hljs-variable),
+.read-view-card.is-detail :deep(.hljs-template-variable) { color: #e2a4a4; }

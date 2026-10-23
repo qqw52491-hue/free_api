@@ -223,13 +223,15 @@ pub(super) async fn evaluate_finish_diff_single<R: tauri::Runtime>(
 ) -> ReviewResult {
     let interrupt_generation = *interrupt_rx.borrow();
     let result = evaluate_finish_diff_once(app, db, context, model_routing, step_id, workspace, baseline, run_started_at, session_id, interrupt_rx, last_reviewed_hash, last_review_result, stage_carry_over, host_verification, human_waivers, gate_notices, approved_target_files, triage, _plan_mode, finish_summary, None, log_suffix, verification_lock.as_ref()).await;
-    if !result.is_service_failure() || *interrupt_rx.borrow() != interrupt_generation { return result; }
+    if !result.is_service_failure() || result.verdict == "cancelled" || *interrupt_rx.borrow() != interrupt_generation
+        || crate::agent::review_control::ensure_allowed(db, session_id, &result.model_id).is_err() { return result; }
     let backup = match db.0.lock() {
         Ok(conn) => crate::agent::router::configured_reviewer_backup(&conn, &result.model_id, &model_routing.reviewer_backup_model),
         Err(e) => Err(e.to_string()),
     };
     match backup {
         Ok(Some((id, name))) => {
+            if crate::agent::review_control::ensure_allowed(db, session_id, &id).is_err() { return result; }
             let _ = app.emit(&format!("agent-log-{session_id}"), format!("终审通道失败；仅尝试用户配置的备用 {name}，不放行交付。"));
             evaluate_finish_diff_once(app, db, context, model_routing, step_id, workspace, baseline, run_started_at, session_id, interrupt_rx, None, None, stage_carry_over, host_verification, human_waivers, gate_notices, approved_target_files, triage, _plan_mode, finish_summary, Some(&id), log_suffix, verification_lock.as_ref()).await
         }
@@ -270,7 +272,6 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     log_suffix: &str,
     verification_lock: Option<&std::sync::Arc<tokio::sync::Mutex<()>>>,
 ) -> ReviewResult {
-    let cancellation_generation = *interrupt_rx.borrow();
     let started_at = std::time::Instant::now();
 
     // 0. 分流判决：终审仅需机械校验（mechanical_only）→ 直接通过，不调 LLM。
@@ -372,6 +373,10 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     let review_fingerprint = with_execution_evidence_fingerprint(
         &base_review_fingerprint, execution_evidence.as_deref(),
     );
+    let excluded = crate::agent::review_control::excluded_models(db, session_id).unwrap_or_default();
+    let review_fingerprint = if excluded.is_empty() { review_fingerprint } else {
+        with_execution_evidence_fingerprint(&review_fingerprint, Some(&serde_json::to_string(&excluded).unwrap_or_default()))
+    };
 
     // 机械嗅探异常预警：物理异常只报不判——伪格式可能任务授权（实测
     // fakefmt），由审查者取证后裁量。mechanical_only 模式下本预警即
@@ -501,6 +506,10 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     };
 
     if let Some(id) = model_override { model_id = id.to_string(); }
+
+    if let Err(note) = crate::agent::review_control::ensure_allowed(db, session_id, &model_id) {
+        return ReviewResult::cancelled(&note, &model_id, &review_fingerprint);
+    }
 
     if model_id.trim().is_empty() {
         return ReviewResult::failed_open("未配置有效的 Reviewer 模型", "none", &review_fingerprint);
@@ -690,6 +699,17 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     let mut progress = super::progress::ReviewProgress::new(
         app, session_id, log_suffix, &reviewer_label, &model_config.model_name,
     );
+    let registration = match crate::agent::review_control::register(db, session_id, progress.id(), &model_id, false, interrupt_rx.clone()) {
+        Ok(registration) => registration,
+        Err(note) => {
+            progress.fail("cancelled", &note);
+            return ReviewResult::cancelled(&note, &model_id, &review_fingerprint);
+        }
+    };
+    let mut member_interrupt = registration.interrupt();
+    let interrupt_rx = &mut member_interrupt;
+    let cancellation_generation = *interrupt_rx.borrow();
+    let _registration = registration;
 
     // 终审取证环：与 child_reviewer 同构——审查者可先请求只读工具核实产物
     // （tmp/ 前缀直达会话产物区），预算用尽后强制收敛为判决 JSON。
@@ -743,13 +763,19 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
                     if cancelled { "cancelled" } else if failure.is_timeout() { "timeout" } else { "request" },
                     if cancelled { "审查收到停止信号，未获得有效结论" } else if failure.is_timeout() { "审查请求超时，未获得有效结论" } else { "审查请求失败，未获得有效结论" },
                 );
-                return ReviewResult::failed_open(
+                let mut failed = if cancelled { ReviewResult::cancelled(
+                    if crate::agent::review_control::ensure_allowed(db, session_id, &model_id).is_err() {
+                        crate::agent::review_control::STOP_NOTE
+                    } else { "审查收到任务停止信号，未获得有效结论" }, &model_id, &review_fingerprint,
+                ) } else { ReviewResult::failed_open(
                     &format!("Reviewer 审查{}：{}；{}",
                         if failure.is_timeout() { "超时" } else { "调用失败" },
                         failure.description(),
                         if timeout_retried { "本轮已重试，未获得有效审查结论" } else { "未获得有效审查结论" }),
                     &model_id, &review_fingerprint,
-                );
+                ) };
+                enforce_failed_rechecks(&mut failed, &rechecked_obligations);
+                return failed;
             }
         };
         progress.response_completed(&output);
@@ -918,6 +944,12 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
         // 格式纠正只回到审查员，不将协议错误伪装为代码缺陷。
         match parsed {
             Ok(mut result) => {
+                if !_registration.complete() {
+                    progress.fail("cancelled", crate::agent::review_control::STOP_NOTE);
+                    let mut cancelled = ReviewResult::cancelled(crate::agent::review_control::STOP_NOTE, &model_id, &review_fingerprint);
+                    enforce_failed_rechecks(&mut cancelled, &rechecked_obligations);
+                    return cancelled;
+                }
                 enforce_failed_rechecks(&mut result, &rechecked_obligations);
                 progress.finish(&result.verdict);
                 return result;

@@ -20,6 +20,7 @@
                 </svg>
                 <span>{{ label }}</span>
             </button>
+            <span v-if="displayModel" class="review-model-pill worker-line-model" :title="`模型: ${displayModel}`">{{ displayModel }}</span>
             <span v-if="worker?.extra?.resumed" class="worker-resumed">续接</span>
             <span class="worker-activity" :title="activity">{{ activity }}</span>
             <span v-if="review?.lastRequestTokensPerSecond != null || durationMs != null" class="worker-metrics">
@@ -29,6 +30,7 @@
                 </span>
                 <span v-if="durationMs != null" class="worker-duration">{{ (durationMs / 1000).toFixed(1) }}s</span>
             </span>
+            <button v-if="canStopReview" type="button" class="worker-stop-review" :disabled="stopping" title="停止此审查；当前任务后续复审也不再派发该模型，新任务恢复原配置" @click.stop="stopThisReview">{{ stopping ? '停止中…' : '停止并排除' }}</button>
             <button type="button" class="worker-thought-toggle" :class="{ 'is-open': expanded }" :aria-expanded="expanded" @click="expanded = !expanded">
                 <span>{{ expanded ? '收起' : '详情' }}</span>
                 <svg class="toggle-arrow" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -36,6 +38,7 @@
                 </svg>
             </button>
         </div>
+        <p v-if="stopError" class="review-stop-error" role="alert">{{ stopError }}</p>
         <div v-if="expanded && review" class="review-live-body">
             <div class="review-stats-grid" aria-label="实际请求与取证统计">
                 <span class="stat-chip">
@@ -72,7 +75,7 @@
                     <time>{{ (event.elapsedMs / 1000).toFixed(1) }}s</time><span>{{ event.description || statusText }}</span>
                 </p>
             </div>
-            <details v-if="!reviewActive || review.lastNotice" class="review-diagnostics">
+            <details class="review-diagnostics">
                 <summary>
                     <span>诊断详情</span>
                     <span v-if="review.model" class="review-model-pill">{{ review.model }}</span>
@@ -87,14 +90,18 @@
             </details>
         </div>
         <div v-if="expanded && worker" class="review-live-body worker-live-body">
-            <div v-if="worker.steps?.length" class="review-stats-grid" aria-label="已上报的子任务步骤">
-                <span class="stat-chip">
+            <div v-if="worker.steps?.length || workerModel || worker.currentTool" class="review-stats-grid" aria-label="已上报的子任务步骤">
+                <span v-if="worker.steps?.length" class="stat-chip">
                     <span class="stat-k">记录</span>
                     <span class="stat-v">{{ worker.steps.length }} 步</span>
                 </span>
                 <span v-if="worker.currentTool" class="stat-chip">
                     <span class="stat-k">当前工具</span>
                     <span class="stat-v">{{ worker.currentTool }}</span>
+                </span>
+                <span v-if="workerModel" class="stat-chip" :title="`执行模型: ${workerModel}`">
+                    <span class="stat-k">模型</span>
+                    <span class="stat-v">{{ workerModel }}</span>
                 </span>
             </div>
             <div ref="activityPane" class="review-activity-scroll worker-activity-scroll soft-scrollbar" role="region" :aria-label="`${label} · 实时动作与思考片段`" tabindex="0" @scroll.passive="onActivityScroll" @wheel.passive="followActivity = false" @touchmove.passive="followActivity = false">
@@ -119,20 +126,45 @@
                 <summary>完整思考</summary>
                 <pre v-if="fullThoughtOpen" class="worker-full-thought">{{ worker.thought }}</pre>
             </details>
+            <details v-if="workerModel" class="review-diagnostics">
+                <summary>
+                    <span>审查详情</span>
+                    <span class="review-model-pill">{{ workerModel }}</span>
+                </summary>
+                <div class="review-diagnostic-content">
+                    <p>执行模型：{{ workerModel }}</p>
+                    <p v-if="worker.currentTool">子任务类型：{{ worker.currentTool }}</p>
+                    <p v-if="worker.steps?.length">已上报步骤：{{ worker.steps.length }} 步</p>
+                </div>
+            </details>
         </div>
     </article>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue';
+import { computed, inject, nextTick, ref, watch } from 'vue';
 import type { AgentWorkerItem } from './types';
 import { workerStepInvocation } from './workerUtils';
 import { isReviewTerminal, type ReviewProgressItem } from './reviewProgress';
 import { reviewDiagnosis, reviewStatusLabel } from './reviewDiagnostics';
+import { stopReviewKey } from './reviewCancellation';
 const props = withDefaults(defineProps<{ worker?: AgentWorkerItem; review?: ReviewProgressItem; isRunning?: boolean }>(), { isRunning: false });
 defineEmits<{ inspect: [] }>();
+const stopReview = inject(stopReviewKey, null);
+const stopping = ref(false);
+const stopError = ref('');
+const canStopReview = computed(() => !!stopReview && memberActive.value && (props.review || props.worker?.role === 'reviewer'));
+async function stopThisReview() {
+    const id = props.review?.id || props.worker?.id;
+    if (!stopReview || !id || stopping.value) return;
+    stopping.value = true;
+    stopError.value = '';
+    try { await stopReview(id); }
+    catch (error) { stopError.value = String(error); }
+    finally { stopping.value = false; }
+}
 const reviewActive = computed(() => !!props.review && props.isRunning && !isReviewTerminal(props.review.phase));
-const memberActive = computed(() => props.review ? reviewActive.value : props.isRunning && (props.worker?.status === 'running' || props.worker?.status === 'pending'));
+const memberActive = computed(() => props.review ? reviewActive.value : props.isRunning && !props.worker?.reviewStopped && (props.worker?.status === 'running' || props.worker?.status === 'pending'));
 const manualExpanded = ref<boolean | null>(null);
 const fullThoughtOpen = ref(false);
 const expanded = computed({ get: () => manualExpanded.value ?? memberActive.value, set: value => { manualExpanded.value = value; } });
@@ -159,6 +191,8 @@ watch(() => [reviewActivities.value, expanded.value, workerThoughtPreview.value,
     if (el && followActivity.value && typeof el.scrollHeight === 'number') el.scrollTop = el.scrollHeight;
 }, { flush: 'post', immediate: true });
 const label = computed(() => props.review?.label || props.worker?.roleLabel || props.worker?.name || (props.review ? '终审成员' : '子 Agent'));
+const workerModel = computed(() => props.worker?.model || props.worker?.extra?.model || '');
+const displayModel = computed(() => props.review?.model || workerModel.value || '');
 const durationMs = computed(() => props.review?.elapsedMs ?? props.worker?.durationMs);
 const diagnosis = computed(() => props.review ? reviewDiagnosis(props.review, props.isRunning) : null);
 const rowStatus = computed(() => {
@@ -168,13 +202,14 @@ const rowStatus = computed(() => {
     if (diagnosis.value?.tone === 'warning') return 'challenged';
     return isReviewTerminal(props.review.phase) ? 'pending' : 'running';
 });
-const statusText = computed(() => props.review ? reviewStatusLabel(props.review, props.isRunning) : !props.isRunning && (props.worker?.status === 'running' || props.worker?.status === 'pending') ? '未完成' : ({ running: '执行中', pending: '等待中', succeeded: '已完成', failed: '失败', challenged: '待核验' }[rowStatus.value]));
+const statusText = computed(() => props.review ? reviewStatusLabel(props.review, props.isRunning) : props.worker?.reviewStopped ? '已停止 · 本任务排除' : !props.isRunning && (props.worker?.status === 'running' || props.worker?.status === 'pending') ? '未完成' : ({ running: '执行中', pending: '等待中', succeeded: '已完成', failed: '失败', challenged: '待核验' }[rowStatus.value]));
 const activity = computed(() => {
     if (props.review) {
         return statusText.value;
     }
     const worker = props.worker;
     if (!worker) return statusText.value;
+    if (worker.reviewStopped) return '已停止 · 本任务排除';
     if (!props.isRunning && (worker.status === 'running' || worker.status === 'pending')) return statusText.value;
     if (worker.status === 'running' && worker.livePreview) {
         return worker.livePreview.streamType === 'thinking' ? '正在思考' : '正在生成结论';
@@ -184,6 +219,11 @@ const activity = computed(() => {
 </script>
 
 <style scoped>
+.worker-stop-review { flex-shrink: 0; padding: 2px 5px; border: 1px solid #e6a23c40; border-radius: 4px; background: transparent; color: #d4ad73; font: inherit; font-size: 10px; cursor: pointer; }
+.worker-stop-review:hover { background: #e6a23c12; }
+.worker-stop-review:disabled { opacity: .6; cursor: wait; }
+.worker-stop-review:focus-visible { outline: 2px solid #d4ad73; outline-offset: 2px; }
+.review-stop-error { margin: 4px 0; color: #f49087; font-size: 11px; }
 .worker-progress {
     min-width: 0;
     font-size: 11.5px;
@@ -520,6 +560,15 @@ button {
     color: #c4b5fd;
     font-size: 10px;
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.worker-line-model {
+    margin-left: 0;
+    flex-shrink: 0;
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .review-diagnostic-content {

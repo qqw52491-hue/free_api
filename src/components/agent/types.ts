@@ -464,7 +464,9 @@ export interface AgentWorkerItem {
     name: string;
     role: "reviewer" | "coder" | "researcher" | "master" | "worker";
     roleLabel: string;
+    model?: string;
     status: AgentToolStatus;
+    reviewStopped?: boolean;
     currentStep?: string;
     currentTool?: string;
     progress: number; // 0 - 100

@@ -14,6 +14,7 @@ pub const BASELINE_RESERVED_FIELDS: &[&str] = &[
     "contract_id",
     "parent_run_id",
     "parent_session_id",
+    "model",
     "model_id",
     "model_tier",
     "reasoning_effort",

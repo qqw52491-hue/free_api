@@ -83,6 +83,7 @@ pub async fn spawn_child_reviewer(
     mut interrupt_rx: watch::Receiver<u64>,
     identity: &ChildRunIdentity,
 ) -> Result<String, String> {
+    crate::agent::review_control::ensure_allowed(db, parent_session_id, model_id)?;
     // 旧 checkpoint/failover 快照仍可携带已退出的 refs 和材料，只清理本次调用副本。
     let current_params = retire_consumer_params(params);
     let params = &current_params;
@@ -338,7 +339,17 @@ pub async fn spawn_child_reviewer(
         }
     }
 
+    let registration = match crate::agent::review_control::register(db, parent_session_id, &child_run_id, model_id, true, interrupt_rx.clone()) {
+        Ok(registration) => registration,
+        Err(error) => {
+            if let Ok(conn) = db.0.lock() { let _ = crate::agent::review_control::cancel_child_on(&conn, &child_run_id); }
+            crate::agent::job_engine::notify_job_state_changed();
+            return Err(error);
+        }
+    };
+    interrupt_rx = registration.interrupt();
     tokio::spawn(async move {
+        let _registration = registration;
         let started_at = std::time::Instant::now();
         // 子任务内部位置落库（agent_stage_marks，key=child:{run_id}）——
         // 让"子 Agent 卡在哪"可实时查询，而非只在收割时留下一行结果。
@@ -380,6 +391,7 @@ pub async fn spawn_child_reviewer(
                                 "child_run_id": &child_run_id_clone,
                                 "role": &param_role,
                                 "role_label": &param_role_label,
+                                "model": &config.model_name,
                             }),
                         );
                     }
@@ -393,6 +405,7 @@ pub async fn spawn_child_reviewer(
                                 "child_run_id": &child_run_id_clone,
                                 "role": &param_role,
                                 "role_label": &param_role_label,
+                                "model": &config.model_name,
                             }),
                         );
                     }
@@ -440,6 +453,7 @@ pub async fn spawn_child_reviewer(
                         "child_run_id": &child_run_id_clone,
                         "step": llm_call_index,
                         "action": "deliberate",
+                        "model": &config.model_name,
                         "params": { "round": llm_call_index },
                     }),
                 );
@@ -588,6 +602,7 @@ pub async fn spawn_child_reviewer(
                     if let Some(role_label) = param_role_label.as_ref() {
                         res_map.insert("role_label".to_string(), role_label.clone());
                     }
+                    res_map.insert("model".to_string(), json!(config.model_name));
                 }
 
                 if is_plan_review {

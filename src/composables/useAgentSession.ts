@@ -368,6 +368,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     const activeStepNumber = ref<number>(1);
     const actionPhaseText = ref<string>("");
     const reviewProgress = ref<ReviewProgressItem[]>([]);
+    const stoppedReviewIds = new Set<string>();
     const reviewProgressStartedAt = ref(0);
     const reviewRunId = ref('');
     const lastRunTelemetry = ref<AgentSessionTelemetry | null>(null);
@@ -904,6 +905,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             if (!teamWorkers.value.some(w => w.id === id)) {
                 const details = extractWorkerDetails(stepItem);
                 teamWorkers.value.push({ id, name: details.name, role: details.role, roleLabel: details.roleLabel,
+                    model: details.model,
                     status: "pending", currentStep: "正在派发，等待子任务编号…", currentTool: tool, progress: 0,
                     startedAt: stepItem.timestamp, extra: { parentStepId: stepItem.id, dispatchPlaceholder: true } });
             }
@@ -923,10 +925,14 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             if (!worker && !receipt?.tool && !isDispatch) continue;
             if (!worker) {
                 worker = { id, name: details.name, role: details.role, roleLabel: details.roleLabel,
+                    model: details.model || predecessor?.model || receipt?.model,
                     status: receipt?.status || "running", currentStep: "正在后台独立处理任务…", currentTool: childTool,
                     progress: receipt?.status === "succeeded" ? 100 : 35, startedAt: stepItem.timestamp || Date.now() };
                 teamWorkers.value.push(worker);
             }
+            if (details.model && !worker.model) worker.model = details.model;
+            if (predecessor?.model && !worker.model) worker.model = predecessor.model;
+            if (receipt?.model && !worker.model) worker.model = receipt.model;
             // Dispatch success only means launched; it never completes the child.
             if (receipt && isDispatch) {
                 worker.name = predecessor?.name || details.name;
@@ -1130,6 +1136,24 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
 
         const eventType = String(payload.event_type || payload.type || payload.stage || "").toLowerCase();
 
+        if (eventType === 'review_member_stopped') {
+            const id = toText(payload.review_id);
+            if (!id) return;
+            if (payload.stopped === false) return;
+            stoppedReviewIds.add(id);
+            const worker = teamWorkers.value.find(w => w.id === id);
+            if (worker) {
+                worker.reviewStopped = true;
+                worker.status = 'challenged';
+                worker.currentStep = '已停止 · 本任务后续排除此审查模型';
+                worker.currentTool = '';
+            }
+            reviewProgress.value = reviewProgress.value.map(review => review.id === id
+                ? { ...review, phase: 'cancelled', failureKind: 'cancelled', description: '已停止 · 本任务后续排除此审查模型' } : review);
+            return;
+        }
+        if (eventType.startsWith('child_reviewer_') && stoppedReviewIds.has(toText(payload.child_run_id))) return;
+
         // 终审独立进度：按成员归属，不冒充主 Agent 思考/最终判决，不用心跳刷满日志。
         if (eventType === "finish_review_progress") {
             const next = applyReviewProgress(reviewProgress.value, payload, Math.max(reviewProgressStartedAt.value, runStartedAt.value || 0));
@@ -1168,6 +1192,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             const chunk = toText(payload.chunk);
             const childRunId = toText(payload.child_run_id) || (isWorkerStream ? "worker-1" : "reviewer-1");
             const explicitRoleLabel = toText(payload.role_label) || toText(payload.role);
+            const explicitModel = toText(payload.model || payload.model_id);
             
             let worker = childRunId ? teamWorkers.value.find((w) => w.id === childRunId) : undefined;
             if (!worker && (!childRunId || childRunId === "reviewer-1" || childRunId === "worker-1")) {
@@ -1182,6 +1207,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                     name: displayName,
                     role: isWorkerStream ? "worker" : "reviewer",
                     roleLabel: explicitRoleLabel || (isWorkerStream ? "侦察" : "审查员"),
+                    model: explicitModel || undefined,
                     status: "running",
                     currentStep: isWorkerStream ? "正在后台独立检索源码并收集事实证据..." : "正在后台分析变更并审查潜在风险...",
                     currentTool: isWorkerStream ? "child_worker" : "child_reviewer",
@@ -1192,6 +1218,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 teamWorkers.value.push(worker);
             }
 
+            if (explicitModel && !worker.model) worker.model = explicitModel;
             if (explicitRoleLabel) worker.roleLabel = explicitRoleLabel;
             if (chunk) {
                 let previews = workerPreviewStreams.get(childRunId);
@@ -1231,6 +1258,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             const action = toText(payload.action);
             const params = payload.params;
             const intent = toText(payload.intent || payload.description).trim();
+            const explicitModel = toText(payload.model || payload.model_id);
 
             let worker = childRunId ? teamWorkers.value.find((w) => w.id === childRunId) : undefined;
             if (!worker && (!childRunId || childRunId === "worker-1" || childRunId === "reviewer-1")) {
@@ -1243,6 +1271,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                     name: isReviewerAction ? "代码质量审查员" : "后台侦察工作者",
                     role: isReviewerAction ? "reviewer" : "worker",
                     roleLabel: isReviewerAction ? "审查员" : "侦察",
+                    model: explicitModel || undefined,
                     status: "running",
                     currentStep: isReviewerAction ? "正在审查..." : "正在后台执行…",
                     currentTool: isReviewerAction ? "child_reviewer" : "child_worker",
@@ -1252,6 +1281,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 };
                 teamWorkers.value.push(worker);
             }
+            if (explicitModel && worker && !worker.model) worker.model = explicitModel;
             if (worker) {
                 if (!worker.steps) {
                     worker.steps = [
@@ -1700,6 +1730,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         activeStepNumber.value = 1;
         actionPhaseText.value = "";
         if (!preserveReview) {
+            stoppedReviewIds.clear();
             reviewProgress.value = [];
             reviewProgressStartedAt.value = 0;
             reviewRunId.value = '';
@@ -1753,6 +1784,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 awaitingRunStart = false;
                 reviewProgress.value = [];
                 reviewProgressStartedAt.value = Date.now();
+                stoppedReviewIds.clear();
                 reviewRunId.value = toText(payload.run_id);
                 if (payload?.goal) {
                     currentGoal.value = payload.goal;
@@ -1946,6 +1978,13 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             appendLog(`[后台回归评测启动失败] ${toText(error)}`);
         }
     }
+    async function stopReview(reviewId: string) {
+        if (!activeSessionId.value || !isRunning.value) throw new Error('当前任务未在运行');
+        const sid = activeSessionId.value;
+        const outcome = await invoke<{ stopped: boolean }>('stop_review_member', { sessionId: sid, reviewId });
+        if (activeSessionId.value === sid) handleProgress({ type: 'review_member_stopped', review_id: reviewId, stopped: outcome.stopped });
+    }
+
     async function requestStop() {
         if (!isRunning.value || stopRequested.value) return;
         stopRequested.value = true;
@@ -2157,6 +2196,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
 
     return {
         activeSessionId,
+        stopReview,
         ensureSession,
         modelRouting,
         updateBudgetMode,

@@ -39,6 +39,7 @@ pub(super) struct ReviewProgress {
 }
 
 impl ReviewProgress {
+    pub(super) fn id(&self) -> &str { &self.id }
     pub(super) fn new<R: Runtime>(
         app: &AppHandle<R>,
         session: &str,

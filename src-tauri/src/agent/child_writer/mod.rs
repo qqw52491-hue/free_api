@@ -587,6 +587,7 @@ pub async fn run_writer_loop(
                             "stream_type": "thinking",
                             "chunk": chunk,
                             "child_run_id": &child_run_id,
+                            "model": &config.model_name,
                         }),
                     );
                 }

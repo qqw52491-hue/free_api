@@ -194,6 +194,7 @@ pub fn run() {
             agent::send_human_intervention,
             agent::replace_agent_goal,
             agent::cancel_agent_run,
+            agent::review_control::stop_review_member,
             // 微信通道（页面 ↔ Node 桥代理）
             agent::channel::bridge::wechat_bridge_start,
             agent::channel::bridge::wechat_bridge_status,

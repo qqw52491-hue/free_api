@@ -259,7 +259,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, provide, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import AgentChatStream from "./agent/AgentChatStream.vue";
 import AgentComposer from "./agent/AgentComposer.vue";
@@ -269,6 +269,7 @@ import AgentRecordPreview from "./agent/AgentRecordPreview.vue";
 import AgentSettingsDrawer from "./agent/AgentSettingsDrawer.vue";
 import type { AgentModelOption, FileDiffPayload } from "./agent/types";
 import { useAgentSession } from "../composables/useAgentSession";
+import { stopReviewKey } from "./agent/reviewCancellation";
 
 const props = defineProps<{
     panelId: string;
@@ -297,6 +298,7 @@ const session = useAgentSession(props.panelId, {
         emit("promoted", oldId, newId, title, projectId);
     },
 });
+provide(stopReviewKey, session.stopReview);
 
 async function openSettings() {
     try {

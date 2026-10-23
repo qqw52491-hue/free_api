@@ -95,6 +95,9 @@ pub struct AgentCheckpoint {
     /// 人类主人明确批准的特赦/豁免指示（用于在代码审查门禁中豁免特定改动）
     #[serde(default)]
     pub human_waivers: Vec<String>,
+    /// 用户停止审查后按任务排除的模型；新任务从空集合开始，同任务恢复保留。
+    #[serde(default)]
+    pub excluded_review_models: std::collections::BTreeSet<String>,
     /// 被变更层门禁挂起、等待人工确认的 git 破坏命令指纹
     /// （shell_safety::git_cmd_fingerprint 归一化串）。
     /// 实测事故 2026-09-25：git checkout -- 销毁他人未提交工作——
@@ -384,6 +387,7 @@ impl AgentCheckpoint {
             approved_plan_summary: None,
             plan_unreviewed_release: false,
             human_waivers: Vec::new(),
+            excluded_review_models: Default::default(),
             git_destructive_pending: Vec::new(),
             git_destructive_asked: Vec::new(),
             git_destructive_confirmed: Vec::new(),
@@ -616,6 +620,7 @@ fn write_checkpoint_on(
     conn: &rusqlite::Connection,
     checkpoint: &mut AgentCheckpoint,
 ) -> Result<WriteOutcome, String> {
+    crate::agent::review_control::merge_exclusions_on(conn, checkpoint)?;
     if checkpoint.version == 0 {
         // snapshot JSON 与表中 revision 必须一致；否则第一次恢复会错误地再次 INSERT。
         checkpoint.version = 1;

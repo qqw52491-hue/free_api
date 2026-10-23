@@ -101,6 +101,9 @@
                                 <span v-if="worker.currentTool" class="worker-card-tool">
                                     {{ getShortToolName(worker.currentTool) }}
                                 </span>
+                                <span v-if="worker.model" class="worker-card-model" :title="`模型: ${worker.model}`">
+                                    {{ worker.model }}
+                                </span>
                             </div>
                             <div class="worker-card-right">
                                 <span class="worker-status-badge" :class="`status-${worker.status}`">
@@ -125,6 +128,7 @@
                             <div class="detail-name-meta">
                                 <strong class="detail-agent-name" :title="selectedWorker.name">{{ formatWorkerName(selectedWorker.name) }} 链路</strong>
                                 <span class="detail-agent-tool">{{ getShortToolName(selectedWorker.currentTool) }} · {{ selectedWorker.roleLabel }}</span>
+                                <span v-if="selectedWorker.model" class="worker-card-model" :title="`模型: ${selectedWorker.model}`">{{ selectedWorker.model }}</span>
                             </div>
                         </div>
                         <div class="detail-header-right">
@@ -1118,6 +1122,20 @@ async function copyOutput(text?: string) {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+.worker-card-model {
+    font-size: 8.5px;
+    color: #c4b5fd;
+    background: rgba(167, 139, 250, 0.1);
+    border: 1px solid rgba(167, 139, 250, 0.22);
+    padding: 0 4px;
+    border-radius: 3px;
+    font-family: ui-monospace, monospace;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 120px;
 }
 
 .worker-status-badge {

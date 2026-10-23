@@ -56,8 +56,22 @@ export function applyReviewProgress(items: ReviewProgressItem[], payload: Record
     };
     const index = items.findIndex(item => item.memberKey === memberKey);
     const old = items[index];
+    if (old?.id === id && old.phase === 'cancelled') return items;
     if (old && (old.startedAt > startedAt || (old.id === id && (old.elapsedMs > next.elapsedMs || (isReviewTerminal(old.phase) && !isReviewTerminal(phase)))))) return items;
     next.anchor = old?.anchor;
+    if (old && old.id === id) {
+        if (next.lastRequestTokensPerSecond == null && old.lastRequestTokensPerSecond != null) {
+            next.lastRequestTokensPerSecond = old.lastRequestTokensPerSecond;
+            next.lastRequestRound = old.lastRequestRound;
+            next.lastRequestOutputTokens = old.lastRequestOutputTokens;
+        }
+        if (next.lastRequestTtftMs == null && old.lastRequestTtftMs != null) {
+            next.lastRequestTtftMs = old.lastRequestTtftMs;
+        }
+        if (!next.model && old.model) {
+            next.model = old.model;
+        }
+    }
     const history = old?.id === id ? old.activities || [] : [];
     const last = history[history.length - 1];
     const activity = { phase, description: next.description, elapsedMs: next.elapsedMs, round: next.round, toolSteps: next.toolSteps };

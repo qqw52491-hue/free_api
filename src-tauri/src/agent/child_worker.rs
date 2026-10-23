@@ -552,6 +552,7 @@ pub async fn run_worker_loop(
                             "stream_type": "thinking",
                             "chunk": chunk,
                             "child_run_id": &child_run_id,
+                            "model": &config.model_name,
                         }),
                     );
                 }
@@ -681,6 +682,7 @@ pub async fn run_worker_loop(
                     "step": steps_used,
                     "action": &parsed.action,
                     "intent": &parsed.intent,
+                    "model": &config.model_name,
                     "params": &parsed.params,
                 }),
             );
