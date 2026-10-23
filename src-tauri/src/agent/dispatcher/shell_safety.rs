@@ -164,89 +164,6 @@ pub fn has_file_write_redirection(cmd: &str) -> bool {
     crate::agent::context::AuditLedger::has_write_redirect(&masked)
 }
 
-/// 纯只读 shell 命令（白名单，用于 parallel 只读扇出放宽）：
-/// 每一段（按换行/`;`/`|`/`&` 切）的首个命令都在只读白名单内，且无写重定向、
-/// heredoc、命令替换。与 is_safe_read_only_shell_command（黑名单）不同：
-/// `node render.mjs`、`ffmpeg -y` 这类有副作用的命令一律不算。
-pub fn is_pure_read_shell_command(raw_cmd: &str) -> bool {
-    let raw = raw_cmd.trim();
-    if raw.is_empty() || raw.contains("<<") || raw.contains("$(") || raw.contains('`') {
-        return false;
-    }
-    if has_file_write_redirection(raw) {
-        return false;
-    }
-    // 引号内容抹除后分析结构；`>&` 的 fd 复制（2>&1）先去掉 &，免得被当成分隔符
-    let blanked = crate::agent::context::AuditLedger::blank_quoted_segments(raw).replace(">&", ">");
-    const READ_CMDS: [&str; 33] = [
-        "cat", "ls", "head", "tail", "grep", "egrep", "fgrep", "rg", "stat", "wc", "file",
-        "ffprobe", "echo", "printf", "pwd", "which", "jq", "diff", "sed", "find", "du", "df",
-        "tree", "basename", "dirname", "realpath", "readlink", "date", "whoami", "cd", "true",
-        "test", "[",
-    ];
-    const GIT_READ: [&str; 8] = [
-        "status", "diff", "log", "show", "ls-files", "rev-parse", "branch", "remote",
-    ];
-    let mut any = false;
-    for seg in blanked.split(|c: char| matches!(c, '\n' | ';' | '|' | '&')) {
-        let tokens: Vec<&str> = seg.split_whitespace().collect();
-        if tokens.is_empty() {
-            continue;
-        }
-        // 跳过前置的 VAR=value 与 time
-        let mut i = 0;
-        while i < tokens.len() {
-            let t = tokens[i];
-            let is_assign = t
-                .split_once('=')
-                .map(|(k, _)| !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
-                .unwrap_or(false);
-            if is_assign || t == "time" {
-                i += 1;
-            } else {
-                break;
-            }
-        }
-        let Some(first) = tokens.get(i) else { return false };
-        let name = first.rsplit('/').next().unwrap_or(first);
-        let rest = &tokens[i + 1..];
-        let ok = if name == "git" {
-            // 跳过 git 全局选项（-C/-c 带参数）找子命令
-            let mut sub = "";
-            let mut it = rest.iter();
-            while let Some(t) = it.next() {
-                if matches!(*t, "-C" | "-c" | "--git-dir" | "--work-tree") {
-                    it.next();
-                } else if !t.starts_with('-') {
-                    sub = t;
-                    break;
-                }
-            }
-            GIT_READ.contains(&sub)
-                && !rest.iter().any(|t| t.starts_with("--output"))
-                && !(sub == "branch" && rest.iter().any(|t| matches!(*t, "-d" | "-D" | "-m" | "-M" | "-c" | "-C" | "--delete" | "--move" | "--copy")))
-                && !(sub == "remote" && rest.iter().any(|t| matches!(*t, "add" | "remove" | "rm" | "rename" | "set-url" | "prune" | "update")))
-        } else if READ_CMDS.contains(&name) {
-            match name {
-                "sed" => !rest.iter().any(|t| t.starts_with("-i") || *t == "--in-place" || t.starts_with("--in-place=")),
-                "find" => !rest.iter().any(|t| {
-                    matches!(*t, "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir")
-                        || t.starts_with("-fprint")
-                        || *t == "-fls"
-                }),
-                _ => true,
-            }
-        } else {
-            false
-        };
-        if !ok {
-            return false;
-        }
-        any = true;
-    }
-    any
-}
-
 /// 抹除 `[[ ... ]]` 成对括号内的内容（保留 `]]` 之后的部分——
 /// `[[ x ]] > f` 的写盘重定向仍须被检出）。引号内容已被上游抹除，
 /// 残留 `[[` 必是结构性的。未闭合的 `[[` 不抹除（保守：内部 > 仍按重定向计）。
@@ -711,42 +628,6 @@ pub fn sensitive_shell_access_review(cmd: &str) -> Option<String> {
         }
     }
     None
-}
-
-#[cfg(test)]
-mod pure_read_tests {
-    use super::is_pure_read_shell_command as pure;
-
-    #[test]
-    fn whitelist_read_commands() {
-        assert!(pure("ls -la out/"));
-        assert!(pure("cat a.txt | head -20"));
-        assert!(pure("cd /tmp && ls 2>&1"));
-        assert!(pure("ffprobe -v error -show_format out/reel.mp4"));
-        assert!(pure("git status --short"));
-        assert!(pure("git -C /x diff --stat"));
-        assert!(pure("grep -rn 'a > b' src"));
-        assert!(pure("sed -n '1,40p' f.rs"));
-        assert!(pure("FOO=1 /usr/bin/find . -name '*.rs'"));
-    }
-
-    #[test]
-    fn rejects_side_effects() {
-        assert!(!pure(""));
-        assert!(!pure("node render.mjs"));
-        assert!(!pure("ffmpeg -y -i a.mp4 b.mp4"));
-        assert!(!pure("ls > out.txt"));
-        assert!(!pure("cat a | tee b"));
-        assert!(!pure("ls && rm -rf x"));
-        assert!(!pure("sed -i 's/a/b/' f"));
-        assert!(!pure("find . -name x -delete"));
-        assert!(!pure("find . -exec rm {} ;"));
-        assert!(!pure("cat <<EOF\nhi\nEOF"));
-        assert!(!pure("echo $(rm x)"));
-        assert!(!pure("git commit -m x"));
-        assert!(!pure("git branch -D x"));
-        assert!(!pure("ls &> out"));
-    }
 }
 
 #[cfg(test)]

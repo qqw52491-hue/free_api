@@ -20,17 +20,12 @@ pub struct WebSearchResultItem {
     pub image_url: Option<String>,
 }
 
-/// TinyFish 免费档内置密钥：随仓库分发（私有仓库），保证零配置开箱即用。
-/// 环境变量 TINYFISH_API_KEY 设置时优先于内置值（便于换 key / 多 key 轮换）。
-/// 泄露风险评估：免费档限流 30 次/分钟 Search，最坏后果是免费额度被蹭。
-const DEFAULT_TINYFISH_API_KEY: &str = "sk-tinyfish-UDFwFLn_4R2v-28ewv6CBdoh1UnThZzC";
-
-/// TinyFish 密钥解析：环境变量优先，缺省回落内置密钥。
+/// TinyFish 仅使用用户配置的环境变量；未配置时跳过并沿用后续搜索回退。
 fn tinyfish_key() -> String {
-    match std::env::var("TINYFISH_API_KEY") {
-        Ok(k) if !k.trim().is_empty() => k.trim().to_string(),
-        _ => DEFAULT_TINYFISH_API_KEY.to_string(),
-    }
+    std::env::var("TINYFISH_API_KEY")
+        .unwrap_or_default()
+        .trim()
+        .to_string()
 }
 
 /// 执行聚合网络搜索
@@ -49,8 +44,7 @@ pub async fn execute_web_search(
         max_results.min(10)
     };
 
-    // 0. TinyFish 免费 Agent 搜索 API (X-API-Key 认证，Search 免费 30 次/分钟)；
-    //    API 级稳定性远高于 Bing 免费抓取，内置密钥零配置开箱即用。
+    // 0. 可选 TinyFish 搜索；未配置用户密钥时不调用此服务。
     let tinyfish_key = tinyfish_key();
     if !tinyfish_key.is_empty() {
         if let Ok(res) = search_tinyfish(q, &tinyfish_key, limit).await {
@@ -105,7 +99,7 @@ pub async fn execute_web_search(
     }])
 }
 
-/// TinyFish Agent 搜索适配器 (免费档 Search 30 次/分钟；认证: X-API-Key 请求头)
+/// TinyFish 搜索适配器（认证: X-API-Key 请求头）
 async fn search_tinyfish(
     query: &str,
     api_key: &str,

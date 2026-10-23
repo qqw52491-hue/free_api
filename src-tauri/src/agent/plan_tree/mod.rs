@@ -169,13 +169,16 @@ mod tests {
             })
         });
 
-        // 3 分支未知工具并行组：按严格上限 2，必须在 spawn 层被整体拒绝
+        // 6 分支未知工具并行组：统一上限 5，必须在 spawn 层被整体拒绝
         let plan_json = json!({
             "id": "oversized",
             "parallel": [
                 { "tool": "a", "args": {} },
                 { "tool": "b", "args": {} },
-                { "tool": "c", "args": {} }
+                { "tool": "c", "args": {} },
+                { "tool": "d", "args": {} },
+                { "tool": "e", "args": {} },
+                { "tool": "f", "args": {} }
             ]
         });
 
@@ -185,57 +188,63 @@ mod tests {
         assert!(!report.success);
         assert_eq!(report.status, "interrupted_by_error");
         let summary = report.error_summary.unwrap_or_default();
-        assert!(summary.contains("最多允许 2"), "错误需指明上限: {}", summary);
+        assert!(summary.contains("最多允许 5"), "错误需指明上限: {}", summary);
         assert!(summary.contains("未 spawn 任何子分支"));
         assert_eq!(report.total_steps, 0);
         assert_eq!(invocations.load(Ordering::SeqCst), 0, "一个子分支都不应被执行");
     }
 
     #[tokio::test]
-    async fn test_readonly_fanout_spawn_allows_four_rejects_five() {
+    async fn test_five_branch_spawn_overlaps_and_keeps_partial_results() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        let invocations = Arc::new(AtomicUsize::new(0));
-        let counter = invocations.clone();
-        let invoker: ToolInvoker = Arc::new(move |tool, _args| {
-            let counter = counter.clone();
-            Box::pin(async move {
-                counter.fetch_add(1, Ordering::SeqCst);
-                Ok(json!({ "tool": tool }))
-            })
-        });
-
-        // 纯只读 4 分支：放宽上限内，正常执行
-        let four: PlanNode = serde_json::from_value(json!({
-            "id": "wide_read", "parallel": [
-                { "tool": "remote-http-mcp/read_text_file", "args": {} },
-                { "tool": "remote-http-mcp/read_text_file", "args": {} },
-                { "tool": "remote-http-mcp/read_text_file", "args": {} },
-                { "tool": "remote-http-mcp/read_text_file", "args": {} }
-            ]
-        }))
-        .unwrap();
-        let report = execute_plan_tree(&four, invoker.clone(), None).await;
-        assert!(report.success, "纯只读 4 分支应放行: {:?}", report.error_summary);
-        assert_eq!(report.successful_steps, 4);
-
-        // 纯只读 5 分支：超过只读上限 4，spawn 层拒绝
-        let five: PlanNode = serde_json::from_value(json!({
-            "id": "too_wide_read", "parallel": [
-                { "tool": "remote-http-mcp/read_text_file", "args": {} },
-                { "tool": "remote-http-mcp/read_text_file", "args": {} },
-                { "tool": "remote-http-mcp/read_text_file", "args": {} },
-                { "tool": "remote-http-mcp/read_text_file", "args": {} },
-                { "tool": "remote-http-mcp/read_text_file", "args": {} }
-            ]
-        }))
-        .unwrap();
-        let report = execute_plan_tree(&five, invoker, None).await;
-        assert_eq!(report.status, "interrupted_by_error");
-        assert!(report
-            .error_summary
-            .unwrap_or_default()
-            .contains("最多允许 4"));
-        assert_eq!(invocations.load(Ordering::SeqCst), 4, "只允许此前 4 次成功执行");
+        for tool in ["read_text_file", "unknown_tool"] {
+            let invocations = Arc::new(AtomicUsize::new(0));
+            let counter = invocations.clone();
+            let barrier = Arc::new(tokio::sync::Barrier::new(5));
+            let invoker: ToolInvoker = Arc::new(move |_tool, args| {
+                let counter = counter.clone();
+                let barrier = barrier.clone();
+                Box::pin(async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    // 必须五路同时启动才能通过，避免只调整预校验、执行器仍限制两路。
+                    barrier.wait().await;
+                    if args["index"] == 2 {
+                        Err("fixture branch failed".into())
+                    } else {
+                        Ok(args)
+                    }
+                })
+            });
+            let branches: Vec<_> = (0..5)
+                .map(|i| json!({"tool":tool,"args":{"index":i}}))
+                .collect();
+            let plan: PlanNode = serde_json::from_value(json!({"parallel":branches})).unwrap();
+            let report = tokio::time::timeout(
+                Duration::from_secs(3),
+                execute_plan_tree(&plan, invoker.clone(), None),
+            )
+            .await
+            .unwrap();
+            assert_eq!(report.total_steps, 5);
+            assert_eq!(report.successful_steps, 4);
+            assert_eq!(report.failed_steps, 1);
+            assert_eq!(invocations.load(Ordering::SeqCst), 5);
+            let six: Vec<_> = (0..6)
+                .map(|i| json!({"tool":tool,"args":{"index":i}}))
+                .collect();
+            let plan: PlanNode = serde_json::from_value(json!({"parallel":six})).unwrap();
+            let report = execute_plan_tree(&plan, invoker, None).await;
+            assert!(report
+                .error_summary
+                .unwrap_or_default()
+                .contains("最多允许 5"));
+            assert_eq!(report.total_steps, 0);
+            assert_eq!(
+                invocations.load(Ordering::SeqCst),
+                5,
+                "超限批次不得启动任何新分支"
+            );
+        }
     }
 
     #[tokio::test]

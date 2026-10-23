@@ -46,10 +46,9 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVFQUM1RkMxNTMzNjY0RDEKUldUUlpEWlR3VitzN3BTK2xMcjJaNldsM1VHK01IUHkxUUtFT0ZSRUp2ajRIZDJWQVBvMXJiWmkK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg2OUQ2QUQ0NEVGOUNBREUKUldUZXl2bE8xR3FkaHRpTlhQdXh0eE0xbVVxckFtL2FNSHN6T1J4LzJTL2tBaEtLTTFidDByWVQK",
       "endpoints": [
-        "https://agent.wxhjy.dpdns.org/update/latest.json",
-        "http://localhost:8790/update/latest.json"
+        "https://github.com/qqw52491-hue/free_api/releases/latest/download/latest.json"
       ],
       "dialog": false
     }

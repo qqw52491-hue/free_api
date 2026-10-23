@@ -146,16 +146,18 @@ for line in sys.stdin:
     #[tokio::test]
     #[ignore = "requires live remote MCP server"]
     pub async fn test_remote_hub_real_connection() {
+        // 凭据与端点一律从环境变量读取，禁止硬编码入库（公开仓库会泄露活跃 token）。
+        let token = std::env::var("FREE_API_REMOTE_MCP_TOKEN")
+            .expect("此测试需设置 FREE_API_REMOTE_MCP_TOKEN 环境变量");
+        let endpoint = std::env::var("FREE_API_REMOTE_MCP_URL")
+            .expect("此测试需设置 FREE_API_REMOTE_MCP_URL 环境变量（形如 https://<域名>/mcp）");
         let mut headers = HashMap::new();
-        headers.insert(
-            "Authorization".to_string(),
-            "Bearer 7a237f4951af018156c723862fb988a50555ae3dd39ab2f29ef2290109209a58".to_string(),
-        );
+        headers.insert("Authorization".to_string(), format!("Bearer {token}"));
         let config = PluginConfig {
             name: "remote-hub".to_string(),
             command: String::new(),
             args: Vec::new(),
-            url: Some("https://mcp.wxhjy.dpdns.org/mcp".to_string()),
+            url: Some(endpoint),
             headers,
             env: HashMap::new(),
             capability_card: None,

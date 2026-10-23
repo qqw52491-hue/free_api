@@ -1,0 +1,176 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '已推送的版本标签，须与项目版本一致，例如 v0.1.0'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release-config:
+    runs-on: ubuntu-22.04
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Check tag and project versions
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        shell: bash
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          const tag = process.env.RELEASE_TAG;
+          const version = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8')).version;
+          const frontend = JSON.parse(fs.readFileSync('package.json', 'utf8')).version;
+          const manifest = fs.readFileSync('src-tauri/Cargo.toml', 'utf8').split('[package]')[1]?.split(/\n\[/)[0];
+          const rust = manifest?.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+          if (!/^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(tag || '') || tag !== `v${version}` || version !== frontend || version !== rust) {
+            throw new Error('发布标签必须为 v<项目版本>，且 tauri.conf.json、package.json、Cargo.toml 版本须一致。');
+          }
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `tag=${tag}\n`);
+          JS
+
+  publish-tauri:
+    needs: release-config
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: 'darwin-aarch64'
+            platform: 'macos-latest'
+            args: '--target aarch64-apple-darwin'
+          - target: 'darwin-x86_64'
+            platform: 'macos-latest'
+            args: '--target x86_64-apple-darwin'
+          - target: 'linux-x86_64'
+            platform: 'ubuntu-22.04'
+            args: '--bundles deb,rpm,appimage'
+          - target: 'windows-x86_64'
+            platform: 'windows-latest'
+            args: ''
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-config.outputs.tag }}
+
+      - name: Check updater signing secret
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo '::error::缺少 TAURI_SIGNING_PRIVATE_KEY。请将本机签名私钥文件的完整内容保存到仓库 Actions Secret；不要提交私钥文件。'
+            exit 1
+          fi
+
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev ripgrep xdg-utils libfuse2
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build and upload release artifacts
+        id: build
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 填入 ~/.tauri/free-api-chat.key 的完整文件内容，不是路径，也不是 .pub。
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # macOS 使用 ad-hoc 签名；这不等于 Apple Developer 签名或公证。
+          APPLE_SIGNING_IDENTITY: ${{ matrix.platform == 'macos-latest' && '-' || '' }}
+          # GitHub runner 无 FUSE 挂载权限时，直接解包运行 AppImage 构建工具。
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+        with:
+          tagName: ${{ needs.release-config.outputs.tag }}
+          releaseCommitish: ${{ needs.release-config.outputs.tag }}
+          releaseName: 'Free API Chat v__VERSION__'
+          releaseBody: 'macOS: 按处理器架构选择 .dmg；Windows: .msi 或 .exe；Linux: .deb、.rpm 或 AppImage。应用更新直接通过本 Release 的 latest.json 和签名产物分发。当前未配置 Apple 公证及 Windows 发布者证书，系统可能显示开发者验证提示。'
+          releaseDraft: true
+          prerelease: false
+          # 清单在四路完成后统一上传，避免各路对同一资产做删除/覆盖。
+          uploadUpdaterJson: false
+          releaseAssetNamePattern: 'free-api-chat_${{ needs.release-config.outputs.tag }}_${{ matrix.target }}[setup][ext]'
+          args: ${{ matrix.args }}
+
+      - name: Generate this platform's updater manifest
+        env:
+          ARTIFACT_PATHS: ${{ steps.build.outputs.artifactPaths }}
+          RELEASE_TAG: ${{ needs.release-config.outputs.tag }}
+          RELEASE_TARGET: ${{ matrix.target }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: node scripts/create-updater-manifest.mjs
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: updater-${{ matrix.target }}
+          path: latest.json
+          if-no-files-found: error
+          overwrite: true
+
+  verify-updater:
+    needs: [release-config, publish-tauri]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-config.outputs.tag }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: updater-*
+          path: updater-manifests
+      - name: Merge, verify and upload the complete updater manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.release-config.outputs.tag }}
+        run: |
+          gh api "repos/$GH_REPO/releases?per_page=100" --paginate --slurp > "$RUNNER_TEMP/release-assets.json"
+          node scripts/merge-updater-manifests.mjs updater-manifests "$RELEASE_TAG" "$GH_REPO" "$RUNNER_TEMP/release-assets.json" latest.json
+          gh release upload "$RELEASE_TAG" latest.json --clobber

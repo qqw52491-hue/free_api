@@ -192,30 +192,6 @@
               </div>
               <p v-if="tunnelStatusLine" class="tunnel-status">{{ tunnelStatusLine }}</p>
 
-              <!-- 自托管更新：经穿透域名分发签名升级包；
-                   后台每小时轮询——发现新版时按钮变绿提示直接安装 -->
-              <div class="tunnel-row">
-                <button
-                  class="btn sm"
-                  :class="{ primary: !!availableUpdate }"
-                  :disabled="busy || updateBusy"
-                  @click="checkUpdate"
-                >
-                  {{ updateBusy ? "检查中" : availableUpdate ? `安装 v${availableUpdate.version}` : "检查更新" }}
-                </button>
-                <p v-if="updateStatus || updateStatusText" class="tunnel-status" style="margin: 0">
-                  {{ updateStatus || updateStatusText }}
-                </p>
-                <button
-                  class="btn sm"
-                  :disabled="busy || publishBusy"
-                  title="选择构建产物（.app.tar.gz/.msi.zip/.nsis.zip/.AppImage.tar.gz）+ 同名 .sig，本机即成分发源"
-                  @click="publishArtifact"
-                >
-                  {{ publishBusy ? "发布中" : "发布升级包" }}
-                </button>
-              </div>
-              <p v-if="publishStatus" class="tunnel-status">{{ publishStatus }}</p>
             </div>
           </div>
         </div>
@@ -510,9 +486,6 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { relaunch } from "@tauri-apps/plugin-process";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { availableUpdate, checkUpdateOnce, updateStatusText } from "../composables/useUpdater";
 import ModelSelectDropdown from "../components/common/ModelSelectDropdown.vue";
 
 interface ModelOption {
@@ -733,61 +706,6 @@ async function saveConsoleUrl() {
     /* 保存失败静默，二维码保持原样 */
   } finally {
     savingUrl.value = false;
-  }
-}
-
-// ---- 自托管更新（经穿透域名分发，私钥本机签名）----
-// 后台 watcher（App.vue 启动+每小时）已填充 availableUpdate；
-// 按钮：有缓存新版 → 直接装；没有 → 现查一次。
-const updateBusy = ref(false);
-const updateStatus = ref("");
-
-async function checkUpdate() {
-  updateBusy.value = true;
-  updateStatus.value = "";
-  try {
-    const update = availableUpdate.value ?? (await checkUpdateOnce());
-    if (!update) {
-      updateStatus.value = "已是最新版本 ✅";
-      return;
-    }
-    updateStatus.value = `发现新版本 ${update.version}，下载安装中…`;
-    await update.downloadAndInstall();
-    availableUpdate.value = null;
-    updateStatus.value = `${update.version} 已安装，即将重启…`;
-    setTimeout(() => relaunch(), 1500);
-  } catch (err) {
-    updateStatus.value = `更新检查失败：${err instanceof Error ? err.message : String(err)}`;
-  } finally {
-    updateBusy.value = false;
-  }
-}
-
-// ---- 本机发布：选构建产物 → 嗅探版本/平台 → 落 updates/ → 合并 manifest ----
-const publishBusy = ref(false);
-const publishStatus = ref("");
-
-async function publishArtifact() {
-  const picked = await openDialog({
-    multiple: false,
-    title: "选择 Tauri 更新产物（旁边要有同名 .sig）",
-    filters: [
-      { name: "更新产物", extensions: ["gz", "zip", "exe"] },
-    ],
-  });
-  if (!picked || typeof picked !== "string") return;
-  publishBusy.value = true;
-  publishStatus.value = "";
-  try {
-    const res = await invoke<{ platform: string; version: string; url: string }>(
-      "publish_update_artifact",
-      { path: picked },
-    );
-    publishStatus.value = `✅ 已发布 ${res.platform} v${res.version} → ${res.url}`;
-  } catch (err) {
-    publishStatus.value = `发布失败：${err instanceof Error ? err.message : String(err)}`;
-  } finally {
-    publishBusy.value = false;
   }
 }
 

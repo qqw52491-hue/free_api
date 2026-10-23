@@ -14,12 +14,6 @@ use crate::db::DbState;
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 
-// ═══════════════════════════════════════════════════════════════════════
-// 常量
-// ═══════════════════════════════════════════════════════════════════════
-
-/// 受控并行的单批最大分支数（与系统提示词"单批最多两个分支"一致）。
-
 pub fn run_plan_tree_sync(
     db: &DbState,
     session_id: &str,
@@ -133,140 +127,8 @@ pub(crate) fn run_plan_tree_sync_with_images(
     }
 }
 
-pub(crate) const MAX_CONTROLLED_PARALLEL_BRANCHES: usize = 2;
-
-/// 纯只读扇出上限：读/检索类工具无副作用，是宽扇出的安全区
-/// （强模型常见的"同时读四处证据"不会推进度，但会互相踩的写入才会）。
-pub(crate) const MAX_CONTROLLED_PARALLEL_READ_BRANCHES: usize = 4;
-
-/// 只读类工具判定（保守）：取工具名最后一段（兼容 MCP "插件/工具名"），
-/// 命中读取/检索语义且不含任何变更语义才算只读；未知工具一律按可变处理。
-pub(crate) fn is_readonly_parallel_tool(tool: &str) -> bool {
-    let name = tool
-        .rsplit(['/', ':'])
-        .next()
-        .unwrap_or(tool)
-        .to_ascii_lowercase();
-    const READ_HINTS: [&str; 7] = ["read", "search", "list", "glob", "grep", "stat", "view"];
-    const MUTATING_HINTS: [&str; 8] = [
-        "write", "exec", "edit", "delete", "remove", "move", "create", "run",
-    ];
-    READ_HINTS.iter().any(|h| name.contains(h))
-        && !MUTATING_HINTS.iter().any(|h| name.contains(h))
-}
-
-/// 并行分支的"有效工具名"：`local_file` 本身没有读/写语义（靠 action 区分），
-/// 只看工具名会把纯读取误判为可变而卡在上限 2。这里对 local_file 取 action 拼成
-/// `local_file/<action>`（action 取自显式字段或 params/args/command 里的 action），
-/// 交给 is_readonly_parallel_tool 判定；action 缺失按 `read` 计——与 local_file 执行端一致（缺省 action = read），实测模型常只写 path/行号。
-/// local_shell 按命令白名单，model_manager 按已实现的查询动作判定。
-pub(crate) fn parallel_branch_label(
-    tool: &str,
-    action: Option<&str>,
-    payloads: &[Option<&Value>],
-) -> String {
-    let base = tool.rsplit(['/', ':']).next().unwrap_or(tool);
-    if base.eq_ignore_ascii_case("local_shell") {
-        // 纯只读白名单命令按只读分支计；其余（含取不到命令串）保持原工具名
-        let cmd = payloads.iter().flatten().find_map(|p| {
-            if tool.eq_ignore_ascii_case("local_shell") {
-                serde_json::from_value::<crate::agent::types::AgentInstruction>(
-                    serde_json::json!({"tool":"local_shell","params":p}))
-                    .ok().and_then(|inst| crate::agent::dispatcher::extract_shell_command_string(&inst))
-            } else { shell_command_text(p) }
-        });
-        return match cmd {
-            Some(c) if crate::agent::dispatcher::is_pure_read_shell_command(&c) => {
-                format!("{}/read", tool)
-            }
-            _ => tool.to_string(),
-        };
-    }
-    if !base.eq_ignore_ascii_case("local_file") && !tool.eq_ignore_ascii_case("model_manager") {
-        return tool.to_string();
-    }
-    let from_payload = || {
-        payloads.iter().flatten().find_map(|p| {
-            p.get("action")
-                .and_then(Value::as_str)
-                .or_else(|| {
-                    p.get("command")
-                        .and_then(|c| c.get("action"))
-                        .and_then(Value::as_str)
-                })
-        })
-    };
-    if tool.eq_ignore_ascii_case("model_manager") {
-        let act = action.filter(|a| !a.is_empty()).or_else(from_payload).unwrap_or("list_specs");
-        return if crate::agent::tools::model_manager::is_readonly_action(act) {
-            format!("{}/list", tool)
-        } else {
-            tool.to_string()
-        };
-    }
-    match action.or_else(from_payload) {
-        Some(a) if !a.trim().is_empty() => format!("{}/{}", tool, a.trim()),
-        _ => format!("{}/read", tool),
-    }
-}
-
-/// 从分支 payload 取 shell 命令串：payload 本身是字符串、或 `.command` 是字符串、
-/// 或 `.command.command` / `.cmd` 是字符串。
-fn shell_command_text(p: &Value) -> Option<String> {
-    if let Some(s) = p.as_str() {
-        return Some(s.to_string());
-    }
-    let c = p.get("command");
-    c.and_then(Value::as_str)
-        .or_else(|| c.and_then(|c| c.get("command")).and_then(Value::as_str))
-        .or_else(|| p.get("cmd").and_then(Value::as_str))
-        .map(str::to_string)
-}
-
-/// parallel 数组里的 JSON 分支 -> 有效工具名（见 parallel_branch_label）。
-pub(crate) fn parallel_branch_label_from_json(step: &Value) -> String {
-    let tool_field = step.get("tool").and_then(Value::as_str);
-    let action_field = step.get("action").and_then(Value::as_str);
-    let tool = tool_field.or(action_field).unwrap_or("");
-    let explicit_action = if tool_field.is_some() { action_field } else { None };
-    serde_json::from_value::<crate::agent::plan_tree::PlanNodeObj>(step.clone())
-        .ok().and_then(|node| node.get_args().ok())
-        .map(|params| parallel_branch_label(tool, explicit_action, &[Some(&params)]))
-        .unwrap_or_else(|| tool.to_string())
-}
-
-/// plan_tree 里的分支节点 -> 有效工具名（见 parallel_branch_label）。
-pub(crate) fn parallel_branch_label_from_node(obj: &crate::agent::plan_tree::PlanNodeObj) -> String {
-    let tool = obj.get_tool();
-    let explicit_action = if obj.tool.is_some() {
-        obj.action.as_deref()
-    } else {
-        None
-    };
-    obj.get_args().map(|params|
-        parallel_branch_label(&tool, explicit_action, &[Some(&params)]))
-        .unwrap_or(tool)
-}
-
-/// 单批并行上限：全部分支都是只读工具时放宽到只读上限，否则维持严格上限。
-pub(crate) fn controlled_parallel_cap_for_tools<I>(tools: I) -> usize
-where
-    I: IntoIterator,
-    I::Item: AsRef<str>,
-{
-    let mut saw_any = false;
-    for tool in tools {
-        saw_any = true;
-        if !is_readonly_parallel_tool(tool.as_ref()) {
-            return MAX_CONTROLLED_PARALLEL_BRANCHES;
-        }
-    }
-    if saw_any {
-        MAX_CONTROLLED_PARALLEL_READ_BRANCHES
-    } else {
-        MAX_CONTROLLED_PARALLEL_BRANCHES
-    }
-}
+/// 受控并行统一单批上限；读、写、Shell 与未知工具均按分支数量核对。
+pub(crate) const MAX_CONTROLLED_PARALLEL_BRANCHES: usize = 5;
 
 const ASYNC_CHILD_TOOLS: &[&str] = &["child_worker", "child_writer", "child_reviewer"];
 
@@ -291,7 +153,7 @@ where
     Ok(())
 }
 
-/// 并行仅接受少量、已经由模型明确给出的独立分支。
+/// 并行按统一单批容量校验；此处不推断分支是否独立。
 /// 该校验不推断、补充或改写任何 MCP 子步骤参数。
 pub(crate) fn validate_controlled_parallel_batch(
     parallel_steps: &[serde_json::Value],
@@ -305,21 +167,13 @@ pub(crate) fn validate_controlled_parallel_batch(
             .or_else(|| step.get("action").and_then(serde_json::Value::as_str))
             .unwrap_or("")
     }))?;
-    let cap = controlled_parallel_cap_for_tools(
-        parallel_steps.iter().map(parallel_branch_label_from_json),
-    );
+    let cap = MAX_CONTROLLED_PARALLEL_BRANCHES;
     if parallel_steps.len() <= cap {
         return Ok(());
     }
-    let cap_note = if cap == MAX_CONTROLLED_PARALLEL_READ_BRANCHES {
-        "，纯只读扇出上限"
-    } else {
-        "；含写入/执行/未知工具的批次不放宽"
-    };
     Err(format!(
-        "parallel 单批最多允许 {} 个独立分支{}，本批包含 {} 个，尚未执行。请拆分为每批至多 {} 个分支，或改为串行执行；本错误仅针对分支数量，未判断范围或参数是否明确。",
+        "parallel 单批最多允许 {} 个独立分支，本批包含 {} 个，尚未执行。请拆分为每批至多 {} 个分支，或改为串行执行；本错误仅针对分支数量，未判断范围或参数是否明确。",
         cap,
-        cap_note,
         parallel_steps.len(),
         cap
     ))
@@ -341,12 +195,7 @@ pub(crate) fn validate_plan_tree_parallel_fanout(node: &PlanNode) -> Result<(), 
                     PlanNode::Obj(child_obj) => child_obj.get_tool(),
                     PlanNode::Seq(_) => "seq_nested".to_string(),
                 }))?;
-                let cap = controlled_parallel_cap_for_tools(parallel_children.iter().map(
-                    |child| match child {
-                        PlanNode::Obj(child_obj) => parallel_branch_label_from_node(child_obj),
-                        PlanNode::Seq(_) => "seq_nested".to_string(),
-                    },
-                ));
+                let cap = MAX_CONTROLLED_PARALLEL_BRANCHES;
                 match parallel_children.len() {
                     0 => {
                         return Err(format!(
@@ -356,16 +205,10 @@ pub(crate) fn validate_plan_tree_parallel_fanout(node: &PlanNode) -> Result<(), 
                     }
                     actual if actual <= cap => {}
                     actual => {
-                        let cap_note = if cap == MAX_CONTROLLED_PARALLEL_READ_BRANCHES {
-                            "纯只读扇出上限"
-                        } else {
-                            "含写入/执行/未知工具，不放宽"
-                        };
                         return Err(format!(
-                            "plan_tree 并行组 [{}] 超过数量上限：本批最多允许 {} 个独立分支（{}），本组包含 {} 个，执行树尚未执行。请拆分为每组至多 {} 个分支，或改为串行执行；本错误未判断范围或参数是否明确。",
+                            "plan_tree 并行组 [{}] 超过数量上限：本批最多允许 {} 个独立分支，本组包含 {} 个，执行树尚未执行。请拆分为每组至多 {} 个分支，或改为串行执行；本错误未判断范围或参数是否明确。",
                             obj.id.clone().unwrap_or_else(|| "?".to_string()),
                             cap,
-                            cap_note,
                             actual,
                             cap
                         ))
@@ -412,192 +255,55 @@ mod tests {
     }
 
     #[test]
-    fn controlled_parallel_allows_at_most_two_explicit_branches_without_parameter_rewrite() {
-        let one = vec![
-            serde_json::json!({"tool": "remote-http-mcp/read_text_file", "command": {"path": "/repo/a.rs"}}),
-        ];
-        let two = vec![
-            serde_json::json!({"tool": "remote-http-mcp/read_text_file", "command": {"cwd": "/repo", "path": "a.rs"}}),
-            serde_json::json!({"tool": "remote-http-mcp/read_text_file", "command": {"cwd": "/repo", "path": "b.rs"}}),
-        ];
-        let three = vec![
-            serde_json::json!({}),
-            serde_json::json!({}),
-            serde_json::json!({}),
-        ];
-
-        assert!(validate_controlled_parallel_batch(&one).is_ok());
-        assert!(validate_controlled_parallel_batch(&two).is_ok());
-        assert!(validate_controlled_parallel_batch(&three)
-            .unwrap_err()
-            .contains("最多允许 2"));
-        assert_eq!(two[0]["command"]["cwd"], serde_json::json!("/repo"));
-        assert_eq!(two[1]["command"]["path"], serde_json::json!("b.rs"));
-    }
-
-    #[test]
-    fn readonly_fanout_widened_to_four_but_mixed_batches_stay_strict() {
-        let read_tool = |p: &str| {
-            serde_json::json!({"tool": "remote-http-mcp/read_text_file", "command": {"path": p}})
-        };
-        let four_reads: Vec<_> = ["a.rs", "b.rs", "c.rs", "d.rs"].iter().map(|p| read_tool(p)).collect();
-        let five_reads: Vec<_> = ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs"].iter().map(|p| read_tool(p)).collect();
-        let three_with_write = vec![
-            read_tool("a.rs"),
-            read_tool("b.rs"),
-            serde_json::json!({"tool": "remote-http-mcp/write_file", "command": {"path": "x.rs"}}),
-        ];
-        let three_with_shell = vec![
-            read_tool("a.rs"),
-            serde_json::json!({"tool": "remote-http-mcp/shell_exec", "command": {"command": "npm"}}),
-            read_tool("b.rs"),
-        ];
-
-        // 纯只读扇出放宽到 4
-        assert!(validate_controlled_parallel_batch(&four_reads).is_ok());
-        assert!(validate_controlled_parallel_batch(&five_reads)
-            .unwrap_err()
-            .contains("最多允许 4"));
-        // 任一写入/执行分支即回到严格上限 2
-        assert!(validate_controlled_parallel_batch(&three_with_write)
-            .unwrap_err()
-            .contains("最多允许 2"));
-        assert!(validate_controlled_parallel_batch(&three_with_shell)
-            .unwrap_err()
-            .contains("不放宽"));
-
-        // 分类器：只读命中且无变更语义；未知工具保守按可变
-        assert!(is_readonly_parallel_tool("remote-http-mcp/read_multiple_files"));
-        assert!(is_readonly_parallel_tool("fs/list_directory"));
-        assert!(!is_readonly_parallel_tool("remote-http-mcp/write_file"));
-        assert!(!is_readonly_parallel_tool("remote-http-mcp/shell_exec"));
-        assert!(!is_readonly_parallel_tool("core"));
-        assert_eq!(
-            controlled_parallel_cap_for_tools(["remote-http-mcp/read_text_file"]),
-            MAX_CONTROLLED_PARALLEL_READ_BRANCHES
-        );
-        assert_eq!(
-            controlled_parallel_cap_for_tools([] as [&str; 0]),
-            MAX_CONTROLLED_PARALLEL_BRANCHES
-        );
-    }
-
-    #[test]
-    fn model_queries_use_the_readonly_cap_but_mutations_and_unknown_actions_do_not() {
-        let web = || json!({"tool": "web_search", "params": {"query": "test"}});
+    fn controlled_parallel_uniform_limit_preserves_payloads_for_all_tool_types() {
         for branch in [
-            json!({"tool": "model_manager", "action": "list_specs"}),
-            json!({"tool": "model_manager", "params": {"action": "list_platforms"}}),
-            json!({"tool": "model_manager", "command": {"action": "list_specs"}}),
-            json!({"tool": "model_manager", "params": {}}),
+            json!({"tool":"remote-http-mcp/read_text_file","command":{"path":"/repo/a.rs"}}),
+            json!({"tool":"local_file","params":{"action":"write","path":"a.rs","content":"test"}}),
+            json!({"tool":"model_manager","action":"delete_spec"}),
+            json!({"tool":"model_manager","args":{"action":"delete_spec"},"params":{"action":"list_specs"}}),
+            json!({"tool":"local_shell","params":{"command":"node -v"}}),
+            json!({"tool":"unknown_tool","params":{"future":true}}),
         ] {
-            let batch = vec![web(), web(), branch, web()];
-            assert!(validate_controlled_parallel_batch(&batch).is_ok(), "{batch:?}");
-            let tree: PlanNode = serde_json::from_value(json!({"parallel": batch})).unwrap();
-            assert!(validate_plan_tree_parallel_fanout(&tree).is_ok());
+            let five = vec![branch.clone(); 5];
+            let before = five.clone();
+            assert!(
+                validate_controlled_parallel_batch(&five).is_ok(),
+                "{branch:?}"
+            );
+            assert_eq!(five, before, "容量校验不得改写实际参数");
+            let six = vec![branch; 6];
+            let error = validate_controlled_parallel_batch(&six).unwrap_err();
+            assert!(
+                error.contains("最多允许 5")
+                    && error.contains("本批包含 6 个")
+                    && error.contains("尚未执行"),
+                "{error}"
+            );
+            assert!(!error.contains("纯只读") && !error.contains("不放宽"));
         }
-        for action in ["upsert_spec", "delete_spec", "add_platform", "update_platform", "add_model", "delete_model", "list_unknown"] {
-            let batch = vec![web(), web(), json!({"tool": "model_manager", "action": action})];
-            assert!(validate_controlled_parallel_batch(&batch).unwrap_err().contains("最多允许 2"), "{action}");
-        }
-        // 顶层动作优先，不能被参数中的 list_specs 掩盖。
-        let batch = vec![web(), web(), json!({"tool": "model_manager", "action": "delete_spec", "params": {"action": "list_specs"}})];
-        assert!(validate_controlled_parallel_batch(&batch).is_err());
-        // 执行端 args 优先于 params：两种表示冲突时按实际执行参数判定。
-        let batch = vec![web(), web(), json!({"tool": "model_manager", "args": {"action": "delete_spec"}, "params": {"action": "list_specs"}})];
-        assert!(validate_controlled_parallel_batch(&batch).is_err());
-        let tree: PlanNode = serde_json::from_value(json!({"parallel": batch})).unwrap();
-        assert!(validate_plan_tree_parallel_fanout(&tree).is_err());
     }
 
     #[test]
-    fn local_file_read_branches_count_as_readonly_fanout() {
-        let lf = |action: &str, path: &str| {
-            serde_json::json!({"tool": "local_file", "action": action, "params": {"path": path}})
-        };
-        let four_reads: Vec<_> = (0..4).map(|i| lf("read", &format!("{i}.rs"))).collect();
-        assert!(validate_controlled_parallel_batch(&four_reads).is_ok());
-        let five_reads: Vec<_> = (0..5).map(|i| lf("read", &format!("{i}.rs"))).collect();
-        assert!(validate_controlled_parallel_batch(&five_reads)
-            .unwrap_err()
-            .contains("最多允许 4"));
-        // action 写在 params 里也算
-        let nested: Vec<_> = (0..4)
-            .map(|i| serde_json::json!({"tool": "local_file", "params": {"action": "read", "path": format!("{i}.rs")}}))
-            .collect();
-        assert!(validate_controlled_parallel_batch(&nested).is_ok());
-        // 混入 write 或缺 action 的 local_file 仍是严格上限 2
-        let with_write = vec![lf("read", "a"), lf("write", "b"), lf("read", "c")];
-        assert!(validate_controlled_parallel_batch(&with_write)
-            .unwrap_err()
-            .contains("最多允许 2"));
-        // 缺 action 的 local_file 执行端默认就是 read，按只读计
-        let no_action = vec![
-            serde_json::json!({"tool": "local_file", "params": {"path": "a"}}),
-            lf("read", "b"),
-            lf("read", "c"),
+    fn screenshot_and_environment_probe_batch_uses_the_same_limit() {
+        // 用户回执 b7a43acb 的实际三分支形状；此处只验证批次数量，不运行外部命令。
+        let mut batch = vec![
+            json!({"tool":"view_image","params":{"path":".attachments/first.png"}}),
+            json!({"tool":"view_image","params":{"path":".attachments/second.png"}}),
+            json!({"tool":"local_shell","params":{"command":"rustup target list --installed; node -v; npm -v; npx tauri --version"}}),
         ];
-        assert!(validate_controlled_parallel_batch(&no_action).is_ok());
-        // local_shell 取不到命令串不放宽
-        let shell: Vec<_> = (0..3)
-            .map(|_| serde_json::json!({"tool": "local_shell", "action": "read"}))
-            .collect();
-        assert!(validate_controlled_parallel_batch(&shell).is_err());
-        // local_shell 纯只读命令放宽到 4；混入有副作用命令则回到 2
-        let sh = |c: &str| serde_json::json!({"tool": "local_shell", "command": {"command": c}});
-        let reads: Vec<_> = ["ls out", "cat a.txt", "ffprobe x.mp4", "git status"].iter().map(|c| sh(c)).collect();
-        assert!(validate_controlled_parallel_batch(&reads).is_ok());
-        let mixed = vec![sh("ls"), sh("node render.mjs"), sh("cat a")];
-        assert!(validate_controlled_parallel_batch(&mixed).is_err());
-        let str_cmd: Vec<_> = (0..3).map(|_| serde_json::json!({"tool": "local_shell", "command": "ls -la"})).collect();
-        assert!(validate_controlled_parallel_batch(&str_cmd).is_ok());
-    }
-
-    #[test]
-    fn plan_tree_fanout_walker_uses_tiered_caps_per_group() {
-        let parse = |v: serde_json::Value| -> PlanNode { serde_json::from_value(v).unwrap() };
-
-        // 纯只读 4 分支的嵌套并行组放行
-        let ok_read_tree = parse(json!({
-            "id": "wide_read", "parallel": [
-                { "tool": "remote-http-mcp/read_text_file", "args": {} },
-                { "tool": "remote-http-mcp/read_text_file", "args": {} },
-                { "tool": "remote-http-mcp/read_multiple_files", "args": {} },
-                { "tool": "remote-http-mcp/read_text_file", "args": {} }
-            ]
-        }));
-        assert!(validate_plan_tree_parallel_fanout(&ok_read_tree).is_ok());
-
-        // 只读 5 分支越界，错误指向只读上限 4
-        let bad_read_tree = parse(json!({
-            "id": "too_wide_read", "parallel": [
-                { "tool": "remote-http-mcp/read_text_file", "args": {} },
-                { "tool": "remote-http-mcp/read_text_file", "args": {} },
-                { "tool": "remote-http-mcp/read_text_file", "args": {} },
-                { "tool": "remote-http-mcp/read_text_file", "args": {} },
-                { "tool": "remote-http-mcp/read_text_file", "args": {} }
-            ]
-        }));
-        let err = validate_plan_tree_parallel_fanout(&bad_read_tree).unwrap_err();
-        assert!(err.contains("最多允许 4"), "错误需指明只读上限: {}", err);
-
-        // 嵌套串行子树视为未知工具（不放宽）：3 分支仍拒绝
-        let nested_seq_tree = parse(json!({
-            "id": "mixed", "parallel": [
-                { "tool": "remote-http-mcp/read_text_file", "args": {} },
-                { "tool": "remote-http-mcp/read_text_file", "args": {} },
-                [ { "tool": "remote-http-mcp/read_text_file", "args": {} } ]
-            ]
-        }));
-        let err = validate_plan_tree_parallel_fanout(&nested_seq_tree).unwrap_err();
-        assert!(err.contains("最多允许 2"), "嵌套串行子树不应放宽: {}", err);
+        assert!(validate_controlled_parallel_batch(&batch).is_ok());
+        batch.push(json!({"tool":"local_file","params":{"action":"read","path":"Cargo.toml"}}));
+        batch.push(json!({"tool":"local_file","params":{"action":"write","path":"report.txt","content":"test"}}));
+        assert!(validate_controlled_parallel_batch(&batch).is_ok());
+        let tree: PlanNode = serde_json::from_value(json!({"parallel":batch})).unwrap();
+        assert!(validate_plan_tree_parallel_fanout(&tree).is_ok());
     }
 
     #[test]
     fn plan_tree_fanout_walker_rejects_oversized_or_empty_parallel_group_at_any_depth() {
         let parse = |v: serde_json::Value| -> PlanNode { serde_json::from_value(v).unwrap() };
 
-        // 合法：每组并行 ≤2，嵌套任意深度都放行
+        // 合法：嵌套串行子树也按统一的单组 5 分支上限处理
         let ok_tree = parse(json!([
             { "tool": "a", "args": {} },
             { "id": "g", "parallel": [
@@ -607,7 +313,7 @@ mod tests {
         ]));
         assert!(validate_plan_tree_parallel_fanout(&ok_tree).is_ok());
 
-        // 越界：嵌套在串行链深处的并行组 3 分支，必须整树拒绝
+        // 越界：嵌套在串行链深处的并行组 6 分支，必须整树拒绝
         let bad_tree = parse(json!([
             { "tool": "a", "args": {} },
             { "id": "deep", "parallel": [
@@ -615,12 +321,15 @@ mod tests {
                 [ { "id": "inner", "parallel": [
                     { "tool": "x", "args": {} },
                     { "tool": "y", "args": {} },
-                    { "tool": "z", "args": {} }
+                    { "tool": "z", "args": {} },
+                    { "tool": "u", "args": {} },
+                    { "tool": "v", "args": {} },
+                    { "tool": "w", "args": {} }
                 ]}]
             ]}
         ]));
         let err = validate_plan_tree_parallel_fanout(&bad_tree).unwrap_err();
-        assert!(err.contains("最多允许 2"), "错误需指明上限: {}", err);
+        assert!(err.contains("最多允许 5"), "错误需指明上限: {}", err);
         assert!(err.contains("inner"), "错误需定位到越界组 id: {}", err);
 
         // 空并行组同样拒绝

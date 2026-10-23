@@ -267,7 +267,9 @@ mod integration_tests {
             json!({"parallel":[
                 {"tool":"view_image","command":{"path":"a.png"}},
                 {"tool":"view_image","args":{"file":"b.png"}},
-                {"tool":"local_file","command":{"path":"probe.txt"}}
+                {"tool":"local_shell","params":{"command":"printf image-adjacent-read-ok"}},
+                {"tool":"local_file","command":{"path":"probe.txt"}},
+                {"tool":"local_file","params":{"action":"read","path":"probe.txt"}}
             ]}),
             &queue,
         );
@@ -320,24 +322,24 @@ mod integration_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn rejected_parallel_fanout_does_not_enqueue_images() {
-        let (root, db, _) = fixture();
+    async fn five_parallel_images_are_consumed_and_six_enqueue_nothing() {
+        let (root, db, url) = fixture();
         let queue = PendingImageQueue::default();
-        let result = run(
-            &root,
-            &db,
-            json!({"parallel":[
-                {"tool":"view_image","command":{"path":"a.png"}},
-                {"tool":"view_image","command":{"path":"a.png"}},
-                {"tool":"view_image","command":{"path":"a.png"}},
-                {"tool":"view_image","command":{"path":"a.png"}},
-                {"tool":"view_image","command":{"path":"a.png"}}
-            ]}),
-            &queue,
-        );
-        assert!(!result.success);
-        assert_eq!(result.route, "parallel_contract_rejected");
-        assert!(queue.lock().unwrap().is_empty());
+        for count in [5, 6] {
+            let images: Vec<_> = (0..count)
+                .map(|_| json!({"tool":"view_image","command":{"path":"a.png"}}))
+                .collect();
+            let result = run(&root, &db, json!({"parallel":images}), &queue);
+            if count == 5 {
+                assert!(result.success, "{}", result.stderr);
+                assert_handoff(&queue, 5, &url);
+            } else {
+                assert!(!result.success);
+                assert_eq!(result.route, "parallel_contract_rejected");
+                assert!(result.stderr.contains("最多允许 5"));
+                assert!(queue.lock().unwrap().is_empty());
+            }
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 

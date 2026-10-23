@@ -2191,6 +2191,8 @@ function hasFileOperation(step: AgentStepItem): boolean {
 
 function shouldShowCapsuleTitle(action?: AmbientActionDisplay): boolean {
     if (!action || !action.capsuleTitle) return false;
+    // 黄色/失败行已在动作标签中显示分类，后面只保留实际文件名与说明。
+    if (action.isWarning && !action.fileName) return false;
     if (['milestone', 'batch', 'parallel', 'pipeline', 'deliver', 'human', 'model'].includes(action.actionKind)) return false;
     const t = action.capsuleTitle.trim();
     if (!t) return false;

@@ -136,17 +136,7 @@ fn run_node_recursive<'a>(
 
                     // 硬拒绝第二道（spawn 层不变量）：无论入口如何绕过预校验，
                     // 超限并行组在此直接报错，一个子分支都不 spawn。
-                    // 上限按批分级：纯只读扇出放宽到 4，含写入/执行/未知工具维持 2。
-                    let cap = crate::agent::plan_tree_dispatch::controlled_parallel_cap_for_tools(
-                        parallel_children.iter().map(|child| match child {
-                            PlanNode::Obj(child_obj) => {
-                                crate::agent::plan_tree_dispatch::parallel_branch_label_from_node(
-                                    child_obj,
-                                )
-                            }
-                            PlanNode::Seq(_) => "seq_nested".to_string(),
-                        }),
-                    );
+                    let cap = crate::agent::plan_tree_dispatch::MAX_CONTROLLED_PARALLEL_BRANCHES;
                     if parallel_children.len() > cap {
                         return Err(format!(
                             "并行组 [{}] 超过受控上限：本批最多允许 {} 个独立分支，当前为 {}。已拒绝执行，未 spawn 任何子分支。请收缩到至多 {} 个互不依赖、参数已确定的分支，或改为串行执行。",

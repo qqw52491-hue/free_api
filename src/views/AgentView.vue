@@ -193,6 +193,7 @@
             <footer class="sidebar-footer">
                 <span class="profile-dot">⚡</span>
                 <span v-if="!sidebarCollapsed" class="profile-name">free_api</span>
+                <AppUpdateControl :collapsed="sidebarCollapsed" />
             </footer>
         </aside>
 
@@ -324,6 +325,7 @@ import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, react
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import AgentPanel from "../components/AgentPanel.vue";
+import AppUpdateControl from "../components/AppUpdateControl.vue";
 import ProjectSidebarTree, { type AgentProject, type TreeSessionItem } from "../components/ProjectSidebarTree.vue";
 import ProjectWorkspace from "../components/ProjectWorkspace.vue";
 import { useGlobalFileDrop, type DraggedPathItem } from "../composables/useGlobalFileDrop";
@@ -1274,6 +1276,7 @@ onUnmounted(() => {
 }
 
 .app-sidebar.collapsed .sidebar-footer {
+    flex-direction: column;
     justify-content: center;
     padding: 12px 0;
 }

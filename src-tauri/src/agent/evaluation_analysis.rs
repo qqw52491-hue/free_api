@@ -17,7 +17,7 @@ pub(crate) struct ParsedAction {
     signature: String,
     is_read_intent: bool,
     parallel_branches: usize,
-    /// 本批适用的受控扇出上限（纯只读 4 / 含写入执行或未知工具 2；非并行批为 0）
+    /// 本批适用的受控扇出上限（统一 5；非并行批为 0）
     parallel_cap: usize,
     parallel_without_rationale: bool,
     plan_title: Option<String>,
@@ -272,11 +272,7 @@ pub(crate) fn parse_action(raw_response: &str) -> Option<ParsedAction> {
         .unwrap_or_default();
     let parallel_branches = parallel_steps.len();
     let parallel_cap = if parallel_branches > 0 {
-        crate::agent::plan_tree_dispatch::controlled_parallel_cap_for_tools(
-            parallel_steps
-                .iter()
-                .map(crate::agent::plan_tree_dispatch::parallel_branch_label_from_json),
-        )
+        crate::agent::plan_tree_dispatch::MAX_CONTROLLED_PARALLEL_BRANCHES
     } else {
         0
     };

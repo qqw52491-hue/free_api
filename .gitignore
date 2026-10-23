@@ -47,3 +47,15 @@ src-tauri/.rpa_profile/
 
 # Agent shell 相对路径 tmp/ 会落在 src-tauri 进程 cwd，产物不应入库
 /src-tauri/tmp/
+
+# Local environment credentials (examples may be committed without real values)
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Updater / publisher private credentials
+.tauri/
+*.key
+*.p12
+*.pfx

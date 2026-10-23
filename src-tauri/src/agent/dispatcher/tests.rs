@@ -1325,8 +1325,6 @@ fn tool_params_precedence_and_parallel_classification_use_selected_payload() {
     let legacy_node: crate::agent::plan_tree::PlanNodeObj = serde_json::from_value(legacy).unwrap();
     assert_eq!(instruction.get_params(), json!({"action":"read","path":"formal"}));
     assert_eq!(instruction.get_params(), legacy_node.get_args().unwrap());
-    assert_eq!(crate::agent::plan_tree_dispatch::parallel_branch_label_from_json(&raw), "local_file/edit");
-    assert_eq!(crate::agent::plan_tree_dispatch::parallel_branch_label_from_node(&node), "local_file/edit");
     let shell: AgentInstruction = serde_json::from_value(json!({"tool":"local_shell","args":{"command":"git reset --hard"}})).unwrap();
     assert!(is_write_or_side_effect_tool(&shell));
     assert_eq!(extract_shell_command_string(&shell).unwrap(), "git reset --hard");
@@ -1507,12 +1505,52 @@ fn shell_params_pipeline_conflict_retains_completed_output_and_stops_later_steps
     std::fs::remove_dir_all(root).unwrap();
 }
 #[test]
-fn shell_params_parallel_classification_includes_the_actual_script_in_args() {
-    use crate::agent::plan_tree_dispatch::{parallel_branch_label_from_json, validate_controlled_parallel_batch};
-    let write=json!({"tool":"local_shell","command":"sh","params":{"args":["-c","git reset --hard"]}});
-    assert_eq!(parallel_branch_label_from_json(&write),"local_shell");
-    assert!(validate_controlled_parallel_batch(&vec![write;3]).is_err());
-    let read=json!({"tool":"local_shell","command":"sh","params":{"args":["-c","pwd"]}});
-    assert_eq!(parallel_branch_label_from_json(&read),"local_shell/read");
-    assert!(validate_controlled_parallel_batch(&vec![read;4]).is_ok());
+fn shell_params_parallel_capacity_is_independent_of_script_classification() {
+    use crate::agent::plan_tree_dispatch::validate_controlled_parallel_batch;
+    let write =
+        json!({"tool":"local_shell","command":"sh","params":{"args":["-c","git reset --hard"]}});
+    assert!(validate_controlled_parallel_batch(&vec![write.clone(); 5]).is_ok());
+    assert!(validate_controlled_parallel_batch(&vec![write; 6]).is_err());
+    let read = json!({"tool":"local_shell","command":"sh","params":{"args":["-c","pwd"]}});
+    assert!(validate_controlled_parallel_batch(&vec![read; 5]).is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parallel_five_writes_execute_and_six_are_rejected_before_any_write() {
+    let (root, db, registry) = shell_params_fixture();
+    for (count, prefix) in [(5, "allowed"), (6, "rejected")] {
+        let branches: Vec<_> = (0..count).map(|i| json!({
+            "tool":"local_file",
+            "params":{"action":"write","path":format!("{prefix}-{i}.txt"),"content":format!("branch {i}")}
+        })).collect();
+        let instruction: AgentInstruction =
+            serde_json::from_value(json!({"parallel":branches})).unwrap();
+        let result = run_agent_step(
+            &db,
+            "parallel-five-writes",
+            &instruction,
+            &registry,
+            Some(&root),
+        );
+        if count == 5 {
+            assert!(result.success, "{}", result.stderr);
+            for i in 0..count {
+                assert_eq!(
+                    std::fs::read_to_string(root.join(format!("{prefix}-{i}.txt"))).unwrap(),
+                    format!("branch {i}")
+                );
+            }
+        } else {
+            assert!(!result.success);
+            assert!(
+                result.stderr.contains("最多允许 5") && result.stderr.contains("尚未执行"),
+                "{}",
+                result.stderr
+            );
+            for i in 0..count {
+                assert!(!root.join(format!("{prefix}-{i}.txt")).exists());
+            }
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
 }
