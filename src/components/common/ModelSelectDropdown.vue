@@ -22,6 +22,15 @@
       </div>
 
       <div class="trigger-right">
+        <button
+          v-if="allowClear && selectedModel && !disabled"
+          type="button"
+          class="btn-trigger-clear"
+          @click.stop="clearSelection"
+          title="恢复默认跟随"
+        >
+          ✕
+        </button>
         <span class="badge-count" v-if="displayModels.length > 0 && !selectedModel">{{ displayModels.length }}</span>
         <svg class="chevron-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="m6 9 6 6 6-6"/>
@@ -80,6 +89,35 @@
 
         <!-- Scrollable Model Groups List -->
         <div class="dropdown-models-list">
+          <!-- Top Default / Clear Option -->
+          <div v-if="showClearOption" class="default-option-wrapper">
+            <button
+              type="button"
+              class="model-option-row default-option-row"
+              :class="{ 'is-selected': !modelValue }"
+              @click="clearSelection"
+            >
+              <div class="option-left">
+                <span class="model-status-dot default-dot" :class="{ 'is-active': !modelValue }"></span>
+                <div class="option-text-group">
+                  <div class="option-title-line">
+                    <span class="option-display-name">🌐 {{ clearOptionLabel || placeholder || '跟随全局自动路由' }}</span>
+                    <span class="badge-default-tag">默认</span>
+                  </div>
+                  <div class="option-id-line">
+                    不锁定特定模型，根据任务分流策略动态路由
+                  </div>
+                </div>
+              </div>
+              <div class="option-right">
+                <svg v-if="!modelValue" class="check-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                  <polyline points="20 6 9 17 4 12"/>
+                </svg>
+              </div>
+            </button>
+            <div class="default-option-divider"></div>
+          </div>
+
           <template v-if="groupedFilteredModels.length > 0">
             <div
               v-for="group in groupedFilteredModels"
@@ -170,6 +208,8 @@ const props = withDefaults(
     size?: 'sm' | 'md' | 'lg';
     placement?: 'auto' | 'top' | 'bottom';
     autoFetch?: boolean;
+    allowClear?: boolean;
+    clearOptionLabel?: string;
   }>(),
   {
     modelValue: '',
@@ -179,6 +219,8 @@ const props = withDefaults(
     size: 'md',
     placement: 'auto',
     autoFetch: true,
+    allowClear: true,
+    clearOptionLabel: '',
   }
 )
 
@@ -320,6 +362,18 @@ const matchedModelsCount = computed(() => {
   return groupedFilteredModels.value.reduce((acc, g) => acc + g.models.length, 0)
 })
 
+const clearOptionText = computed(() => {
+  return props.clearOptionLabel || props.placeholder || '跟随全局自动路由'
+})
+
+const showClearOption = computed(() => {
+  if (!props.allowClear) return false
+  const q = searchQuery.value.trim().toLowerCase()
+  if (!q) return true
+  const label = clearOptionText.value.toLowerCase()
+  return label.includes(q) || '全局'.includes(q) || '默认'.includes(q) || '跟随'.includes(q)
+})
+
 function toggleDropdown() {
   if (props.disabled) return
   isOpen.value = !isOpen.value
@@ -328,6 +382,12 @@ function toggleDropdown() {
 function closeDropdown() {
   isOpen.value = false
   searchQuery.value = ''
+}
+
+function clearSelection() {
+  emit('update:modelValue', '')
+  emit('change', '', null)
+  closeDropdown()
 }
 
 function selectModel(m: ModelOptionItem) {
@@ -528,6 +588,28 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
+}
+
+.btn-trigger-clear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-3, #71717a);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-trigger-clear:hover {
+  background: rgba(239, 68, 68, 0.2);
+  color: #f87171;
 }
 
 .badge-count {
@@ -808,6 +890,31 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   margin-left: 8px;
+  flex-shrink: 0;
+}
+
+/* Top Default / Clear Option */
+.default-clear-block {
+  margin-bottom: 4px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.default-clear-option {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.default-clear-option:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.default-clear-option.is-selected {
+  background: rgba(108, 99, 255, 0.14);
+  border-color: rgba(108, 99, 255, 0.35);
+}
+
+.default-clear-icon {
+  font-size: 13px;
   flex-shrink: 0;
 }
 
