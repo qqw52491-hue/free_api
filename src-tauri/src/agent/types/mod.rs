@@ -550,6 +550,9 @@ pub struct AgentInstruction {
 
     #[serde(default)]
     pub todo_update: Vec<TodoItem>,
+    /// 主模型对已登记人类回复的语义判断；宿主只校验来源和范围。
+    #[serde(default)]
+    pub human_reply_decision: Option<crate::agent::human_reply::HumanReplyDecision>,
     /// 目标块显式规划或批量更新（粗粒度任务单元）
     #[serde(default)]
     pub target_blocks_update: Option<Vec<crate::agent::target_block::TargetBlock>>,
@@ -773,6 +776,7 @@ impl AgentInstruction {
             || self.submit_plan.is_some()
             || self.prepare_finish.is_some()
             || self.fail_task.is_some()
+            || self.human_reply_decision.is_some()
         {
             return Ok(());
         }

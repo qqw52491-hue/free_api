@@ -60,6 +60,21 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn state_and_native_namespace_errors_explain_the_correct_shape_without_execution() {
+    let f = Fixture::new();
+    let (_, result) = f.execute(json!({"tool":"todo_update","params":{"items":[]}}));
+    assert!(!result.success);
+    assert!(result.stderr.contains("顶层数组字段"));
+    assert!(result.stderr.contains("本次工具调用未执行"));
+    let (_, result) = f.execute(json!({"tool":"project_resources/list_resources","params":{}}));
+    assert!(!result.success);
+    assert!(result.stderr.contains("params.action"));
+    assert!(result.stderr.contains("本次未执行"));
+    let (_, result) = f.execute(json!({"tool":"task_store","params":{"action":"list_resources"}}));
+    assert!(result.success, "{}", result.stderr);
+}
+
+#[test]
 fn readonly_declarations_cannot_hide_real_file_writes_or_shell_effects() {
     let f = Fixture::new();
     for container in ["command", "params"] {
@@ -102,7 +117,7 @@ fn host_run_ownership_survives_single_batch_parallel_and_timeout_dispatch() {
         let run_id = format!("host-run-{index}");
         let inst: AgentInstruction = serde_json::from_value(value).unwrap();
         let result = run_agent_step_internal(&f.db, &f.session, &inst, &f.registry,
-            Some(&f.workspace), None, Some(&run_id));
+            Some(&f.workspace), None, Some(&run_id), None);
         assert!(result.success, "{} {}", result.route, result.stderr);
         let ids: Vec<String> = {
             let conn = f.db.0.lock().unwrap();
@@ -136,7 +151,7 @@ fn cancellation_targets_the_host_run_and_missing_context_never_starts_background
     assert_eq!(result.route, "local_shell:missing_run_context");
     for run in ["host-a", "host-b"] {
         let result = run_agent_step_internal(&f.db, &f.session, &inst, &f.registry,
-            Some(&f.workspace), None, Some(run));
+            Some(&f.workspace), None, Some(run), None);
         assert!(result.success, "{}", result.stderr);
     }
     assert_eq!(crate::agent::job_engine::cancel_all_running_jobs(&f.db, "host-a").unwrap(), 1);

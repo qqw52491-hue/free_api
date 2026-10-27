@@ -90,6 +90,8 @@ pub struct PlanGateProjection {
     /// 交付层据此强制披露「未经独立审查」，不许静默交付。
     #[serde(default)]
     pub unreviewed_release: bool,
+    #[serde(default)]
+    pub pending_human_reply: Option<crate::agent::human_reply::PendingHumanReply>,
 }
 
 /// 失败教训记录（用于防止大模型在长任务中重复尝试已知失败的方法）

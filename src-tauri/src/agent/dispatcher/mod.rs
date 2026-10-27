@@ -31,6 +31,8 @@ fn mcp_service_requires_concrete_tool(tool: &str, action: &str) -> bool {
 }
 
 mod shell_safety;
+mod shell_execution_guard;
+pub(crate) use shell_execution_guard::{ShellExecutionGuard, git_operation_scope};
 mod tool_events;
 mod project_dispatch;
 mod command_exec;
@@ -45,7 +47,40 @@ pub(crate) use tool_events::*;
 pub(crate) use project_dispatch::*;
 pub(crate) use command_exec::*;
 
+fn value_has_side_effect(value: &serde_json::Value) -> bool {
+    serde_json::from_value::<AgentInstruction>(value.clone())
+        .map(|inst| is_write_or_side_effect_tool(&inst))
+        .unwrap_or(true)
+}
+
+fn plan_has_side_effect(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Array(children) => children.iter().any(plan_has_side_effect),
+        serde_json::Value::Object(object) => object
+            .get("parallel")
+            .and_then(|v| v.as_array())
+            .map(|children| children.iter().any(plan_has_side_effect))
+            .unwrap_or_else(|| value_has_side_effect(value)),
+        _ => true,
+    }
+}
+
 pub fn is_write_or_side_effect_tool(inst: &AgentInstruction) -> bool {
+    // 组合入口按实际子调用分类，不能因为顶层名称是 pipeline/parallel 就漏掉写入。
+    if let Some(parallel) = &inst.parallel {
+        return parallel.iter().any(value_has_side_effect);
+    }
+    if let Some(tree) = &inst.plan_tree {
+        return plan_has_side_effect(tree);
+    }
+    if !inst.commands.is_empty() {
+        return inst.commands.iter().any(value_has_side_effect);
+    }
+    if let Some(commands) = inst.command.as_ref()
+        .and_then(|v| v.get("commands"))
+        .and_then(|v| v.as_array()) {
+        return commands.iter().any(value_has_side_effect);
+    }
     // 调用参数里的 read_only/readonly 不是可信工具属性，不能覆盖有效动作。
 
     // 分类前统一剥离命名空间（remote-hub/read_file -> read_file）
@@ -160,7 +195,7 @@ pub fn run_agent_step(
     registry: &PluginRegistry,
     workspace_root: Option<&std::path::Path>,
 ) -> DispatchResult {
-    run_agent_step_internal(db, session_id, instruction, registry, workspace_root, None, None)
+    run_agent_step_internal(db, session_id, instruction, registry, workspace_root, None, None, None)
 }
 
 pub(crate) fn run_agent_step_with_images(
@@ -171,8 +206,9 @@ pub(crate) fn run_agent_step_with_images(
     workspace_root: Option<&std::path::Path>,
     pending: &crate::agent::tools::view_image::PendingImageQueue,
     run_id: Option<&str>,
+    shell_guard: Option<&std::sync::Arc<ShellExecutionGuard>>,
 ) -> DispatchResult {
-    run_agent_step_internal(db, session_id, instruction, registry, workspace_root, Some(pending), run_id)
+    run_agent_step_internal(db, session_id, instruction, registry, workspace_root, Some(pending), run_id, shell_guard)
 }
 
 fn run_agent_step_internal(
@@ -183,6 +219,7 @@ fn run_agent_step_internal(
     workspace_root: Option<&std::path::Path>,
     pending: Option<&crate::agent::tools::view_image::PendingImageQueue>,
     run_id: Option<&str>,
+    shell_guard: Option<&std::sync::Arc<ShellExecutionGuard>>,
 ) -> DispatchResult {
     let tool_name = instruction.get_tool();
     if let Some(Err(error)) = instruction.resolved_local_shell_params() {
@@ -228,7 +265,7 @@ fn run_agent_step_internal(
                 ),
                 ..Default::default()
             });
-        return run_plan_tree_sync_with_images(db, session_id, &plan_node, registry, workspace_root, pending, run_id);
+        return run_plan_tree_sync_with_images(db, session_id, &plan_node, registry, workspace_root, pending, run_id, shell_guard);
     }
     if let Some(ref tree_val) = instruction.plan_tree {
         if let Ok(plan_node) =
@@ -238,7 +275,7 @@ fn run_agent_step_internal(
                 "🌳 [PlanTree: {}] 检测到 plan_tree 复合树形计划，启动树形解释器...",
                 session_id
             );
-            return run_plan_tree_sync_with_images(db, session_id, &plan_node, registry, workspace_root, pending, run_id);
+            return run_plan_tree_sync_with_images(db, session_id, &plan_node, registry, workspace_root, pending, run_id, shell_guard);
         }
     }
 
@@ -315,7 +352,7 @@ fn run_agent_step_internal(
                 },
             };
             let res =
-                execute_command_with_images(db, session_id, step_tool, &step_action, &step_params, registry, workspace_root, pending, run_id);
+                execute_command_with_images(db, session_id, step_tool, &step_action, &step_params, registry, workspace_root, pending, run_id, shell_guard);
             append_mcp_raw_results(&mut mcp_raw_items, res.view.as_ref());
 
             // 拼接输出结果
@@ -361,7 +398,7 @@ fn run_agent_step_internal(
     }
 
     let params = instruction.get_params();
-    execute_command_with_images(db, session_id, &tool_name, &action, &params, registry, workspace_root, pending, run_id)
+    execute_command_with_images(db, session_id, &tool_name, &action, &params, registry, workspace_root, pending, run_id, shell_guard)
 }
 
 #[tauri::command]

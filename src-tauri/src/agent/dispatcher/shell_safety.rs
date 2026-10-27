@@ -312,35 +312,35 @@ pub enum GitDestructiveVerdict {
     },
 }
 
-/// 命令指纹：压缩空白后原文——ask_human 的 message 原文引用该指纹即可机械核对
+/// 命令指纹：仅剥掉外层空白，保留命令内部原文——ask_human 原样引用以机械核对
 /// 「主人确认的是不是这条命令」（模型改写措辞不破坏匹配）。
 pub fn git_cmd_fingerprint(cmd: &str) -> String {
-    cmd.split_whitespace().collect::<Vec<_>>().join(" ")
+    cmd.trim().to_string()
 }
 
 /// 剥离 shell 词法后的 token 序列（处理引号包裹的路径参数）。
-fn shell_tokens(s: &str) -> Vec<String> {
+pub(crate) fn shell_tokens(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
-    let mut quote: Option<u8> = None;
-    for &b in s.as_bytes() {
+    let mut quote: Option<char> = None;
+    for b in s.chars() {
         match quote {
             Some(q) => {
                 if b == q {
                     quote = None;
                 } else {
-                    cur.push(b as char);
+                    cur.push(b);
                 }
             }
             None => {
-                if b == b'\'' || b == b'"' {
+                if b == '\'' || b == '"' {
                     quote = Some(b);
-                } else if b == b' ' || b == b'\t' {
+                } else if b == ' ' || b == '\t' {
                     if !cur.is_empty() {
                         out.push(std::mem::take(&mut cur));
                     }
                 } else {
-                    cur.push(b as char);
+                    cur.push(b);
                 }
             }
         }

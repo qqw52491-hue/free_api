@@ -622,6 +622,9 @@ async fn run_agent_main_loop_in_workspace_inner(
         }
     });
     checkpoint.task_git_baseline = Some(git_baseline.clone());
+    if !is_resuming_existing && !git_baseline.pre_dirty.is_empty() {
+        context.add_error_feedback(&git_baseline.origin_notice(&workspace_dir));
+    }
     let task_started_at = *checkpoint.task_started_at.get_or_insert_with(|| {
         if is_resuming_existing {
             chrono::DateTime::parse_from_rfc3339(&checkpoint.created_at)
@@ -858,12 +861,8 @@ async fn run_agent_main_loop_in_workspace_inner(
             if is_image {
                 if let Some(ref data_url) = att.image_data_url {
                     if !data_url.is_empty() {
-                        context.add_image_feedback(
-                            &format!(
-                                "【用户已附加图片: `{}`】(文件路径: {}, 大小: {} 字节)",
-                                att.file_name, att.file_path, att.size_bytes
-                            ),
-                            data_url,
+                        crate::agent::attachment_vision::add_attachment_image(
+                            &mut context, &att.file_name, data_url, &final_session_id,
                         );
                         injected_image_paths.insert(att.file_path.clone());
                         continue;
@@ -886,12 +885,8 @@ async fn run_agent_main_loop_in_workspace_inner(
                         &att.content_type
                     };
                     let data_url = format!("data:{};base64,{}", mime, b64);
-                    context.add_image_feedback(
-                        &format!(
-                            "【用户已附加图片: `{}`】(文件路径: {}, 大小: {} 字节)",
-                            att.file_name, att.file_path, att.size_bytes
-                        ),
-                        &data_url,
+                    crate::agent::attachment_vision::add_attachment_image(
+                        &mut context, &att.file_name, &data_url, &final_session_id,
                     );
                     injected_image_paths.insert(att.file_path.clone());
                 }
@@ -1001,14 +996,8 @@ async fn run_agent_main_loop_in_workspace_inner(
                                         "image/jpeg"
                                     };
                                     let data_url = format!("data:{};base64,{}", mime, b64);
-                                    context.add_image_feedback(
-                                        &format!(
-                                            "【用户已附加图片: `{}`】(文件路径: {}, 大小: {} 字节)",
-                                            file_name,
-                                            file_path,
-                                            bytes.len()
-                                        ),
-                                        &data_url,
+                                    crate::agent::attachment_vision::add_attachment_image(
+                                        &mut context, file_name, &data_url, &final_session_id,
                                     );
                                     injected_image_paths.insert(file_path.to_string());
                                 }

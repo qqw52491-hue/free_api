@@ -184,6 +184,11 @@ impl ContextRenderer {
     /// 避免靠写入被拒（一整轮 LLM 往返的代价）来反推门禁规则。
     /// 【按需条件化渲染原则】：每轮仅命中唯一的激活状态分支，严格控体积（单状态 1~3 行），稳吃前缀缓存。
     pub fn render_plan_gate(gate: Option<&PlanGateProjection>) -> String {
+        let pending = gate.and_then(|g| g.pending_human_reply.as_ref()).map(|r| r.render()).unwrap_or_default();
+        format!("{}{}", pending, Self::render_plan_gate_status(gate))
+    }
+
+    fn render_plan_gate_status(gate: Option<&PlanGateProjection>) -> String {
         let Some(gate) = gate else {
             return String::new();
         };

@@ -17,7 +17,7 @@ use tokio::sync::watch;
 
 
 // 验收语义变更时升版：旧裁决不能在新规则下继续复用；Git 基线保持原样。
-const FINISH_REVIEW_RULES_VERSION: &str = "review-search-v8-review-teams";
+const FINISH_REVIEW_RULES_VERSION: &str = "review-search-v9-task-origin";
 const MAX_FINISH_FORMAT_RETRIES: u32 = 5;
 const MAX_FINISH_REQUEST_RETRIES: u32 = 5;
 
@@ -670,6 +670,8 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
         }
     }
 
+    let origin_notice = baseline.origin_notice(workspace);
+    if !origin_notice.is_empty() { block_sections.push(origin_notice); }
     let extra_guidance = if block_sections.is_empty() {
         String::new()
     } else {
@@ -915,6 +917,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
                         &tool_name,
                         &req,
                     ) {
+                        Ok(out) if tool_name == "run_command" && req.get("command").and_then(serde_json::Value::as_str).is_some_and(|cmd| cmd.contains("git") && cmd.contains("diff")) => format!("{}\n\n{}", out, baseline.origin_notice(workspace)),
                         Ok(out) => out,
                         Err(e) => format!("取证请求被拒绝: {}", e),
                     }

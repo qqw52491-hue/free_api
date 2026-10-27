@@ -140,13 +140,13 @@ pub(super) async fn dispatch_ask_human(
 
         // 人工仲裁与放行上下文识别：
         // 明确带有 plan_approval/plan/approval kind，或门禁阻断/审查耗尽显式指示仲裁。
-        let is_approval_context = is_plan_approval_kind
-            || ctx.checkpoint.gate_human_escape_directed
+        let asks_git_operation = ctx.checkpoint.git_destructive_pending.iter().any(|command| ask_msg.contains(command));
+        let is_approval_context = is_plan_approval_kind || (!asks_git_operation && ( ctx.checkpoint.gate_human_escape_directed
             || ctx.checkpoint.stage_review_blockers_open > 0
             || ctx.checkpoint.last_review_blocking_count > 0
             || (form_val.is_none()
                 && ctx.checkpoint.plan_reviewer_retry_count
-                    >= crate::agent::checkpoint::max_plan_reviewer_rounds());
+                    >= crate::agent::checkpoint::max_plan_reviewer_rounds())));
 
         ctx.app.emit(
             &format!("agent-log-{}", ctx.final_session_id),
@@ -265,10 +265,10 @@ pub(super) async fn dispatch_ask_human(
             },
         )?;
         crate::agent::control::mark_stage(ctx.final_session_id, "ask_human:waiting_reply");
-        let reply = match ctx.rx.recv().await {
+        let (reply, received_human_reply) = match ctx.rx.recv().await {
             Some(HumanControl::Answer(reply, cursor)) => {
                 ctx.context.acknowledge_chat(cursor);
-                reply
+                (reply, true)
             },
             Some(HumanControl::ReplaceGoal(goal)) => {
                 return Ok(ArmOutcome::Early(DispatchResult { view: None,
@@ -286,135 +286,17 @@ pub(super) async fn dispatch_ask_human(
                     route: RUN_INTERRUPTED_ROUTE.to_string(),
                 }))
             }
-            None => "人类未回复，通道异常关闭".to_string(),
+            None => ("人类未回复，通道异常关闭".to_string(), false),
         };
-        // git 破坏命令核销：非拒绝回复 → asked 指纹确认为已放行，重发即通过
-        let git_confirmed = ctx.checkpoint.git_destructive_resolve_reply(&reply);
-        if git_confirmed > 0 {
-            ctx.app.emit(
-                &format!("agent-log-{}", ctx.final_session_id),
-                format!("✅ 主人已确认 {} 条 git 破坏命令，原样重发即可放行", git_confirmed),
-            )
-            .ok();
-        }
         ctx.context.add_error_feedback(&format!("【人类回复】{}", reply));
-        if is_approval_context {
-            match parse_plan_approval_decision(&reply) {
-                Some(false) => {
-                    // 人类提出修改意见，打回重新推演审查
-                    ctx.checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Reviewing;
-                }
-                Some(true) => {
-                    // 人类在方案审批卡片中批准放行
-                    ctx.checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
-                    // 未经独立审查披露：没有任何审查结论交付即获人工放行时打标——
-                    // 交付与报告必须如实声明，不许静默。判定用 deliveries 而非
-                    // consumed：全失败批次也计「齐套」，consumed 会漏标（实测）。
-                    ctx.checkpoint.plan_unreviewed_release =
-                        ctx.checkpoint.plan_review_deliveries.is_empty();
-                    if ctx.checkpoint.plan_unreviewed_release {
-                        ctx.app.emit(
-                            &format!("agent-log-{}", ctx.final_session_id),
-                            "⚠️ 方案经人工放行，但未收到任何独立审查结论（审查未派发或全部失败）".to_string(),
-                        )
-                        .ok();
-                    }
-                    ctx.checkpoint.gate_human_escape_directed = false;
-                    ctx.checkpoint.recent_gate_block_step = None;
-                    if ctx.checkpoint.stage_review_blockers_open > 0 {
-                        ctx.checkpoint.clear_stage_review_blockers();
-                        ctx.checkpoint.stage_review_blocker_stage = None;
-                    }
-                    if ctx.checkpoint.last_review_blocking_count > 0 {
-                        ctx.checkpoint.last_review_blocking_count = 0;
-                    }
-                    // 摘要中剥离结构化标记，避免协议噪声污染持久化内容
-                    let clean_reply = strip_plan_decision_marker(&reply);
-                    ctx.checkpoint.approved_plan_summary =
-                        Some(clean_reply.chars().take(500).collect());
-                    ctx.checkpoint.record_human_review_waiver(ctx.state.inner(), ctx.context, &format!("问: {} → 答: {}", waiver_question, clean_reply));
-                    ctx.checkpoint.last_reviewed_diff_hash = None;
-                    ctx.checkpoint.last_review_result = None;
-                    ctx.checkpoint.reviewer_retry_count = 0;
-                    ctx.app.emit(
-                        &format!("agent-log-{}", ctx.final_session_id),
-                        "✅ 方案审批与人工仲裁已放行（收到用户批准，写入门禁解除）".to_string(),
-                    )
-                    .ok();
-                }
-                None => {
-                    // “问一次就好，一次审批全程放权”
-                    // 若用户已有非空回复且未包含打回否定词，直接放行写入，彻底避免连环死循环轰炸用户
-                    let trimmed = reply.trim();
-                    if !trimmed.is_empty()
-                        && trimmed != "人类未回复，通道异常关闭"
-                        && trimmed != "我再想想"
-                    {
-                        ctx.checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Approved;
-                        ctx.checkpoint.plan_unreviewed_release =
-                            ctx.checkpoint.plan_review_deliveries.is_empty();
-                        if ctx.checkpoint.plan_unreviewed_release {
-                            ctx.app.emit(
-                                &format!("agent-log-{}", ctx.final_session_id),
-                                "⚠️ 方案经人工放行，但未收到任何独立审查结论（审查未派发或全部失败）".to_string(),
-                            )
-                            .ok();
-                        }
-                        ctx.checkpoint.gate_human_escape_directed = false;
-                        ctx.checkpoint.recent_gate_block_step = None;
-                        if ctx.checkpoint.stage_review_blockers_open > 0 {
-                            ctx.checkpoint.clear_stage_review_blockers();
-                            ctx.checkpoint.stage_review_blocker_stage = None;
-                        }
-                        if ctx.checkpoint.last_review_blocking_count > 0 {
-                            ctx.checkpoint.last_review_blocking_count = 0;
-                        }
-                        let clean_reply = strip_plan_decision_marker(&reply);
-                        ctx.checkpoint.approved_plan_summary =
-                            Some(clean_reply.chars().take(500).collect());
-                        ctx.checkpoint.record_human_review_waiver(ctx.state.inner(), ctx.context, &format!("问: {} → 答: {}", waiver_question, clean_reply));
-                        ctx.checkpoint.last_reviewed_diff_hash = None;
-                        ctx.checkpoint.last_review_result = None;
-                        ctx.checkpoint.reviewer_retry_count = 0;
-                        ctx.app.emit(
-                            &format!("agent-log-{}", ctx.final_session_id),
-                            "✅ 方案审批与人工仲裁已放行（收到用户非反对回复，门禁解除）".to_string(),
-                        )
-                        .ok();
-                    } else {
-                        let msg = "【方案审批结论无法判定】未从回复中识别出明确的批准或打回意图，\
-                                   前置写入门禁保持关闭。请重新呈报方案请用户明确确认。";
-                        ctx.context.add_error_feedback(msg);
-                        ctx.app.emit(
-                            &format!("agent-log-{}", ctx.final_session_id),
-                            msg.to_string(),
-                        )
-                        .ok();
-                    }
-                }
-            }
-        } else {
+        // 按钮是明确结构化操作；自由文本留给主模型正常下一轮理解。
+        let explicit_plan = (received_human_reply && is_approval_context).then(|| parse_plan_approval_decision(&reply)).flatten();
+        if let Some(approved) = explicit_plan {
             let clean_reply = strip_plan_decision_marker(&reply);
-            let reply_lower = clean_reply.to_ascii_lowercase();
-            let has_explicit_waiver_intent = reply_lower.contains("force_pass")
-                || reply_lower.contains("放行")
-                || reply_lower.contains("特赦")
-                || reply_lower.contains("豁免")
-                || reply_lower.contains("确认执行")
-                || (reply_lower.contains("保留") && reply_lower.contains("调试"));
-            if has_explicit_waiver_intent {
-                ctx.checkpoint.record_human_review_waiver(ctx.state.inner(), ctx.context, &format!("问: {} → 答: {}", waiver_question, clean_reply));
-                ctx.checkpoint.last_reviewed_diff_hash = None;
-                ctx.checkpoint.last_review_result = None;
-                ctx.checkpoint.reviewer_retry_count = 0;
-                if ctx.checkpoint.stage_review_blockers_open > 0 {
-                    ctx.checkpoint.clear_stage_review_blockers();
-                    ctx.checkpoint.stage_review_blocker_stage = None;
-                }
-                if ctx.checkpoint.last_review_blocking_count > 0 {
-                    ctx.checkpoint.last_review_blocking_count = 0;
-                }
-            }
+            ctx.checkpoint.apply_explicit_plan_decision(ctx.state.inner(), ctx.context, approved, &waiver_question, &clean_reply);
+        }
+        if received_human_reply {
+            ctx.checkpoint.register_human_reply(&ask_msg, &reply, is_approval_context && explicit_plan.is_none());
         }
         ctx.checkpoint.begin_planning(ctx.step_id, ctx.context);
         save_checkpoint(ctx.state.inner(), ctx.checkpoint)?;

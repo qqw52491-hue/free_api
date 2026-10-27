@@ -832,46 +832,21 @@
 
     #[test]
     fn test_git_destructive_confirm_lifecycle() {
-        let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
-        let mut cp = AgentCheckpoint::new("test-git-confirm".to_string(), &ctx);
-        let fp = "git checkout -- scripts/eval_runner.mjs";
-
-        // 1. 挂起登记（幂等）且未确认
-        cp.block_git_destructive(fp);
-        cp.block_git_destructive(fp);
+        let ctx = SandwichContext::new("sys".into(), "goal".into());
+        let mut cp = AgentCheckpoint::new("test-git-confirm".into(), &ctx);
+        let command = "git checkout -- scripts/eval_runner.mjs";
+        cp.block_git_destructive(command);
+        cp.block_git_destructive(command);
+        cp.git_destructive_scopes.insert(command.into(), "host-scope".into());
         assert_eq!(cp.git_destructive_pending.len(), 1);
-        assert!(!cp.is_git_destructive_confirmed(fp));
-
-        // 2. ask_human 问题未引用命令原文 → 不算问过（防串线误确认）
         cp.git_destructive_mark_asked("把无关文件清理一下可以吗");
-        assert!(cp.git_destructive_asked.is_empty());
-        let n = cp.git_destructive_resolve_reply("可以");
-        assert_eq!(n, 0);
-        assert!(!cp.is_git_destructive_confirmed(fp));
-        assert_eq!(cp.git_destructive_pending.len(), 1); // 未问到的 pending 保留
-
-        // 3. 问题原文引用命令 + 明确同意 → 核销；反问/非表态回复不算确认
-        cp.git_destructive_mark_asked("需要执行 `git checkout -- scripts/eval_runner.mjs` 清理无关改动，可以吗？");
-        assert_eq!(cp.git_destructive_asked.len(), 1);
-        let n = cp.git_destructive_resolve_reply("为什么要删这个文件？");
-        assert_eq!(n, 0);
-        assert!(!cp.is_git_destructive_confirmed(fp));
-        assert_eq!(cp.git_destructive_pending.len(), 1); // 未表态 → 仍 pending
-        // 再问一次（问题原文引用）+ 明确同意 → 核销
+        cp.register_human_reply("把无关文件清理一下可以吗", "可以", false);
+        assert!(cp.pending_human_reply.is_none());
         cp.git_destructive_mark_asked("需要执行 `git checkout -- scripts/eval_runner.mjs`，请确认");
-        let n = cp.git_destructive_resolve_reply("可以，删吧");
-        assert_eq!(n, 1);
-        assert!(cp.is_git_destructive_confirmed(fp));
-        assert!(cp.git_destructive_pending.is_empty());
-
-        // 4. 拒绝回复 → asked 从 pending 移除（死单），不产生确认
-        let fp2 = "git reset --hard HEAD~1";
-        cp.block_git_destructive(fp2);
-        cp.git_destructive_mark_asked(&format!("确认执行 `{}`？", fp2));
-        let n = cp.git_destructive_resolve_reply("不行，别动那个文件");
-        assert_eq!(n, 0);
-        assert!(!cp.is_git_destructive_confirmed(fp2));
-        assert!(cp.git_destructive_pending.is_empty());
+        cp.register_human_reply("需要执行该命令", "不可以", false);
+        assert!(cp.pending_human_reply.is_some());
+        assert!(!cp.is_git_destructive_confirmed(command));
+        assert_eq!(cp.pending_human_reply.as_ref().unwrap().reply, "不可以");
     }
 
     #[test]

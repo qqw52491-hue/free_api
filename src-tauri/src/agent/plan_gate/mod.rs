@@ -200,40 +200,10 @@ pub(crate) fn strip_plan_decision_marker(reply: &str) -> String {
     }
 }
 
-/// 从人类回复中解析方案审批结论。
-///
-/// 返回 `Some(true)` = 批准放行；`Some(false)` = 打回重新推演；`None` = 无法判定。
-///
-/// 判定顺序：
-/// 1. 优先解析前端下发的结构化标记，这是权威来源，**不受用户自然语言内容干扰**；
-/// 2. 无标记时（CLI / 直接调用等非 UI 通道）回退到关键词嗅探；
-/// 3. 仍无法判定时返回 `None`，由调用方保持门禁关闭，绝不默认放行。
+/// 仅解析前端的明确结构化按钮结果；自然语言由主模型下一轮判断。
+/// 无有效按钮结果时不修改审批状态，不按关键词或“非空回复”放行。
 pub(crate) fn parse_plan_approval_decision(reply: &str) -> Option<bool> {
-    // 1. 结构化标记：权威来源。即便用户补充意见里写了"打回修改"等字样也不会误判。
-    if let Some(decision) = extract_plan_decision(reply) {
-        return Some(decision.approved);
-    }
-
-    // 2. 回退：否定信号优先于肯定信号，避免"我不太同意但先按这个来"被判为批准
-    let negative = [
-        "【方案打回修改】", "打回修改", "\"approved\":false", "\"confirm\":false",
-        "打回", "不同意", "拒绝", "不行", "别写", "不要写", "重新推演", "重新审查", "暂不批准",
-    ];
-    if negative.iter().any(|m| reply.contains(m)) {
-        return Some(false);
-    }
-    let positive = [
-        "【方案已批准】", "批准方案", "同意该方案", "方案通过",
-        "批准", "同意", "通过", "好的", "好", "可以", "行", "没问题", "继续", "开始", "开始执行",
-        "ok", "yes", "approve", "go", "proceed",
-    ];
-    let reply_lower = reply.to_ascii_lowercase();
-    if positive.iter().any(|m| reply_lower.contains(m)) {
-        return Some(true);
-    }
-
-    // 3. 无法判定：交由调用方保持门禁关闭
-    None
+    extract_plan_decision(reply).map(|decision| decision.approved)
 }
 
 /// 阶段审查拦截判定（独立于方案门禁：Approved 后的写入也要过阶段审查这一关）。

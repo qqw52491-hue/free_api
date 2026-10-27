@@ -165,21 +165,21 @@ mod tests_inner {
     }
 
     #[test]
-    fn plan_decision_falls_back_to_text_markers_without_structured_marker() {
+    fn plan_decision_leaves_free_text_for_the_model() {
         use crate::agent::loop_runner::parse_plan_approval_decision;
 
-        // 非 UI 通道（CLI / 直接调用）没有结构化标记，仍需兼容旧的文本约定
+        // 无结构化按钮结果时保留原话，由主模型理解，不按文字直接批准。
         assert_eq!(
             parse_plan_approval_decision("【方案已批准】可以开始改了"),
-            Some(true)
+            None
         );
         assert_eq!(
             parse_plan_approval_decision("【方案打回修改】换个库再推演一次"),
-            Some(false)
+            None
         );
         assert_eq!(
             parse_plan_approval_decision("{\"approved\":false}"),
-            Some(false)
+            None
         );
     }
 
@@ -221,10 +221,10 @@ mod tests_inner {
             parse_plan_approval_decision("<!--plan-decision:{\"approved\":true,\"via\":\"mobile\"}-->"),
             Some(true)
         );
-        // 畸形 JSON 静默降级到关键词链路，绝不能 panic 或误放行
+        // 畸形 JSON 不产生批准，保留原话交给主模型。
         assert_eq!(
             parse_plan_approval_decision("<!--plan-decision:{bad json}--> 我同意"),
-            Some(true)
+            None
         );
         // approved 缺失时同样降级
         assert_eq!(

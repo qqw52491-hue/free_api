@@ -114,6 +114,42 @@ fn image_count(messages: &[ChatMessage]) -> usize {
         .count()
 }
 
+#[test]
+fn attachment_image_reference_is_readable_before_observation_and_after_restore() {
+    let data = TestDb::new();
+    let session = format!("attachment-ref-{}", uuid::Uuid::new_v4());
+    let mut context = SandwichContext::new("SYS".into(), "查看截图".into());
+    let url = "data:image/png;base64,QUJD";
+    add_attachment_image(&mut context, "截图.png", url, &session);
+    assert_eq!(image_count(&context.turns_history), 1);
+    let parts = context.turns_history.last().unwrap().content.as_array().unwrap();
+    let text = parts[0]["text"].as_str().unwrap();
+    let path = text.split("原图回看副本（view_image 的 path）：").nth(1).unwrap();
+    assert!(path.ends_with(".png"));
+    let (_, read_url, _) = crate::agent::tools::view_image::resolve_and_encode_image(path, &data.root, &session).unwrap();
+    assert_eq!(read_url, url);
+    assert!(crate::agent::tools::view_image::resolve_and_encode_image(path, &data.root, "other-session").is_err());
+    let mut checkpoint = AgentCheckpoint::new(session.clone(), &context);
+    save_checkpoint(&data.db, &mut checkpoint).unwrap();
+    let checkpoint = load_checkpoint(&data.db, &session).unwrap().unwrap();
+    let mut restored = SandwichContext::new("SYS".into(), "继续".into());
+    checkpoint.restore_context(&mut restored);
+    assert_eq!(serde_json::to_value(&context.turns_history).unwrap(), serde_json::to_value(&restored.turns_history).unwrap());
+    assert!(crate::agent::tools::view_image::resolve_and_encode_image(path, &data.root, &session).is_ok());
+    std::fs::remove_dir_all(crate::agent::path_guard::get_session_tmp_dir(&session)).unwrap();
+}
+
+#[test]
+fn attachment_image_copy_failure_keeps_image_without_inventing_a_path() {
+    let session = format!("attachment-fail-{}", uuid::Uuid::new_v4());
+    let mut context = SandwichContext::new("SYS".into(), "查看截图".into());
+    add_attachment_image(&mut context, "截图.png", "data:image/png;base64,invalid!", &session);
+    assert_eq!(image_count(&context.turns_history), 1);
+    let content = context.turns_history.last().unwrap().content.to_string();
+    assert!(content.contains("回看副本未保存"));
+    assert!(!content.contains("view_image 的 path"));
+}
+
 #[tokio::test]
 async fn observed_attachments_restore_planning_and_survive_checkpoint_recovery() {
     let instruction =

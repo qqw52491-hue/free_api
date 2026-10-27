@@ -232,6 +232,7 @@ mod integration_tests {
             Some(root),
             queue,
             None,
+            None,
         )
     }
 

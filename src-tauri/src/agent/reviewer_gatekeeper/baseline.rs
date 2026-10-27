@@ -68,6 +68,19 @@ impl ReviewMaterialSnapshot {
 }
 
 impl GitBaseline {
+    /// 宿主事实：当前内容与任务起点对照，不能拿 HEAD/index 差异推断修改者。
+    pub(crate) fn origin_notice(&self, workspace: &Path) -> String {
+        if !self.is_git { return String::new(); }
+        let mut paths: Vec<_> = self.pre_dirty.keys().collect();
+        paths.sort();
+        let rows = paths.iter().take(32).map(|path| format!("- {}：{}", path,
+            if self.unchanged_since_baseline(workspace, path) { "任务开始前已有修改；当前内容仍与起点一致" }
+            else { "任务开始前已有修改；当前内容与起点不同，需对照本轮增量" }
+        )).collect::<Vec<_>>().join("\n");
+        format!("【任务起点与已有修改（宿主记录）】\n起点引用：{}；任务前已有未提交文件 {} 个，下面显示 {} 个。\n{}\n普通 git diff 的比较对象由命令参数决定；git checkout --/默认 git restore 会回到暂存区，不等于任务起点。若只撤销本轮修改，应先对照此起点，只撤销目标文件的本轮增量，保留任务前已有内容；后续叠加修改须先比较，不能整目录清空。已确认目标属于本轮修改且要整文件恢复起点时，可用 git restore --source=<上述起点引用> --worktree -- <精确目标路径>，不修改暂存区；不要用于覆盖后来叠加的其他修改。专用 git_diff 按任务起点提供差异。起点引用可能是快照提交，也可能仅为 HEAD，不能据此承诺所有未跟踪文件均有内容备份。\n",
+            self.base_head.as_deref().unwrap_or("未保存可用引用"), paths.len(), paths.len().min(32), rows)
+    }
+
     pub(crate) fn collect_review_snapshot(
         &self,
         workspace: &Path,
@@ -138,12 +151,20 @@ impl GitBaseline {
         let _ = ensure_shadow_snapshot(workspace);
         let mut b = Self::capture(workspace);
         if b.is_git {
-            let mut names: Vec<String> = Vec::new();
-            if let Some(t) = git_cmd(workspace, &["diff", "--name-only", "--relative", "HEAD"]) {
-                names.extend(t.lines().map(|l| l.trim().to_string()));
-            }
-            if let Some(t) = git_cmd(workspace, &["ls-files", "--others", "--exclude-standard"]) {
-                names.extend(t.lines().map(|l| l.trim().to_string()));
+            // 路径不是展示文本：-z 禁止 Git 对中文/引号/换行转义，也不能 trim 文件名。
+            let mut names = Vec::new();
+            for args in [
+                vec!["diff", "--name-only", "--no-renames", "--relative", "-z"],
+                vec!["diff", "--cached", "--name-only", "--no-renames", "--relative", "-z", "HEAD"],
+                vec!["ls-files", "--others", "--exclude-standard", "-z"],
+            ] {
+                if let Ok(output) = git_command(workspace).args(args).output() {
+                    if output.status.success() {
+                        names.extend(output.stdout.split(|b| *b == 0)
+                            .filter(|b| !b.is_empty())
+                            .filter_map(|b| String::from_utf8(b.to_vec()).ok()));
+                    }
+                }
             }
             for n in names.into_iter().filter(|n| !n.is_empty()) {
                 let h = Self::file_content_hash(workspace, &n);

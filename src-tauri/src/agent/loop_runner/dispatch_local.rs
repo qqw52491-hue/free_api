@@ -38,7 +38,14 @@ pub(super) async fn dispatch_local_tool(
             if let Some(cmd_str) = crate::agent::dispatcher::extract_shell_command_string(inst) {
                 if let Some(reason) = crate::agent::dispatcher::sensitive_shell_access_review(&cmd_str) {
                     let fp = crate::agent::dispatcher::git_cmd_fingerprint(&cmd_str);
-                    if !ctx.checkpoint.is_git_destructive_confirmed(&fp) {
+                    let params = inst.get_params();
+                    let cwd = params.get("cwd").and_then(|v| v.as_str()).map(PathBuf::from).unwrap_or_else(|| ctx.workspace_dir.to_path_buf());
+                    let cwd = if cwd.is_absolute() { cwd } else { ctx.workspace_dir.join(cwd) };
+                    let scope = crate::agent::dispatcher::git_operation_scope(&cmd_str, &cwd)
+                        .unwrap_or_else(|_| format!("cwd:{}", cwd.to_string_lossy()));
+                    if ctx.checkpoint.git_destructive_approved_scopes.get(&fp) != Some(&scope) {
+                        ctx.checkpoint.git_destructive_approved_scopes.remove(&fp);
+                        ctx.checkpoint.git_destructive_scopes.insert(fp.clone(), scope);
                         ctx.checkpoint.block_git_destructive(&fp);
                         let _ = save_checkpoint(ctx.state.inner(), ctx.checkpoint);
                         let stderr = format!(
@@ -68,83 +75,6 @@ pub(super) async fn dispatch_local_tool(
             }
         }
         if is_write_tool {
-
-            // git 工作区破坏命令对账门（实测事故 2026-09-25：终审歧义指令被执行为
-            // `git checkout --` 销毁他人未提交工作，且全程未进副作用台账）：
-            //   · 目标全在本 session 写入台账/计划核准集 → 自清理放行；
-            //   · 无路径形态（reset --hard/clean/push -f…）或含外来目标 → 挂起等
-            //     人工确认；ask_human 原文引用命令指纹 + 非拒绝回复 → 核销重发。
-            if let Some(cmd_str) =
-                crate::agent::dispatcher::extract_shell_command_string(inst)
-            {
-                use crate::agent::dispatcher::{
-                    git_cmd_fingerprint, git_destructive_review, GitDestructiveVerdict,
-                };
-                let verdict = git_destructive_review(&cmd_str);
-                if verdict != GitDestructiveVerdict::NotDestructive {
-                    let fp = git_cmd_fingerprint(&cmd_str);
-                    let mut foreign_reason: Option<String> = None;
-                    match &verdict {
-                        // 变更型但不销毁（stash pop/apply）：入账即可，不请人
-                        GitDestructiveVerdict::SideEffect => {}
-                        GitDestructiveVerdict::Pathless => {
-                            foreign_reason = Some(
-                                "无显式路径目标，影响面无法按台账界定（整树/历史/远端）"
-                                    .to_string(),
-                            );
-                        }
-                        GitDestructiveVerdict::Targets { paths, dirty_gated } => {
-                            let foreign = foreign_git_targets(
-                                paths,
-                                *dirty_gated,
-                                inst,
-                                ctx.context,
-                                ctx.checkpoint,
-                                ctx.workspace_dir,
-                            );
-                            if !foreign.is_empty() {
-                                foreign_reason = Some(format!(
-                                    "目标不在本 session 写入台账或计划核准集: {}",
-                                    foreign.join(", ")
-                                ));
-                            }
-                        }
-                        GitDestructiveVerdict::NotDestructive => {}
-                    }
-                    if let Some(reason) = foreign_reason {
-                        if !ctx.checkpoint.is_git_destructive_confirmed(&fp) {
-                            ctx.checkpoint.block_git_destructive(&fp);
-                            let _ = save_checkpoint(ctx.state.inner(), ctx.checkpoint);
-                            let stderr = format!(
-                                "【git 破坏命令待人工确认】`{fp}` —— {reason}，执行将销毁\
-                                 非本 session 产生的未提交工作。\n确需执行：用 ask_human \
-                                 询问主人，message 中原样包含完整命令 `{fp}`；主人回复须明确\
-                                 同意（确认/可以/批准/执行），拒绝或未表态均不放行；放行后\
-                                 原样重发本命令即可。主人拒绝或失联\
-                                 → 改用非破坏路径（先复制备份再处理，或放弃该操作）。",
-                            );
-                            emit_tool_event(
-                                ctx.app,
-                                ctx.final_session_id,
-                                ctx.step_id,
-                                inst,
-                                "failed",
-                                Some("git_destructive_needs_confirm".to_string()),
-                                Some(false),
-                                &stderr,
-                                Some(ctx.tool_started_at.elapsed().as_millis()),
-                                None,
-                            );
-                            return Ok(ArmOutcome::Early(DispatchResult { view: None,
-                                success: false,
-                                stdout: String::new(),
-                                stderr,
-                                route: "git_destructive_needs_confirm".to_string(),
-                            }));
-                        }
-                    }
-                }
-            }
 
             if let Some(scope_guard) = ctx.context
                 .resource_scope
@@ -195,11 +125,17 @@ pub(super) async fn dispatch_local_tool(
 
         let pending_images = crate::agent::tools::view_image::PendingImageQueue::default();
         let tool_images = pending_images.clone();
+        let shell_guard = std::sync::Arc::new(
+            crate::agent::dispatcher::ShellExecutionGuard::capture(
+                ctx.context, ctx.checkpoint, ctx.workspace_dir,
+            ),
+        );
+        let execution_guard = shell_guard.clone();
         let work_group = crate::agent::work_history::current_group();
         let mut tool_task = tokio::task::spawn_blocking(move || {
             println!("执行动作: {:?}", inst_c);
             crate::agent::work_history::in_blocking_group(work_group, ||
-                run_agent_step_with_images(&db, &sid, &inst_c, &registry, Some(&ws_root), &tool_images, Some(&run_id)))
+                run_agent_step_with_images(&db, &sid, &inst_c, &registry, Some(&ws_root), &tool_images, Some(&run_id), Some(&execution_guard)))
         });
 
         let mut dispatch_result = tokio::select! {
@@ -257,6 +193,10 @@ pub(super) async fn dispatch_local_tool(
         if dispatch_result.route == RUN_INTERRUPTED_ROUTE {
             return Ok(ArmOutcome::Early(dispatch_result));
         }
+        if shell_guard.record_pending(ctx.checkpoint) {
+            save_checkpoint(ctx.state.inner(), ctx.checkpoint)?;
+        }
+
         crate::agent::tools::view_image::transfer_pending_images(
             &pending_images, &mut ctx.context.pending_view_images,
         )?;
@@ -327,103 +267,4 @@ pub(super) async fn dispatch_local_tool(
 
         dispatch_result
     }))
-}
-
-/// git 破坏命令的路径对账：返回「不在本 session 写入台账且不在计划核准集」
-/// 的目标列表。归一化口径：命令目标按指令 cwd（缺省 workspace_dir）解析为
-/// 词法绝对路径；台账路径（非绝对时按 workspace_dir 解析）同规后精确匹配。
-/// dirty_gated=true（checkout/restore 形态）时，只把「脏=有未提交内容」的
-/// 目标算外来——干净已提交文件上还原是 no-op，无可销毁物，不该烦主人。
-/// 目标为目录前缀不展开判定（`.`/`*` 已在 Pathless 分流）——界外宁多判为
-/// foreign 触发人工确认，也不放宽到前缀匹配（fail 方向 = 移交而非放行）。
-fn foreign_git_targets(
-    targets: &[String],
-    dirty_gated: bool,
-    inst: &AgentInstruction,
-    context: &crate::agent::context::types::SandwichContext,
-    checkpoint: &crate::agent::checkpoint::AgentCheckpoint,
-    workspace_dir: &std::path::Path,
-) -> Vec<String> {
-    use crate::agent::context::resource_scope::lexically_normalize;
-    use std::path::Path;
-
-    let normalize_with = |raw: &str, base: &Path| -> String {
-        let p = Path::new(raw);
-        let joined = if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            base.join(p)
-        };
-        lexically_normalize(&joined).to_string_lossy().to_string()
-    };
-
-    // 命令的 cwd 基准（指令显式 cwd 优先，相对 cwd 以 workspace_dir 为基）
-    let cwd_base = inst
-        .get_params()
-        .get("cwd")
-        .and_then(|v| v.as_str())
-        .map(|cwd| {
-            let p = Path::new(cwd);
-            if p.is_absolute() {
-                p.to_path_buf()
-            } else {
-                workspace_dir.join(p)
-            }
-        })
-        .unwrap_or_else(|| workspace_dir.to_path_buf());
-
-    // session 写入台账（含本 session 前几轮 run 的继承写入——同会话内
-    // 「自己写的可以删」跨 run 成立；跨 session 的外来文件不在其中，
-    // 照常触发人工确认）+ 计划核准目标集
-    let mut allowed: Vec<String> = context
-        .side_effects
-        .iter()
-        .flat_map(|e| e.affected_paths.iter().map(|p| normalize_with(p, workspace_dir)))
-        .collect();
-    if let Some(approved) = &checkpoint.approved_target_files {
-        allowed.extend(
-            approved
-                .iter()
-                .map(|p| normalize_with(p, workspace_dir)),
-        );
-    }
-
-    // dirty_gated：只对「有未提交内容可销毁」的目标算外来。porcelain 输出为
-    // 仓库根相对路径，归一化基准 = git toplevel（拿不到则退化为 cwd_base 侧，
-    // 仍比「不查脏」精确）。
-    let dirty_abs: std::collections::BTreeSet<String> = if dirty_gated {
-        let repo_root = std::process::Command::new("git")
-            .args(["rev-parse", "--show-toplevel"])
-            .current_dir(&cwd_base)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .filter(|s| !s.is_empty())
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| cwd_base.clone());
-        crate::agent::review_tools::git_dirty_file_paths(&cwd_base)
-            .unwrap_or_default()
-            .iter()
-            .map(|p| normalize_with(p, &repo_root))
-            .collect()
-    } else {
-        std::collections::BTreeSet::new()
-    };
-
-    targets
-        .iter()
-        .filter(|t| {
-            let norm = normalize_with(t, &cwd_base);
-            if allowed.iter().any(|a| a == &norm) {
-                return false; // 本 session 写的/计划核准的 = 自清理
-            }
-            // checkout/restore 类：干净已提交文件上还原是 no-op，不算外来
-            if dirty_gated && !dirty_abs.contains(&norm) {
-                return false;
-            }
-            true
-        })
-        .cloned()
-        .collect()
 }

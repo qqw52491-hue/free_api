@@ -1268,3 +1268,20 @@ mod completion_todo_regressions {
         );
     }
 }
+
+#[cfg(test)]
+mod human_reply_protocol_tests {
+    use super::*;
+
+    #[test]
+    fn human_reply_protocol_accepts_standalone_judgment_and_keeps_boolean_types() {
+        let good = r#"{"human_reply_decision":{"reply_id":"reply-1","git_decisions":[],"plan_approved":false,"reason":"用户要求修改方案"}}"#;
+        let inst = parse_executable_instruction(good).unwrap();
+        assert!(!inst.has_executable_entry());
+        assert_eq!(inst.human_reply_decision.unwrap().plan_approved, Some(false));
+        let bad = r#"{"human_reply_decision":{"reply_id":"reply-1","git_decisions":[{"command":"git restore -- config/","approved":"false"}],"reason":"fixture"}}"#;
+        assert!(parse_executable_instruction(bad).is_err());
+        let empty = r#"{"human_reply_decision":"","tool":"local_file","params":{"action":"read","path":"a.txt"}}"#;
+        assert!(parse_executable_instruction(empty).unwrap().human_reply_decision.is_none());
+    }
+}

@@ -51,6 +51,7 @@ pub mod review_tools;
 pub(crate) mod review_stream;
 pub mod eval_oracle;
 pub mod host_verify;
+pub(crate) mod human_reply;
 pub mod impact_pack;
 pub mod router;
 pub mod run_state;

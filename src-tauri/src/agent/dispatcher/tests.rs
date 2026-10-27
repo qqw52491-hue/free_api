@@ -649,10 +649,10 @@
             );
         }
 
-        // 指纹归一化：空白压缩后原样，ask_human 引用靠它机械核对
+        // 指纹保留内部空白，避免不同文件名混为同一次许可
         assert_eq!(
             git_cmd_fingerprint("git   checkout   --   a.rs"),
-            "git checkout -- a.rs"
+            "git   checkout   --   a.rs"
         );
     }
 

@@ -160,6 +160,16 @@ pub async fn run_tool_phase(
         return Ok(result);
     }
 
+    if let Some(decision) = &inst.human_reply_decision {
+        if let Err(error) = checkpoint.apply_human_reply_decision(state.inner(), context, decision) {
+            return Ok(DispatchResult { view: None, success: false, stdout: String::new(), stderr: error, route: "human_reply:invalid_source".into() });
+        }
+        save_checkpoint(state.inner(), checkpoint)?;
+        if !inst.has_executable_entry() {
+            return Ok(DispatchResult { view: None, success: true, stdout: "已记录主模型对本次人类回复的判断。".into(), stderr: String::new(), route: "human_reply:resolved".into() });
+        }
+    }
+
     // --- B. 执行动作 ---
     if let Some(reason) = context.repeated_failure_blocker(
         &inst.get_tool(),

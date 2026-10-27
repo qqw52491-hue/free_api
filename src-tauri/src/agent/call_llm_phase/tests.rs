@@ -125,6 +125,33 @@ fn read(path: &str) -> String {
 }
 
 #[tokio::test]
+async fn human_reply_decision_uses_the_normal_model_request_and_actual_host_application() {
+    use crate::agent::checkpoint::AgentCheckpoint;
+    let mut context = SandwichContext::new("fixture system".into(), "理解用户回复并继续任务".into());
+    let mut cp = AgentCheckpoint::new("reply-model".into(), &context);
+    cp.block_git_destructive("git checkout -- config/");
+    cp.git_destructive_scopes.insert("git checkout -- config/".into(), "host-scope".into());
+    cp.git_destructive_mark_asked("是否执行 `git checkout -- config/`？");
+    cp.register_human_reply("是否执行 git checkout -- config/？", "不可以，先解释用途", false);
+    context.plan_gate = Some(cp.plan_gate_projection());
+    let id = cp.pending_human_reply.as_ref().unwrap().reply_id.clone();
+    let answer = json!({"human_reply_decision":{"reply_id":id,"git_decisions":[{"command":"git checkout -- config/","approved":false}],"plan_approved":null,"reason":"用户拒绝操作并要求解释"},"tool":"local_file","params":{"action":"read","path":"evidence.txt"}}).to_string();
+    let f = Fixture::new(vec![response(&answer, Some("stop"))]).await;
+    let app = tauri::test::mock_app();
+    app.manage(f.data.db.clone());
+    let (_sender, mut interrupt) = watch::channel(0);
+    let (inst, _, _, _) = call_llm(&context, &app.state::<DbState>(), "mock".into(), "flash", None, 1, "reply-model", false, 0, "auto", false, &mut interrupt).await.unwrap();
+    cp.apply_human_reply_decision(&f.data.db, &mut context, inst.human_reply_decision.as_ref().unwrap()).unwrap();
+    assert!(cp.git_destructive_approved_scopes.is_empty());
+    let result = run_agent_step(&f.data.db, "reply-model", &inst, &PluginRegistry::new(), Some(&f.data.root));
+    assert!(result.success && result.stdout.contains("existing evidence"));
+    let requests = f.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "沿用正常规划调用，不额外增加审批模型请求");
+    assert!(requests[0]["messages"].to_string().contains("不可以，先解释用途"));
+    assert!(requests[0]["messages"].to_string().contains(&id));
+}
+
+#[tokio::test]
 async fn generation_exhaustion_does_not_restart_the_inner_budget() {
     let reasoning_only = json!({"choices":[{"delta":{"reasoning_content":"fixture reasoning"},"finish_reason":"stop"}]} );
     for chunk in [

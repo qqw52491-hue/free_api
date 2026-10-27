@@ -124,13 +124,14 @@ pub(crate) fn execute_command_with_images(
     workspace_root: Option<&std::path::Path>,
     pending: Option<&crate::agent::tools::view_image::PendingImageQueue>,
     run_id: Option<&str>,
+    shell_guard: Option<&std::sync::Arc<ShellExecutionGuard>>,
 ) -> DispatchResult {
     if tool.eq_ignore_ascii_case("view_image") || action.eq_ignore_ascii_case("view_image") {
         if let Some(pending) = pending {
             return crate::agent::tools::view_image::dispatch(params, workspace_root, session_id, pending);
         }
     }
-    execute_command_in_run(db, session_id, tool, action, params, registry, workspace_root, run_id)
+    execute_command_in_run(db, session_id, tool, action, params, registry, workspace_root, run_id, shell_guard)
 }
 
 pub(crate) fn execute_command_inner(
@@ -142,7 +143,7 @@ pub(crate) fn execute_command_inner(
     registry: &PluginRegistry,
     workspace_root: Option<&std::path::Path>,
 ) -> DispatchResult {
-    execute_command_in_run(db, session_id, tool, action, params, registry, workspace_root, None)
+    execute_command_in_run(db, session_id, tool, action, params, registry, workspace_root, None, None)
 }
 
 fn execute_command_in_run(
@@ -154,6 +155,7 @@ fn execute_command_in_run(
     registry: &PluginRegistry,
     workspace_root: Option<&std::path::Path>,
     run_id: Option<&str>,
+    shell_guard: Option<&std::sync::Arc<ShellExecutionGuard>>,
 ) -> DispatchResult {
     let normalized = if tool.eq_ignore_ascii_case("local_shell") {
         match crate::agent::tool_params::normalize_shell_params(params) {
@@ -165,6 +167,9 @@ fn execute_command_in_run(
     // 单步、流水线及并行叶子共用纯参数预检，先报错再做原有安全裁决。
     if let Some(result) = crate::agent::tools::input_validation::native_rejection(tool, action, params) {
         return result;
+    }
+    if let (Some(guard), Some(workspace)) = (shell_guard, workspace_root) {
+        if let Some(result) = guard.check(tool, action, params, workspace) { return result; }
     }
     // 0. 宿主层安全防护：
     // 项目专属会话禁止切换工作区（锁定在项目根目录，防止越界串扰）
@@ -473,7 +478,12 @@ fn execute_command_in_run(
     let builtin_list = crate::agent::prompt_assembly::build_builtin_tools_compact_list();
     // 顶层独立动作被误当工具调用：模型熟悉的 {"tool","action","params"} 形状
     // 不适用于方案提交/交付预检这类状态转换动作，报错须点破格式而非只说"拼写错"。
-    let standalone_hint = if matches!(tool, "submit_plan" | "prepare_finish") {
+    let standalone_hint = if tool == "todo_update" {
+        "\n提示：todo_update 是指令 JSON 的顶层数组字段，不是工具。请把 todo_update: [...] 与本轮实际 tool/params 并列提交；本次工具调用未执行。".to_string()
+    } else if let Some(action) = tool.strip_prefix("project_resources/")
+        .filter(|action| matches!(*action, "list_resources" | "read_resource" | "register_resource")) {
+        format!("\n提示：project_resources 是原生工具，动作放在 params.action，不使用 MCP 的斜杠格式。正确形态：{{\"tool\":\"project_resources\",\"params\":{{\"action\":\"{action}\"}}}}；读取还需已有 resource_id，登记还需真实 path。本次未执行。")
+    } else if matches!(tool, "submit_plan" | "prepare_finish") {
         format!(
             "\n提示：'{}' 是顶层独立动作而非工具——请单独输出 {{\"{}\": {{...}}}}，不要附带 tool/action/params。",
             tool, tool

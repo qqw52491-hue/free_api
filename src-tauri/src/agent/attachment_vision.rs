@@ -201,6 +201,21 @@ fn preserve_image(url: &str, directory: &Path) -> Result<String, String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
+/// 附件首次进入上下文时就给出可读副本；不把应用私有原路径冒充工具可读路径。
+pub(crate) fn add_attachment_image(
+    context: &mut SandwichContext,
+    file_name: &str,
+    data_url: &str,
+    session_id: &str,
+) {
+    let directory = crate::agent::path_guard::get_session_tmp_dir(session_id).join("image-observations");
+    let reference = match preserve_image(data_url, &directory) {
+        Ok(path) => format!("原图回看副本（view_image 的 path）：{path}"),
+        Err(error) => format!("原图仍随消息提供；回看副本未保存：{error}"),
+    };
+    context.add_image_feedback(&format!("【用户已附加图片: `{file_name}`】\n{reference}"), data_url);
+}
+
 /// 每批未观察附件只进行一次观察调用；结果或失败落在同一任务检查点，恢复后不重复整理。
 /// 用户主动 view_image 的暂存队列保持原有一次性视觉调用，不经过这里。
 pub(crate) async fn prepare(

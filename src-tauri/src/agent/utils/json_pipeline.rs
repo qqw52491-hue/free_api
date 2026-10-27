@@ -359,6 +359,7 @@ pub fn normalize_raw_instruction_value(val: &mut serde_json::Value) {
             "fail_task",
             "review_contract_update",
             "change_verification_update",
+            "human_reply_decision",
             "self_report",
             "scope_extension",
             "request_retriage",

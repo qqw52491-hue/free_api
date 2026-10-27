@@ -107,9 +107,18 @@ pub struct AgentCheckpoint {
     /// 已在 ask_human 问题中原文引用、正在等待回复核销的指纹。
     #[serde(default)]
     pub git_destructive_asked: Vec<String>,
-    /// 经人工确认放行的 git 破坏命令指纹（同一命令重发不再确认）。
+    /// 仅兼容旧检查点的关键词确认记录；不再用作有效授权。
     #[serde(default)]
     pub git_destructive_confirmed: Vec<String>,
+    /// 当前操作的宿主目录/文件版本绑定；旧的纯文字 confirmed 不作为许可。
+    #[serde(default)]
+    pub git_destructive_scopes: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub git_destructive_approved_scopes: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub pending_human_reply: Option<crate::agent::human_reply::PendingHumanReply>,
+    #[serde(default)]
+    pub last_human_reply_resolution: Option<crate::agent::human_reply::ResolvedHumanReply>,
     /// 策略引擎核准的目标改动文件列表（用于写后真实 Git Diff 范围防逃逸比对）
     #[serde(default)]
     pub approved_target_files: Option<Vec<String>>,
@@ -391,6 +400,10 @@ impl AgentCheckpoint {
             git_destructive_pending: Vec::new(),
             git_destructive_asked: Vec::new(),
             git_destructive_confirmed: Vec::new(),
+            git_destructive_scopes: Default::default(),
+            git_destructive_approved_scopes: Default::default(),
+            pending_human_reply: None,
+            last_human_reply_resolution: None,
             approved_target_files: None,
             policy_decision_summary: None,
             plan_mode: PlanExecutionMode::Auto,
