@@ -32,8 +32,8 @@ pub(crate) fn percent_decode(input: &str) -> String {
 
 /// POST /channel/session/{session_id}/attachment-upload
 /// 浏览器给不了本地路径，网页端直接收字节流（raw body + X-File-Name），
-/// 落临时文件后走既有登记逻辑（复制进项目 .attachments/ 隔离目录）。
-/// 附件仅支持项目会话——临时会话没有 .attachments 落点（与微信桥约束一致）。
+/// 落临时文件后走既有登记逻辑（保存到应用 tmp，不写入项目目录）。
+/// 此入口保留项目对话及资源句柄绑定约束。
 pub(crate) async fn handler_session_attachment_upload(
     AxumState(state): AxumState<Arc<ChannelState>>,
     headers: HeaderMap,

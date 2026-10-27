@@ -213,7 +213,7 @@ fn canonical_project_file(
     let root = PathBuf::from(&project.root_path)
         .canonicalize()
         .map_err(|_| "项目根目录已不存在或无法访问".to_string())?;
-    let path = PathBuf::from(raw_path.trim());
+    let path = project_resource_target(&root, raw_path)?;
     let target = if path.is_relative() {
         root.join(path)
     } else {
@@ -225,10 +225,43 @@ fn canonical_project_file(
     if !requested.is_file() {
         return Err("项目资源必须是可读取的普通文件".to_string());
     }
-    if !requested.starts_with(&root) {
+    let in_uploads = crate::agent::path_guard::project_attachment_dir(&root, false)
+        .is_ok_and(|uploads| requested.starts_with(uploads));
+    if !requested.starts_with(&root) && !in_uploads {
         return Err("资源文件位于项目根目录外，已拒绝访问".to_string());
     }
     Ok((project, requested))
+}
+
+fn project_resource_target(root: &Path, raw: &str) -> Result<PathBuf, String> {
+    let raw = raw.trim();
+    if let Some(name) = raw.strip_prefix("tmp/project-attachments/") {
+        let uploads = crate::agent::path_guard::project_attachment_dir(root, false)?;
+        let target = uploads.join(name).canonicalize().map_err(|_| "上传资源不存在或无法访问")?;
+        if !target.starts_with(&uploads) { return Err("上传资源路径超出当前项目临时区".into()); }
+        return Ok(target);
+    }
+    Ok(PathBuf::from(raw))
+}
+
+fn project_resource_display_path(project: &AgentProject, path: &Path) -> Result<String, String> {
+    let root = PathBuf::from(&project.root_path).canonicalize().map_err(|e| e.to_string())?;
+    if let Ok(relative) = path.strip_prefix(&root) { return Ok(relative.to_string_lossy().into_owned()); }
+    let uploads = crate::agent::path_guard::project_attachment_dir(&root, false)?;
+    let relative = path.strip_prefix(uploads).map_err(|_| "资源不在当前项目或其上传临时区")?;
+    Ok(format!("tmp/project-attachments/{}", relative.to_string_lossy()))
+}
+
+fn copy_project_attachment(root: &Path, source: &Path, original_name: &str) -> Result<PathBuf, String> {
+    let directory = crate::agent::path_guard::project_attachment_dir(root, true)?;
+    let name: String = original_name.chars()
+        .map(|c| if c.is_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' })
+        .take(MAX_RESOURCE_LABEL_CHARS).collect();
+    let target = directory.join(format!("att-{}-{name}", Uuid::new_v4()));
+    let mut input = std::fs::File::open(source).map_err(|e| e.to_string())?;
+    let mut output = std::fs::OpenOptions::new().write(true).create_new(true).open(&target).map_err(|e| e.to_string())?;
+    std::io::copy(&mut input, &mut output).map_err(|e| format!("保存附件临时副本失败: {e}"))?;
+    Ok(target)
 }
 
 fn prepare_and_import_project_file(
@@ -240,7 +273,7 @@ fn prepare_and_import_project_file(
     let root = PathBuf::from(&project.root_path)
         .canonicalize()
         .map_err(|_| "项目根目录已不存在或无法访问".to_string())?;
-    let path = PathBuf::from(raw_path.trim());
+    let path = project_resource_target(&root, raw_path)?;
     let target = if path.is_relative() {
         root.join(path)
     } else {
@@ -252,19 +285,11 @@ fn prepare_and_import_project_file(
     if !requested.is_file() {
         return Err("项目资源必须是可读取的普通文件".to_string());
     }
-    // 🌟 如果文件位于项目外部（例如桌面/下载目录），自动复制一份到项目工作区中并登记
-    let canonical = if !requested.starts_with(&root) {
-        let file_name = requested
-            .file_name()
-            .unwrap_or_else(|| std::ffi::OsStr::new("imported_file"));
-        let target_in_root = root.join(file_name);
-        if target_in_root != requested {
-            std::fs::copy(&requested, &target_in_root)
-                .map_err(|e| format!("导入外部文件到项目目录失败: {}", e))?;
-        }
-        target_in_root
-            .canonicalize()
-            .map_err(|_| "导入后文件无法访问".to_string())?
+    let in_uploads = crate::agent::path_guard::project_attachment_dir(&root, false)
+        .is_ok_and(|uploads| requested.starts_with(uploads));
+    let canonical = if !requested.starts_with(&root) && !in_uploads {
+        let name = requested.file_name().and_then(|name| name.to_str()).unwrap_or("attachment");
+        copy_project_attachment(&root, &requested, name)?
     } else {
         requested
     };
@@ -298,11 +323,7 @@ pub(crate) fn add_project_resource_row(
     let (project, canonical_path) = prepare_and_import_project_file(conn, project_id, raw_path)?;
     let metadata = std::fs::metadata(&canonical_path)
         .map_err(|error| format!("无法读取资源元数据: {}", error))?;
-    let relative_path = canonical_path
-        .strip_prefix(PathBuf::from(&project.root_path))
-        .map_err(|_| "无法计算项目内相对路径".to_string())?
-        .to_string_lossy()
-        .to_string();
+    let relative_path = project_resource_display_path(&project, &canonical_path)?;
     let fallback_label = canonical_path
         .file_name()
         .and_then(|value| value.to_str())
@@ -395,11 +416,7 @@ pub(crate) fn add_project_resource_for_session(
     let (project, canonical_path) = prepare_and_import_project_file(conn, &project.id, raw_path)?;
     let metadata = std::fs::metadata(&canonical_path)
         .map_err(|error| format!("无法读取资源元数据: {}", error))?;
-    let relative_path = canonical_path
-        .strip_prefix(PathBuf::from(&project.root_path))
-        .map_err(|_| "无法计算项目内相对路径".to_string())?
-        .to_string_lossy()
-        .to_string();
+    let relative_path = project_resource_display_path(&project, &canonical_path)?;
     let fallback_label = canonical_path
         .file_name()
         .and_then(|value| value.to_str())
@@ -452,7 +469,7 @@ pub(crate) fn add_project_resource_for_session(
     .map_err(|error| error.to_string())
 }
 
-/// 上传附件自动登记：把附件复制进项目内隔离目录（避免与项目文件同名覆盖），
+/// 上传附件自动登记：把附件复制进应用 tmp 隔离目录（避免污染或覆盖项目文件），
 /// 再登记为受管资源，返回全文句柄 resource_id。非项目会话返回 None（无句柄可用）。
 pub(crate) fn register_attachment_for_session(
     conn: &Connection,
@@ -464,18 +481,7 @@ pub(crate) fn register_attachment_for_session(
         return Ok(None);
     };
     let root = PathBuf::from(&project.root_path);
-    let import_dir = root.join(".attachments");
-    std::fs::create_dir_all(&import_dir)
-        .map_err(|error| format!("创建附件导入目录失败: {}", error))?;
-    let sanitized: String = original_name
-        .chars()
-        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
-        .take(MAX_RESOURCE_LABEL_CHARS)
-        .collect();
-    let safe_name = format!("att-{}-{}", &Uuid::new_v4().to_string()[..8], sanitized);
-    let target = import_dir.join(safe_name);
-    std::fs::copy(attachment_path, &target)
-        .map_err(|error| format!("附件导入项目工作区失败: {}", error))?;
+    let target = copy_project_attachment(&root, attachment_path, original_name)?;
     let resource = add_project_resource_for_session(
         conn,
         session_id,

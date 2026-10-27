@@ -368,14 +368,12 @@ pub async fn parse_attachment_file(path: String) -> Result<ParsedAttachmentResul
 /// 保存并解析从前端上传/拖拽的 Base64 文件
 #[tauri::command]
 pub async fn save_and_parse_uploaded_attachment(
-    app: AppHandle,
     state: State<'_, DbState>,
     session_id: String,
     file_name: String,
     base64_data: String,
 ) -> Result<ParsedAttachmentResult, String> {
     use base64::Engine;
-    use tauri::Manager;
 
     let clean_b64 = if let Some(pos) = base64_data.find("base64,") {
         &base64_data[pos + 7..]
@@ -386,18 +384,19 @@ pub async fn save_and_parse_uploaded_attachment(
         .decode(clean_b64.trim())
         .map_err(|e| format!("Base64 解码失败: {}", e))?;
 
-    let app_dir = app
-        .path()
-        .app_data_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let attach_dir = app_dir.join("attachments").join(&session_id);
-    std::fs::create_dir_all(&attach_dir).map_err(|e| format!("创建附件目录失败: {}", e))?;
-
-    let target_path = attach_dir.join(&file_name);
-    std::fs::write(&target_path, &bytes).map_err(|e| format!("保存附件文件失败: {}", e))?;
+    let attach_dir = crate::agent::path_guard::session_attachment_dir(&session_id)?;
+    let safe_name: String = file_name.chars()
+        .map(|c| if c.is_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' })
+        .take(200).collect();
+    let target_path = attach_dir.join(format!("{}-{safe_name}", uuid::Uuid::new_v4()));
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&target_path)
+        .map_err(|e| format!("保存附件文件失败: {e}"))?;
+    file.write_all(&bytes).map_err(|e| format!("保存附件文件失败: {e}"))?;
 
     let path_str = target_path.to_string_lossy().to_string();
     let mut parsed = parse_attachment_file(path_str.clone()).await?;
+    parsed.file_name = safe_name;
 
     // 📎 附件全文句柄：项目会话自动登记为受管资源，模型后续可按句柄回读全文/结构化摘要
     let handle_line = {

@@ -14,6 +14,42 @@ pub fn get_session_tmp_dir(session_id: &str) -> PathBuf {
     base.join("free-api-chat").join("tmp").join(session_id)
 }
 
+/// 宿主管理的上传目录；逐级检查，上传不能通过预放置的链接写出临时区。
+fn managed_attachment_dir(parts: &[&str], create: bool) -> Result<PathBuf, String> {
+    let base = dirs_next::data_dir().ok_or("无法定位应用数据目录")?.join("free-api-chat");
+    if create { std::fs::create_dir_all(&base).map_err(|e| e.to_string())?; }
+    let mut directory = base.canonicalize().map_err(|e| e.to_string())?;
+    for part in std::iter::once("tmp").chain(parts.iter().copied()) {
+        let mut components = Path::new(part).components();
+        if !matches!(components.next(), Some(std::path::Component::Normal(_))) || components.next().is_some() {
+            return Err("附件目录标识无效".into());
+        }
+        directory.push(part);
+        if create {
+            match std::fs::create_dir(&directory) {
+                Ok(()) => {},
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {},
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        let metadata = std::fs::symlink_metadata(&directory).map_err(|e| e.to_string())?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() { return Err("附件临时目录不是普通目录，未执行操作".into()); }
+    }
+    Ok(directory)
+}
+
+pub(crate) fn session_attachment_dir(session_id: &str) -> Result<PathBuf, String> {
+    managed_attachment_dir(&[session_id, "attachments"], true)
+}
+
+/// 同一物理项目的上传资源共享临时区；不会创建项目工作区内的文件。
+pub(crate) fn project_attachment_dir(workspace: &Path, create: bool) -> Result<PathBuf, String> {
+    use sha2::{Digest, Sha256};
+    let workspace = workspace.canonicalize().map_err(|e| e.to_string())?;
+    let key = format!("{:x}", Sha256::digest(workspace.to_string_lossy().as_bytes()));
+    managed_attachment_dir(&["project-attachments", &key], create)
+}
+
 /// 仅用于方案门适用性：确认 local_file 写入仍在本会话 tmp 内，不创建目录。
 /// 不使用全局 tmp 前缀；拒绝穿越、其他会话与指向工作区的链接。
 pub(crate) fn is_confined_session_tmp_write(
@@ -153,6 +189,10 @@ pub fn ensure_allowed_path(
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err("路径不能为空".to_string());
+    }
+    let attachment_alias = trimmed.strip_prefix("./").unwrap_or(trimmed);
+    if attachment_alias == "tmp/project-attachments" || attachment_alias.starts_with("tmp/project-attachments/") {
+        return Err("上传资源只读；需要修改时先复制到本会话 tmp/ 中处理".into());
     }
 
     let ws_canonical = workspace_root
@@ -345,9 +385,18 @@ pub fn ensure_readable_path(
 ) -> Result<AllowedPathResolution, String> {
     match ensure_allowed_path(raw, workspace_root, session_id, auto_create_if_tmp) {
         Ok(r) => Ok(r),
-        Err(e) => resolve_configured_read(raw, workspace_root, session_id)
+        Err(e) => {
+            let uploaded = project_attachment_dir(workspace_root, false).ok().and_then(|root| {
+                let name = raw.trim().strip_prefix("./").unwrap_or(raw.trim());
+                let target = if name == "tmp/project-attachments" { root.clone() }
+                    else { name.strip_prefix("tmp/project-attachments/").map(|rest| root.join(rest))
+                        .unwrap_or_else(|| PathBuf::from(raw.trim())) };
+                resolve_under_root(&target.to_string_lossy(), &root)
+            });
+            uploaded.or_else(|| resolve_configured_read(raw, workspace_root, session_id))
             .or_else(|| skills_root().and_then(|root| resolve_under_root(raw, &root)))
-            .ok_or(e),
+            .ok_or(e)
+        },
     }
 }
 

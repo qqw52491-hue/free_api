@@ -124,7 +124,7 @@ pub(crate) struct AttachmentReq {
     pub(crate) original_name: Option<String>,
 }
 
-/// 微信发来的媒体文件登记为项目受管资源（复制进 .attachments/ 隔离目录，返回句柄）
+/// 微信发来的媒体文件登记为项目受管资源（复制进应用 tmp，返回句柄）
 pub(crate) async fn handler_session_attachment(
     AxumState(state): AxumState<Arc<ChannelState>>,
     headers: HeaderMap,
@@ -431,7 +431,9 @@ mod file_transfer_tests {
         std::fs::remove_file(&incoming).unwrap(); // 原始下载路径消失后，受管副本仍可读取
         let preview = crate::commands::projects::read_project_resource_for_session(&conn, &session.id, &resource).unwrap();
         assert_eq!(preview.content, "小文件正文🙂");
-        assert!(std::path::Path::new(&preview.resource.canonical_path).starts_with(scratch.join(".attachments")));
+        let uploads = crate::agent::path_guard::project_attachment_dir(&scratch, false).unwrap();
+        assert!(std::path::Path::new(&preview.resource.canonical_path).starts_with(uploads));
+        assert!(!scratch.join(".attachments").exists());
         assert!(register_channel_attachment(&conn, &session.id, &base, "directory", &scratch).is_err());
         let _ = std::fs::remove_dir_all(base);
     }

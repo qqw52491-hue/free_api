@@ -29,12 +29,111 @@
             .unwrap()
             .expect("项目会话应登记出句柄");
         assert_eq!(std::fs::read_to_string(root.join("report.txt")).unwrap(), "项目自带的同名文件，绝不能被附件覆盖");
-        let imported_dir = root.join(".attachments");
-        assert!(imported_dir.exists());
+        let imported_dir = crate::agent::path_guard::project_attachment_dir(&root, false).unwrap();
+        assert!(!root.join(".attachments").exists());
+        assert!(!root.join("upload.bin").exists());
         let preview = read_project_resource_for_session(&conn, &session.id, &resource_id).unwrap();
         assert!(preview.content.contains("attachment body"));
         assert_eq!(std::fs::read_dir(&imported_dir).unwrap().count(), 1);
 
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn uploaded_project_images_stay_in_tmp_read_across_own_sessions_and_do_not_dirty_git() {
+        use base64::Engine;
+        use std::process::Command;
+        let base = std::env::temp_dir().join(format!("upload-tmp-{}", Uuid::new_v4()));
+        let root = base.join("project");
+        let other = base.join("other");
+        std::fs::create_dir_all(&root).unwrap(); std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(root.join("existing.txt"), "user file").unwrap();
+        for args in [vec!["init", "-q"], vec!["config", "user.name", "Fixture"], vec!["config", "user.email", "fixture@example.invalid"], vec!["add", "."], vec!["commit", "-qm", "fixture"]] {
+            assert!(Command::new("git").args(args).current_dir(&root).status().unwrap().success());
+        }
+        let conn = crate::db::init_db(&base.join("test.db")).unwrap();
+        let project = create_project_row(&conn, "upload", root.to_str().unwrap()).unwrap();
+        let session = create_project_session_row(&conn, &project.id, "first", "m").unwrap();
+        let second = create_project_session_row(&conn, &project.id, "second", "m").unwrap();
+        let other_project = create_project_row(&conn, "other", other.to_str().unwrap()).unwrap();
+        let other_session = create_project_session_row(&conn, &other_project.id, "other", "m").unwrap();
+        let png = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=").unwrap();
+        let source = base.join("screenshot.png"); std::fs::write(&source, &png).unwrap();
+        let id = register_attachment_for_session(&conn, &session.id, &source, "截图.png").unwrap().unwrap();
+        let preview = read_project_resource_for_session(&conn, &second.id, &id).unwrap();
+        assert!(preview.resource.relative_path.starts_with("tmp/project-attachments/"));
+        let (_, url, _) = crate::agent::tools::view_image::resolve_and_encode_image(&preview.resource.relative_path, &root, &second.id).unwrap();
+        assert_eq!(url, format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(&png)));
+        assert!(crate::agent::path_guard::ensure_allowed_path(&preview.resource.relative_path, &root, Some(&second.id), true).is_err());
+        assert!(crate::agent::path_guard::ensure_allowed_path(&preview.resource.canonical_path, &root, Some(&second.id), true).is_err());
+        assert!(read_project_resource_for_session(&conn, &other_session.id, &id).is_err());
+        assert!(crate::agent::tools::view_image::resolve_and_encode_image(&preview.resource.canonical_path, &other, &other_session.id).is_err());
+        // 同名附件各存独立版本；外部文件自动登记也不能覆盖项目文件。
+        let second_id = register_attachment_for_session(&conn, &session.id, &source, "截图.png").unwrap().unwrap();
+        assert_ne!(id, second_id);
+        let external = base.join("existing.txt"); std::fs::write(&external, "uploaded data").unwrap();
+        let imported = add_project_resource_row(&conn, &project.id, external.to_str().unwrap()).unwrap();
+        assert!(imported.relative_path.starts_with("tmp/project-attachments/"));
+        assert_eq!(std::fs::read_to_string(root.join("existing.txt")).unwrap(), "user file");
+        let status = Command::new("git").args(["status", "--porcelain"]).current_dir(&root).output().unwrap();
+        assert!(status.status.success() && status.stdout.is_empty(), "上传不得制造 Git 修改");
+        assert!(!root.join(".attachments").exists());
+        assert_eq!(std::fs::read(&source).unwrap(), png);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn managed_attachment_directories_reject_traversal_and_symlink_redirects() {
+        assert!(crate::agent::path_guard::session_attachment_dir("../other").is_err());
+        #[cfg(unix)] {
+            let base = std::env::temp_dir().join(format!("upload-links-{}", Uuid::new_v4()));
+            let root = base.join("project"); let outside = base.join("outside");
+            std::fs::create_dir_all(&root).unwrap(); std::fs::create_dir_all(&outside).unwrap();
+            let uploads = crate::agent::path_guard::project_attachment_dir(&root, true).unwrap();
+            std::fs::remove_dir(&uploads).unwrap();
+            std::os::unix::fs::symlink(&outside, &uploads).unwrap();
+            assert!(crate::agent::path_guard::project_attachment_dir(&root, true).is_err());
+            std::fs::write(outside.join("private.txt"), "private").unwrap();
+            assert!(crate::agent::path_guard::ensure_readable_path("tmp/project-attachments/private.txt", &root, Some("upload-links"), false).is_err());
+            std::fs::remove_file(&uploads).unwrap();
+            let _ = std::fs::remove_dir_all(base);
+        }
+    }
+
+    #[test]
+    fn desktop_upload_command_saves_in_session_tmp_and_keeps_history_and_resource_reads_working() {
+        use tauri::Manager;
+        use std::sync::{Arc, Mutex};
+        let base = std::env::temp_dir().join(format!("desktop-upload-{}", Uuid::new_v4()));
+        let root = base.join("project"); std::fs::create_dir_all(&root).unwrap();
+        let conn = crate::db::init_db(&base.join("test.db")).unwrap();
+        let project = create_project_row(&conn, "desktop", root.to_str().unwrap()).unwrap();
+        let session = create_project_session_row(&conn, &project.id, "desktop", "m").unwrap();
+        let app = tauri::test::mock_app(); app.manage(crate::db::DbState(Arc::new(Mutex::new(conn))));
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let upload = |name: &str, bytes: &str| runtime.block_on(crate::commands::chat::save_and_parse_uploaded_attachment(
+            app.state::<crate::db::DbState>(), session.id.clone(), name.to_string(), bytes.to_string(),
+        )).unwrap();
+        let first = upload("report.txt", "Zmlyc3Q=");
+        let second = upload("report.txt", "c2Vjb25k");
+        let escaped = upload("../escape.txt", "c2FmZQ==");
+        let tmp = crate::agent::path_guard::get_session_tmp_dir(&session.id).canonicalize().unwrap();
+        assert!(Path::new(&first.file_path).starts_with(&tmp));
+        assert_ne!(first.file_path, second.file_path);
+        assert_eq!(std::fs::read_to_string(&first.file_path).unwrap(), "first");
+        assert_eq!(std::fs::read_to_string(&second.file_path).unwrap(), "second");
+        assert!(!escaped.file_name.contains('/'));
+        assert!(!tmp.parent().unwrap().join("escape.txt").exists());
+        let parsed = runtime.block_on(crate::commands::chat::parse_attachment_file(first.file_path.clone())).unwrap();
+        assert_eq!(parsed.raw_preview.as_deref(), Some("first"));
+        let db = app.state::<crate::db::DbState>(); let conn = db.0.lock().unwrap();
+        let resources = project_resources_for_session(&conn, &session.id).unwrap();
+        assert_eq!(resources.len(), 3);
+        let preview = read_project_resource_for_session(&conn, &session.id, &resources[0].resource_id).unwrap();
+        assert!(!preview.content.is_empty());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0, "真实上传入口不得向项目写任何文件");
+        assert!(project_resource_target(&root, "tmp/project-attachments/../../../escape.txt").is_err());
+        drop(conn);
         let _ = std::fs::remove_dir_all(base);
     }
 
@@ -64,7 +163,9 @@
         let imported =
             add_project_resource_row(&conn, &project.id, outside.to_string_lossy().as_ref())
                 .unwrap();
-        assert_eq!(imported.relative_path, "outside.txt");
+        assert!(imported.relative_path.starts_with("tmp/project-attachments/"));
+        assert!(imported.relative_path.ends_with("outside.txt"));
+        assert!(!root.join("outside.txt").exists());
         assert_eq!(
             project_resources_for_session(&conn, &session.id)
                 .unwrap()
