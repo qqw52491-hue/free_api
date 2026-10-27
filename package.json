@@ -18,7 +18,8 @@
     "test:e2e": "npm run test:e2e:build && wdio run wdio.conf.mjs",
     "eval:real": "node scripts/eval_runner.mjs",
     "eval:real:dry": "node scripts/eval_runner.mjs --dry-run",
-    "sync:types": "cd src-tauri && cargo test -- export_bindings && mkdir -p ../src/types/generated && cp src/types/generated/*.ts ../src/types/generated/"
+    "sync:types": "cd src-tauri && cargo test -- export_bindings && mkdir -p ../src/types/generated && cp src/types/generated/*.ts ../src/types/generated/",
+    "release": "node scripts/release-version.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

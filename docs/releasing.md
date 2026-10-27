@@ -4,7 +4,7 @@
 
 工作流在对应 GitHub runner 上构建：Windows x64、Linux x64，以及 macOS Apple Silicon / Intel 两种架构。Linux 生成 deb/rpm 和 AppImage。产物上传到同一个 **Release 草稿**；各构建保存自己的更新清单，最后由 `verify-updater` 合并四个平台的条目并核对下载地址属于本次 Release，避免并发写入覆盖。全部任务成功后再手动发布。
 
-本地已验证版本检查、签名配对、更新状态与清单合并逻辑；没有成功运行 GitHub 发布矩阵或真实跨版本安装的记录，不能把工作流存在等同于各平台已经验收。
+v0.1.0 的四个平台构建及清单合并已在 GitHub 运行成功，更新签名和公开清单已验证；不同平台实际安装及跨版本升级仍需实机验收。
 
 ## 1. 配置更新签名 Secret
 
@@ -23,25 +23,29 @@
 
 参见 [GitHub Secrets](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets)、[Tauri Updater](https://v2.tauri.app/plugin/updater/) 和 [Tauri GitHub 构建说明](https://v2.tauri.app/distribute/pipelines/github/)。
 
-## 2. 提交要发布的代码并推送标签
+## 2. 一条命令准备版本并推送
 
-先检查并提交这次要发布的代码。工作区中的未提交文件不会进入 GitHub 的标签构建；尤其需要包含工作流、凭据移除和配对公钥配置。不要直接推送指向旧代码的标签。
-
-以下以当前项目版本 `0.1.0` 为例：
+先提交想随新版发布的代码，然后在项目根目录运行：
 
 ```bash
-# 先完成代码审阅和提交，再执行：
-git status
-git tag v0.1.0
-git push origin main
-git push origin v0.1.0
+# 可先预览，不修改文件、不创建标签，也不联系远端
+npm run release -- v0.1.1 --dry-run
+
+# 确认版本后，自动更新版本文件、提交、打标签并推送
+npm run release -- v0.1.1
 ```
 
-`package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 的版本必须一致，标签须为 `v<版本>`；版本不匹配时工作流会在打包前失败。更新前端版本时也应同步 `package-lock.json`。已有发布标签不要重复创建或随意移动，下一版使用新的版本号。
+也可以写 `v1.2`，脚本会补齐为 `v1.2.0`；版本必须是稳定版数字，不能使用 `v1`、前导零或 `-rc`。脚本自动同步 `package.json`、`package-lock.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`，只提交这五个版本文件。脚本不会修改模型配置、签名密钥或用户数据。
 
-手动运行：在 Actions 中打开 Release，选择 **Run workflow**，填入已经推送的版本标签。工作流会检出并构建该标签，不会把 `main` 分支名当作版本号。
+正式运行前，脚本检查是否在 `main`，工作区是否干净，本地及远端标签是否已存在，以及远端 `main` 是否有本地尚未包含的提交。工作区有改动时，先自己检查并提交需要发布的文件；脚本不会替你决定是否把它们一起提交。预览不检查远端，实际执行时才会检查。
 
-创建 Release 时，`releaseCommitish` 使用检出后的完整提交 SHA；`tagName` 仍是版本标签。GitHub 创建 Release 的 `target_commitish` 参数不能直接使用这里的 `v0.1.0` 标签名，首轮远端构建已复现 `Validation Failed: target_commitish`，工作流已按真实回执修正。已有标签无需移动。
+若输入版本与当前版本相同，且该标签在本地和远端都不存在，脚本不会创建空提交，而是直接将标签指向当前提交。Git 标签可以指向已有提交，但同名标签不能重复使用；例如当前已有 `v0.1.0`，下次可用 `v0.1.1`。
+
+脚本会推送 `main` 和新标签，触发 GitHub Actions，**但不会替你发布 Release 草稿**。如果推送失败，已完成的版本文件、提交或标签保留，脚本会说明停止阶段和对应的继续推送命令；不要重新创建同名标签或强推。
+
+手动重跑：在 GitHub Actions 中打开 Release，选择 **Run workflow**，填入已经推送的版本标签。工作流会检出并构建该标签，不会把 `main` 分支名当作版本号。
+
+创建 Release 时，`releaseCommitish` 使用检出后的完整提交 SHA；`tagName` 仍是版本标签。首轮远端构建曾复现 `Validation Failed: target_commitish`，工作流已按真实回执修正。已有标签无需移动。
 
 ## 3. 查看构建与草稿
 
@@ -56,7 +60,7 @@ git push origin v0.1.0
 
 首次运行可能暴露平台依赖或源码兼容问题，以实际日志修复。工作流不会因为本机 Linux 检查通过就宣称 Windows/macOS 已通过。
 
-如果仍显示 **The job was not started**，先核对 GitHub 账户、组织、Actions 权限与账单状态；这是远端任务尚未启动，不是应用编译错误。这里没有更改仓库可见性、账户设置或自动推送标签。
+如果仍显示 **The job was not started**，先核对 GitHub 账户、组织、Actions 权限与账单状态；这是远端任务尚未启动，不是应用编译错误。优先根据实际 GitHub 日志定位原因。
 
 ## 4. 更新服务与公开源码
 
@@ -77,3 +81,5 @@ https://github.com/qqw52491-hue/free_api/releases/latest/download/latest.json
 本地回归：`node scripts/test-github-updater.mjs`，覆盖在途检查共享、网络错误、下载进度、重复安装、签名失败、重启失败恢复、deb/rpm 手动安装分流，以及乱序合并、缺平台、错误版本、缺签名和非本次 Release 地址拒绝。
 
 当前源码中的远端 MCP token 与内置 TinyFish Key 已移除，但旧提交仍包含原值。删除当前文件中的值不会清除 Git 历史。公开前需要处理旧凭据；优先在服务端作废或轮换，是否重写历史或另建只含当前快照的仓库应由维护者决定，本次没有执行这些操作。参见 [GitHub 敏感数据处理说明](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/removing-sensitive-data-from-a-repository)。
+
+发布脚本回归：`node scripts/test-release-version.mjs` 在临时仓库和本地模拟远端验证版本同步、提交和标签、同版本标签、未提交文件、标签冲突、远端领先以及推送失败后的恢复提示。

@@ -150,7 +150,7 @@ npm run dev:wayland
 
 **能直接发布自己构建的安装包吗？**
 
-先核对应用标识、更新地址与签名配置。当前 [`tauri.conf.json`](src-tauri/tauri.conf.json) 开启了更新产物，二次分发应使用自己的更新端点和签名配置，或按需关闭更新产物生成。生成更新签名需要配置私钥环境变量，详见 [Tauri Updater 文档](https://v2.tauri.app/plugin/updater/)。私钥不应进入仓库。 完整步骤见 [三平台发布与 GitHub 更新指南](docs/releasing.md)。
+先核对应用标识、更新地址与签名配置。当前 [`tauri.conf.json`](src-tauri/tauri.conf.json) 开启了更新产物，二次分发应使用自己的更新端点和签名配置，或按需关闭更新产物生成。生成更新签名需要配置私钥环境变量，详见 [Tauri Updater 文档](https://v2.tauri.app/plugin/updater/)。私钥不应进入仓库。 完整步骤见 [三平台发布与 GitHub 更新指南](docs/releasing.md)。 发布时可用 `npm run release -- v0.1.1` 自动同步版本、提交和推送标签；加 `--dry-run` 可以先预览。
 
 应用在启动和前台每小时检查 GitHub Release，侧栏底部“应用更新”可下载并安装新版本；更新分发独立于微信和内网穿透。首次发布还需跑通 CI 并实测升级；Linux AppImage 使用内置更新，deb/rpm 从发布页手动安装。
 
