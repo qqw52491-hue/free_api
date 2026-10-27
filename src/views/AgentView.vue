@@ -191,9 +191,9 @@
             </div>
 
             <footer class="sidebar-footer">
+                <AppUpdateControl :collapsed="sidebarCollapsed" />
                 <span class="profile-dot">⚡</span>
                 <span v-if="!sidebarCollapsed" class="profile-name">free_api</span>
-                <AppUpdateControl :collapsed="sidebarCollapsed" />
             </footer>
         </aside>
 
@@ -1273,12 +1273,22 @@ onUnmounted(() => {
     border-top: 1px solid rgba(255, 255, 255, 0.06);
     color: #a1a1aa;
     font-size: 12px;
+    margin-top: auto;
 }
 
 .app-sidebar.collapsed .sidebar-footer {
     flex-direction: column;
+    align-items: center;
     justify-content: center;
-    padding: 12px 0;
+    gap: 8px;
+    padding: 12px 0 16px;
+}
+
+.app-sidebar.collapsed .profile-dot {
+    width: 26px;
+    height: 26px;
+    font-size: 13px;
+    border-radius: 7px;
 }
 
 .profile-dot {

@@ -1,5 +1,5 @@
 <template>
-  <div class="app-update-control">
+  <div v-if="shouldShow" class="app-update-control" :class="{ collapsed }">
     <button
       type="button"
       class="update-trigger"
@@ -35,7 +35,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -47,6 +47,16 @@ import {
 defineProps<{ collapsed?: boolean }>();
 const panelOpen = ref(false);
 const currentVersion = ref("");
+
+// 只有存在可用更新、安装中、安装完成，或用户已手动打开面板时才显示该按钮；无更新时不占位
+const shouldShow = computed(() => {
+  return Boolean(
+    availableUpdate.value ||
+    updateInstalling.value ||
+    updateInstalled.value ||
+    panelOpen.value
+  );
+});
 onMounted(() => { void getVersion().then(value => { currentVersion.value = value; }).catch(() => {}); });
 async function checkManually() {
   try { await checkUpdateOnce(); } catch { /* 具体错误由共享状态显示 */ }
@@ -58,12 +68,53 @@ async function openReleases() {
 </script>
 
 <style scoped>
-.app-update-control { margin-left: auto; }
-:global(.app-sidebar.collapsed) .app-update-control { margin-left: 0; }
-.update-trigger { display: flex; align-items: center; gap: 7px; padding: 5px; border: 0; border-radius: 7px; background: transparent; color: #a1a1aa; cursor: pointer; font: inherit; font-size: 11px; }
-.update-trigger svg { width: 18px; height: 18px; }
-.update-trigger:hover { background: #27272a; color: #fafafa; }
-.update-trigger.available { color: #60a5fa; }
+.app-update-control {
+  margin-left: auto;
+}
+
+.app-update-control.collapsed {
+  margin-left: 0;
+  display: flex;
+  justify-content: center;
+  width: 100%;
+}
+
+.update-trigger {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #a1a1aa;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  transition: all 0.15s ease;
+}
+
+.app-update-control.collapsed .update-trigger {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  justify-content: center;
+  border-radius: 8px;
+}
+
+.update-trigger svg {
+  width: 18px;
+  height: 18px;
+}
+
+.update-trigger:hover {
+  background: #27272a;
+  color: #fafafa;
+}
+
+.update-trigger.available {
+  color: #60a5fa;
+}
 .update-panel { position: fixed; z-index: 100; left: 12px; bottom: 64px; width: min(330px, calc(100vw - 48px)); padding: 16px; border: 1px solid #3f3f46; border-radius: 12px; background: #18181b; box-shadow: 0 12px 40px #0006; color: #e4e4e7; font-size: 12px; }
 .update-panel header { display: flex; align-items: center; justify-content: space-between; }
 .update-panel header button { border: 0; background: none; color: #a1a1aa; font-size: 20px; cursor: pointer; }
