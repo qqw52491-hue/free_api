@@ -186,6 +186,8 @@ const KNOWN_FILE_EXTENSIONS = new Set([
     "sql", "db", "sqlite",
     "py", "ipynb", "go", "java", "c", "cpp", "cc", "cxx", "h", "hpp",
     "sh", "bash", "zsh",
+    "png", "jpg", "jpeg", "webp", "gif", "ico", "bmp",
+    "pdf", "xlsx", "xls", "csv", "docx", "doc", "pptx", "ppt", "zip", "tar", "gz",
 ]);
 
 const KNOWN_EXACT_FILENAMES = new Set([
@@ -266,6 +268,14 @@ export function getInlineFileIconSvg(rawPath: string): string | null {
 
     if (ext === "go" || ext === "java" || ext === "c" || ext === "cpp" || ext === "cc" || ext === "cxx" || ext === "h" || ext === "hpp") {
         return `<svg class="md-file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M14 2H6A2 2 0 0 0 4 4V20A2 2 0 0 0 6 22H18A2 2 0 0 0 20 20V8L14 2Z" stroke="#60A5FA" stroke-width="2" stroke-linejoin="round"/><path d="M14 2V8H20" stroke="#60A5FA" stroke-width="2" stroke-linejoin="round"/></svg>`;
+    }
+
+    if (ext === "png" || ext === "jpg" || ext === "jpeg" || ext === "webp" || ext === "gif" || ext === "ico" || ext === "bmp") {
+        return `<svg class="md-file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3" stroke="#EC4899" stroke-width="2"/><circle cx="8.5" cy="9" r="1.5" fill="#F472B6"/><path d="M21 16L16 11L6 20" stroke="#EC4899" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    }
+
+    if (ext === "pdf" || ext === "xlsx" || ext === "xls" || ext === "csv" || ext === "docx" || ext === "doc" || ext === "pptx" || ext === "ppt" || ext === "zip" || ext === "tar" || ext === "gz") {
+        return `<svg class="md-file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M14 2H6A2 2 0 0 0 4 4V20A2 2 0 0 0 6 22H18A2 2 0 0 0 20 20V8L14 2Z" stroke="#A78BFA" stroke-width="2" stroke-linejoin="round"/><path d="M14 2V8H20M8 13H16M8 17H13" stroke="#A78BFA" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
     }
 
     return null;
@@ -375,6 +385,20 @@ export function normalizeStreamingMarkdown(raw: string): string {
     if (boldMatches && boldMatches.length % 2 !== 0) {
         processed += "**";
     }
+
+    // 5. 修复 CommonMark 中文紧邻标点加粗失效问题（如 和**“中文内容”**的、**（重点）**、**100%**的）
+    processed = processed
+        .split(/(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]+`)/g)
+        .map((segment, index) => {
+            if (index % 2 === 1) return segment;
+            return segment.replace(/\*\*([^\s*](?:[^\n*]*?[^\s*])?)\*\*/g, (match, inner: string) => {
+                if (/^[“”‘’（）【】《》「」『』〈〉"'()\[\]]|[“”‘’（）【】《》「」『』〈〉"'()\[\]，。！？：；、.!?:;%]$/.test(inner)) {
+                    return `<strong>${inner}</strong>`;
+                }
+                return match;
+            });
+        })
+        .join("");
 
     return processed;
 }

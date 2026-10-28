@@ -561,7 +561,7 @@ watch(userInput, () => { nextTick(() => { const el = inputRef.value; if (el) { e
 .tip-text { font-size: 13px; color: var(--text-2); text-align: center; }
 
 .messages-list { padding: 20px 0; }
-.message-row { display: flex; gap: 14px; padding: 16px 28px; transition: background 0.15s; }
+.message-row { display: flex; gap: 14px; padding: 16px 28px; transition: background 0.15s; content-visibility: auto; contain-intrinsic-size: auto 84px; }
 .message-row:hover { background: var(--surface-1); }
 .message-row.assistant { background: rgba(108,99,255,0.03); }
 .message-row.assistant:hover { background: rgba(108,99,255,0.06); }

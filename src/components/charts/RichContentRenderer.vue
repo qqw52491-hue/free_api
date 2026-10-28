@@ -220,6 +220,7 @@ const parsedBlocks = computed<ContentBlock[]>(() => {
 
 function decorateStreamingTail(html: string): string {
   if (!html || typeof window === "undefined" || !window.DOMParser) return html;
+  if (typeof document !== "undefined" && document.hidden) return html;
   try {
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, "text/html");
@@ -241,17 +242,13 @@ function decorateStreamingTail(html: string): string {
     const trimmed = fullText.trimEnd();
     const trailingSpaces = fullText.slice(trimmed.length);
 
-    // 末尾字符呈现"模糊显形"阶梯（豆包式 blur-in 末梢版）：
-    // 越新越糊越淡——透明度 0.9→0.1 叠加模糊 0px→3px，
-    // 上一句完全凝实，新字从虚焦里长出来。只做末梢 ~7 个 span，
-    // 避免全文逐词 blur 滤镜并发导致的 GPU 掉帧
-    const opacities = [0.90, 0.78, 0.64, 0.50, 0.36, 0.22, 0.10];
-    const blurs = [0, 0.4, 0.8, 1.3, 1.8, 2.4, 3.0];
+    // 末尾字符呈现纯透明度渐显阶梯（0.92 -> 0.14）：
+    // 上一句完全凝实，新字平滑浮现；仅用纯 opacity 避免 WebKit/Wayland 下 blur 滤镜软光栅化开销
+    const opacities = [0.92, 0.80, 0.66, 0.52, 0.38, 0.25, 0.14];
     const tailCount = Math.min(opacities.length, trimmed.length);
     if (tailCount <= 0) return html;
 
     const activeOpacities = opacities.slice(opacities.length - tailCount);
-    const activeBlurs = blurs.slice(blurs.length - tailCount);
     const prefix = trimmed.slice(0, trimmed.length - tailCount);
     const tailChars = Array.from(trimmed.slice(trimmed.length - tailCount));
 
@@ -267,9 +264,6 @@ function decorateStreamingTail(html: string): string {
       const span = doc.createElement("span");
       span.className = "stream-tail-fade";
       span.style.opacity = String(activeOpacities[i]);
-      if (activeBlurs[i] > 0) {
-        span.style.filter = `blur(${activeBlurs[i]}px)`;
-      }
       span.textContent = tailChars[i];
       frag.appendChild(span);
     }
@@ -340,8 +334,7 @@ function getBlockHtml(block: ContentBlock, idx: number): string {
 .markdown-segment :deep(h2),
 .markdown-segment :deep(h3),
 .markdown-segment :deep(h4) {
-  animation: chatgpt-stream-fade-in 0.16s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-  will-change: opacity, transform;
+  animation: chatgpt-stream-fade-in 0.16s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 /* 真流式期间：每个 chunk 都整体重建 innerHTML，若保留逐元素入场动画
@@ -358,15 +351,13 @@ function getBlockHtml(block: ContentBlock, idx: number): string {
 .rich-content-stream.is-live-streaming .markdown-segment :deep(h3),
 .rich-content-stream.is-live-streaming .markdown-segment :deep(h4) {
   animation: none !important;
-  will-change: auto;
 }
 
 /* 🌟 新流入文字纯透明度过渡：无颜色渐变，文字颜色天然继承，上一句完全凝实，末端纯透明度 100% -> 0% 阶梯 */
 .markdown-segment :deep(.stream-tail-fade) {
   display: inline !important;
   color: inherit !important;
-  transition: opacity 0.12s linear, filter 0.14s linear;
-  will-change: opacity, filter;
+  transition: opacity 0.12s linear;
 }
 
 /* 标题样式：拉开上下段落呼吸感与层级区分 */

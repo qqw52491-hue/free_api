@@ -104,6 +104,8 @@
     flex-direction: column;
     box-sizing: border-box;
     width: 100%;
+    content-visibility: auto;
+    contain-intrinsic-size: auto 96px;
 }
 
 /* 👤 用户消息气泡 (深色精致圆角气泡，自适应文本宽度，悬停时操作栏在下方平滑浮现) */
