@@ -3,6 +3,12 @@
     padding: 0 clamp(16px, 4vw, 48px) 12px;
     background: linear-gradient(0deg, #141416 85%, transparent);
 }
+
+.model-setup-hint {
+    margin: 6px 4px 0;
+    color: var(--text-secondary, #7b8494);
+    font-size: 12px;
+}
 .manus-composer {
     position: relative;
     display: flex;

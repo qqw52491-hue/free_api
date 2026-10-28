@@ -63,6 +63,10 @@ pub async fn run_agent_main_loop(
     plan_mode: Option<String>,
     task_start_mode: Option<crate::agent::conversation::TaskStartMode>,
 ) -> Result<(), String> {
+    {
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        model_routing.validate_desktop_start(&conn)?;
+    }
     run_agent_main_loop_in_workspace(
         app,
         state,

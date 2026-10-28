@@ -425,13 +425,18 @@ watch(() => props.allModels, (models) => session.ensureModelRouting(models), { d
 const activeProModelName = computed(() => {
     const id = session.modelRouting.value.pro;
     const model = props.allModels.find((item) => item.id === id);
-    return model?.display_name || model?.name || "Manus 1.6";
+    return model?.display_name || model?.name || "未配置模型";
 });
 const activeFlashModelName = computed(() => {
     const id = session.modelRouting.value.flash;
     const model = props.allModels.find((item) => item.id === id);
     return model?.display_name || model?.name || "未配置";
 });
+const hasStartModels = computed(() =>
+    [session.modelRouting.value.pro, session.modelRouting.value.flash].every((id) =>
+        !!id && props.allModels.some((model) => model.id === id),
+    ),
+);
 const reasoningEffortLabel = (value: string) => ({
     auto: "自动",
     off: "关闭",
@@ -671,7 +676,13 @@ async function handleInspectorAgentSubmit(data: any) {
 defineExpose({
     isRunning: session.isRunning,
     session,
-    runAgent: (goal: string) => session.runAgent(goal),
+    runAgent: (goal: string) => {
+        if (!hasStartModels.value) {
+            session.goalInput.value = goal;
+            return;
+        }
+        return session.runAgent(goal);
+    },
     attachFiles: (paths: string[]) => composerRef.value?.attachFilePaths(paths),
 });
 </script>

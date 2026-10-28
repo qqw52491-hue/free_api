@@ -1154,13 +1154,17 @@
                         }"
                         type="button"
                         :disabled="!canSubmit || isSending"
-                        :title="isRunning ? (isWaitingForHuman ? '回答当前请求' : (submitMode === 'interrupt' ? '⚡ 立即打断当前任务并切换为新目标' : '⏳ 加入队列，等当前任务完成后自动执行')) : (taskStartMode === 'resume' ? '继续原任务，保留审查状态' : '开始新任务')"
+                        :title="!isRunning && !hasSelectedModel ? '请先添加模型，并选择推理和执行模型' : isRunning ? (isWaitingForHuman ? '回答当前请求' : (submitMode === 'interrupt' ? '⚡ 立即打断当前任务并切换为新目标' : '⏳ 加入队列，等当前任务完成后自动执行')) : (taskStartMode === 'resume' ? '继续原任务，保留审查状态' : '开始新任务')"
                         @click="submit"
                     >
                         <svg viewBox="0 0 24 24"><path d="m7 12 5-5 5 5M12 7v10"/></svg>
                     </button>
                 </div>
             </div>
+        </div>
+
+        <div v-if="!isRunning && !hasSelectedModel" class="model-setup-hint" role="status">
+            请先在平台与模型管理中添加模型，并选择推理（Pro）和执行（Flash）模型后发送；两者可以相同。
         </div>
 
         <!-- 🚀 实时性能流式状态行 (连续字体排版 · 柔和间距 · 实时流式跳动) -->
@@ -2412,8 +2416,13 @@ onMounted(autoResizeTextarea);
 const currentModelName = computed(() => {
     const proId = props.modelRouting?.pro;
     const model = props.allModels.find((m) => m.id === proId);
-    return model?.display_name || model?.name || "Manus Desktop";
+    return model?.display_name || model?.name || "未配置模型";
 });
+const hasSelectedModel = computed(() =>
+    [props.modelRouting?.pro, props.modelRouting?.flash].every((id) =>
+        !!id && props.allModels.some((model) => model.id === id),
+    ),
+);
 const placeholderText = computed(() => props.isRunning
     ? props.isWaitingForHuman
         ? "补充自定义说明后按回车提交…"
@@ -2423,7 +2432,8 @@ const placeholderText = computed(() => props.isRunning
     : taskStartMode.value === "resume" ? "补充说明或输入继续，将保留原任务与审查状态…" : "想让 Agent 帮你做什么？",
 );
 const canSubmit = computed(() => {
-    return Boolean(props.draft.trim()) || attachments.value.length > 0;
+    return (props.isRunning || hasSelectedModel.value)
+        && (Boolean(props.draft.trim()) || attachments.value.length > 0);
 });
 
 async function submit(explicitMode?: "interrupt" | "queue" | Event) {

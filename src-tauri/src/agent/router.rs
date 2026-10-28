@@ -1,5 +1,6 @@
 use crate::agent::context::SandwichContext;
 use serde::{Deserialize, Serialize};
+use rusqlite::OptionalExtension;
 use std::collections::BTreeMap;
 
 /// 前端传入的模型路由配置表
@@ -208,6 +209,28 @@ pub(crate) fn configured_reviewer_backup(
 }
 
 impl ModelRoutingConfig {
+    /// 桌面启动前只核验配置事实；不发请求，不要求无鉴权服务填写 API Key。
+    pub(crate) fn validate_desktop_start(&self, conn: &rusqlite::Connection) -> Result<(), String> {
+        for (label, id) in [("推理（Pro）", &self.pro), ("执行（Flash）", &self.flash)] {
+            if id.trim().is_empty() {
+                return Err(format!("尚未选择{label}模型，请先在平台与模型管理中配置并选择模型。任务未启动。"));
+            }
+            let enabled: Option<bool> = conn.query_row(
+                "SELECT m.enabled = 1 FROM models m JOIN platforms p ON p.id=m.platform_id WHERE m.id=?1",
+                [id], |row| row.get(0),
+            ).optional().map_err(|e| format!("读取{label}模型配置失败：{e}。任务未启动。"))?;
+            if enabled != Some(true) {
+                return Err(format!("所选{label}模型不存在或已禁用，请重新选择模型。任务未启动。"));
+            }
+            let config = crate::llm::ModelConfig::from_conn(conn, id)
+                .map_err(|e| format!("读取{label}模型配置失败：{e}。任务未启动。"))?;
+            if config.base_url.trim().is_empty() || config.model_name.trim().is_empty() {
+                return Err(format!("所选{label}模型缺少接口地址或模型名称，请补全配置。任务未启动。"));
+            }
+        }
+        Ok(())
+    }
+
     pub fn reasoning_effort_for(&self, tier: &RoutingTier) -> &str {
         let configured = match tier {
             RoutingTier::Pro => &self.pro_reasoning_effort,
@@ -603,6 +626,41 @@ impl AgentRouter {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn desktop_preflight_checks_both_slots_before_start() {
+        let conn = crate::db::init_db(&std::path::PathBuf::from(":memory:")).unwrap();
+        let mut routing = super::ModelRoutingConfig::default();
+        assert!(routing.validate_desktop_start(&conn).unwrap_err().contains("Pro"));
+        routing.pro = "m".into();
+        assert!(routing.validate_desktop_start(&conn).unwrap_err().contains("不存在或已禁用"));
+        conn.execute("INSERT INTO platforms (id,name,base_url,api_key,created_at) VALUES ('p','local','http://localhost:1234/v1','','now')", []).unwrap();
+        conn.execute("INSERT INTO models (id,platform_id,name,display_name,created_at) VALUES ('m','p','local','local','now')", []).unwrap();
+        assert!(routing.validate_desktop_start(&conn).unwrap_err().contains("Flash"));
+        routing.flash = "m".into();
+        routing.validate_desktop_start(&conn).unwrap();
+        conn.execute("UPDATE models SET enabled=0", []).unwrap();
+        assert!(routing.validate_desktop_start(&conn).is_err());
+        conn.execute("UPDATE models SET enabled=1", []).unwrap();
+        conn.execute("UPDATE platforms SET base_url=''", []).unwrap();
+        assert!(routing.validate_desktop_start(&conn).unwrap_err().contains("缺少接口地址"));
+    }
+
+    #[test]
+    fn fresh_database_empty_routing_returns_missing_model_error() {
+        let dir = std::env::temp_dir().join(format!("fresh-model-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = crate::db::init_db(&dir.join("fresh.db")).unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM models", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 0);
+        let context = crate::agent::context::SandwichContext::new("system".into(), "hello".into());
+        let decision = super::AgentRouter::route_for_step(&context, &super::ModelRoutingConfig::default(), 0);
+        assert!(decision.model_id.is_empty());
+        let error = crate::llm::ModelConfig::from_conn(&conn, &decision.model_id).err().unwrap();
+        assert!(error.contains("模型不存在"), "{error}");
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn reviewer_backup_is_explicit_and_never_scans_pool() {
         use crate::db::init_db;
