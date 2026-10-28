@@ -2,6 +2,7 @@
 
 mod agent;
 mod commands;
+mod crash_report;
 mod db;
 mod llm;
 mod llm_breaker;
@@ -12,11 +13,30 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use db::{get_db_path, init_db, DbState};
+use tauri::Manager;
+
+fn report_startup_error(message: &str) {
+    eprintln!("{message}");
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    rfd::MessageDialog::new().set_title("Free API Chat 启动失败")
+        .set_description(message).set_level(rfd::MessageLevel::Error).show();
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let db_path = get_db_path();
-    let conn = init_db(&db_path).expect("Failed to initialize database");
+    let crash_session = crash_report::CrashSession::new(&db_path);
+    crash_session.install_panic_hook();
+    let conn = match init_db(&db_path) {
+        Ok(conn) => conn,
+        Err(error) => {
+            let message = format!("无法初始化应用数据库：{error}\n数据库路径：{}", db_path.display());
+            crash_session.record_startup_error(&message);
+            report_startup_error(&message);
+            crash_session.mark_clean();
+            return;
+        }
+    };
     if let Err(e) = db::init_read_pool(&db_path) {
         eprintln!("[db] 只读连接池初始化失败 (将平滑降级为互斥锁): {e}");
     }
@@ -40,7 +60,9 @@ pub fn run() {
     builder
         .manage(db_state)
         .manage(registry)
+        .manage(crash_session.clone())
         .setup(|app| {
+            app.state::<crash_report::CrashSession>().start_notifications(app.handle());
             // 启动清理：上次进程遗留的 running trace 标记为已中断（无跨进程恢复，僵尸记录防堆积）
             {
                 let state = tauri::Manager::state::<DbState>(app);
@@ -216,8 +238,17 @@ pub fn run() {
             agent::scheduler::wechat_schedule_toggle,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building tauri application")
+        .unwrap_or_else(|error| {
+            let message = format!("无法启动应用窗口：{error}");
+            crash_session.record_startup_error(&message);
+            report_startup_error(&message);
+            crash_session.mark_clean();
+            std::process::exit(1);
+        })
         .run(|app_handle, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                app_handle.state::<crash_report::CrashSession>().mark_clean();
+            }
             // 仅首次 ExitRequested 触发优雅停机；后续（如 app_handle.exit 再次触发）直接放行
             static SHUTDOWN_STARTED: AtomicBool = AtomicBool::new(false);
             if let tauri::RunEvent::ExitRequested { api, .. } = event {

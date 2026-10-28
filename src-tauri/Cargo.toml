@@ -48,6 +48,9 @@ ts-rs = { version = "12.0.1", default-features = false, features = ["serde-compa
 tauri-plugin-updater = "2.12.0"
 tauri-plugin-process = "2.4.0"
 
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+rfd = { version = "0.16", default-features = false }
+
 # 仅 `cargo build --features wdio` 的测试构建载入；正常开发与发布版均不包含 WebDriver。
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
