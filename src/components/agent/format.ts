@@ -177,6 +177,132 @@ function isNpmPackageVersion(str: string): boolean {
     return false;
 }
 
+const KNOWN_FILE_EXTENSIONS = new Set([
+    "rs", "vue", "ts", "tsx", "js", "mjs", "cjs", "jsx",
+    "css", "scss", "sass", "less",
+    "toml", "lock", "json", "yaml", "yml", "ini", "conf", "env",
+    "md", "markdown", "mdx",
+    "html", "htm", "xml", "svg",
+    "sql", "db", "sqlite",
+    "py", "ipynb", "go", "java", "c", "cpp", "cc", "cxx", "h", "hpp",
+    "sh", "bash", "zsh",
+]);
+
+const KNOWN_EXACT_FILENAMES = new Set([
+    "cargo.toml", "cargo.lock", "package.json", "package-lock.json",
+    "pnpm-lock.yaml", "yarn.lock", "tsconfig.json", "dockerfile",
+    "makefile", "cmakelists.txt", "agents.md", "readme.md",
+]);
+
+/**
+ * 根据文件路径或文件名生成行内 14×14 语言/文件类型专属 SVG 图标
+ */
+export function getInlineFileIconSvg(rawPath: string): string | null {
+    const cleaned = rawPath
+        .trim()
+        .replace(/^file:\/\//i, "")
+        .split(/[?#]/)[0]
+        .replace(/:\d+(?::\d+)?(-\d+)?$/, "")
+        .trim();
+    if (!cleaned) return null;
+
+    const baseName = (cleaned.split(/[\\/]/).pop() || "").toLowerCase();
+    if (!baseName) return null;
+
+    const dotIdx = baseName.lastIndexOf(".");
+    const ext = dotIdx > 0 ? baseName.slice(dotIdx + 1) : "";
+
+    if (baseName.endsWith(".lock") || baseName === "cargo.lock" || baseName === "package-lock.json" || baseName === "pnpm-lock.yaml" || baseName === "yarn.lock") {
+        return `<svg class="md-file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="4.5" y="11" width="15" height="10" rx="2.2" stroke="#7AA2F7" stroke-width="2"/><path d="M8 11V7.5C8 5.29 9.79 3.5 12 3.5C14.21 3.5 16 5.29 16 7.5V11" stroke="#7AA2F7" stroke-width="2" stroke-linecap="round"/></svg>`;
+    }
+
+    if (ext === "rs") {
+        return `<svg class="md-file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="#E4682A"/><path d="M8.5 16.5V7.5H12.6C14.5 7.5 15.6 8.5 15.6 10.1C15.6 11.4 14.8 12.3 13.5 12.6L16 16.5H13.6L11.4 12.8H10.6V16.5H8.5ZM10.6 9.2V11.3H12.3C13.1 11.3 13.6 10.9 13.6 10.2C13.6 9.6 13.1 9.2 12.3 9.2H10.6Z" fill="#18181B"/></svg>`;
+    }
+
+    if (ext === "vue") {
+        return `<svg class="md-file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M2 3.5H5.8L12 14.2L18.2 3.5H22L12 20.8L2 3.5Z" fill="#41B883"/><path d="M5.8 3.5H9.4L12 8L14.6 3.5H18.2L12 14.2L5.8 3.5Z" fill="#35495E"/></svg>`;
+    }
+
+    if (ext === "css" || ext === "scss" || ext === "sass" || ext === "less") {
+        return `<svg class="md-file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M8.5 4C6.8 4 6 4.9 6 6.5V9.5C6 10.8 5.1 11.6 3.8 12C5.1 12.4 6 13.2 6 14.5V17.5C6 19.1 6.8 20 8.5 20M15.5 4C17.2 4 18 4.9 18 6.5V9.5C18 10.8 18.9 11.6 20.2 12C18.9 12.4 18 13.2 18 14.5V17.5C18 19.1 17.2 20 15.5 20" stroke="#38BDF8" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    }
+
+    if (ext === "toml" || ext === "yaml" || ext === "yml" || ext === "ini" || ext === "conf" || ext === "env" || baseName === "dockerfile" || baseName === "makefile" || baseName === "cmakelists.txt") {
+        return `<svg class="md-file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 15.2A3.2 3.2 0 1 0 12 8.8A3.2 3.2 0 0 0 12 15.2Z" stroke="#8B9BB4" stroke-width="2.1"/><path d="M19.4 15A1.65 1.65 0 0 0 19.73 16.82L19.79 16.88A2 2 0 0 1 16.96 19.71L16.9 19.65A1.65 1.65 0 0 0 15.08 19.32A1.65 1.65 0 0 0 14 20.85V21A2 2 0 0 1 10 21V20.91A1.65 1.65 0 0 0 8.92 19.4A1.65 1.65 0 0 0 7.1 19.73L7.04 19.79A2 2 0 0 1 4.21 16.96L4.27 16.9A1.65 1.65 0 0 0 4.6 15.08A1.65 1.65 0 0 0 3.09 14H3A2 2 0 0 1 3 10H3.09A1.65 1.65 0 0 0 4.6 8.92A1.65 1.65 0 0 0 4.27 7.1L4.21 7.04A2 2 0 0 1 7.04 4.21L7.1 4.27A1.65 1.65 0 0 0 8.92 4.6H9A1.65 1.65 0 0 0 10 3.09V3A2 2 0 0 1 14 3V3.09A1.65 1.65 0 0 0 15 4.6A1.65 1.65 0 0 0 16.82 4.27L16.88 4.21A2 2 0 0 1 19.71 7.04L19.65 7.1A1.65 1.65 0 0 0 19.32 8.92V9A1.65 1.65 0 0 0 20.85 10H21A2 2 0 0 1 21 14H20.91A1.65 1.65 0 0 0 19.4 15Z" stroke="#8B9BB4" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    }
+
+    if (ext === "ts" || ext === "tsx") {
+        return `<svg class="md-file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="2.5" y="2.5" width="19" height="19" rx="3.5" fill="#3178C6"/><path d="M6.2 10H11.8M9 10V17.5M17.8 11.2C17.1 10.5 15.8 10.2 14.7 10.9C13.7 11.5 13.9 12.8 15 13.4L16.2 14C17.4 14.6 17.8 15.7 17 16.8C16.2 17.8 14.3 17.8 13.2 16.8" stroke="#FFFFFF" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    }
+
+    if (ext === "js" || ext === "mjs" || ext === "cjs" || ext === "jsx") {
+        return `<svg class="md-file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="2.5" y="2.5" width="19" height="19" rx="3.5" fill="#EAB308"/><path d="M10.2 10.2V15.5C10.2 16.8 9.2 17.5 7.8 16.8M17.5 11.2C16.8 10.5 15.5 10.2 14.5 10.9C13.5 11.5 13.8 12.8 14.8 13.4L16 14C17.1 14.6 17.5 15.7 16.7 16.8C15.9 17.8 14.1 17.8 13 16.8" stroke="#18181B" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    }
+
+    if (ext === "json") {
+        return `<svg class="md-file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M8.5 4C6.8 4 6 4.9 6 6.5V9.5C6 10.8 5.1 11.6 3.8 12C5.1 12.4 6 13.2 6 14.5V17.5C6 19.1 6.8 20 8.5 20M15.5 4C17.2 4 18 4.9 18 6.5V9.5C18 10.8 18.9 11.6 20.2 12C18.9 12.4 18 13.2 18 14.5V17.5C18 19.1 17.2 20 15.5 20" stroke="#FBBF24" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    }
+
+    if (ext === "md" || ext === "markdown" || ext === "mdx") {
+        return `<svg class="md-file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="2.5" y="4.5" width="19" height="15" rx="2.5" stroke="#60A5FA" stroke-width="2"/><path d="M6 15V9L8.8 12.2L11.6 9V15M16.5 9V15M16.5 15L14.3 12.8M16.5 15L18.7 12.8" stroke="#60A5FA" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    }
+
+    if (ext === "html" || ext === "htm" || ext === "xml" || ext === "svg") {
+        return `<svg class="md-file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M8 7L3 12L8 17M16 7L21 12L16 17M13.5 5L10.5 19" stroke="#FB923C" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    }
+
+    if (ext === "sql" || ext === "db" || ext === "sqlite") {
+        return `<svg class="md-file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><ellipse cx="12" cy="6" rx="7.5" ry="3" stroke="#22D3EE" stroke-width="2"/><path d="M4.5 6V12C4.5 13.66 7.86 15 12 15C16.14 15 19.5 13.66 19.5 12V6M4.5 12V18C4.5 19.66 7.86 21 12 21C16.14 21 19.5 19.66 19.5 18V12" stroke="#22D3EE" stroke-width="2"/></svg>`;
+    }
+
+    if (ext === "py" || ext === "ipynb") {
+        return `<svg class="md-file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M11.8 3C7.5 3 7.8 4.9 7.8 4.9V6.9H12.2V7.5H5.8C3.9 7.5 3 8.8 3 11.2C3 13.6 4.3 13.4 4.3 13.4H5.8V11.5C5.8 9.8 7.2 9.8 7.2 9.8H12.2C13.5 9.8 14.5 8.8 14.5 7.5V4.9C14.5 3.6 13.5 3 11.8 3Z" fill="#38BDF8"/><path d="M12.2 21C16.5 21 16.2 19.1 16.2 19.1V17.1H11.8V16.5H18.2C20.1 16.5 21 15.2 21 12.8C21 10.4 19.7 10.6 19.7 10.6H18.2V12.5C18.2 14.2 16.8 14.2 16.8 14.2H11.8C10.5 14.2 9.5 15.2 9.5 16.5V19.1C9.5 20.4 10.5 21 12.2 21Z" fill="#FACC15"/></svg>`;
+    }
+
+    if (ext === "sh" || ext === "bash" || ext === "zsh") {
+        return `<svg class="md-file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3" stroke="#34D399" stroke-width="2"/><path d="M7 9L11 12L7 15M13 15H17" stroke="#34D399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    }
+
+    if (ext === "go" || ext === "java" || ext === "c" || ext === "cpp" || ext === "cc" || ext === "cxx" || ext === "h" || ext === "hpp") {
+        return `<svg class="md-file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M14 2H6A2 2 0 0 0 4 4V20A2 2 0 0 0 6 22H18A2 2 0 0 0 20 20V8L14 2Z" stroke="#60A5FA" stroke-width="2" stroke-linejoin="round"/><path d="M14 2V8H20" stroke="#60A5FA" stroke-width="2" stroke-linejoin="round"/></svg>`;
+    }
+
+    return null;
+}
+
+/**
+ * 判断行内反引号文本是否为源码/配置文件引用（如 `src-tauri/src/lib.rs`, `src/components/AgentPanel.vue`, `Cargo.toml`）
+ */
+function isInlineFileReference(rawText: string): boolean {
+    const s = rawText.trim();
+    if (!s || s.length < 3 || s.length > 180 || /\s/.test(s)) return false;
+    if (/^(?:https?|mailto|ftp|ws|wss|data|blob|javascript):/i.test(s)) return false;
+    if (s.startsWith("--") || s.startsWith("$") || (s.includes("@") && !s.startsWith("@/"))) return false;
+    if (/[()=;{}<>`"'|&*?]/.test(s)) return false;
+
+    const withoutLine = s.split("#")[0].replace(/:\d+(?::\d+)?(-\d+)?$/, "");
+    const baseName = (withoutLine.split(/[\\/]/).pop() || "").toLowerCase();
+    if (!baseName) return false;
+
+    if (KNOWN_EXACT_FILENAMES.has(baseName)) return true;
+
+    const dotIdx = baseName.lastIndexOf(".");
+    if (dotIdx <= 0) return false;
+    const ext = baseName.slice(dotIdx + 1);
+    if (!KNOWN_FILE_EXTENSIONS.has(ext)) return false;
+
+    // 若包含路径分隔符（如 src/components/AgentPanel.vue），且扩展名命中已知文件后缀，直接判定为文件路径
+    if (withoutLine.includes("/") || withoutLine.includes("\\")) {
+        return true;
+    }
+
+    // 单个文件名（无路径分隔符）：限制多点链式属性访问（仅允许 .test. / .spec. / .min. / .d. / .conf. / .config.）
+    const stem = baseName.slice(0, dotIdx);
+    if (!stem.includes(".")) return true;
+    return /\.(?:test|spec|min|d|conf|config|module|stories)$/i.test(stem);
+}
+
 /**
  * 流式输出平滑预处理器：在编译前虚拟补全未闭合的代码块、数学公式与排版标记，防止打字机流式输出时界面剧烈抖动与闪白
  */
@@ -392,6 +518,28 @@ export function renderMarkdown(content: string): string {
             return `<h${depth} id="${id}" data-heading-text="${cleanText}">${text}</h${depth}>`;
         };
 
+        renderer.codespan = function ({ text }: { text: string }) {
+            const raw = (text || "")
+                .replace(/&amp;/g, "&")
+                .replace(/&lt;/g, "<")
+                .replace(/&gt;/g, ">")
+                .replace(/&quot;/g, '"')
+                .replace(/&#39;/g, "'");
+            const escaped = raw
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;");
+
+            if (isInlineFileReference(raw)) {
+                const iconSvg = getInlineFileIconSvg(raw);
+                if (iconSvg) {
+                    return `<span class="markdown-file-ref">${iconSvg}<span class="markdown-file-ref-name">${escaped}</span></span>`;
+                }
+            }
+            return `<code>${escaped}</code>`;
+        };
+
         renderer.link = function ({ href, title, text }: { href: string; title?: string | null; text: string }) {
             // 过滤 marked 对 npm 依赖包版本号（如 @vitejs/plugin-vue@5.2.4 或 vue@3.5.26）的邮箱误判
             if (href.startsWith("mailto:") && isNpmPackageVersion(href)) {
@@ -405,11 +553,23 @@ export function renderMarkdown(content: string): string {
                 return `<a href="${href}"${titleAttr} class="markdown-rich-link markdown-anchor-link">${text}</a>`;
             }
 
-            // 2. 本地文件与目录 (file:// 或 /Users/... 或 C:\...)
-            const isLocal = href.startsWith("file://") || /^\/?[A-Za-z]:[\\/]/.test(href);
+            // 如果链接内部是图片（例如 [![A](img)](/local/report.md)），保留原始内部 HTML
+            if (/<img\b|<video\b|<audio\b/i.test(text || "")) {
+                return `<a href="${href}"${titleAttr} class="markdown-rich-link">${text}</a>`;
+            }
+
+            const plainText = (text || "").replace(/<[^>]+>/g, "").trim() || href;
+            const fileIconSvg = getInlineFileIconSvg(href) || getInlineFileIconSvg(plainText);
+
+            // 2. 本地文件与目录 (file:// 或 /Users/... 或 C:\... 或相对源码文件路径)
+            const isLocal =
+                href.startsWith("file://") ||
+                href.startsWith("/") ||
+                /^\/?[A-Za-z]:[\\/]/.test(href) ||
+                (!/^(?:https?|mailto|ftp|ws|wss|javascript|data|blob):/i.test(href) && Boolean(fileIconSvg));
             if (isLocal) {
-                const folderIconSvg = `<svg class="link-arrow-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
-                return `<a href="${href}" data-local-path="${href}"${titleAttr} class="markdown-rich-link markdown-local-link">${folderIconSvg}${text}</a>`;
+                const folderIconSvg = `<svg class="md-file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8B9BB4" stroke-width="2" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
+                return `<a href="${href}" data-local-path="${href}"${titleAttr} class="markdown-rich-link markdown-local-link markdown-file-ref">${fileIconSvg || folderIconSvg}<span class="markdown-file-ref-name">${plainText}</span></a>`;
             }
 
             // 3. 外部网络链接

@@ -74,12 +74,12 @@ const normalizedList = computed(() => normalizeArtifactList(props.artifacts));
 .header-title {
   font-size: 12.5px;
   font-weight: 600;
-  color: #e4e4e7;
+  color: var(--theme-text-primary, #e4e4e7);
 }
 
 .header-count {
   font-size: 11px;
-  color: #a5b4fc;
+  color: var(--theme-status-accent, #a5b4fc);
   background: rgba(99, 102, 241, 0.15);
   border: 1px solid rgba(99, 102, 241, 0.25);
   padding: 0 5px;
@@ -88,7 +88,7 @@ const normalizedList = computed(() => normalizeArtifactList(props.artifacts));
 
 .header-tip {
   font-size: 11px;
-  color: #71717a;
+  color: var(--theme-text-muted, #71717a);
 }
 
 .artifact-cards-grid {

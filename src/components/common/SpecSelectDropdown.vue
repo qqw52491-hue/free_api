@@ -287,8 +287,8 @@ onUnmounted(() => {
   width: 100%;
   height: 38px;
   padding: 0 12px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(var(--theme-foreground-rgb), 0.04);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.12);
   border-radius: var(--radius-sm, 8px);
   color: var(--text-1, #f4f4f5);
   font-size: 13px;
@@ -299,14 +299,14 @@ onUnmounted(() => {
 }
 
 .spec-select-trigger:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.07);
-  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(var(--theme-foreground-rgb), 0.07);
+  border-color: rgba(var(--theme-foreground-rgb), 0.22);
 }
 
 .spec-select-wrapper.is-open .spec-select-trigger {
   border-color: var(--accent, #6c63ff);
   box-shadow: 0 0 0 2px var(--accent-glow, rgba(108, 99, 255, 0.25));
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(var(--theme-foreground-rgb), 0.08);
 }
 
 .spec-select-trigger:disabled {
@@ -330,7 +330,7 @@ onUnmounted(() => {
   height: 22px;
   border-radius: 6px;
   background: rgba(245, 158, 11, 0.15);
-  color: #fbbf24;
+  color: var(--theme-status-warning, #fbbf24);
   flex-shrink: 0;
 }
 
@@ -379,7 +379,7 @@ onUnmounted(() => {
   padding: 0;
   border-radius: 50%;
   border: none;
-  background: rgba(255, 255, 255, 0.1);
+  background: rgba(var(--theme-foreground-rgb), 0.1);
   color: var(--text-3, #71717a);
   font-size: 11px;
   line-height: 1;
@@ -389,7 +389,7 @@ onUnmounted(() => {
 
 .btn-trigger-clear:hover {
   background: rgba(239, 68, 68, 0.2);
-  color: #f87171;
+  color: var(--theme-status-danger, #f87171);
 }
 
 .chevron-icon {
@@ -404,10 +404,10 @@ onUnmounted(() => {
 
 /* ---- Popover 下拉弹出卡片 ---- */
 .spec-dropdown-popover {
-  background: #18181b;
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: var(--theme-bg-panel, #18181b);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.16);
   border-radius: var(--radius-md, 12px);
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.08);
+  box-shadow: var(--theme-shadow, 0 16px 40px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.08));
   backdrop-filter: blur(16px);
   display: flex;
   flex-direction: column;
@@ -417,8 +417,8 @@ onUnmounted(() => {
 
 .dropdown-search-bar {
   padding: 8px 10px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.02);
+  border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
+  background: rgba(var(--theme-foreground-rgb), 0.02);
 }
 
 .search-input-wrap {
@@ -438,8 +438,8 @@ onUnmounted(() => {
   width: 100%;
   height: 30px;
   padding: 0 28px 0 30px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(var(--theme-foreground-rgb), 0.05);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.1);
   border-radius: 6px;
   color: var(--text-1, #f4f4f5);
   font-size: 12px;
@@ -484,7 +484,7 @@ onUnmounted(() => {
 }
 
 .spec-option-item:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(var(--theme-foreground-rgb), 0.06);
 }
 
 .spec-option-item.is-active {
@@ -493,7 +493,7 @@ onUnmounted(() => {
 }
 
 .spec-option-item.is-clear-option {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.06);
   margin-bottom: 4px;
   border-radius: 6px;
 }
@@ -520,7 +520,7 @@ onUnmounted(() => {
   padding: 1px 5px;
   border-radius: 4px;
   background: rgba(168, 85, 247, 0.15);
-  color: #c084fc;
+  color: var(--theme-status-accent, #c084fc);
 }
 
 .option-meta {
@@ -533,7 +533,7 @@ onUnmounted(() => {
 .meta-tag {
   font-size: 11px;
   color: var(--text-3, #a1a1aa);
-  background: rgba(255, 255, 255, 0.05);
+  background: rgba(var(--theme-foreground-rgb), 0.05);
   padding: 1px 5px;
   border-radius: 3px;
   font-family: monospace;
@@ -561,12 +561,19 @@ onUnmounted(() => {
 /* 动画 */
 .scale-fade-enter-active,
 .scale-fade-leave-active {
-  transition: opacity 0.15s ease, transform 0.15s ease;
+  transition: opacity var(--motion-normal) ease, transform var(--motion-normal) var(--motion-ease);
 }
+
+.scale-fade-leave-active { transition-duration: var(--motion-quick); }
 
 .scale-fade-enter-from,
 .scale-fade-leave-to {
   opacity: 0;
-  transform: translateY(-4px) scale(0.98);
+  transform: translateY(-3px) scale(0.99);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scale-fade-enter-active, .scale-fade-leave-active { transition: none; }
+  .scale-fade-enter-from, .scale-fade-leave-to { transform: none; }
 }
 </style>

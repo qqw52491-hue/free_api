@@ -76,7 +76,7 @@
                                 </button>
                             </div>
                         </div>
-                        <div class="agent-text-body">
+                        <div v-deferred-history="true" class="agent-text-body">
                             <RichContentRenderer :content="message.content" :compact-html="true" @open-preview="$emit('open-preview', $event)" />
                         </div>
                     </template>
@@ -242,7 +242,7 @@
                                 </button>
                             </div>
                         </div>
-                        <div class="agent-text-body">
+                        <div v-deferred-history="historyEntryIds.has(entry.id)" class="agent-text-body">
                             <RichContentRenderer :content="entry.content" :compact-html="true" @open-preview="$emit('open-preview', $event)" />
                         </div>
                     </template>
@@ -1461,6 +1461,7 @@
                     </div>
                     <div
                         class="summary-rich"
+                        v-deferred-history="historyEntryIds.has(entry.id) && !isStreamingCompletion(entry)"
                         :class="{ 'is-streaming-text': isStreamingCompletion(entry) }"
                         :title="isStreamingCompletion(entry) ? '点击可直接瞬间完成渐显' : undefined"
                         @click="isStreamingCompletion(entry) && finishTypewriterInstantly(entry.id, entry.summary || entry.title)"
@@ -1513,6 +1514,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowReactive, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { vDeferredHistory } from "../../directives/deferredHistory";
 import AttachmentCard from "./AttachmentCard.vue";
 import CollapsibleUserText from "./CollapsibleUserText.vue";
 import AttachmentPreviewModal from "./AttachmentPreviewModal.vue";
@@ -1950,20 +1952,41 @@ function handleDownloadArtifact(_artifact: ArtifactDescriptor) {
 const streamElement = ref<HTMLElement | null>(null);
 const activeQuestionId = ref<string | null>(null);
 const questionAnchors = new Map<string, HTMLElement>();
+let questionAnchorOrderDirty = true;
+let orderedQuestionAnchors: Array<{ id: string; element: HTMLElement }> = [];
 let questionNavRaf: number | null = null;
 let questionNavDisposed = false;
 function updateActiveQuestion() {
     questionNavRaf = null;
     const root = streamElement.value;
-    if (!root) return;
-    const readingLine = root.getBoundingClientRect().top + root.clientHeight * 0.5;
-    let active = questionMarks.value[0]?.id || null;
-    for (const mark of questionMarks.value) {
-        const anchor = questionAnchors.get(mark.id);
-        if (anchor && anchor.getBoundingClientRect().top <= readingLine) active = mark.id;
-    }
+    if (!root || !root.clientHeight) return;
+    const marks = questionMarks.value;
+    // 跟随输出时通常已经在底部，无需再测量整段历史。
     if (root.scrollHeight > root.clientHeight + 8 && isNearBottom(root)) {
-        active = questionMarks.value[questionMarks.value.length - 1]?.id || null;
+        activeQuestionId.value = marks[marks.length - 1]?.id || null;
+        return;
+    }
+    if (questionAnchorOrderDirty) {
+        orderedQuestionAnchors = marks.flatMap(mark => {
+            const element = questionAnchors.get(mark.id);
+            return element ? [{ id: mark.id, element }] : [];
+        });
+        questionAnchorOrderDirty = false;
+    }
+    const readingLine = root.getBoundingClientRect().top + root.clientHeight * 0.5;
+    let active = marks[0]?.id || null;
+    // 问答锚点按展示顺序排列；二分测量代替每次滚动逐条读取布局。
+    let left = 0;
+    let right = orderedQuestionAnchors.length - 1;
+    while (left <= right) {
+        const mid = (left + right) >>> 1;
+        const anchor = orderedQuestionAnchors[mid];
+        if (anchor.element.getBoundingClientRect().top <= readingLine) {
+            active = anchor.id;
+            left = mid + 1;
+        } else {
+            right = mid - 1;
+        }
     }
     activeQuestionId.value = active;
 }
@@ -1971,8 +1994,11 @@ function scheduleQuestionPosition() {
     if (!questionNavDisposed && questionNavRaf === null) questionNavRaf = requestAnimationFrame(updateActiveQuestion);
 }
 function setQuestionAnchor(id: string, element: unknown) {
+    const previous = questionAnchors.get(id);
+    if (element === previous || (!previous && !(element instanceof HTMLElement))) return;
     if (element instanceof HTMLElement) questionAnchors.set(id, element);
     else questionAnchors.delete(id);
+    questionAnchorOrderDirty = true;
     scheduleQuestionPosition();
 }
 function jumpToQuestion(id: string) {
@@ -1982,6 +2008,7 @@ function jumpToQuestion(id: string) {
 onBeforeUnmount(() => {
     questionNavDisposed = true;
     questionAnchors.clear();
+    orderedQuestionAnchors = [];
     if (questionNavRaf !== null) cancelAnimationFrame(questionNavRaf);
 });
 const activeThoughtStartedAt = ref<number | null>(null);
@@ -3867,6 +3894,7 @@ function currentTimeline(): TimelineEntry[] {
 }
 
 const baseTimelineEntries = computed<TimelineEntry[]>(() => [...historyTimelineEntries.value, ...currentTimeline()]);
+const historyEntryIds = computed(() => new Set(historyTimelineEntries.value.map(entry => entry.id)));
 // 只以身份/锚点变更重算位置；心跳和片段计数不重建步骤分组。
 const reviewLocationKey = computed(() => JSON.stringify(props.reviewProgress.map(review => ({ id: review.id, anchor: review.anchor }))));
 const reviewPlacement = computed(() => placeReviewRows(JSON.parse(reviewLocationKey.value) as ReviewLocation[], baseTimelineEntries.value));
@@ -3904,7 +3932,10 @@ const questionNavigationKey = computed(() => {
     return JSON.stringify(entries);
 });
 const questionMarks = computed(() => buildQuestionMarks(JSON.parse(questionNavigationKey.value)));
-watch(questionMarks, scheduleQuestionPosition, { flush: 'post' });
+watch(questionMarks, () => {
+    questionAnchorOrderDirty = true;
+    scheduleQuestionPosition();
+}, { flush: 'post' });
 watch(streamViewMode, scheduleQuestionPosition, { flush: 'post' });
 // Cache grouping/operation parsing independently of child-agent token streams.
 const ambientDisplayItems = computed(() => new Map(timelineEntries.value

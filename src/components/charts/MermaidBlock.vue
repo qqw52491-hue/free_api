@@ -29,6 +29,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import mermaid from "mermaid";
+import { themeColor, useTheme } from "../../composables/useTheme";
+import { useVisibleThemeRefresh } from "../../composables/useVisibleThemeRefresh";
+
+const { isDark } = useTheme();
 
 const props = defineProps<{
   code: string;
@@ -40,6 +44,7 @@ const renderError = ref<string | null>(null);
 const copied = ref(false);
 
 const uniqueId = `mermaid-${Math.random().toString(36).substring(2, 9)}`;
+let renderGeneration = 0;
 
 const diagramTitle = computed(() => {
   const trimmed = props.code.trim().toLowerCase();
@@ -54,6 +59,7 @@ const diagramTitle = computed(() => {
 });
 
 async function renderDiagram() {
+  const generation = ++renderGeneration;
   renderError.value = null;
   const raw = props.code.trim();
   if (!raw) return;
@@ -61,27 +67,29 @@ async function renderDiagram() {
   try {
     mermaid.initialize({
       startOnLoad: false,
-      theme: "dark",
+      theme: "base",
       securityLevel: "loose",
       themeVariables: {
-        darkMode: true,
-        background: "#18181b",
-        mainBkg: "#1f1f23",
-        primaryColor: "#6c63ff",
-        primaryTextColor: "#f4f4f5",
-        primaryBorderColor: "rgba(255, 255, 255, 0.15)",
-        lineColor: "#8e8e93",
-        secondaryColor: "#00d4aa",
-        tertiaryColor: "#ffa43d",
-        edgeLabelBackground: "#18181b",
+        darkMode: isDark.value,
+        background: themeColor("--bg-1"),
+        mainBkg: themeColor("--bg-2"),
+        primaryColor: isDark.value ? "#302c58" : "#eeeafd",
+        primaryTextColor: themeColor("--text-1"),
+        primaryBorderColor: themeColor("--accent"),
+        lineColor: themeColor("--text-2"),
+        secondaryColor: isDark.value ? "#143f3c" : "#e0f3ec",
+        tertiaryColor: isDark.value ? "#4b3824" : "#fff0d7",
+        edgeLabelBackground: themeColor("--bg-1"),
         fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
         fontSize: "13px",
       },
     });
 
     const { svg } = await mermaid.render(uniqueId, raw);
+    if (generation !== renderGeneration) return;
     svgContent.value = svg;
   } catch (err: any) {
+    if (generation !== renderGeneration) return;
     renderError.value = err?.message || String(err);
     svgContent.value = "";
   }
@@ -154,15 +162,17 @@ onMounted(() => {
 watch(() => props.code, () => {
   nextTick(renderDiagram);
 });
+
+useVisibleThemeRefresh(containerRef, renderDiagram);
 </script>
 
 <style scoped>
 .mermaid-card {
   width: 100%;
   margin: 14px 0;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
   border-radius: 10px;
-  background: #18181b;
+  background: var(--theme-bg-panel, #18181b);
   overflow: hidden;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -174,15 +184,15 @@ watch(() => props.code, () => {
   justify-content: space-between;
   height: 38px;
   padding: 0 12px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  background: rgba(255, 255, 255, 0.02);
+  border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.06);
+  background: rgba(var(--theme-foreground-rgb), 0.02);
 }
 
 .mermaid-title {
   display: flex;
   align-items: center;
   gap: 6px;
-  color: #f4f4f5;
+  color: var(--theme-text-primary, #f4f4f5);
   font-size: 12.5px;
   font-weight: 600;
 }
@@ -200,9 +210,9 @@ watch(() => props.code, () => {
   align-items: center;
   gap: 4px;
   padding: 3px 8px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
   border-radius: 5px;
-  color: #a1a1aa;
+  color: var(--theme-text-secondary, #a1a1aa);
   background: transparent;
   cursor: pointer;
   font-size: 11px;
@@ -218,14 +228,14 @@ watch(() => props.code, () => {
 }
 
 .tool-btn:hover {
-  color: #ffffff;
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.16);
+  color: var(--theme-text-primary, #ffffff);
+  background: rgba(var(--theme-foreground-rgb), 0.08);
+  border-color: rgba(var(--theme-foreground-rgb), 0.16);
 }
 
 .mermaid-error {
   padding: 10px 14px;
-  color: #fca5a5;
+  color: var(--theme-status-danger, #fca5a5);
   background: rgba(239, 68, 68, 0.08);
   border-bottom: 1px solid rgba(239, 68, 68, 0.15);
   font-size: 12px;
@@ -240,7 +250,7 @@ watch(() => props.code, () => {
   display: flex;
   justify-content: center;
   overflow-x: auto;
-  background: #141416;
+  background: var(--theme-bg-base, #141416);
 }
 
 .mermaid-body :deep(svg) {

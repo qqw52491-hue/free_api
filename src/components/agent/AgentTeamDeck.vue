@@ -830,7 +830,7 @@ async function copyOutput(text?: string) {
     border: 1px solid rgba(234, 179, 8, 0.35);
     border-radius: 6px;
     font-size: 10px;
-    color: #fef08a;
+    color: var(--theme-status-warning, #fef08a);
 }
 
 .notice-info {
@@ -851,15 +851,15 @@ async function copyOutput(text?: string) {
 }
 
 .notice-text strong {
-    color: #ffffff;
+    color: var(--theme-text-primary, #ffffff);
 }
 
 .btn-clear-history-step {
     padding: 2px 7px;
     font-size: 9px;
-    background: rgba(255, 255, 255, 0.1);
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    color: #f4f4f5;
+    background: rgba(var(--theme-foreground-rgb), 0.1);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.2);
+    color: var(--theme-text-primary, #f4f4f5);
     border-radius: 4px;
     cursor: pointer;
     white-space: nowrap;
@@ -869,7 +869,7 @@ async function copyOutput(text?: string) {
 .btn-clear-history-step:hover {
     background: rgba(234, 179, 8, 0.25);
     border-color: #fef08a;
-    color: #fef08a;
+    color: var(--theme-status-warning, #fef08a);
 }
 
 .deck-header-bar {
@@ -877,7 +877,7 @@ async function copyOutput(text?: string) {
     align-items: center;
     justify-content: space-between;
     padding-bottom: 6px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.06);
 }
 
 .title-with-dot {
@@ -906,7 +906,7 @@ async function copyOutput(text?: string) {
 .header-title-text {
     font-size: 11.5px;
     font-weight: 700;
-    color: #f4f4f5;
+    color: var(--theme-text-primary, #f4f4f5);
 }
 
 .header-status-pill {
@@ -914,24 +914,24 @@ async function copyOutput(text?: string) {
     font-weight: 600;
     padding: 1px 6px;
     border-radius: 10px;
-    background: rgba(255, 255, 255, 0.06);
-    color: #a1a1aa;
+    background: rgba(var(--theme-foreground-rgb), 0.06);
+    color: var(--theme-text-secondary, #a1a1aa);
 }
 
 .header-status-pill.pill-running {
     background: rgba(56, 189, 248, 0.18);
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
     border: 1px solid rgba(56, 189, 248, 0.35);
 }
 
 .header-status-pill.pill-succeeded {
     background: rgba(52, 211, 153, 0.18);
-    color: #34d399;
+    color: var(--theme-status-success, #34d399);
 }
 
 .topo-diagram-card {
-    background: #191922;
-    border: 1px solid rgba(255, 255, 255, 0.07);
+    background: var(--theme-bg-panel, #191922);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.07);
     border-radius: 7px;
     padding: 5px 6px;
     display: flex;
@@ -943,8 +943,8 @@ async function copyOutput(text?: string) {
     display: flex;
     align-items: center;
     gap: 7px;
-    background: #20202c;
-    border: 1px solid rgba(255, 255, 255, 0.09);
+    background: var(--theme-bg-raised, #20202c);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.09);
     border-radius: 6px;
     padding: 4px 6px;
     transition: all 0.15s ease;
@@ -952,14 +952,14 @@ async function copyOutput(text?: string) {
 
 .topo-master-node.is-running {
     border-color: rgba(56, 189, 248, 0.4);
-    background: linear-gradient(90deg, rgba(56, 189, 248, 0.1), #20202c);
+    background: linear-gradient(90deg, rgba(56, 189, 248, 0.1), var(--theme-bg-raised, #20202c));
 }
 
 .master-avatar {
     width: 22px;
     height: 22px;
     border-radius: 5px;
-    background: linear-gradient(135deg, #1e293b, #0f172a);
+    background: linear-gradient(135deg, var(--theme-bg-raised, #1e293b), var(--theme-bg-panel, #0f172a));
     display: grid;
     place-items: center;
     font-size: 11px;
@@ -975,12 +975,12 @@ async function copyOutput(text?: string) {
 
 .master-name {
     font-size: 10.5px;
-    color: #f4f4f5;
+    color: var(--theme-text-primary, #f4f4f5);
 }
 
 .master-status-desc {
     font-size: 8.5px;
-    color: #a1a1aa;
+    color: var(--theme-text-secondary, #a1a1aa);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -990,8 +990,8 @@ async function copyOutput(text?: string) {
     font-size: 8px;
     padding: 1px 4px;
     border-radius: 3px;
-    background: rgba(255, 255, 255, 0.06);
-    color: #a1a1aa;
+    background: rgba(var(--theme-foreground-rgb), 0.06);
+    color: var(--theme-text-secondary, #a1a1aa);
     display: inline-flex;
     align-items: center;
     gap: 3px;
@@ -999,12 +999,12 @@ async function copyOutput(text?: string) {
 
 .master-status-badge.status-running {
     background: rgba(56, 189, 248, 0.2);
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
 }
 
 .master-status-badge.status-succeeded {
     background: rgba(52, 211, 153, 0.2);
-    color: #34d399;
+    color: var(--theme-status-success, #34d399);
 }
 
 /* 竖向分支列表 (自上而下延伸，收紧高度) */
@@ -1036,7 +1036,7 @@ async function copyOutput(text?: string) {
     left: 3px;
     height: 50%;
     width: 1.5px;
-    background: rgba(255, 255, 255, 0.15);
+    background: rgba(var(--theme-foreground-rgb), 0.15);
 }
 
 .spine-curve {
@@ -1045,7 +1045,7 @@ async function copyOutput(text?: string) {
     left: 3px;
     width: 8px;
     height: 1.5px;
-    background: rgba(255, 255, 255, 0.15);
+    background: rgba(var(--theme-foreground-rgb), 0.15);
 }
 
 .spine-line.bottom-line {
@@ -1054,7 +1054,7 @@ async function copyOutput(text?: string) {
     left: 3px;
     bottom: 0;
     width: 1.5px;
-    background: rgba(255, 255, 255, 0.15);
+    background: rgba(var(--theme-foreground-rgb), 0.15);
 }
 
 .topo-vertical-node.status-running .spine-line,
@@ -1076,20 +1076,20 @@ async function copyOutput(text?: string) {
     gap: 5px;
     padding: 3px 6px;
     margin: 1px 0;
-    background: #20202a;
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: var(--theme-bg-raised, #20202a);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
     border-radius: 5px;
     transition: all 0.15s ease;
 }
 
 .topo-vertical-node:hover .topo-worker-card {
-    border-color: rgba(255, 255, 255, 0.2);
-    background: #242432;
+    border-color: rgba(var(--theme-foreground-rgb), 0.2);
+    background: var(--theme-bg-raised, #242432);
 }
 
 .topo-vertical-node.active .topo-worker-card {
     border-color: #38bdf8;
-    background: linear-gradient(90deg, rgba(56, 189, 248, 0.15), #20202a);
+    background: linear-gradient(90deg, rgba(56, 189, 248, 0.15), var(--theme-bg-raised, #20202a));
 }
 
 .worker-card-left {
@@ -1105,7 +1105,7 @@ async function copyOutput(text?: string) {
 
 .worker-card-name {
     font-size: 10px;
-    color: #f4f4f5;
+    color: var(--theme-text-primary, #f4f4f5);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1114,8 +1114,8 @@ async function copyOutput(text?: string) {
 
 .worker-card-tool {
     font-size: 8.5px;
-    color: #71717a;
-    background: rgba(255, 255, 255, 0.04);
+    color: var(--theme-text-muted, #71717a);
+    background: rgba(var(--theme-foreground-rgb), 0.04);
     padding: 0 4px;
     border-radius: 3px;
     font-family: ui-monospace, monospace;
@@ -1126,7 +1126,7 @@ async function copyOutput(text?: string) {
 
 .worker-card-model {
     font-size: 8.5px;
-    color: #c4b5fd;
+    color: var(--theme-status-accent, #c4b5fd);
     background: rgba(167, 139, 250, 0.1);
     border: 1px solid rgba(167, 139, 250, 0.22);
     padding: 0 4px;
@@ -1150,12 +1150,12 @@ async function copyOutput(text?: string) {
 
 .worker-status-badge.status-running {
     background: rgba(56, 189, 248, 0.2);
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
 }
 
 .worker-status-badge.status-succeeded {
     background: rgba(52, 211, 153, 0.2);
-    color: #34d399;
+    color: var(--theme-status-success, #34d399);
 }
 
 .topo-single-hint {
@@ -1164,13 +1164,13 @@ async function copyOutput(text?: string) {
     gap: 5px;
     margin-top: 6px;
     font-size: 9px;
-    color: #71717a;
+    color: var(--theme-text-muted, #71717a);
     justify-content: center;
 }
 
 .hint-dot {
     font-size: 6px;
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
 }
 
 .topo-all-done-hint {
@@ -1193,21 +1193,21 @@ async function copyOutput(text?: string) {
 .done-title {
     font-size: 10px;
     font-weight: 600;
-    color: #34d399;
+    color: var(--theme-status-success, #34d399);
 }
 
 .done-desc {
     font-size: 8.5px;
-    color: #a1a1aa;
+    color: var(--theme-text-secondary, #a1a1aa);
 }
 
 .btn-toggle-done {
     margin-top: 4px;
     padding: 2px 8px;
     font-size: 8.5px;
-    background: rgba(255, 255, 255, 0.08);
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    color: #38bdf8;
+    background: rgba(var(--theme-foreground-rgb), 0.08);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.15);
+    color: var(--theme-status-info, #38bdf8);
     border-radius: 4px;
     cursor: pointer;
     transition: all 0.2s;
@@ -1224,7 +1224,7 @@ async function copyOutput(text?: string) {
     flex-direction: column;
     gap: 6px;
     padding-top: 6px;
-    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    border-top: 1px solid rgba(var(--theme-foreground-rgb), 0.06);
 }
 
 /* 横向排列短标题 Tab 栏 (支持自动流式换行) */
@@ -1241,10 +1241,10 @@ async function copyOutput(text?: string) {
     align-items: center;
     gap: 4px;
     padding: 4px 7px;
-    background: #181820;
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: var(--theme-bg-panel, #181820);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
     border-radius: 6px;
-    color: #a1a1aa;
+    color: var(--theme-text-secondary, #a1a1aa);
     font-size: 9.5px;
     font-weight: 600;
     cursor: pointer;
@@ -1253,15 +1253,15 @@ async function copyOutput(text?: string) {
 }
 
 .chain-tab-btn:hover {
-    color: #f4f4f5;
-    background: #21212b;
-    border-color: rgba(255, 255, 255, 0.15);
+    color: var(--theme-text-primary, #f4f4f5);
+    background: var(--theme-bg-raised, #21212b);
+    border-color: rgba(var(--theme-foreground-rgb), 0.15);
 }
 
 .chain-tab-btn.active {
-    background: #252533;
+    background: var(--theme-bg-raised, #252533);
     border-color: #38bdf8;
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
     box-shadow: 0 0 8px rgba(56, 189, 248, 0.15);
 }
 
@@ -1279,12 +1279,12 @@ async function copyOutput(text?: string) {
 
 .tab-progress-tag.status-running {
     background: rgba(56, 189, 248, 0.2);
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
 }
 
 .tab-progress-tag.status-succeeded {
     background: rgba(52, 211, 153, 0.2);
-    color: #34d399;
+    color: var(--theme-status-success, #34d399);
 }
 
 /* Tab 面板主体 */
@@ -1325,7 +1325,7 @@ async function copyOutput(text?: string) {
 
 .detail-agent-name {
     font-size: 11px;
-    color: #f4f4f5;
+    color: var(--theme-text-primary, #f4f4f5);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1333,7 +1333,7 @@ async function copyOutput(text?: string) {
 
 .detail-agent-tool {
     font-size: 8.5px;
-    color: #71717a;
+    color: var(--theme-text-muted, #71717a);
     font-family: ui-monospace, monospace;
     white-space: nowrap;
     overflow: hidden;
@@ -1345,24 +1345,24 @@ async function copyOutput(text?: string) {
     font-weight: 600;
     padding: 1px 5px;
     border-radius: 4px;
-    background: rgba(255, 255, 255, 0.06);
-    color: #a1a1aa;
+    background: rgba(var(--theme-foreground-rgb), 0.06);
+    color: var(--theme-text-secondary, #a1a1aa);
     white-space: nowrap;
 }
 
 .stage-metric-pill.status-running {
     background: rgba(56, 189, 248, 0.2);
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
 }
 
 .stage-metric-pill.status-succeeded {
     background: rgba(52, 211, 153, 0.2);
-    color: #34d399;
+    color: var(--theme-status-success, #34d399);
 }
 
 .worker-dur-pill {
     font-size: 8.5px;
-    color: #71717a;
+    color: var(--theme-text-muted, #71717a);
     margin-right: 4px;
     white-space: nowrap;
 }
@@ -1375,7 +1375,7 @@ async function copyOutput(text?: string) {
 .chain-progress-track {
     width: 100%;
     height: 4px;
-    background: rgba(255, 255, 255, 0.07);
+    background: rgba(var(--theme-foreground-rgb), 0.07);
     border-radius: 2px;
     overflow: hidden;
 }
@@ -1404,7 +1404,7 @@ async function copyOutput(text?: string) {
 .worker-scorecard-deck {
     margin-top: 6px;
     padding: 6px 10px;
-    background: rgba(18, 22, 34, 0.6);
+    background: rgba(var(--theme-rgb-panel, 18, 22, 34), 0.6);
     border: 1px solid rgba(80, 100, 160, 0.2);
     border-radius: 6px;
 }
@@ -1415,7 +1415,7 @@ async function copyOutput(text?: string) {
     margin-bottom: 6px;
 }
 .scorecard-icon { font-size: 13px; }
-.scorecard-title { font-size: 11px; font-weight: 600; color: #e2e8f0; }
+.scorecard-title { font-size: 11px; font-weight: 600; color: var(--theme-text-primary, #e2e8f0); }
 .scorecard-badge {
     margin-left: auto;
     font-size: 9.5px;
@@ -1438,13 +1438,13 @@ async function copyOutput(text?: string) {
     justify-content: space-between;
     font-size: 10px;
 }
-.dim-name { color: #94a3b8; }
-.dim-val { color: #f1f5f9; font-weight: 600; font-family: monospace; }
-.dim-val.text-danger { color: #f87171; }
+.dim-name { color: var(--theme-status-info, #94a3b8); }
+.dim-val { color: var(--theme-text-primary, #f1f5f9); font-weight: 600; font-family: monospace; }
+.dim-val.text-danger { color: var(--theme-status-danger, #f87171); }
 .progress-track {
     width: 100%;
     height: 4px;
-    background: rgba(255, 255, 255, 0.08);
+    background: rgba(var(--theme-foreground-rgb), 0.08);
     border-radius: 999px;
     overflow: hidden;
 }
@@ -1460,7 +1460,7 @@ async function copyOutput(text?: string) {
 .progress-bar.test { background: linear-gradient(90deg, #f59e0b, #d97706); }
 
 .worker-findings-deck {
-    background: linear-gradient(135deg, rgba(56, 189, 248, 0.08), rgba(24, 24, 32, 0.95));
+    background: linear-gradient(135deg, rgba(56, 189, 248, 0.08), rgba(var(--theme-rgb-panel, 24, 24, 32), 0.95));
     border: 1px solid rgba(56, 189, 248, 0.25);
     border-radius: 8px;
     padding: 8px 10px;
@@ -1482,14 +1482,14 @@ async function copyOutput(text?: string) {
 }
 
 .findings-title {
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
     font-weight: 700;
 }
 
 .findings-count {
     font-size: 8.5px;
-    color: #a1a1aa;
-    background: rgba(255, 255, 255, 0.08);
+    color: var(--theme-text-secondary, #a1a1aa);
+    background: rgba(var(--theme-foreground-rgb), 0.08);
     padding: 1px 5px;
     border-radius: 4px;
 }
@@ -1501,7 +1501,7 @@ async function copyOutput(text?: string) {
     padding: 1px 6px;
     border-radius: 3px;
     background: rgba(52, 211, 153, 0.15);
-    color: #34d399;
+    color: var(--theme-status-success, #34d399);
 }
 
 .findings-list {
@@ -1519,8 +1519,8 @@ async function copyOutput(text?: string) {
     gap: 6px;
     font-size: 10px;
     line-height: 1.45;
-    color: #e4e4e7;
-    background: rgba(0, 0, 0, 0.2);
+    color: var(--theme-text-primary, #e4e4e7);
+    background: var(--theme-inset-bg, rgba(0, 0, 0, 0.2));
     padding: 4px 6px;
     border-radius: 4px;
     border-left: 2px solid #38bdf8;
@@ -1533,7 +1533,7 @@ async function copyOutput(text?: string) {
 }
 
 .finding-item.is-blocking .finding-num {
-    color: #ef4444;
+    color: var(--theme-status-danger, #ef4444);
     background: rgba(239, 68, 68, 0.18);
 }
 
@@ -1543,14 +1543,14 @@ async function copyOutput(text?: string) {
 }
 
 .finding-item.is-warning .finding-num {
-    color: #f59e0b;
+    color: var(--theme-status-warning, #f59e0b);
     background: rgba(245, 158, 11, 0.18);
 }
 
 .finding-num {
     font-size: 8.5px;
     font-weight: 700;
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
     background: rgba(56, 189, 248, 0.15);
     border-radius: 50%;
     width: 14px;
@@ -1572,7 +1572,7 @@ async function copyOutput(text?: string) {
     align-items: center;
     justify-content: space-between;
     padding: 3px 2px 5px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.05);
     margin-bottom: 4px;
 }
 
@@ -1582,18 +1582,18 @@ async function copyOutput(text?: string) {
     gap: 5px;
     font-size: 10.5px;
     font-weight: 650;
-    color: #e4e4e7;
+    color: var(--theme-text-primary, #e4e4e7);
 }
 
 .steps-deck-icon {
     font-size: 12px;
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
 }
 
 .btn-toggle-steps-fold {
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    color: #a1a1aa;
+    background: rgba(var(--theme-foreground-rgb), 0.06);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.12);
+    color: var(--theme-text-secondary, #a1a1aa);
     font-size: 8.5px;
     padding: 2px 6px;
     border-radius: 4px;
@@ -1602,7 +1602,7 @@ async function copyOutput(text?: string) {
 }
 
 .btn-toggle-steps-fold:hover {
-    color: #ffffff;
+    color: var(--theme-text-primary, #ffffff);
     background: rgba(56, 189, 248, 0.15);
     border-color: rgba(56, 189, 248, 0.3);
 }
@@ -1620,20 +1620,20 @@ async function copyOutput(text?: string) {
     flex-direction: column;
     gap: 3px;
     padding: 3.5px 7px;
-    background: #171720;
-    border: 1px solid rgba(255, 255, 255, 0.05);
+    background: var(--theme-bg-panel, #171720);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.05);
     border-radius: 5px;
     transition: all 0.15s ease;
 }
 
 .compact-node:hover {
-    background: #1b1b26;
-    border-color: rgba(255, 255, 255, 0.1);
+    background: var(--theme-bg-panel, #1b1b26);
+    border-color: rgba(var(--theme-foreground-rgb), 0.1);
 }
 
 .compact-node.is-active {
     border-color: rgba(56, 189, 248, 0.45);
-    background: linear-gradient(90deg, rgba(56, 189, 248, 0.08), #171720);
+    background: linear-gradient(90deg, rgba(56, 189, 248, 0.08), var(--theme-bg-panel, #171720));
 }
 
 .step-compact-line {
@@ -1648,20 +1648,20 @@ async function copyOutput(text?: string) {
     font-size: 8px;
     font-family: ui-monospace, SFMono-Regular, monospace;
     font-weight: 700;
-    color: #71717a;
-    background: rgba(255, 255, 255, 0.06);
+    color: var(--theme-text-muted, #71717a);
+    background: rgba(var(--theme-foreground-rgb), 0.06);
     padding: 1px 4px;
     border-radius: 3px;
     flex-shrink: 0;
 }
 
 .compact-node.status-succeeded .step-seq-tag {
-    color: #34d399;
+    color: var(--theme-status-success, #34d399);
     background: rgba(52, 211, 153, 0.12);
 }
 
 .compact-node.is-active .step-seq-tag {
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
     background: rgba(56, 189, 248, 0.18);
 }
 
@@ -1671,7 +1671,7 @@ async function copyOutput(text?: string) {
     padding: 1px 5px;
     border-radius: 3px;
     background: rgba(56, 189, 248, 0.12);
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
     border: 1px solid rgba(56, 189, 248, 0.2);
     flex-shrink: 0;
 }
@@ -1679,7 +1679,7 @@ async function copyOutput(text?: string) {
 .step-intent-title {
     font-size: 10px;
     font-weight: 650;
-    color: #f4f4f5;
+    color: var(--theme-text-primary, #f4f4f5);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1693,12 +1693,12 @@ async function copyOutput(text?: string) {
     padding-left: 18px;
     font-size: 8.5px;
     font-family: ui-monospace, SFMono-Regular, monospace;
-    color: #71717a;
+    color: var(--theme-text-muted, #71717a);
     line-height: 1.25;
 }
 
 .cmd-prompt-icon {
-    color: #52525b;
+    color: var(--theme-text-dim, #52525b);
     font-weight: 700;
 }
 
@@ -1706,18 +1706,18 @@ async function copyOutput(text?: string) {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    color: #a1a1aa;
+    color: var(--theme-text-secondary, #a1a1aa);
 }
 
 .compact-node.status-succeeded .step-status-tag {
-    color: #34d399;
+    color: var(--theme-status-success, #34d399);
     font-size: 9px;
     font-weight: 700;
     flex-shrink: 0;
 }
 
 .compact-node.is-active .step-status-tag {
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
     font-weight: 700;
     flex-shrink: 0;
 }
@@ -1727,7 +1727,7 @@ async function copyOutput(text?: string) {
     align-items: flex-start;
     gap: 4px;
     font-size: 9px;
-    color: #fef08a;
+    color: var(--theme-status-warning, #fef08a);
     background: rgba(234, 179, 8, 0.08);
     border: 1px solid rgba(234, 179, 8, 0.2);
     padding: 3px 6px;
@@ -1747,12 +1747,12 @@ async function copyOutput(text?: string) {
     border: 0;
     cursor: pointer;
     width: 100%;
-    color: #71717a;
+    color: var(--theme-text-muted, #71717a);
     transition: all 0.15s ease;
 }
 
 .folded-steps-indicator-bar:hover .fold-badge {
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
     border-color: rgba(56, 189, 248, 0.3);
     background: rgba(56, 189, 248, 0.1);
 }
@@ -1760,15 +1760,15 @@ async function copyOutput(text?: string) {
 .fold-line {
     flex: 1;
     height: 1px;
-    background: rgba(255, 255, 255, 0.08);
+    background: rgba(var(--theme-foreground-rgb), 0.08);
 }
 
 .fold-badge {
     font-size: 8.5px;
     padding: 2px 8px;
     border-radius: 10px;
-    background: #181822;
-    border: 1px dashed rgba(255, 255, 255, 0.15);
+    background: var(--theme-bg-panel, #181822);
+    border: 1px dashed rgba(var(--theme-foreground-rgb), 0.15);
     white-space: nowrap;
 }
 
@@ -1776,12 +1776,12 @@ async function copyOutput(text?: string) {
 /* 描述层级：具体执行内容 */
 .step-desc-box {
     font-size: 9.5px;
-    color: #a1a1aa;
+    color: var(--theme-text-secondary, #a1a1aa);
     line-height: 1.45;
-    background: rgba(255, 255, 255, 0.03);
+    background: rgba(var(--theme-foreground-rgb), 0.03);
     padding: 4px 6px;
     border-radius: 4px;
-    border-left: 2px solid rgba(255, 255, 255, 0.12);
+    border-left: 2px solid rgba(var(--theme-foreground-rgb), 0.12);
     word-break: break-word;
 }
 
@@ -1791,7 +1791,7 @@ async function copyOutput(text?: string) {
     align-items: flex-start;
     gap: 5px;
     font-size: 9.5px;
-    color: #fef08a;
+    color: var(--theme-status-warning, #fef08a);
     background: rgba(234, 179, 8, 0.08);
     border: 1px solid rgba(234, 179, 8, 0.2);
     padding: 4px 6px;
@@ -1812,8 +1812,8 @@ async function copyOutput(text?: string) {
 
 /* 终端输出预览 */
 .worker-output-terminal {
-    background: #111116;
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: var(--theme-bg-base, #111116);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
     border-radius: 6px;
     overflow: hidden;
     margin-top: 2px;
@@ -1824,17 +1824,17 @@ async function copyOutput(text?: string) {
     align-items: center;
     justify-content: space-between;
     padding: 3px 6px;
-    background: rgba(255, 255, 255, 0.04);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    background: rgba(var(--theme-foreground-rgb), 0.04);
+    border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.06);
     font-size: 8.5px;
-    color: #71717a;
+    color: var(--theme-text-muted, #71717a);
 }
 
 .btn-copy-out {
     background: transparent;
     border: none;
     font-size: 8.5px;
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
     cursor: pointer;
     padding: 0 2px;
 }
@@ -1844,7 +1844,7 @@ async function copyOutput(text?: string) {
     padding: 6px;
     font-size: 8.5px;
     font-family: ui-monospace, SFMono-Regular, monospace;
-    color: #e4e4e7;
+    color: var(--theme-text-primary, #e4e4e7);
     white-space: pre-wrap;
     word-break: break-word;
     max-height: 100px;
@@ -1868,13 +1868,13 @@ async function copyOutput(text?: string) {
 
 .standby-title {
     font-size: 11px;
-    color: #f4f4f5;
+    color: var(--theme-text-primary, #f4f4f5);
 }
 
 .standby-desc {
     margin: 0;
     font-size: 9px;
-    color: #71717a;
+    color: var(--theme-text-muted, #71717a);
     line-height: 1.4;
     max-width: 220px;
 }
@@ -1898,8 +1898,8 @@ async function copyOutput(text?: string) {
     align-items: center;
     gap: 6px;
     padding: 8px 12px;
-    background: rgba(18, 18, 22, 0.7);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(var(--theme-rgb-base, 18, 18, 22), 0.7);
+    border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
     overflow-x: auto;
     scrollbar-width: none;
     backdrop-filter: blur(8px);
@@ -1916,10 +1916,10 @@ async function copyOutput(text?: string) {
     align-items: center;
     gap: 6px;
     padding: 5px 10px;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(var(--theme-foreground-rgb), 0.04);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
     border-radius: 6px;
-    color: #94a3b8;
+    color: var(--theme-status-info, #94a3b8);
     font-size: 12px;
     font-weight: 500;
     cursor: pointer;
@@ -1928,15 +1928,15 @@ async function copyOutput(text?: string) {
 }
 
 .agent-tab-pill:hover {
-    background: rgba(255, 255, 255, 0.08);
-    color: #e2e8f0;
-    border-color: rgba(255, 255, 255, 0.15);
+    background: rgba(var(--theme-foreground-rgb), 0.08);
+    color: var(--theme-text-primary, #e2e8f0);
+    border-color: rgba(var(--theme-foreground-rgb), 0.15);
 }
 
 .agent-tab-pill.active {
     background: rgba(56, 189, 248, 0.12);
     border-color: rgba(56, 189, 248, 0.4);
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
     box-shadow: 0 0 10px rgba(56, 189, 248, 0.15);
 }
 
@@ -1960,8 +1960,8 @@ async function copyOutput(text?: string) {
     font-size: 10px;
     padding: 1px 5px;
     border-radius: 10px;
-    background: rgba(255, 255, 255, 0.06);
-    color: #94a3b8;
+    background: rgba(var(--theme-foreground-rgb), 0.06);
+    color: var(--theme-status-info, #94a3b8);
     display: inline-flex;
     align-items: center;
     gap: 3px;
@@ -1969,24 +1969,24 @@ async function copyOutput(text?: string) {
 
 .tab-pill-status.status-running {
     background: rgba(56, 189, 248, 0.2);
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
 }
 
 .tab-pill-status.status-succeeded {
     background: rgba(34, 197, 94, 0.15);
-    color: #4ade80;
+    color: var(--theme-status-success, #4ade80);
 }
 
 .tab-pill-status.status-failed {
     background: rgba(239, 68, 68, 0.15);
-    color: #f87171;
+    color: var(--theme-status-danger, #f87171);
 }
 
 /* 🌟 2. 拓扑折叠条 */
 .topology-collapsible-bar {
     padding: 4px 12px;
-    background: rgba(255, 255, 255, 0.02);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    background: rgba(var(--theme-foreground-rgb), 0.02);
+    border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.05);
 }
 
 .btn-toggle-topology {
@@ -1995,7 +1995,7 @@ async function copyOutput(text?: string) {
     gap: 6px;
     background: transparent;
     border: none;
-    color: #64748b;
+    color: var(--theme-status-info, #64748b);
     font-size: 11px;
     cursor: pointer;
     padding: 2px 4px;
@@ -2004,7 +2004,7 @@ async function copyOutput(text?: string) {
 }
 
 .btn-toggle-topology:hover {
-    color: #94a3b8;
+    color: var(--theme-status-info, #94a3b8);
 }
 
 .topology-toggle-icon {
@@ -2012,7 +2012,7 @@ async function copyOutput(text?: string) {
 }
 
 .topology-worker-summary {
-    color: #475569;
+    color: var(--theme-status-info, #475569);
 }
 
 /* 🌟 3. 步骤流容器 */
@@ -2027,21 +2027,21 @@ async function copyOutput(text?: string) {
 .master-view .master-goal-deck {
     margin: 12px 0;
     padding: 10px 14px;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(var(--theme-foreground-rgb), 0.03);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
     border-radius: 8px;
 }
 
 .master-view .goal-header {
     font-size: 12px;
     font-weight: 600;
-    color: #94a3b8;
+    color: var(--theme-status-info, #94a3b8);
     margin-bottom: 4px;
 }
 
 .master-view .goal-text {
     font-size: 13px;
-    color: #e2e8f0;
+    color: var(--theme-text-primary, #e2e8f0);
     line-height: 1.5;
     margin: 0;
 }
@@ -2053,7 +2053,7 @@ async function copyOutput(text?: string) {
 .overview-title {
     font-size: 12px;
     font-weight: 600;
-    color: #94a3b8;
+    color: var(--theme-status-info, #94a3b8);
     margin-bottom: 8px;
 }
 
@@ -2065,15 +2065,15 @@ async function copyOutput(text?: string) {
 
 .worker-overview-card {
     padding: 8px 12px;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.07);
+    background: rgba(var(--theme-foreground-rgb), 0.03);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.07);
     border-radius: 6px;
     cursor: pointer;
     transition: all 0.15s ease;
 }
 
 .worker-overview-card:hover {
-    background: rgba(255, 255, 255, 0.06);
+    background: rgba(var(--theme-foreground-rgb), 0.06);
     border-color: rgba(56, 189, 248, 0.3);
 }
 
@@ -2086,7 +2086,7 @@ async function copyOutput(text?: string) {
 
 .w-card-top .w-name {
     font-size: 13px;
-    color: #f1f5f9;
+    color: var(--theme-text-primary, #f1f5f9);
 }
 
 .w-card-top .w-status-badge {
@@ -2098,7 +2098,7 @@ async function copyOutput(text?: string) {
 
 .w-card-desc {
     font-size: 11.5px;
-    color: #94a3b8;
+    color: var(--theme-status-info, #94a3b8);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -2116,7 +2116,7 @@ async function copyOutput(text?: string) {
     gap: 8px;
     padding: 6px 10px;
     border-radius: 6px;
-    background: rgba(15, 23, 42, 0.45);
+    background: rgba(var(--theme-rgb-panel, 15, 23, 42), 0.45);
     border: 1px solid rgba(56, 189, 248, 0.22);
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
     user-select: none;
@@ -2127,7 +2127,7 @@ async function copyOutput(text?: string) {
 }
 
 .worker-live-thought-row .ambient-live-text-bar:hover {
-    background: rgba(15, 23, 42, 0.65);
+    background: rgba(var(--theme-rgb-panel, 15, 23, 42), 0.65);
     border-color: rgba(56, 189, 248, 0.4);
 }
 
@@ -2142,7 +2142,7 @@ async function copyOutput(text?: string) {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
 }
 
 .thought-square-svg {
@@ -2161,7 +2161,7 @@ async function copyOutput(text?: string) {
 .live-think-title {
     font-size: 11.5px;
     font-weight: 600;
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
     letter-spacing: 0.1px;
 }
 
@@ -2188,7 +2188,7 @@ async function copyOutput(text?: string) {
     font-weight: 500;
     line-height: 20px;
     height: 20px;
-    color: #f1f5f9;
+    color: var(--theme-text-primary, #f1f5f9);
     display: block;
     width: 100%;
     white-space: nowrap;
@@ -2242,9 +2242,9 @@ async function copyOutput(text?: string) {
     gap: 3px;
     padding: 2px 7px;
     border-radius: 4px;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    color: #94a3b8;
+    background: rgba(var(--theme-foreground-rgb), 0.05);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.1);
+    color: var(--theme-status-info, #94a3b8);
     font-size: 10.5px;
     cursor: pointer;
     flex-shrink: 0;
@@ -2252,9 +2252,9 @@ async function copyOutput(text?: string) {
 }
 
 .thought-expand-btn:hover {
-    color: #e2e8f0;
-    background: rgba(255, 255, 255, 0.1);
-    border-color: rgba(255, 255, 255, 0.2);
+    color: var(--theme-text-primary, #e2e8f0);
+    background: rgba(var(--theme-foreground-rgb), 0.1);
+    border-color: rgba(var(--theme-foreground-rgb), 0.2);
 }
 
 .thought-expand-btn svg {
@@ -2270,7 +2270,7 @@ async function copyOutput(text?: string) {
     margin-top: 6px;
     padding: 10px 12px;
     border-radius: 6px;
-    background: rgba(15, 23, 42, 0.7);
+    background: rgba(var(--theme-rgb-panel, 15, 23, 42), 0.7);
     backdrop-filter: blur(10px);
     border: 1px solid rgba(56, 189, 248, 0.2);
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
@@ -2283,25 +2283,25 @@ async function copyOutput(text?: string) {
     justify-content: space-between;
     margin-bottom: 6px;
     padding-bottom: 4px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.06);
 }
 
 .thought-expanded-title {
     font-size: 11px;
     font-weight: 500;
-    color: #94a3b8;
+    color: var(--theme-status-info, #94a3b8);
 }
 
 .thought-char-count {
     font-size: 10px;
-    color: #64748b;
+    color: var(--theme-status-info, #64748b);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 .thought-expanded-body {
     font-size: 11.5px;
     line-height: 1.6;
-    color: #e2e8f0;
+    color: var(--theme-text-primary, #e2e8f0);
     white-space: pre-wrap;
     word-break: break-word;
     max-height: 220px;
@@ -2333,10 +2333,10 @@ async function copyOutput(text?: string) {
 .worker-step-inline-detail {
     margin: 2px 0 8px 0;
     padding: 8px 10px;
-    background: rgba(18, 20, 28, 0.85);
+    background: rgba(var(--theme-rgb-base, 18, 20, 28), 0.85);
     border: 1px solid rgba(56, 189, 248, 0.2);
     border-radius: 6px;
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+    box-shadow: var(--theme-shadow, 0 4px 14px rgba(0, 0, 0, 0.3));
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
@@ -2349,7 +2349,7 @@ async function copyOutput(text?: string) {
     justify-content: space-between;
     gap: 8px;
     padding-bottom: 5px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.06);
 }
 
 .inline-title-meta {
@@ -2362,7 +2362,7 @@ async function copyOutput(text?: string) {
 .inline-step-num {
     font-size: 9.5px;
     font-weight: 600;
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
     background: rgba(56, 189, 248, 0.12);
     padding: 0.5px 4.5px;
     border-radius: 3px;
@@ -2372,12 +2372,12 @@ async function copyOutput(text?: string) {
 .inline-step-title {
     font-size: 11px;
     font-weight: 600;
-    color: #f1f5f9;
+    color: var(--theme-text-primary, #f1f5f9);
 }
 
 .inline-step-dur {
     font-size: 10px;
-    color: #94a3b8;
+    color: var(--theme-status-info, #94a3b8);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
@@ -2387,7 +2387,7 @@ async function copyOutput(text?: string) {
     gap: 3px;
     font-size: 10.5px;
     font-weight: 500;
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
     background: rgba(56, 189, 248, 0.1);
     border: 1px solid rgba(56, 189, 248, 0.25);
     border-radius: 4px;
@@ -2413,7 +2413,7 @@ async function copyOutput(text?: string) {
     gap: 5px;
     font-size: 10px;
     font-weight: 600;
-    color: #94a3b8;
+    color: var(--theme-status-info, #94a3b8);
 }
 
 .sec-icon {
@@ -2421,13 +2421,13 @@ async function copyOutput(text?: string) {
 }
 
 .sec-title {
-    color: #cbd5e1;
+    color: var(--theme-text-primary, #cbd5e1);
 }
 
 .btn-mini-copy {
     margin-left: auto;
     font-size: 9.5px;
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
     background: transparent;
     border: none;
     cursor: pointer;
@@ -2444,9 +2444,9 @@ async function copyOutput(text?: string) {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 10px;
     line-height: 1.45;
-    color: #e2e8f0;
-    background: rgba(0, 0, 0, 0.35);
-    border: 1px solid rgba(255, 255, 255, 0.06);
+    color: var(--theme-text-primary, #e2e8f0);
+    background: var(--theme-inset-bg, rgba(0, 0, 0, 0.35));
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.06);
     border-radius: 4px;
     max-height: 160px;
     overflow-y: auto;
@@ -2460,7 +2460,7 @@ async function copyOutput(text?: string) {
     margin: 0;
     font-size: 10.5px;
     line-height: 1.5;
-    color: #cbd5e1;
+    color: var(--theme-text-primary, #cbd5e1);
 }
 
 .sec-text.thought-text {
@@ -2468,7 +2468,7 @@ async function copyOutput(text?: string) {
     background: rgba(56, 189, 248, 0.05);
     border-left: 2px solid #38bdf8;
     border-radius: 3px;
-    color: #e2e8f0;
+    color: var(--theme-text-primary, #e2e8f0);
     font-size: 11px;
     line-height: 1.55;
     white-space: pre-wrap;

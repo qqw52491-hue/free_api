@@ -190,7 +190,7 @@ h3 { margin: 0 0 5px; font-size: 14px; } p { margin: 0; }
 button, select { border: 1px solid var(--border-color, #454955); border-radius: 6px; background: var(--bg-primary, #23262e); color: inherit; font-size: 12px; padding: 6px 9px; cursor: pointer; }
 button:disabled, select:disabled { opacity: .5; cursor: default; }
 .directory-access-note { margin-top: 8px; }
-.directory-access-error { margin-top: 10px; font-size: 12px; color: #f28b82; }
-.directory-access-notice { margin-top: 10px; font-size: 12px; color: #70cba6; }
+.directory-access-error { margin-top: 10px; font-size: 12px; color: var(--theme-status-danger, #f28b82); }
+.directory-access-notice { margin-top: 10px; font-size: 12px; color: var(--theme-status-success, #70cba6); }
 @media (max-width: 600px) { .directory-access-row { flex-wrap: wrap; } .directory-access-row code { flex-basis: 100%; } }
 </style>

@@ -168,10 +168,10 @@
                 <div><span>运行</span><strong>{{ elapsedLabel }}</strong></div>
                 <div><span>完成</span><strong>{{ completedToolCount }}</strong></div>
                 <div v-if="tokenUsage && tokenUsage.tokens_per_second !== undefined && tokenUsage.tokens_per_second > 0" :title="`吐字速率: ${tokenUsage.tokens_per_second.toFixed(1)} tok/s, 首字: ${tokenUsage.ttft_ms ?? 0}ms`">
-                    <span>速率</span><strong style="color:#38bdf8">{{ tokenUsage.tokens_per_second.toFixed(1) }} <small style="font-size:9px;color:#71717a">t/s</small></strong>
+                    <span>速率</span><strong style="color:var(--theme-status-info, #38bdf8)">{{ tokenUsage.tokens_per_second.toFixed(1) }} <small style="font-size:9px;color:var(--theme-text-muted, #71717a)">t/s</small></strong>
                 </div>
                 <div v-if="tokenUsage && tokenUsage.cache_hit_rate !== undefined && tokenUsage.cache_hit_rate > 0" :title="`前缀缓存命中: ${tokenUsage.cached_tokens ?? 0} / ${tokenUsage.prompt_tokens} tokens`">
-                    <span>缓存</span><strong style="color:#4ade80">{{ tokenUsage.cache_hit_rate.toFixed(0) }}%</strong>
+                    <span>缓存</span><strong style="color:var(--theme-status-success, #4ade80)">{{ tokenUsage.cache_hit_rate.toFixed(0) }}%</strong>
                 </div>
                 <div v-if="tokenUsage" :title="`已用 ${tokenUsage.total_tokens} / 窗口 ${tokenUsage.context_window > 0 ? tokenUsage.context_window : '-'}`">
                     <span>上下文</span><strong>{{ tokenUsage.usage_percent.toFixed(1) }}%</strong>
@@ -1267,9 +1267,9 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     height: 100%;
     max-height: 100%;
     flex-direction: column;
-    border-left: 1px solid rgba(255, 255, 255, 0.08);
-    color: #dedee1;
-    background: #18181b;
+    border-left: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
+    color: var(--theme-text-primary, #dedee1);
+    background: var(--theme-bg-panel, #18181b);
     overflow: hidden;
 }
 
@@ -1280,8 +1280,8 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     justify-content: space-between;
     padding: 0 12px;
     height: 38px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-    background: #18181b;
+    border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
+    background: var(--theme-bg-panel, #18181b);
 }
 .canvas-actions {
     display: flex;
@@ -1294,18 +1294,18 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     gap: 5px;
     padding: 4px 8px;
     border-radius: 6px;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    background: rgba(255, 255, 255, 0.05);
-    color: #e4e4e7;
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.12);
+    background: rgba(var(--theme-foreground-rgb), 0.05);
+    color: var(--theme-text-primary, #e4e4e7);
     font-size: 11px;
     font-weight: 500;
     cursor: pointer;
     transition: all 0.15s ease;
 }
 .btn-canvas-action:hover {
-    background: rgba(255, 255, 255, 0.12);
-    color: #ffffff;
-    border-color: rgba(255, 255, 255, 0.2);
+    background: rgba(var(--theme-foreground-rgb), 0.12);
+    color: var(--theme-text-primary, #ffffff);
+    border-color: rgba(var(--theme-foreground-rgb), 0.2);
 }
 .btn-exit-canvas {
     display: inline-flex;
@@ -1313,17 +1313,17 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     gap: 5px;
     padding: 4px 10px;
     border-radius: 6px;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    background: rgba(255, 255, 255, 0.06);
-    color: #d4d4d8;
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.12);
+    background: rgba(var(--theme-foreground-rgb), 0.06);
+    color: var(--theme-text-primary, #d4d4d8);
     font-size: 11px;
     font-weight: 550;
     cursor: pointer;
     transition: all 0.15s ease;
 }
 .btn-exit-canvas:hover {
-    background: rgba(255, 255, 255, 0.12);
-    color: #ffffff;
+    background: rgba(var(--theme-foreground-rgb), 0.12);
+    color: var(--theme-text-primary, #ffffff);
 }
 .canvas-title {
     display: flex;
@@ -1331,10 +1331,10 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     gap: 6px;
     font-size: 12px;
     font-weight: 650;
-    color: #f4f4f5;
+    color: var(--theme-text-primary, #f4f4f5);
 }
 .pulse-dot {
-    color: #fbbf24;
+    color: var(--theme-status-warning, #fbbf24);
     font-size: 10px;
     animation: pulse 2s infinite;
 }
@@ -1349,7 +1349,7 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     min-height: 0;
     width: 100%;
     overflow: hidden;
-    background: #141416;
+    background: var(--theme-bg-base, #141416);
 }
 .full-height-preview {
     height: 100% !important;
@@ -1368,13 +1368,13 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
 }
 
 /* 标准详情顶栏 */
-.inspector-top { display: flex; justify-content: space-between; gap: 12px; padding: 14px 16px 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.06); background: rgba(255, 255, 255, 0.015); }
-.inspector-top span { color: #71717a; font-size: 9px; font-weight: 800; letter-spacing: .1em; }
-.inspector-top h2 { margin: 4px 0 2px; color: #f4f4f5; font-size: 15px; font-weight: 650; }
+.inspector-top { display: flex; justify-content: space-between; gap: 12px; padding: 14px 16px 12px; border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.06); background: rgba(var(--theme-foreground-rgb), 0.015); }
+.inspector-top span { color: var(--theme-text-muted, #71717a); font-size: 9px; font-weight: 800; letter-spacing: .1em; }
+.inspector-top h2 { margin: 4px 0 2px; color: var(--theme-text-primary, #f4f4f5); font-size: 15px; font-weight: 650; }
 .inspector-top p { 
     max-width: 210px; 
     margin: 0; 
-    color: #a1a1aa; 
+    color: var(--theme-text-secondary, #a1a1aa);
     font-size: 11px; 
     line-height: 1.45; 
     display: -webkit-box;
@@ -1390,34 +1390,34 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     width: 22px;
     height: 22px;
     place-items: center;
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.1);
     border-radius: 5px;
-    background: rgba(255, 255, 255, 0.04);
-    color: #a1a1aa;
+    background: rgba(var(--theme-foreground-rgb), 0.04);
+    color: var(--theme-text-secondary, #a1a1aa);
     cursor: pointer;
     transition: all 0.15s ease;
     padding: 0;
 }
 .btn-close-inspector:hover {
-    border-color: rgba(255, 255, 255, 0.25);
-    color: #ffffff;
-    background: rgba(255, 255, 255, 0.12);
+    border-color: rgba(var(--theme-foreground-rgb), 0.25);
+    color: var(--theme-text-primary, #ffffff);
+    background: rgba(var(--theme-foreground-rgb), 0.12);
 }
-.state-badge { align-self: center; padding: 3px 6px; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 5px; color: #a1a1aa !important; font-size: 9.5px !important; }
+.state-badge { align-self: center; padding: 3px 6px; border: 1px solid rgba(var(--theme-foreground-rgb), 0.12); border-radius: 5px; color: var(--theme-text-secondary, #a1a1aa) !important; font-size: 9.5px !important; }
 
-.inspector-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid rgba(255, 255, 255, 0.06); background: rgba(0, 0, 0, 0.15); }
-.inspector-metrics div { display: grid; gap: 2px; padding: 8px 6px; text-align: center; border-right: 1px solid rgba(255, 255, 255, 0.05); }
+.inspector-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.06); background: var(--theme-inset-bg, rgba(0, 0, 0, 0.15)); }
+.inspector-metrics div { display: grid; gap: 2px; padding: 8px 6px; text-align: center; border-right: 1px solid rgba(var(--theme-foreground-rgb), 0.05); }
 .inspector-metrics div:last-child { border-right: 0; }
-.inspector-metrics span { color: #71717a; font-size: 9px; }
-.inspector-metrics strong { color: #f4f4f5; font-size: 11.5px; font-weight: 600; }
-.inspector-metrics .danger { color: #ff4757; }
+.inspector-metrics span { color: var(--theme-text-muted, #71717a); font-size: 9px; }
+.inspector-metrics strong { color: var(--theme-text-primary, #f4f4f5); font-size: 11.5px; font-weight: 600; }
+.inspector-metrics .danger { color: var(--theme-status-danger, #ff4757); }
 
 .detail-tabs {
     display: flex;
     gap: 4px;
     padding: 6px 8px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-    background: #141416;
+    border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.06);
+    background: var(--theme-bg-base, #141416);
     overflow-x: auto;
     scrollbar-width: none;
 }
@@ -1432,7 +1432,7 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     padding: 6px 8px;
     border: 0;
     border-radius: 5px;
-    color: #a1a1aa;
+    color: var(--theme-text-secondary, #a1a1aa);
     cursor: pointer;
     background: transparent;
     font: inherit;
@@ -1443,12 +1443,12 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     flex-shrink: 0;
 }
 .detail-tabs button:hover {
-    color: #ffffff;
-    background: rgba(255, 255, 255, 0.04);
+    color: var(--theme-text-primary, #ffffff);
+    background: rgba(var(--theme-foreground-rgb), 0.04);
 }
 .detail-tabs button.active {
-    color: #ffffff;
-    background: rgba(255, 255, 255, 0.09);
+    color: var(--theme-text-primary, #ffffff);
+    background: rgba(var(--theme-foreground-rgb), 0.09);
 }
 
 .tab-badge-diff {
@@ -1461,10 +1461,10 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     margin-left: 2px;
 }
 .tab-badge-diff .stat-add {
-    color: #4ade80;
+    color: var(--theme-status-success, #4ade80);
 }
 .tab-badge-diff .stat-del {
-    color: #f87171;
+    color: var(--theme-status-danger, #f87171);
 }
 
 .diff-tab-pane {
@@ -1500,22 +1500,22 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 .step-diff-banner .banner-file {
-    color: #e0f2fe;
+    color: var(--theme-text-primary, #e0f2fe);
     font-weight: 600;
 }
 .step-diff-banner .banner-add {
-    color: #4ade80;
+    color: var(--theme-status-success, #4ade80);
     font-weight: 600;
 }
 .step-diff-banner .banner-del {
-    color: #f87171;
+    color: var(--theme-status-danger, #f87171);
     font-weight: 600;
 }
 .step-diff-banner .banner-action {
     display: flex;
     align-items: center;
     gap: 3px;
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
     font-size: 11px;
     font-weight: 550;
 }
@@ -1534,31 +1534,31 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     width: 8px;
 }
 .inspector-scroll::-webkit-scrollbar-track {
-    background: rgba(0, 0, 0, 0.25);
+    background: var(--theme-inset-bg, rgba(0, 0, 0, 0.25));
 }
 .inspector-scroll::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.32);
+    background: rgba(var(--theme-foreground-rgb), 0.32);
     border-radius: 4px;
-    border: 1px solid rgba(0, 0, 0, 0.4);
+    border: 1px solid var(--theme-border, rgba(0, 0, 0, 0.4));
 }
 .inspector-scroll::-webkit-scrollbar-thumb:hover {
-    background: rgba(255, 255, 255, 0.55);
+    background: rgba(var(--theme-foreground-rgb), 0.55);
 }
 
 .detail-placeholder { display: grid; min-height: 240px; place-content: center; text-align: center; }
-.placeholder-glyph { margin-bottom: 8px; color: #71717a; font-size: 24px; }
-.detail-placeholder h3 { margin: 0; color: #e4e4e7; font-size: 13px; font-weight: 600; }
-.detail-placeholder p { max-width: 240px; margin: 6px auto 0; color: #71717a; font-size: 11.5px; line-height: 1.6; }
+.placeholder-glyph { margin-bottom: 8px; color: var(--theme-text-muted, #71717a); font-size: 24px; }
+.detail-placeholder h3 { margin: 0; color: var(--theme-text-primary, #e4e4e7); font-size: 13px; font-weight: 600; }
+.detail-placeholder p { max-width: 240px; margin: 6px auto 0; color: var(--theme-text-muted, #71717a); font-size: 11.5px; line-height: 1.6; }
 
-.selected-step-heading { padding: 2px 0 16px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
-.selected-step-heading > span { color: #71717a; font-size: 10px; font-weight: 700; }
-.selected-step-heading h3 { margin: 6px 0 4px; color: #f4f4f5; font-size: 14px; font-weight: 600; word-break: break-word; }
-.selected-step-heading p { margin: 0; color: #a1a1aa; font-size: 11px; line-height: 1.6; }
+.selected-step-heading { padding: 2px 0 16px; border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.08); }
+.selected-step-heading > span { color: var(--theme-text-muted, #71717a); font-size: 10px; font-weight: 700; }
+.selected-step-heading h3 { margin: 6px 0 4px; color: var(--theme-text-primary, #f4f4f5); font-size: 14px; font-weight: 600; word-break: break-word; }
+.selected-step-heading p { margin: 0; color: var(--theme-text-secondary, #a1a1aa); font-size: 11px; line-height: 1.6; }
 
 /* 🤖 本步骤派发的子 Agent 概览卡片 */
 .subagents-step-deck {
     margin-bottom: 12px;
-    background: #181822;
+    background: var(--theme-bg-panel, #181822);
     border: 1px solid rgba(56, 189, 248, 0.25);
     border-radius: 8px;
     padding: 10px;
@@ -1588,13 +1588,13 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     margin: 0;
     font-size: 11px;
     font-weight: 700;
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
 }
 
 .btn-jump-team-deck {
     background: rgba(56, 189, 248, 0.12);
     border: 1px solid rgba(56, 189, 248, 0.3);
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
     font-size: 9px;
     font-weight: 600;
     padding: 2px 7px;
@@ -1615,8 +1615,8 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
 }
 
 .subagent-mini-card {
-    background: rgba(0, 0, 0, 0.25);
-    border: 1px solid rgba(255, 255, 255, 0.06);
+    background: var(--theme-inset-bg, rgba(0, 0, 0, 0.25));
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.06);
     border-radius: 6px;
     padding: 6px 8px;
     display: flex;
@@ -1636,12 +1636,12 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     padding: 1px 4px;
     border-radius: 3px;
     background: rgba(56, 189, 248, 0.2);
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
 }
 
 .sub-name-text {
     font-size: 10px;
-    color: #f4f4f5;
+    color: var(--theme-text-primary, #f4f4f5);
     flex: 1;
     white-space: nowrap;
     overflow: hidden;
@@ -1657,18 +1657,18 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
 
 .sub-status-pill.status-succeeded {
     background: rgba(52, 211, 153, 0.15);
-    color: #34d399;
+    color: var(--theme-status-success, #34d399);
 }
 
 .sub-status-pill.status-running {
     background: rgba(56, 189, 248, 0.15);
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
 }
 
 .sub-task-text {
     margin: 0;
     font-size: 9px;
-    color: #a1a1aa;
+    color: var(--theme-text-secondary, #a1a1aa);
     line-height: 1.35;
 }
 
@@ -1677,7 +1677,7 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     align-items: flex-start;
     gap: 4px;
     font-size: 8.5px;
-    color: #fef08a;
+    color: var(--theme-status-warning, #fef08a);
     background: rgba(234, 179, 8, 0.08);
     border: 1px solid rgba(234, 179, 8, 0.15);
     padding: 3px 6px;
@@ -1696,7 +1696,7 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
 .highlight-count-tag {
     font-size: 7.5px;
     font-weight: 700;
-    color: #fef08a;
+    color: var(--theme-status-warning, #fef08a);
     background: rgba(234, 179, 8, 0.2);
     padding: 0 4px;
     border-radius: 3px;
@@ -1704,18 +1704,18 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     margin-left: 2px;
 }
 
-.step-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; color: #a1a1aa; font-size: 10.5px; }
+.step-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; color: var(--theme-text-secondary, #a1a1aa); font-size: 10.5px; }
 .step-meta b { padding: 2px 7px; border-radius: 5px; font-weight: 500; }
-.step-meta .status-running { color: #f4f4f5; background: #27272a; }
-.step-meta .status-succeeded { color: #2ed573; background: rgba(46, 213, 115, 0.12); }
-.step-meta .status-failed { color: #ff4757; background: rgba(255, 71, 87, 0.12); }
-.step-meta .status-challenged { color: #e6a23c; background: rgba(230, 162, 60, 0.14); border: 1px solid rgba(230, 162, 60, 0.28); }
+.step-meta .status-running { color: var(--theme-text-primary, #f4f4f5); background: var(--theme-bg-raised, #27272a); }
+.step-meta .status-succeeded { color: var(--theme-status-success, #2ed573); background: rgba(46, 213, 115, 0.12); }
+.step-meta .status-failed { color: var(--theme-status-danger, #ff4757); background: rgba(255, 71, 87, 0.12); }
+.step-meta .status-challenged { color: var(--theme-status-warning, #e6a23c); background: rgba(230, 162, 60, 0.14); border: 1px solid rgba(230, 162, 60, 0.28); }
 .step-meta em { font-style: normal; }
 
-.step-explanation { margin: 12px 0; color: #a1a1aa; font-size: 12px; line-height: 1.65; }
-.narrative-copy { margin: 8px 0 0; color: #d4d4d8; font-size: 12px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
-.step-meta .thought { color: #a78bfa; background: rgba(167, 139, 250, 0.12); }
-.step-meta .human { color: #fbbf24; background: rgba(251, 191, 36, 0.12); }
+.step-explanation { margin: 12px 0; color: var(--theme-text-secondary, #a1a1aa); font-size: 12px; line-height: 1.65; }
+.narrative-copy { margin: 8px 0 0; color: var(--theme-text-primary, #d4d4d8); font-size: 12px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
+.step-meta .thought { color: var(--theme-status-accent, #a78bfa); background: rgba(167, 139, 250, 0.12); }
+.step-meta .human { color: var(--theme-status-warning, #fbbf24); background: rgba(251, 191, 36, 0.12); }
 
 /* 错误诊断高亮卡片 */
 .error-diagnostic-card {
@@ -1732,13 +1732,13 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     margin-bottom: 8px;
 }
 .error-badge {
-    color: #ff4757;
+    color: var(--theme-status-danger, #ff4757);
     font-size: 11px;
     font-weight: 650;
 }
 .error-pre {
     margin: 0;
-    color: #ff6b81;
+    color: var(--theme-status-danger, #ff6b81);
     font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
     white-space: pre-wrap;
     word-break: break-word;
@@ -1758,7 +1758,7 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
 }
 .section-title-row h4 {
     margin: 0;
-    color: #a1a1aa;
+    color: var(--theme-text-secondary, #a1a1aa);
     font-size: 10.5px;
     font-weight: 750;
     letter-spacing: .04em;
@@ -1768,27 +1768,27 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     align-items: center;
     gap: 4px;
     padding: 3px 8px;
-    border: 1px solid rgba(255, 255, 255, 0.12);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.12);
     border-radius: 4px;
-    background: rgba(255, 255, 255, 0.05);
-    color: #d4d4d8;
+    background: rgba(var(--theme-foreground-rgb), 0.05);
+    color: var(--theme-text-primary, #d4d4d8);
     font-size: 10px;
     font-weight: 550;
     cursor: pointer;
     transition: all 0.15s ease;
 }
 .btn-copy:hover {
-    border-color: rgba(255, 255, 255, 0.25);
-    background: rgba(255, 255, 255, 0.12);
-    color: #ffffff;
+    border-color: rgba(var(--theme-foreground-rgb), 0.25);
+    background: rgba(var(--theme-foreground-rgb), 0.12);
+    color: var(--theme-text-primary, #ffffff);
 }
 .btn-copy.danger {
     border-color: rgba(255, 71, 87, 0.3);
-    color: #ff6b81;
+    color: var(--theme-status-danger, #ff6b81);
 }
 .btn-copy.danger:hover {
     background: rgba(255, 71, 87, 0.18);
-    color: #fff;
+    color: var(--theme-text-primary, #fff);
 }
 .btn-copy.small {
     padding: 2px 6px;
@@ -1800,10 +1800,10 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     margin: 0;
     padding: 10px;
     overflow: auto;
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
     border-radius: 7px;
-    color: #d4d4d8;
-    background: #141416;
+    color: var(--theme-text-primary, #d4d4d8);
+    background: var(--theme-bg-base, #141416);
     font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
     white-space: pre-wrap;
     word-break: break-word;
@@ -1817,27 +1817,27 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
 }
 .context-heading h3 {
     margin: 0;
-    color: #f4f4f5;
+    color: var(--theme-text-primary, #f4f4f5);
     font-size: 13px;
     font-weight: 650;
 }
 .context-heading p {
     margin: 3px 0 0;
-    color: #71717a;
+    color: var(--theme-text-muted, #71717a);
     font-size: 10.5px;
 }
 
 .context-card {
     padding: 10px 12px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
     border-radius: 8px;
-    background: #1f1f23;
+    background: var(--theme-bg-panel, #1f1f23);
 }
 
 /* Token 容量与自适应压缩监控卡片样式 */
 .budget-status-card {
     border-color: rgba(56, 189, 248, 0.2);
-    background: linear-gradient(180deg, rgba(56, 189, 248, 0.04) 0%, rgba(31, 31, 35, 1) 100%);
+    background: linear-gradient(180deg, rgba(56, 189, 248, 0.04) 0%, var(--theme-bg-panel, rgba(31, 31, 35, 1)) 100%);
 }
 .budget-header {
     display: flex;
@@ -1850,7 +1850,7 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     align-items: center;
     gap: 6px;
     font-size: 11px;
-    color: #f4f4f5;
+    color: var(--theme-text-primary, #f4f4f5);
 }
 .budget-icon {
     font-size: 12px;
@@ -1862,12 +1862,12 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     font-weight: 650;
 }
 .budget-tag.safe {
-    color: #4ade80;
+    color: var(--theme-status-success, #4ade80);
     background: rgba(74, 222, 128, 0.12);
     border: 1px solid rgba(74, 222, 128, 0.25);
 }
 .budget-tag.compacted {
-    color: #fbbf24;
+    color: var(--theme-status-warning, #fbbf24);
     background: rgba(251, 191, 36, 0.12);
     border: 1px solid rgba(251, 191, 36, 0.25);
 }
@@ -1875,7 +1875,7 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     height: 4px;
     width: 100%;
     border-radius: 2px;
-    background: rgba(255, 255, 255, 0.08);
+    background: rgba(var(--theme-foreground-rgb), 0.08);
     overflow: hidden;
     margin-bottom: 8px;
 }
@@ -1896,10 +1896,10 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     align-items: center;
     justify-content: space-between;
     font-size: 10px;
-    color: #71717a;
+    color: var(--theme-text-muted, #71717a);
 }
 .budget-meta-row b {
-    color: #d4d4d8;
+    color: var(--theme-text-primary, #d4d4d8);
 }
 .compaction-notice {
     margin-top: 8px;
@@ -1907,7 +1907,7 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     border-radius: 5px;
     background: rgba(251, 191, 36, 0.08);
     border: 1px solid rgba(251, 191, 36, 0.18);
-    color: #fbbf24;
+    color: var(--theme-status-warning, #fbbf24);
     font-size: 10px;
     line-height: 1.45;
 }
@@ -1921,14 +1921,14 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
 .tag-badge {
     font-size: 10.5px;
     font-weight: 650;
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
 }
-.tag-badge.danger { color: #ff4757; }
-.tag-badge.memory { color: #fbbf24; }
+.tag-badge.danger { color: var(--theme-status-danger, #ff4757); }
+.tag-badge.memory { color: var(--theme-status-warning, #fbbf24); }
 
 .card-text {
     margin: 0;
-    color: #d4d4d8;
+    color: var(--theme-text-primary, #d4d4d8);
     font-size: 11.5px;
     line-height: 1.6;
     white-space: pre-wrap;
@@ -1946,13 +1946,13 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     border: 1px solid rgba(255, 71, 87, 0.15);
 }
 .failure-item strong {
-    color: #ff6b81;
+    color: var(--theme-status-danger, #ff6b81);
     font-size: 11px;
     display: block;
 }
 .failure-item p {
     margin: 3px 0 0;
-    color: #a1a1aa;
+    color: var(--theme-text-secondary, #a1a1aa);
     font-size: 10.5px;
     line-height: 1.45;
 }
@@ -1968,14 +1968,14 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     border: 1px solid rgba(251, 191, 36, 0.15);
 }
 .mem-key {
-    color: #fbbf24;
+    color: var(--theme-status-warning, #fbbf24);
     font-size: 10.5px;
     font-weight: 600;
     display: block;
 }
 .mem-val {
     margin: 2px 0 0;
-    color: #d4d4d8;
+    color: var(--theme-text-primary, #d4d4d8);
     font-size: 11px;
     line-height: 1.45;
     white-space: pre-wrap;
@@ -1989,16 +1989,16 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
 }
 .empty-context-tip {
     padding: 16px 0;
-    color: #71717a;
+    color: var(--theme-text-muted, #71717a);
     font-size: 11px;
     text-align: center;
     line-height: 1.6;
 }
 
 .turn-message-card {
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
     border-radius: 7px;
-    background: #141416;
+    background: var(--theme-bg-base, #141416);
     overflow: hidden;
 }
 .turn-message-card.role-system {
@@ -2015,7 +2015,7 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
 }
 .turn-message-card.role-archive {
     border-color: rgba(251, 191, 36, 0.35);
-    background: linear-gradient(180deg, rgba(251, 191, 36, 0.06) 0%, rgba(20, 20, 22, 1) 100%);
+    background: linear-gradient(180deg, rgba(251, 191, 36, 0.06) 0%, var(--theme-bg-base, rgba(20, 20, 22, 1)) 100%);
     box-shadow: inset 0 0 12px rgba(251, 191, 36, 0.04);
 }
 
@@ -2028,23 +2028,23 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
 }
 .filter-pill {
     padding: 3px 9px;
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.1);
     border-radius: 12px;
-    background: rgba(255, 255, 255, 0.03);
-    color: #a1a1aa;
+    background: rgba(var(--theme-foreground-rgb), 0.03);
+    color: var(--theme-text-secondary, #a1a1aa);
     font-size: 10px;
     font-weight: 500;
     cursor: pointer;
     transition: all 0.15s ease;
 }
 .filter-pill:hover {
-    color: #f4f4f5;
-    background: rgba(255, 255, 255, 0.08);
+    color: var(--theme-text-primary, #f4f4f5);
+    background: rgba(var(--theme-foreground-rgb), 0.08);
 }
 .filter-pill.active {
     border-color: rgba(56, 189, 248, 0.4);
     background: rgba(56, 189, 248, 0.12);
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
     font-weight: 650;
 }
 
@@ -2053,35 +2053,35 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     align-items: center;
     justify-content: space-between;
     padding: 6px 10px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-    background: rgba(255, 255, 255, 0.02);
+    border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.05);
+    background: rgba(var(--theme-foreground-rgb), 0.02);
     cursor: pointer;
     user-select: none;
     transition: background 0.15s ease;
 }
 .turn-header:hover {
-    background: rgba(255, 255, 255, 0.04);
+    background: rgba(var(--theme-foreground-rgb), 0.04);
 }
 .collapse-arrow {
     font-size: 8px;
-    color: #71717a;
+    color: var(--theme-text-muted, #71717a);
     width: 10px;
     display: inline-block;
 }
 .turn-body-snippet {
     padding: 7px 10px;
-    color: #71717a;
+    color: var(--theme-text-muted, #71717a);
     font: 10.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
     cursor: pointer;
-    background: rgba(0, 0, 0, 0.2);
+    background: var(--theme-inset-bg, rgba(0, 0, 0, 0.2));
     transition: background 0.15s ease;
 }
 .turn-body-snippet:hover {
-    background: rgba(255, 255, 255, 0.03);
-    color: #a1a1aa;
+    background: rgba(var(--theme-foreground-rgb), 0.03);
+    color: var(--theme-text-secondary, #a1a1aa);
 }
 .snippet-expand {
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
     font-size: 10px;
 }
 .role-badge {
@@ -2091,12 +2091,12 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     font-size: 10px;
     font-weight: 750;
 }
-.badge-system span { color: #a78bfa; }
-.badge-user span { color: #38bdf8; }
-.badge-assistant span { color: #4ade80; }
-.badge-archive span { color: #fbbf24; font-weight: 800; }
+.badge-system span { color: var(--theme-status-accent, #a78bfa); }
+.badge-user span { color: var(--theme-status-info, #38bdf8); }
+.badge-assistant span { color: var(--theme-status-success, #4ade80); }
+.badge-archive span { color: var(--theme-status-warning, #fbbf24); font-weight: 800; }
 .role-badge small {
-    color: #71717a;
+    color: var(--theme-text-muted, #71717a);
     font-size: 9px;
     font-weight: normal;
 }
@@ -2106,7 +2106,7 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     padding: 10px;
     max-height: 280px;
     overflow-y: auto;
-    color: #d4d4d8;
+    color: var(--theme-text-primary, #d4d4d8);
     font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
     white-space: pre-wrap;
     word-break: break-word;
@@ -2114,19 +2114,19 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
 
 /* 资源面板样式 */
 .resources-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
-.resources-heading h3 { margin: 0; color: #f4f4f5; font-size: 13px; font-weight: 650; }
-.resources-heading p { margin: 3px 0 0; color: #71717a; font-size: 10.5px; }
-.resources-heading button, .resource-row button { border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 5px; padding: 4px 8px; color: #d4d4d8; cursor: pointer; background: #27272a; font: inherit; font-size: 10.5px; }
-.resources-heading button:hover, .resource-row button:hover { background: #3f3f46; color: #fff; }
+.resources-heading h3 { margin: 0; color: var(--theme-text-primary, #f4f4f5); font-size: 13px; font-weight: 650; }
+.resources-heading p { margin: 3px 0 0; color: var(--theme-text-muted, #71717a); font-size: 10.5px; }
+.resources-heading button, .resource-row button { border: 1px solid rgba(var(--theme-foreground-rgb), 0.12); border-radius: 5px; padding: 4px 8px; color: var(--theme-text-primary, #d4d4d8); cursor: pointer; background: var(--theme-bg-raised, #27272a); font: inherit; font-size: 10.5px; }
+.resources-heading button:hover, .resource-row button:hover { background: var(--theme-bg-muted, #3f3f46); color: var(--theme-text-primary, #fff); }
 .resources-heading button:disabled { cursor: wait; opacity: .55; }
-.resource-error { color: #ff4757; font-size: 11px; line-height: 1.6; }
-.resource-placeholder { padding: 22px 0; color: #71717a; font-size: 11px; line-height: 1.7; }
-.resource-row { margin-top: 10px; padding: 10px; border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 7px; background: #1f1f23; }
-.resource-row > span { color: #71717a; font-size: 9.5px; font-weight: 700; }
-.resource-row h4 { margin: 4px 0 3px; color: #f4f4f5; font-size: 12.5px; font-weight: 600; }
-.resource-row p { margin: 0; color: #a1a1aa; font-size: 10.5px; line-height: 1.5; }
+.resource-error { color: var(--theme-status-danger, #ff4757); font-size: 11px; line-height: 1.6; }
+.resource-placeholder { padding: 22px 0; color: var(--theme-text-muted, #71717a); font-size: 11px; line-height: 1.7; }
+.resource-row { margin-top: 10px; padding: 10px; border: 1px solid rgba(var(--theme-foreground-rgb), 0.08); border-radius: 7px; background: var(--theme-bg-panel, #1f1f23); }
+.resource-row > span { color: var(--theme-text-muted, #71717a); font-size: 9.5px; font-weight: 700; }
+.resource-row h4 { margin: 4px 0 3px; color: var(--theme-text-primary, #f4f4f5); font-size: 12.5px; font-weight: 600; }
+.resource-row p { margin: 0; color: var(--theme-text-secondary, #a1a1aa); font-size: 10.5px; line-height: 1.5; }
 .resource-row footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
-.resource-row small { color: #71717a; font-size: 9.5px; }
+.resource-row small { color: var(--theme-text-muted, #71717a); font-size: 9.5px; }
 
 /* 模型解析异常卡片样式 */
 .parse-error-card {
@@ -2143,7 +2143,7 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     padding: 10px;
     border-radius: 8px;
     border: 1px solid rgba(239, 68, 68, 0.2);
-    background: rgba(0, 0, 0, 0.35);
+    background: var(--theme-inset-bg, rgba(0, 0, 0, 0.35));
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -2153,27 +2153,27 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     align-items: center;
     justify-content: space-between;
     font-size: 11px;
-    color: #fca5a5;
+    color: var(--theme-status-danger, #fca5a5);
 }
 .parse-error-reason {
     font-size: 11px;
-    color: #ef4444;
+    color: var(--theme-status-danger, #ef4444);
     line-height: 1.5;
 }
 .parse-error-reason b {
-    color: #f87171;
+    color: var(--theme-status-danger, #f87171);
 }
 .parse-error-thinking b,
 .parse-error-raw b {
     display: block;
     font-size: 10.5px;
-    color: #a1a1aa;
+    color: var(--theme-text-secondary, #a1a1aa);
     margin-bottom: 4px;
 }
 .parse-error-item .pre-block {
     max-height: 220px;
     overflow-y: auto;
-    background: #09090b;
+    background: var(--theme-bg-deep, #09090b);
     border-color: rgba(239, 68, 68, 0.2);
 }
 
@@ -2184,8 +2184,8 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     justify-content: space-between;
     gap: 8px;
     padding: 6px 10px;
-    background: #14141a;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    background: var(--theme-bg-base, #14141a);
+    border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
     position: sticky;
     top: 0;
     z-index: 20;
@@ -2211,10 +2211,10 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     align-items: center;
     gap: 5px;
     padding: 3px 8px;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(var(--theme-foreground-rgb), 0.04);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
     border-radius: 5px;
-    color: #94a3b8;
+    color: var(--theme-status-info, #94a3b8);
     font-size: 11px;
     font-weight: 500;
     cursor: pointer;
@@ -2225,15 +2225,15 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
 }
 
 .agent-nav-pill:hover {
-    background: rgba(255, 255, 255, 0.08);
-    color: #e2e8f0;
-    border-color: rgba(255, 255, 255, 0.15);
+    background: rgba(var(--theme-foreground-rgb), 0.08);
+    color: var(--theme-text-primary, #e2e8f0);
+    border-color: rgba(var(--theme-foreground-rgb), 0.15);
 }
 
 .agent-nav-pill.active {
     background: rgba(56, 189, 248, 0.12);
     border-color: rgba(56, 189, 248, 0.4);
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
     box-shadow: 0 0 8px rgba(56, 189, 248, 0.12);
 }
 
@@ -2269,23 +2269,23 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     font-size: 9px;
     padding: 0.5px 4px;
     border-radius: 3px;
-    background: rgba(255, 255, 255, 0.06);
-    color: #94a3b8;
+    background: rgba(var(--theme-foreground-rgb), 0.06);
+    color: var(--theme-status-info, #94a3b8);
 }
 
 .pill-status-badge.status-running {
     background: rgba(56, 189, 248, 0.2);
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
 }
 
 .pill-status-badge.status-succeeded {
     background: rgba(34, 197, 94, 0.15);
-    color: #4ade80;
+    color: var(--theme-status-success, #4ade80);
 }
 
 .pill-status-badge.status-failed {
     background: rgba(239, 68, 68, 0.15);
-    color: #f87171;
+    color: var(--theme-status-danger, #f87171);
 }
 
 .btn-close-topbar {
@@ -2296,15 +2296,15 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     background: transparent;
     border: none;
     border-radius: 4px;
-    color: #71717a;
+    color: var(--theme-text-muted, #71717a);
     cursor: pointer;
     transition: all 0.12s ease;
     flex-shrink: 0;
 }
 
 .btn-close-topbar:hover {
-    background: rgba(255, 255, 255, 0.08);
-    color: #f4f4f5;
+    background: rgba(var(--theme-foreground-rgb), 0.08);
+    color: var(--theme-text-primary, #f4f4f5);
 }
 
 .dedicated-worker-pane {
@@ -2313,5 +2313,5 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
     overflow-y: auto;
 }
 
-@media (max-width: 980px) { .manus-inspector { min-height: 460px; border-top: 1px solid rgba(255, 255, 255, 0.08); border-left: 0; } }
+@media (max-width: 980px) { .manus-inspector { min-height: 460px; border-top: 1px solid rgba(var(--theme-foreground-rgb), 0.08); border-left: 0; } }
 </style>

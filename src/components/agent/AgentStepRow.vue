@@ -301,7 +301,7 @@ function handleLeadClick() {
     border-radius: 4px;
     font-size: 11px;
     line-height: 1.4;
-    color: #94a3b8;
+    color: var(--theme-status-info, #94a3b8);
     background: transparent;
     transition: background 0.12s ease;
     user-select: none;
@@ -311,7 +311,7 @@ function handleLeadClick() {
 }
 
 .ambient-text-row:hover {
-    background: rgba(255, 255, 255, 0.04);
+    background: rgba(var(--theme-foreground-rgb), 0.04);
 }
 
 .ambient-text-row.is-clickable {
@@ -366,33 +366,33 @@ function handleLeadClick() {
 }
 
 .action-tag.action-tag-edit {
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
     background: rgba(56, 189, 248, 0.1);
 }
 
 .action-tag.action-tag-write {
-    color: #34d399;
+    color: var(--theme-status-success, #34d399);
     background: rgba(52, 211, 153, 0.1);
 }
 
 .action-tag.action-tag-read {
-    color: #cbd5e1;
-    background: rgba(255, 255, 255, 0.06);
+    color: var(--theme-text-primary, #cbd5e1);
+    background: rgba(var(--theme-foreground-rgb), 0.06);
 }
 
 .action-tag.action-tag-shell {
-    color: #fbbf24;
+    color: var(--theme-status-warning, #fbbf24);
     background: rgba(245, 158, 11, 0.12);
 }
 
 .action-tag.action-tag-search {
-    color: #cbd5e1;
-    background: rgba(255, 255, 255, 0.06);
+    color: var(--theme-text-primary, #cbd5e1);
+    background: rgba(var(--theme-foreground-rgb), 0.06);
 }
 
 .action-tag.action-tag-general {
-    color: #94a3b8;
-    background: rgba(255, 255, 255, 0.04);
+    color: var(--theme-status-info, #94a3b8);
+    background: rgba(var(--theme-foreground-rgb), 0.04);
 }
 
 .chip-file-icon {
@@ -407,7 +407,7 @@ function handleLeadClick() {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 11.5px;
     font-weight: 500;
-    color: #cbd5e1;
+    color: var(--theme-text-primary, #cbd5e1);
     letter-spacing: -0.2px;
     max-width: 180px;
     overflow: hidden;
@@ -417,7 +417,7 @@ function handleLeadClick() {
 }
 
 .ambient-action-lead.has-diff .chip-file-name:hover {
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
     text-decoration: underline;
     cursor: pointer;
 }
@@ -426,8 +426,8 @@ function handleLeadClick() {
 .chip-cmd-pill {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 11.5px;
-    color: #fef08a;
-    background: rgba(255, 255, 255, 0.05);
+    color: var(--theme-status-warning, #fef08a);
+    background: rgba(var(--theme-foreground-rgb), 0.05);
     padding: 0.5px 5px;
     border-radius: 3px;
     max-width: 240px;
@@ -440,7 +440,7 @@ function handleLeadClick() {
 .chip-file-dir {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 11px;
-    color: #64748b;
+    color: var(--theme-status-info, #64748b);
     margin-left: -2px;
     letter-spacing: -0.2px;
 }
@@ -450,8 +450,8 @@ function handleLeadClick() {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 10.5px;
     font-weight: 500;
-    color: #94a3b8;
-    background: rgba(255, 255, 255, 0.05);
+    color: var(--theme-status-info, #94a3b8);
+    background: rgba(var(--theme-foreground-rgb), 0.05);
     padding: 0.5px 4px;
     border-radius: 3px;
     line-height: 1.25;
@@ -460,7 +460,7 @@ function handleLeadClick() {
 /* 耗时微标 (统一置于右侧说明文字之后) */
 .chip-duration {
     font-size: 10.5px;
-    color: #eab308;
+    color: var(--theme-status-warning, #eab308);
     font-weight: 500;
     flex-shrink: 0;
     margin-left: 2px;
@@ -469,14 +469,14 @@ function handleLeadClick() {
 /* Diff 增删行微标 (+22 -163，鲜明优雅) */
 .chip-diff-add {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    color: #34d399;
+    color: var(--theme-status-success, #34d399);
     font-weight: 500;
     font-size: 11px;
 }
 
 .chip-diff-del {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    color: #f87171;
+    color: var(--theme-status-danger, #f87171);
     font-weight: 500;
     font-size: 11px;
 }
@@ -484,7 +484,7 @@ function handleLeadClick() {
 .chip-intercepted {
     font-size: 10px;
     font-weight: 600;
-    color: #f87171;
+    color: var(--theme-status-danger, #f87171);
     background: rgba(239, 68, 68, 0.15);
     border-radius: 3px;
     padding: 0 4px;
@@ -492,7 +492,7 @@ function handleLeadClick() {
 
 /* 说明文字 (如: 为审计日志注入做准备) */
 .ambient-text-body {
-    color: #94a3b8;
+    color: var(--theme-status-info, #94a3b8);
     font-size: 11.5px;
     white-space: nowrap;
     overflow: hidden;
@@ -506,7 +506,7 @@ function handleLeadClick() {
 .ambient-text-time {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 10.5px;
-    color: #64748b;
+    color: var(--theme-status-info, #64748b);
     flex-shrink: 0;
     margin-left: auto;
     padding-left: 8px;

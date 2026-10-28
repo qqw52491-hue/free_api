@@ -87,7 +87,7 @@ async function openReleases() {
   border: 0;
   border-radius: 7px;
   background: transparent;
-  color: #a1a1aa;
+  color: var(--theme-text-secondary, #a1a1aa);
   cursor: pointer;
   font: inherit;
   font-size: 11px;
@@ -108,22 +108,22 @@ async function openReleases() {
 }
 
 .update-trigger:hover {
-  background: #27272a;
-  color: #fafafa;
+  background: var(--theme-bg-raised, #27272a);
+  color: var(--theme-text-primary, #fafafa);
 }
 
 .update-trigger.available {
-  color: #60a5fa;
+  color: var(--theme-status-info, #60a5fa);
 }
-.update-panel { position: fixed; z-index: 100; left: 12px; bottom: 64px; width: min(330px, calc(100vw - 48px)); padding: 16px; border: 1px solid #3f3f46; border-radius: 12px; background: #18181b; box-shadow: 0 12px 40px #0006; color: #e4e4e7; font-size: 12px; }
+.update-panel { position: fixed; z-index: 100; left: 12px; bottom: 64px; width: min(330px, calc(100vw - 48px)); padding: 16px; border: 1px solid var(--theme-border, #3f3f46); border-radius: 12px; background: var(--theme-bg-panel, #18181b); box-shadow: 0 12px 40px #0006; color: var(--theme-text-primary, #e4e4e7); font-size: 12px; }
 .update-panel header { display: flex; align-items: center; justify-content: space-between; }
-.update-panel header button { border: 0; background: none; color: #a1a1aa; font-size: 20px; cursor: pointer; }
+.update-panel header button { border: 0; background: none; color: var(--theme-text-secondary, #a1a1aa); font-size: 20px; cursor: pointer; }
 .update-panel p { margin: 10px 0; line-height: 1.6; overflow-wrap: anywhere; }
-.update-panel p:first-of-type, .update-panel small { color: #a1a1aa; }
-.update-panel .update-error { color: #fbbf24; }
+.update-panel p:first-of-type, .update-panel small { color: var(--theme-text-secondary, #a1a1aa); }
+.update-panel .update-error { color: var(--theme-status-warning, #fbbf24); }
 .update-panel progress { width: 100%; accent-color: #60a5fa; }
 .update-actions { display: flex; gap: 8px; margin: 14px 0 10px; }
 .update-actions button { padding: 7px 10px; border: 1px solid #3b82f6; border-radius: 6px; background: #2563eb; color: white; cursor: pointer; font: inherit; }
-.update-actions button.secondary { border-color: #3f3f46; background: transparent; color: #d4d4d8; }
+.update-actions button.secondary { border-color: var(--theme-border, #3f3f46); background: transparent; color: var(--theme-text-primary, #d4d4d8); }
 .update-actions button:disabled { opacity: .55; cursor: wait; }
 </style>

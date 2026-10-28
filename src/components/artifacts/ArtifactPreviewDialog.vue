@@ -537,7 +537,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(4, 6, 12, 0.68);
+  background: rgba(var(--theme-rgb-deep, 4, 6, 12), 0.68);
   backdrop-filter: blur(8px);
   padding: 24px;
   animation: fadeIn 0.15s ease-out;
@@ -548,10 +548,10 @@ onBeforeUnmount(() => {
   flex-direction: column;
   width: min(1000px, 94vw);
   height: min(780px, 90vh);
-  background: #141418;
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: var(--theme-bg-base, #141418);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.15);
   border-radius: 14px;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.08);
+  box-shadow: var(--theme-shadow, 0 24px 60px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.08));
   overflow: hidden;
 }
 
@@ -560,8 +560,8 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   padding: 12px 18px;
-  background: #1a1a20;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+  background: var(--theme-bg-panel, #1a1a20);
+  border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.09);
   flex-shrink: 0;
 }
 
@@ -587,7 +587,7 @@ onBeforeUnmount(() => {
 .dialog-name {
   font-size: 14px;
   font-weight: 600;
-  color: #ffffff;
+  color: var(--theme-text-primary, #ffffff);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -602,7 +602,7 @@ onBeforeUnmount(() => {
 
 .dialog-tag {
   background: rgba(99, 102, 241, 0.15);
-  color: #a5b4fc;
+  color: var(--theme-status-accent, #a5b4fc);
   border: 1px solid rgba(99, 102, 241, 0.3);
   padding: 1px 6px;
   border-radius: 4px;
@@ -610,7 +610,7 @@ onBeforeUnmount(() => {
 }
 
 .dialog-path {
-  color: #71717a;
+  color: var(--theme-text-muted, #71717a);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -634,9 +634,9 @@ onBeforeUnmount(() => {
   font-size: 12px !important;
   font-weight: 500 !important;
   cursor: pointer;
-  border: 1px solid rgba(255, 255, 255, 0.1) !important;
-  background: rgba(255, 255, 255, 0.05) !important;
-  color: #e4e4e7 !important;
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.1) !important;
+  background: rgba(var(--theme-foreground-rgb), 0.05) !important;
+  color: var(--theme-text-primary, #e4e4e7) !important;
   transition: all 0.15s ease;
 }
 
@@ -649,15 +649,15 @@ onBeforeUnmount(() => {
 }
 
 .action-btn:hover {
-  background: rgba(255, 255, 255, 0.12) !important;
-  border-color: rgba(255, 255, 255, 0.25) !important;
-  color: #ffffff !important;
+  background: rgba(var(--theme-foreground-rgb), 0.12) !important;
+  border-color: rgba(var(--theme-foreground-rgb), 0.25) !important;
+  color: var(--theme-text-primary, #ffffff) !important;
 }
 
 .action-btn.btn-primary {
   background: rgba(99, 102, 241, 0.25) !important;
   border-color: rgba(99, 102, 241, 0.5) !important;
-  color: #ffffff !important;
+  color: var(--theme-text-primary, #ffffff) !important;
 }
 
 .action-btn.btn-primary:hover {
@@ -672,7 +672,7 @@ onBeforeUnmount(() => {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  background: #101014;
+  background: var(--theme-bg-base, #101014);
   position: relative;
   display: flex;
   flex-direction: column;
@@ -723,7 +723,7 @@ onBeforeUnmount(() => {
   max-width: 100%;
   max-height: 100%;
   border-radius: 8px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--theme-shadow, 0 8px 32px rgba(0, 0, 0, 0.5));
 }
 
 .empty-preview-state {
@@ -743,19 +743,19 @@ onBeforeUnmount(() => {
 
 .empty-preview-state h3 {
   margin: 0 0 6px;
-  color: #f4f4f5;
+  color: var(--theme-text-primary, #f4f4f5);
   font-size: 18px;
 }
 
 .state-kind {
-  color: #a5b4fc;
+  color: var(--theme-status-accent, #a5b4fc);
   font-size: 13px;
   margin: 0 0 16px;
 }
 
 .state-path {
   font-size: 12px;
-  color: #71717a;
+  color: var(--theme-text-muted, #71717a);
   max-width: 480px;
   margin-bottom: 20px;
 }
@@ -764,10 +764,10 @@ onBeforeUnmount(() => {
   display: inline-block;
   margin-top: 6px;
   padding: 4px 8px;
-  background: rgba(0, 0, 0, 0.4);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--theme-inset-bg, rgba(0, 0, 0, 0.4));
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.1);
   border-radius: 6px;
-  color: #34d399;
+  color: var(--theme-status-success, #34d399);
   word-break: break-all;
 }
 

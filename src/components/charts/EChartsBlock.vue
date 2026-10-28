@@ -36,6 +36,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import * as echarts from "echarts";
+import { themeColor, useTheme } from "../../composables/useTheme";
+import { useVisibleThemeRefresh } from "../../composables/useVisibleThemeRefresh";
+
+const { isDark } = useTheme();
 
 const props = withDefaults(
   defineProps<{
@@ -118,13 +122,13 @@ function initChart() {
     }
 
     if (!chartInstance) {
-      chartInstance = echarts.init(chartContainer.value, "dark", {
+      chartInstance = echarts.init(chartContainer.value, isDark.value ? "dark" : undefined, {
         renderer: "canvas",
       });
     }
 
-    // 注入 Obsidian 曜石暗色主题与精致调色板
-    const obsidianPalette = [
+    // 图表默认配色随界面变化；调用方明确提供的颜色保持优先。
+    const palette = isDark.value ? [
       "#6c63ff",
       "#00d4aa",
       "#ffa43d",
@@ -134,19 +138,19 @@ function initChart() {
       "#2ed573",
       "#fbbf24",
       "#f43f5e",
-    ];
+    ] : ["#6258dc", "#087f70", "#ad6e13", "#126ca6", "#c7364d", "#8a4ec4", "#17804b", "#96700a", "#b3377d"];
 
     const finalOption: echarts.EChartsOption = {
       backgroundColor: "transparent",
-      color: rawOption.color || obsidianPalette,
+      color: rawOption.color || palette,
       textStyle: {
         fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
-        color: "#d4d4d8",
+        color: themeColor("--text-1"),
       },
       tooltip: {
-        backgroundColor: "#1f1f23",
-        borderColor: "rgba(255, 255, 255, 0.12)",
-        textStyle: { color: "#f4f4f5", fontSize: 12 },
+        backgroundColor: themeColor("--bg-2"),
+        borderColor: themeColor("--border-2"),
+        textStyle: { color: themeColor("--text-1"), fontSize: 12 },
         extraCssText: "box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4); border-radius: 8px;",
         ...rawOption.tooltip,
       },
@@ -156,7 +160,7 @@ function initChart() {
         right: 25,
         bottom: 35,
         containLabel: true,
-        borderColor: "rgba(255, 255, 255, 0.06)",
+        borderColor: themeColor("--border-1"),
         ...rawOption.grid,
       },
       ...rawOption,
@@ -171,7 +175,7 @@ function initChart() {
           s.label = {
             show: true,
             position: "right",
-            color: "#f4f4f5",
+            color: themeColor("--text-1"),
             fontSize: 11,
             ...(s.label as object),
           };
@@ -205,7 +209,7 @@ async function downloadImage() {
   const url = chartInstance.getDataURL({
     type: "png",
     pixelRatio: 2,
-    backgroundColor: "#18181b",
+    backgroundColor: themeColor("--bg-1"),
   });
   try {
     const { save } = await import("@tauri-apps/plugin-dialog");
@@ -267,6 +271,12 @@ watch(() => props.code, () => {
   nextTick(initChart);
 });
 
+useVisibleThemeRefresh(chartContainer, () => {
+  chartInstance?.dispose();
+  chartInstance = null;
+  initChart();
+});
+
 onBeforeUnmount(() => {
   resizeObserver?.disconnect();
   chartInstance?.dispose();
@@ -278,9 +288,9 @@ onBeforeUnmount(() => {
 .echarts-card {
   width: 100%;
   margin: 14px 0;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
   border-radius: 10px;
-  background: #18181b;
+  background: var(--theme-bg-panel, #18181b);
   overflow: hidden;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -292,15 +302,15 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   height: 38px;
   padding: 0 12px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  background: rgba(255, 255, 255, 0.02);
+  border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.06);
+  background: rgba(var(--theme-foreground-rgb), 0.02);
 }
 
 .echarts-title {
   display: flex;
   align-items: center;
   gap: 6px;
-  color: #f4f4f5;
+  color: var(--theme-text-primary, #f4f4f5);
   font-size: 12.5px;
   font-weight: 600;
 }
@@ -320,9 +330,9 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 4px;
   padding: 3px 8px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
   border-radius: 5px;
-  color: #a1a1aa;
+  color: var(--theme-text-secondary, #a1a1aa);
   background: transparent;
   cursor: pointer;
   font-size: 11px;
@@ -338,14 +348,14 @@ onBeforeUnmount(() => {
 }
 
 .tool-btn:hover {
-  color: #ffffff;
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.16);
+  color: var(--theme-text-primary, #ffffff);
+  background: rgba(var(--theme-foreground-rgb), 0.08);
+  border-color: rgba(var(--theme-foreground-rgb), 0.16);
 }
 
 .echarts-error {
   padding: 10px 14px;
-  color: #fca5a5;
+  color: var(--theme-status-danger, #fca5a5);
   background: rgba(239, 68, 68, 0.08);
   border-bottom: 1px solid rgba(239, 68, 68, 0.15);
   font-size: 12px;

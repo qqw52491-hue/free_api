@@ -84,31 +84,31 @@ function hidePreview() { previewId.value = null; }
     width: 6px;
     height: 2px;
     border-radius: 2px;
-    background: #606570;
+    background: var(--theme-bg-muted, #606570);
     transition: width .12s ease, background .12s ease;
 }
 .question-nav-tick.is-active span { width: 10px; background: #a9b7ca; }
 .question-nav-tick.is-pending span { background: #8099b5; }
-.question-nav-tick:hover span, .question-nav-tick.is-previewed span { width: 12px; background: #d9e5f3; }
+.question-nav-tick:hover span, .question-nav-tick.is-previewed span { width: 12px; background: var(--theme-inverse-bg, #d9e5f3); }
 .question-nav-tick:focus-visible { outline: 1px solid #8da9cc; outline-offset: -1px; border-radius: 3px; }
 .question-nav-preview {
     position: fixed;
     z-index: 1000;
     box-sizing: border-box;
     padding: 11px 13px;
-    border: 1px solid #3a3e47;
+    border: 1px solid var(--theme-border, #3a3e47);
     border-radius: 9px;
-    color: #e4e4e7;
-    background: #22242a;
+    color: var(--theme-text-primary, #e4e4e7);
+    background: var(--theme-bg-raised, #22242a);
     box-shadow: 0 8px 28px #0005;
     font: 12px/1.55 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     pointer-events: none;
 }
-.question-nav-preview-heading { display: flex; justify-content: space-between; color: #9199a7; font-size: 10px; }
-.question-nav-preview-heading span { color: #697383; }
+.question-nav-preview-heading { display: flex; justify-content: space-between; color: var(--theme-text-secondary, #9199a7); font-size: 10px; }
+.question-nav-preview-heading span { color: var(--theme-text-muted, #697383); }
 .question-nav-preview p { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; margin: 6px 0 0; overflow-wrap: anywhere; }
 .question-nav-preview-question { font-weight: 600; }
-.question-nav-preview-answer { color: #b1b7c2; border-top: 1px solid #ffffff0d; padding-top: 6px; }
-.question-nav-preview-answer.is-empty { color: #7b8594; }
+.question-nav-preview-answer { color: var(--theme-text-secondary, #b1b7c2); border-top: 1px solid rgba(var(--theme-foreground-rgb), 0.050980392156862744); padding-top: 6px; }
+.question-nav-preview-answer.is-empty { color: var(--theme-text-secondary, #7b8594); }
 @media (prefers-reduced-motion: reduce) { .question-nav-tick span { transition: none; } }
 </style>

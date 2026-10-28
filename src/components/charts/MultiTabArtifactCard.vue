@@ -72,11 +72,11 @@ function defaultIcon(type: string) {
 .multi-tab-card {
   width: 100%;
   margin: 14px 0;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.1);
   border-radius: 10px;
-  background: #18181b;
+  background: var(--theme-bg-panel, #18181b);
   overflow: hidden;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--theme-shadow, 0 4px 20px rgba(0, 0, 0, 0.3));
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
 
@@ -85,15 +85,15 @@ function defaultIcon(type: string) {
   align-items: center;
   justify-content: space-between;
   padding: 8px 14px;
-  background: #1f1f23;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--theme-bg-panel, #1f1f23);
+  border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
 }
 
 .card-title {
   display: flex;
   align-items: center;
   gap: 6px;
-  color: #f4f4f5;
+  color: var(--theme-text-primary, #f4f4f5);
   font-size: 13px;
 }
 
@@ -101,10 +101,10 @@ function defaultIcon(type: string) {
   display: flex;
   align-items: center;
   gap: 4px;
-  background: #141416;
+  background: var(--theme-bg-base, #141416);
   padding: 3px;
   border-radius: 7px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.06);
 }
 
 .tab-nav-btn {
@@ -115,19 +115,19 @@ function defaultIcon(type: string) {
   border: 0;
   border-radius: 5px;
   background: transparent;
-  color: #a1a1aa;
+  color: var(--theme-text-secondary, #a1a1aa);
   font-size: 12px;
   font-weight: 550;
   cursor: pointer;
   transition: all 0.15s;
 }
 
-.tab-nav-btn:hover { color: #fff; }
+.tab-nav-btn:hover { color: var(--theme-text-primary, #fff); }
 
 .tab-nav-btn.active {
-  background: #27272a;
-  color: #f4f4f5;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  background: var(--theme-bg-raised, #27272a);
+  color: var(--theme-text-primary, #f4f4f5);
+  box-shadow: var(--theme-shadow, 0 1px 4px rgba(0, 0, 0, 0.3));
 }
 
 .tab-pane-content {
@@ -141,9 +141,9 @@ function defaultIcon(type: string) {
 .code-pane {
   margin: 0;
   padding: 12px;
-  background: #141416;
+  background: var(--theme-bg-base, #141416);
   border-radius: 6px;
-  color: #e4e4e7;
+  color: var(--theme-text-primary, #e4e4e7);
   font-size: 12px;
   overflow: auto;
 }

@@ -1564,7 +1564,7 @@ onMounted(() => {
   font-size: 20px;
   font-weight: 700;
   margin: 0 0 6px 0;
-  color: #fff;
+  color: var(--theme-text-primary, #fff);
 }
 
 .header-sub {
@@ -1584,7 +1584,7 @@ onMounted(() => {
 
 /* AI 角色孵化器卡片 */
 .ai-incubator-card {
-  background: linear-gradient(135deg, rgba(30, 27, 75, 0.45) 0%, rgba(24, 24, 27, 0.75) 50%, rgba(15, 23, 42, 0.5) 100%);
+  background: linear-gradient(135deg, rgba(30, 27, 75, 0.45) 0%, rgba(var(--theme-rgb-panel, 24, 24, 27), 0.75) 50%, rgba(var(--theme-rgb-panel, 15, 23, 42), 0.5) 100%);
   border: 1px solid rgba(129, 140, 248, 0.3);
   box-shadow: 0 4px 24px rgba(79, 70, 229, 0.08);
   position: relative;
@@ -1624,7 +1624,7 @@ onMounted(() => {
   border-radius: 9999px;
   background: rgba(99, 102, 241, 0.18);
   border: 1px solid rgba(129, 140, 248, 0.35);
-  color: #c7d2fe;
+  color: var(--theme-status-accent, #c7d2fe);
   font-size: 11px;
   font-weight: 600;
   width: fit-content;
@@ -1633,7 +1633,7 @@ onMounted(() => {
 .ai-heading {
   font-size: 15px;
   font-weight: 700;
-  color: #f4f4f5;
+  color: var(--theme-text-primary, #f4f4f5);
   margin: 0;
 }
 
@@ -1669,9 +1669,9 @@ onMounted(() => {
   gap: 6px;
   padding: 5px 12px;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  color: #d4d4d8;
+  background: rgba(var(--theme-foreground-rgb), 0.06);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.12);
+  color: var(--theme-text-primary, #d4d4d8);
   font-size: 12px;
   cursor: pointer;
   transition: all 0.15s ease;
@@ -1681,7 +1681,7 @@ onMounted(() => {
 .toggle-suggestions-btn.active {
   background: rgba(99, 102, 241, 0.2);
   border-color: rgba(99, 102, 241, 0.4);
-  color: #c7d2fe;
+  color: var(--theme-status-accent, #c7d2fe);
 }
 
 .toggle-arrow {
@@ -1696,9 +1696,9 @@ onMounted(() => {
   gap: 12px;
   padding: 12px 14px;
   margin-bottom: 12px;
-  background: rgba(0, 0, 0, 0.25);
+  background: var(--theme-inset-bg, rgba(0, 0, 0, 0.25));
   border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.05);
 }
 
 .sugg-group {
@@ -1716,12 +1716,12 @@ onMounted(() => {
 .group-title {
   font-size: 12px;
   font-weight: 600;
-  color: #e0e7ff;
+  color: var(--theme-text-primary, #e0e7ff);
 }
 
 .group-desc {
   font-size: 11.5px;
-  color: #71717a;
+  color: var(--theme-text-muted, #71717a);
 }
 
 .sugg-chips-wrap {
@@ -1736,9 +1736,9 @@ onMounted(() => {
   gap: 5px;
   padding: 5px 10px;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  color: #d4d4d8;
+  background: rgba(var(--theme-foreground-rgb), 0.04);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
+  color: var(--theme-text-primary, #d4d4d8);
   font-size: 12px;
   cursor: pointer;
   transition: all 0.15s ease;
@@ -1748,14 +1748,14 @@ onMounted(() => {
 .sugg-chip:hover {
   background: rgba(99, 102, 241, 0.16);
   border-color: rgba(129, 140, 248, 0.4);
-  color: #ffffff;
+  color: var(--theme-text-primary, #ffffff);
   transform: translateY(-1px);
 }
 
 /* 对话流面板 */
 .ai-chat-thread-box {
   margin-bottom: 12px;
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--theme-inset-bg, rgba(0, 0, 0, 0.35));
   border: 1px solid rgba(129, 140, 248, 0.25);
   border-radius: 10px;
   padding: 10px 14px;
@@ -1767,13 +1767,13 @@ onMounted(() => {
   justify-content: space-between;
   margin-bottom: 8px;
   padding-bottom: 6px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.06);
 }
 
 .thread-title {
   font-size: 11.5px;
   font-weight: 600;
-  color: #c7d2fe;
+  color: var(--theme-status-accent, #c7d2fe);
 }
 
 .btn-reset-chat {
@@ -1783,8 +1783,8 @@ onMounted(() => {
   padding: 2px 8px;
   border-radius: 4px;
   background: transparent;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: #a1a1aa;
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.1);
+  color: var(--theme-text-secondary, #a1a1aa);
   font-size: 11px;
   cursor: pointer;
   transition: all 0.15s ease;
@@ -1793,7 +1793,7 @@ onMounted(() => {
 .btn-reset-chat:hover {
   background: rgba(239, 68, 68, 0.15);
   border-color: rgba(239, 68, 68, 0.3);
-  color: #fca5a5;
+  color: var(--theme-status-danger, #fca5a5);
 }
 
 .chat-bubbles-scroll {
@@ -1810,7 +1810,7 @@ onMounted(() => {
 }
 
 .chat-bubbles-scroll::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.15);
+  background: rgba(var(--theme-foreground-rgb), 0.15);
   border-radius: 3px;
 }
 
@@ -1828,7 +1828,7 @@ onMounted(() => {
   width: 24px;
   height: 24px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(var(--theme-foreground-rgb), 0.08);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1840,14 +1840,14 @@ onMounted(() => {
   background: linear-gradient(135deg, rgba(79, 70, 229, 0.35) 0%, rgba(124, 58, 237, 0.35) 100%);
   border: 1px solid rgba(129, 140, 248, 0.3);
   border-radius: 8px 2px 8px 8px;
-  color: #f4f4f5;
+  color: var(--theme-text-primary, #f4f4f5);
 }
 
 .chat-bubble-row.assistant .bubble-content {
-  background: rgba(39, 39, 42, 0.7);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(var(--theme-rgb-raised, 39, 39, 42), 0.7);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
   border-radius: 2px 8px 8px 8px;
-  color: #e4e4e7;
+  color: var(--theme-text-primary, #e4e4e7);
 }
 
 .bubble-content {
@@ -1870,7 +1870,7 @@ onMounted(() => {
 
 .sync-tag {
   font-size: 11px;
-  color: #34d399;
+  color: var(--theme-status-success, #34d399);
   font-weight: 500;
 }
 
@@ -1879,7 +1879,7 @@ onMounted(() => {
   align-items: center;
   gap: 6px;
   font-size: 12px;
-  color: #a1a1aa;
+  color: var(--theme-text-secondary, #a1a1aa);
 }
 
 /* 快速微调栏 */
@@ -1893,7 +1893,7 @@ onMounted(() => {
 
 .tweaks-label {
   font-size: 11.5px;
-  color: #71717a;
+  color: var(--theme-text-muted, #71717a);
   white-space: nowrap;
 }
 
@@ -1908,7 +1908,7 @@ onMounted(() => {
   border-radius: 4px;
   background: rgba(99, 102, 241, 0.1);
   border: 1px solid rgba(99, 102, 241, 0.25);
-  color: #c7d2fe;
+  color: var(--theme-status-accent, #c7d2fe);
   font-size: 11.5px;
   cursor: pointer;
   transition: all 0.15s ease;
@@ -1917,7 +1917,7 @@ onMounted(() => {
 .tweak-chip:hover {
   background: rgba(99, 102, 241, 0.25);
   border-color: rgba(99, 102, 241, 0.5);
-  color: #ffffff;
+  color: var(--theme-text-primary, #ffffff);
   transform: translateY(-1px);
 }
 
@@ -1929,10 +1929,10 @@ onMounted(() => {
 .ai-prompt-textarea {
   width: 100%;
   box-sizing: border-box;
-  background: rgba(24, 24, 27, 0.9);
+  background: rgba(var(--theme-rgb-panel, 24, 24, 27), 0.9);
   border: 1px solid rgba(129, 140, 248, 0.3);
   border-radius: 8px;
-  color: #f4f4f5;
+  color: var(--theme-text-primary, #f4f4f5);
   padding: 10px 14px;
   font-size: 13px;
   line-height: 1.5;
@@ -1977,30 +1977,30 @@ onMounted(() => {
   gap: 5px;
   padding: 4px 10px;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  color: #a1a1aa;
+  background: rgba(var(--theme-foreground-rgb), 0.05);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
+  color: var(--theme-text-secondary, #a1a1aa);
   font-size: 12px;
   cursor: pointer;
   transition: all 0.15s ease;
 }
 
 .kind-pill-btn:hover {
-  background: rgba(255, 255, 255, 0.1);
-  color: #e4e4e7;
+  background: rgba(var(--theme-foreground-rgb), 0.1);
+  color: var(--theme-text-primary, #e4e4e7);
 }
 
 .kind-pill-btn.active {
   background: rgba(99, 102, 241, 0.25);
   border-color: rgba(99, 102, 241, 0.5);
-  color: #a5b4fc;
+  color: var(--theme-status-accent, #a5b4fc);
   font-weight: 500;
 }
 
 .kind-pill-btn.auto-pill.active {
   background: rgba(59, 130, 246, 0.2);
   border-color: rgba(59, 130, 246, 0.45);
-  color: #93c5fd;
+  color: var(--theme-status-info, #93c5fd);
 }
 
 .pill-check {
@@ -2017,8 +2017,8 @@ onMounted(() => {
   font-weight: 600;
   border-radius: 8px;
   background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  color: #ffffff;
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.15);
+  color: var(--on-accent);
   cursor: pointer;
   transition: all 0.15s ease;
 }
@@ -2050,7 +2050,7 @@ onMounted(() => {
   border-radius: 6px;
   background: rgba(139, 92, 246, 0.15);
   border: 1px solid rgba(139, 92, 246, 0.35);
-  color: #c4b5fd;
+  color: var(--theme-status-accent, #c4b5fd);
   font-size: 11.5px;
   font-weight: 500;
   cursor: pointer;
@@ -2060,7 +2060,7 @@ onMounted(() => {
 .btn-polish-prompt:hover:not(:disabled) {
   background: rgba(139, 92, 246, 0.28);
   border-color: rgba(139, 92, 246, 0.6);
-  color: #ede9fe;
+  color: var(--theme-text-primary, #ede9fe);
   transform: translateY(-1px);
 }
 
@@ -2073,8 +2073,8 @@ onMounted(() => {
 .spinner-xs {
   width: 12px;
   height: 12px;
-  border: 2px solid rgba(255, 255, 255, 0.3);
-  border-top-color: #fff;
+  border: 2px solid rgba(var(--theme-foreground-rgb), 0.3);
+  border-top-color: var(--theme-border-strong, #fff);
   border-radius: 50%;
   animation: spin 0.7s linear infinite;
   display: inline-block;
@@ -2083,8 +2083,8 @@ onMounted(() => {
 .spinner-sm {
   width: 14px;
   height: 14px;
-  border: 2px solid rgba(255, 255, 255, 0.3);
-  border-top-color: #fff;
+  border: 2px solid rgba(var(--theme-foreground-rgb), 0.3);
+  border-top-color: var(--theme-border-strong, #fff);
   border-radius: 50%;
   animation: spin 0.7s linear infinite;
   display: inline-block;
@@ -2095,8 +2095,8 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  background: linear-gradient(180deg, rgba(39, 39, 42, 0.4) 0%, rgba(24, 24, 27, 0.6) 100%);
-  border-color: rgba(255, 255, 255, 0.08);
+  background: linear-gradient(180deg, rgba(var(--theme-rgb-raised, 39, 39, 42), 0.4) 0%, rgba(var(--theme-rgb-panel, 24, 24, 27), 0.6) 100%);
+  border-color: rgba(var(--theme-foreground-rgb), 0.08);
 }
 
 .preset-title {
@@ -2117,9 +2117,9 @@ onMounted(() => {
   gap: 6px;
   padding: 6px 12px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: #e4e4e7;
+  background: rgba(var(--theme-foreground-rgb), 0.05);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.1);
+  color: var(--theme-text-primary, #e4e4e7);
   font-size: 12.5px;
   cursor: pointer;
   transition: all 0.15s ease;
@@ -2128,14 +2128,14 @@ onMounted(() => {
 .preset-chip:hover {
   background: rgba(99, 102, 241, 0.15);
   border-color: rgba(99, 102, 241, 0.4);
-  color: #a5b4fc;
+  color: var(--theme-status-accent, #a5b4fc);
   transform: translateY(-1px);
 }
 
 /* 表单网格 */
 .editor-card {
   border-color: rgba(99, 102, 241, 0.35);
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--theme-shadow, 0 4px 20px rgba(0, 0, 0, 0.3));
 }
 
 .card-title-row {
@@ -2148,7 +2148,7 @@ onMounted(() => {
 .card-title-row h3 {
   font-size: 15px;
   margin: 0;
-  color: #f4f4f5;
+  color: var(--theme-text-primary, #f4f4f5);
 }
 
 .form-grid {
@@ -2175,7 +2175,7 @@ onMounted(() => {
 }
 
 .req {
-  color: #f43f5e;
+  color: var(--theme-status-danger, #f43f5e);
 }
 
 input[type="text"],
@@ -2184,7 +2184,7 @@ textarea {
   background: var(--bg-2, #27272a);
   border: 1px solid var(--border-1, #3f3f46);
   border-radius: 8px;
-  color: #f4f4f5;
+  color: var(--theme-text-primary, #f4f4f5);
   padding: 8px 12px;
   font-size: 13px;
   outline: none;
@@ -2211,11 +2211,11 @@ textarea {
 
 .feedback-hint {
   font-size: 13px;
-  color: #10b981;
+  color: var(--theme-status-success, #10b981);
 }
 
 .feedback-hint.error {
-  color: #f43f5e;
+  color: var(--theme-status-danger, #f43f5e);
 }
 
 /* 角色卡片网格 */
@@ -2238,7 +2238,7 @@ textarea {
 }
 
 .role-card-item:hover {
-  border-color: rgba(255, 255, 255, 0.16);
+  border-color: rgba(var(--theme-foreground-rgb), 0.16);
   transform: translateY(-2px);
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25);
 }
@@ -2276,7 +2276,7 @@ textarea {
 
 .role-label {
   font-size: 14px;
-  color: #f4f4f5;
+  color: var(--theme-text-primary, #f4f4f5);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2294,14 +2294,14 @@ textarea {
   border-radius: 99px;
   cursor: pointer;
   border: 1px solid var(--border-1, #3f3f46);
-  background: rgba(255, 255, 255, 0.05);
+  background: rgba(var(--theme-foreground-rgb), 0.05);
   color: var(--text-3, #71717a);
   transition: all 0.15s;
 }
 
 .switch-pill.on {
   background: rgba(16, 185, 129, 0.12);
-  color: #10b981;
+  color: var(--theme-status-success, #10b981);
   border-color: rgba(16, 185, 129, 0.3);
   font-weight: 600;
 }
@@ -2320,7 +2320,7 @@ textarea {
   padding: 3px 8px;
   border-radius: 6px;
   background: var(--bg-2, #27272a);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.06);
   color: var(--text-2, #d4d4d8);
   max-width: 100%;
 }
@@ -2333,31 +2333,31 @@ textarea {
 
 .role-scope-hint {
   font-size: 12px;
-  color: #a1a1aa;
+  color: var(--theme-text-secondary, #a1a1aa);
   margin: 0;
   line-height: 1.45;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(var(--theme-foreground-rgb), 0.03);
   padding: 6px 8px;
   border-radius: 6px;
 }
 
 .role-prompt-preview {
-  background: rgba(0, 0, 0, 0.2);
+  background: var(--theme-inset-bg, rgba(0, 0, 0, 0.2));
   border-radius: 6px;
   padding: 8px 10px;
-  border: 1px solid rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.04);
 }
 
 .preview-label {
   font-size: 11px;
-  color: #71717a;
+  color: var(--theme-text-muted, #71717a);
   display: block;
   margin-bottom: 4px;
 }
 
 .prompt-text {
   font-size: 12px;
-  color: #d4d4d8;
+  color: var(--theme-text-primary, #d4d4d8);
   margin: 0;
   line-height: 1.45;
   display: -webkit-box;
@@ -2373,7 +2373,7 @@ textarea {
   gap: 6px;
   margin-top: auto;
   padding-top: 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  border-top: 1px solid rgba(var(--theme-foreground-rgb), 0.05);
 }
 
 /* 按钮风格 */
@@ -2387,13 +2387,13 @@ textarea {
   font-weight: 500;
   cursor: pointer;
   border: 1px solid transparent;
-  background: rgba(255, 255, 255, 0.08);
-  color: #f4f4f5;
+  background: rgba(var(--theme-foreground-rgb), 0.08);
+  color: var(--theme-text-primary, #f4f4f5);
   transition: all 0.15s;
 }
 
 .btn:hover {
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(var(--theme-foreground-rgb), 0.12);
 }
 
 .btn.primary {
@@ -2411,11 +2411,11 @@ textarea {
 }
 
 .btn.ghost:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(var(--theme-foreground-rgb), 0.06);
 }
 
 .btn.danger:hover {
-  color: #f43f5e;
+  color: var(--theme-status-danger, #f43f5e);
   border-color: rgba(244, 63, 94, 0.4);
   background: rgba(244, 63, 94, 0.1);
 }
@@ -2469,29 +2469,29 @@ textarea {
 
 .kind-chip:hover {
   border-color: #6366f1;
-  color: #fff;
+  color: var(--theme-text-primary, #fff);
 }
 
 .kind-chip.selected {
   background: rgba(99, 102, 241, 0.15);
   border-color: #6366f1;
-  color: #818cf8;
+  color: var(--theme-status-accent, #818cf8);
   font-weight: 500;
 }
 
 .meta-tag.kind-tag {
   background: rgba(99, 102, 241, 0.12);
-  color: #818cf8;
+  color: var(--theme-status-accent, #818cf8);
 }
 
 .meta-tag.concurrency-tag {
   background: rgba(234, 179, 8, 0.12);
-  color: #eab308;
+  color: var(--theme-status-warning, #eab308);
 }
 
 .role-hard-scope {
   font-size: 11px;
-  color: #f59e0b;
+  color: var(--theme-status-warning, #f59e0b);
   margin: 6px 0 0 0;
   line-height: 1.4;
   background: rgba(245, 158, 11, 0.08);
@@ -2536,7 +2536,7 @@ textarea {
 .contract-title-group .field-label {
   font-size: 13.5px;
   font-weight: 600;
-  color: #f4f4f5;
+  color: var(--theme-text-primary, #f4f4f5);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -2551,7 +2551,7 @@ textarea {
 .btn-input-add {
   background: rgba(6, 182, 212, 0.12);
   border: 1px solid rgba(6, 182, 212, 0.35);
-  color: #67e8f9;
+  color: var(--theme-status-info, #67e8f9);
   font-weight: 500;
   display: inline-flex;
   align-items: center;
@@ -2564,14 +2564,14 @@ textarea {
 .btn-input-add:hover {
   background: rgba(6, 182, 212, 0.22);
   border-color: rgba(6, 182, 212, 0.6);
-  color: #fff;
+  color: var(--theme-text-primary, #fff);
   box-shadow: 0 0 12px rgba(6, 182, 212, 0.25);
 }
 
 .btn-output-add {
   background: rgba(16, 185, 129, 0.12);
   border: 1px solid rgba(16, 185, 129, 0.35);
-  color: #6ee7b7;
+  color: var(--theme-status-success, #6ee7b7);
   font-weight: 500;
   display: inline-flex;
   align-items: center;
@@ -2584,7 +2584,7 @@ textarea {
 .btn-output-add:hover {
   background: rgba(16, 185, 129, 0.22);
   border-color: rgba(16, 185, 129, 0.6);
-  color: #fff;
+  color: var(--theme-text-primary, #fff);
   box-shadow: 0 0 12px rgba(16, 185, 129, 0.25);
 }
 
@@ -2592,7 +2592,7 @@ textarea {
   padding: 22px 18px;
   border: 1px dashed var(--border-1, #3f3f46);
   border-radius: 8px;
-  background: rgba(0, 0, 0, 0.2);
+  background: var(--theme-inset-bg, rgba(0, 0, 0, 0.2));
   text-align: center;
 }
 
@@ -2611,10 +2611,10 @@ textarea {
 
 /* 现代精炼表格体系 (Sleek Schema Table) */
 .schema-table-wrap {
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
   border-radius: 9px;
   overflow: hidden;
-  background: rgba(18, 18, 22, 0.5);
+  background: rgba(var(--theme-rgb-base, 18, 18, 22), 0.5);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
 }
 
@@ -2631,7 +2631,7 @@ textarea {
   align-items: center;
   gap: 10px;
   padding: 9px 12px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.3px;
@@ -2641,17 +2641,17 @@ textarea {
 .input-table-wrap .schema-table-header {
   background: rgba(6, 182, 212, 0.08);
   border-bottom-color: rgba(6, 182, 212, 0.2);
-  color: #67e8f9;
+  color: var(--theme-status-info, #67e8f9);
 }
 
 .output-table-wrap .schema-table-header {
   background: rgba(16, 185, 129, 0.08);
   border-bottom-color: rgba(16, 185, 129, 0.2);
-  color: #6ee7b7;
+  color: var(--theme-status-success, #6ee7b7);
 }
 
 .th-req {
-  color: #ef4444;
+  color: var(--theme-status-danger, #ef4444);
   font-weight: bold;
 }
 
@@ -2665,8 +2665,8 @@ textarea {
   align-items: center;
   gap: 10px;
   padding: 6px 12px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-  background: rgba(24, 24, 27, 0.5);
+  border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.04);
+  background: rgba(var(--theme-rgb-panel, 24, 24, 27), 0.5);
   transition: background 0.15s ease;
 }
 
@@ -2675,7 +2675,7 @@ textarea {
 }
 
 .schema-table-row:hover {
-  background: rgba(255, 255, 255, 0.035);
+  background: rgba(var(--theme-foreground-rgb), 0.035);
 }
 
 /* 单元格列宽与对齐 */
@@ -2694,7 +2694,7 @@ textarea {
 .row-index {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 11px;
-  color: #71717a;
+  color: var(--theme-text-muted, #71717a);
   font-weight: 600;
 }
 
@@ -2737,14 +2737,14 @@ textarea {
   padding: 0 10px;
   font-size: 12px;
   border-radius: 6px;
-  background: rgba(0, 0, 0, 0.35);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  color: #f4f4f5;
+  background: var(--theme-inset-bg, rgba(0, 0, 0, 0.35));
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
+  color: var(--theme-text-primary, #f4f4f5);
   transition: all 0.15s ease;
 }
 
 .cell-input:focus {
-  background: rgba(0, 0, 0, 0.65);
+  background: var(--theme-inset-bg, rgba(0, 0, 0, 0.65));
   outline: none;
 }
 
@@ -2767,11 +2767,11 @@ textarea {
 }
 
 .input-table-wrap .mono-input {
-  color: #a5f3fc;
+  color: var(--theme-status-info, #a5f3fc);
 }
 
 .output-table-wrap .mono-input {
-  color: #a7f3d0;
+  color: var(--theme-status-success, #a7f3d0);
 }
 
 .cell-select {
@@ -2781,9 +2781,9 @@ textarea {
   font-size: 11.5px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   border-radius: 6px;
-  background: rgba(0, 0, 0, 0.35);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  color: #e4e4e7;
+  background: var(--theme-inset-bg, rgba(0, 0, 0, 0.35));
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
+  color: var(--theme-text-primary, #e4e4e7);
   cursor: pointer;
   outline: none;
   transition: all 0.15s ease;
@@ -2797,9 +2797,9 @@ textarea {
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.04);
-  color: #71717a;
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
+  background: rgba(var(--theme-foreground-rgb), 0.04);
+  color: var(--theme-text-muted, #71717a);
   transition: all 0.15s ease;
   text-align: center;
   display: inline-flex;
@@ -2810,7 +2810,7 @@ textarea {
 .req-toggle-pill.active {
   background: rgba(239, 68, 68, 0.16);
   border-color: rgba(239, 68, 68, 0.45);
-  color: #f87171;
+  color: var(--theme-status-danger, #f87171);
   box-shadow: 0 0 8px rgba(239, 68, 68, 0.2);
 }
 
@@ -2820,7 +2820,7 @@ textarea {
   border-radius: 6px;
   border: 1px solid transparent;
   background: transparent;
-  color: #71717a;
+  color: var(--theme-text-muted, #71717a);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
@@ -2830,26 +2830,26 @@ textarea {
 
 .btn-row-del:hover {
   background: rgba(239, 68, 68, 0.18);
-  color: #ef4444;
+  color: var(--theme-status-danger, #ef4444);
   border-color: rgba(239, 68, 68, 0.35);
 }
 
 /* 角色列表徽章样式 */
 .meta-tag.contract-tag {
   background: rgba(16, 185, 129, 0.12);
-  color: #10b981;
+  color: var(--theme-status-success, #10b981);
   border-color: rgba(16, 185, 129, 0.25);
 }
 
 .meta-tag.focus-tag {
   background: rgba(245, 158, 11, 0.12);
-  color: #f59e0b;
+  color: var(--theme-status-warning, #f59e0b);
   border-color: rgba(245, 158, 11, 0.25);
 }
 
 .meta-tag.input-tag {
   background: rgba(6, 182, 212, 0.12);
-  color: #06b6d4;
+  color: var(--theme-status-info, #06b6d4);
   border-color: rgba(6, 182, 212, 0.25);
 }
 
@@ -2890,14 +2890,14 @@ textarea {
 
 .focus-pill:hover {
   border-color: #f59e0b;
-  color: #f4f4f5;
+  color: var(--theme-text-primary, #f4f4f5);
   background: rgba(245, 158, 11, 0.05);
 }
 
 .focus-pill.active {
   background: rgba(245, 158, 11, 0.15);
   border-color: #f59e0b;
-  color: #fbbf24;
+  color: var(--theme-status-warning, #fbbf24);
   font-weight: 600;
   box-shadow: 0 0 10px rgba(245, 158, 11, 0.15);
 }

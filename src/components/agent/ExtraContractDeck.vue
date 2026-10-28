@@ -212,7 +212,7 @@ function formatHistoricalVal(val: any): string {
 
 <style scoped>
 .extra-contract-deck {
-  background: linear-gradient(135deg, rgba(168, 85, 247, 0.08), rgba(24, 24, 32, 0.95));
+  background: linear-gradient(135deg, rgba(168, 85, 247, 0.08), rgba(var(--theme-rgb-panel, 24, 24, 32), 0.95));
   border: 1px solid rgba(168, 85, 247, 0.28);
   border-radius: 8px;
   padding: 8px 10px;
@@ -234,15 +234,15 @@ function formatHistoricalVal(val: any): string {
 }
 
 .extra-deck-title {
-  color: #c084fc;
+  color: var(--theme-status-accent, #c084fc);
   font-weight: 700;
   letter-spacing: 0.2px;
 }
 
 .extra-deck-count {
   font-size: 8.5px;
-  color: #a1a1aa;
-  background: rgba(255, 255, 255, 0.08);
+  color: var(--theme-text-secondary, #a1a1aa);
+  background: rgba(var(--theme-foreground-rgb), 0.08);
   padding: 1px 5px;
   border-radius: 4px;
 }
@@ -258,14 +258,14 @@ function formatHistoricalVal(val: any): string {
   flex-direction: column;
   gap: 3px;
   padding: 5px 7px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(var(--theme-foreground-rgb), 0.03);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.06);
   border-radius: 6px;
   transition: background 0.15s ease;
 }
 
 .contract-field-row:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(var(--theme-foreground-rgb), 0.06);
 }
 
 .field-meta {
@@ -289,23 +289,23 @@ function formatHistoricalVal(val: any): string {
   padding: 1px 4px;
   border-radius: 3px;
   background: rgba(168, 85, 247, 0.2);
-  color: #d8b4fe;
+  color: var(--theme-status-accent, #d8b4fe);
   border: 1px solid rgba(168, 85, 247, 0.35);
 }
 
 .field-name-text {
-  color: #f4f4f5;
+  color: var(--theme-text-primary, #f4f4f5);
   font-family: monospace;
 }
 
 .field-required-star {
-  color: #f43f5e;
+  color: var(--theme-status-danger, #f43f5e);
   font-weight: bold;
 }
 
 .field-desc-text {
   font-size: 8.5px;
-  color: #a1a1aa;
+  color: var(--theme-text-secondary, #a1a1aa);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -329,25 +329,25 @@ function formatHistoricalVal(val: any): string {
 
 .badge-info {
   background: rgba(56, 189, 248, 0.15);
-  color: #38bdf8;
+  color: var(--theme-status-info, #38bdf8);
   border: 1px solid rgba(56, 189, 248, 0.3);
 }
 
 .badge-success {
   background: rgba(52, 211, 153, 0.15);
-  color: #34d399;
+  color: var(--theme-status-success, #34d399);
   border: 1px solid rgba(52, 211, 153, 0.3);
 }
 
 .badge-warning {
   background: rgba(251, 191, 36, 0.15);
-  color: #fbbf24;
+  color: var(--theme-status-warning, #fbbf24);
   border: 1px solid rgba(251, 191, 36, 0.3);
 }
 
 .badge-danger {
   background: rgba(244, 63, 94, 0.15);
-  color: #f43f5e;
+  color: var(--theme-status-danger, #f43f5e);
   border: 1px solid rgba(244, 63, 94, 0.3);
 }
 
@@ -363,7 +363,7 @@ function formatHistoricalVal(val: any): string {
   padding: 1px 6px;
   border-radius: 3px;
   background: rgba(99, 102, 241, 0.18);
-  color: #a5b4fc;
+  color: var(--theme-status-accent, #a5b4fc);
   border: 1px solid rgba(99, 102, 241, 0.35);
   letter-spacing: 0.1px;
 }
@@ -372,7 +372,7 @@ function formatHistoricalVal(val: any): string {
   font-size: 11px;
   font-weight: 700;
   font-family: monospace;
-  color: #38bdf8;
+  color: var(--theme-status-info, #38bdf8);
   background: rgba(56, 189, 248, 0.1);
   padding: 1px 6px;
   border-radius: 4px;
@@ -387,47 +387,47 @@ function formatHistoricalVal(val: any): string {
 
 .bool-true {
   background: rgba(52, 211, 153, 0.15);
-  color: #34d399;
+  color: var(--theme-status-success, #34d399);
 }
 
 .bool-false {
   background: rgba(244, 63, 94, 0.15);
-  color: #f43f5e;
+  color: var(--theme-status-danger, #f43f5e);
 }
 
 .val-missing {
   font-size: 8.5px;
-  color: #71717a;
+  color: var(--theme-text-muted, #71717a);
   font-style: italic;
 }
 
 .val-empty-arr {
   font-size: 8.5px;
-  color: #71717a;
+  color: var(--theme-text-muted, #71717a);
   font-family: monospace;
 }
 
 .historical-accordion {
   margin-top: 4px;
-  border-top: 1px dashed rgba(255, 255, 255, 0.1);
+  border-top: 1px dashed rgba(var(--theme-foreground-rgb), 0.1);
   padding-top: 6px;
 }
 
 .historical-summary {
   font-size: 8.5px;
-  color: #71717a;
+  color: var(--theme-text-muted, #71717a);
   cursor: pointer;
   user-select: none;
 }
 
 .historical-summary:hover {
-  color: #a1a1aa;
+  color: var(--theme-text-secondary, #a1a1aa);
 }
 
 .historical-content {
   margin-top: 4px;
   padding: 4px 6px;
-  background: rgba(0, 0, 0, 0.25);
+  background: var(--theme-inset-bg, rgba(0, 0, 0, 0.25));
   border-radius: 4px;
   display: flex;
   flex-direction: column;
@@ -436,16 +436,16 @@ function formatHistoricalVal(val: any): string {
 
 .historical-row {
   font-size: 8.5px;
-  color: #a1a1aa;
+  color: var(--theme-text-secondary, #a1a1aa);
 }
 
 .historical-key {
-  color: #d4d4d8;
+  color: var(--theme-text-primary, #d4d4d8);
   font-family: monospace;
 }
 
 .historical-val {
-  color: #71717a;
+  color: var(--theme-text-muted, #71717a);
   margin-left: 4px;
 }
 </style>

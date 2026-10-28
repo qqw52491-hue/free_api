@@ -181,7 +181,7 @@
                         🔍 诊断详情
                       </button>
                       <span class="m-tokens">输出上限: {{ m.max_tokens }} tok</span>
-                      <span class="m-tokens" :style="{ color: m.context_window > 0 ? '#818cf8' : 'var(--text-4)' }">
+                      <span class="m-tokens" :style="{ color: m.context_window > 0 ? 'var(--accent-light)' : 'var(--text-4)' }">
                         上下文窗口: {{ m.context_window > 0 ? formatTok(m.context_window) : '未配置 (默认32k)' }}
                       </span>
                     </div>
@@ -450,7 +450,7 @@
             </div>
             <div class="modal-body">
               <!-- 从规格模板套用 -->
-              <div class="form-group" style="background:rgba(255, 255, 255, 0.02);padding:10px 12px;border-radius:8px;border:1px solid rgba(255, 255, 255, 0.08)">
+              <div class="form-group" style="background:rgba(var(--theme-foreground-rgb), 0.02);padding:10px 12px;border-radius:8px;border:1px solid rgba(var(--theme-foreground-rgb), 0.08)">
                 <label class="form-label" style="margin-bottom:8px;font-size:12px;color:var(--text-2)">⚡ 从规格词典一键套用:</label>
                 <SpecSelectDropdown
                   :specs="modelSpecs"

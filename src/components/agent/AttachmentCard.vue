@@ -205,8 +205,8 @@ function handleClick() {
     align-items: center;
     gap: 8px;
     padding: 4px 8px 4px 5px;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.09);
+    background: rgba(var(--theme-foreground-rgb), 0.05);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.09);
     border-radius: 8px;
     max-width: 260px;
     transition: all 0.15s ease;
@@ -226,10 +226,10 @@ function handleClick() {
 }
 
 .attachment-chip-card:hover {
-    background: rgba(255, 255, 255, 0.09);
-    border-color: rgba(255, 255, 255, 0.18);
+    background: rgba(var(--theme-foreground-rgb), 0.09);
+    border-color: rgba(var(--theme-foreground-rgb), 0.18);
     transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    box-shadow: var(--theme-shadow, 0 4px 12px rgba(0, 0, 0, 0.3));
 }
 
 .attachment-chip-card.is-image {
@@ -245,7 +245,7 @@ function handleClick() {
     overflow: hidden;
     cursor: pointer;
     flex-shrink: 0;
-    background: #000;
+    background: var(--theme-bg-deep, #000);
 }
 
 .img-thumbnail {
@@ -266,7 +266,7 @@ function handleClick() {
     display: grid;
     place-items: center;
     font-size: 16px;
-    background: rgba(255, 255, 255, 0.06);
+    background: rgba(var(--theme-foreground-rgb), 0.06);
 }
 
 .thumb-overlay {
@@ -286,7 +286,7 @@ function handleClick() {
 .thumb-overlay svg {
     width: 14px;
     height: 14px;
-    stroke: #ffffff;
+    stroke: var(--on-accent);
     stroke-width: 2;
     fill: none;
 }
@@ -299,15 +299,15 @@ function handleClick() {
     place-items: center;
     font-size: 15px;
     flex-shrink: 0;
-    background: rgba(255, 255, 255, 0.07);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(var(--theme-foreground-rgb), 0.07);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
 }
 
 .file-icon-badge.badge-excel { background: rgba(16, 185, 129, 0.15); border-color: rgba(16, 185, 129, 0.3); }
 .file-icon-badge.badge-pdf   { background: rgba(239, 68, 68, 0.15);  border-color: rgba(239, 68, 68, 0.3); }
 .file-icon-badge.badge-word  { background: rgba(59, 130, 246, 0.15); border-color: rgba(59, 130, 246, 0.3); }
 .file-icon-badge.badge-zip   { background: rgba(245, 158, 11, 0.15); border-color: rgba(245, 158, 11, 0.3); }
-.file-icon-badge.badge-generic { background: rgba(255, 255, 255, 0.07); border-color: rgba(255, 255, 255, 0.08); }
+.file-icon-badge.badge-generic { background: rgba(var(--theme-foreground-rgb), 0.07); border-color: rgba(var(--theme-foreground-rgb), 0.08); }
 
 .attachment-meta {
     display: flex;
@@ -321,7 +321,7 @@ function handleClick() {
 .attachment-meta .file-name {
     font-size: 11.5px;
     font-weight: 500;
-    color: #f4f4f5;
+    color: var(--theme-text-primary, #f4f4f5);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -330,7 +330,7 @@ function handleClick() {
 
 .attachment-meta .file-size {
     font-size: 10px;
-    color: #71717a;
+    color: var(--theme-text-muted, #71717a);
 }
 
 .unpack-attachment-btn {
@@ -341,7 +341,7 @@ function handleClick() {
     border-radius: 50% !important;
     border: 0 !important;
     background: rgba(59, 130, 246, 0.15) !important;
-    color: #60a5fa !important;
+    color: var(--theme-status-info, #60a5fa) !important;
     cursor: pointer;
     padding: 0 !important;
     flex-shrink: 0;
@@ -350,7 +350,7 @@ function handleClick() {
 
 .unpack-attachment-btn:hover {
     background: rgba(59, 130, 246, 0.35) !important;
-    color: #93c5fd !important;
+    color: var(--theme-status-info, #93c5fd) !important;
     transform: scale(1.08);
 }
 
@@ -368,8 +368,8 @@ function handleClick() {
     height: 18px !important;
     border-radius: 50% !important;
     border: 0 !important;
-    background: rgba(255, 255, 255, 0.08) !important;
-    color: #a1a1aa !important;
+    background: rgba(var(--theme-foreground-rgb), 0.08) !important;
+    color: var(--theme-text-secondary, #a1a1aa) !important;
     cursor: pointer;
     padding: 0 !important;
     flex-shrink: 0;
@@ -378,7 +378,7 @@ function handleClick() {
 
 .remove-attachment-btn:hover {
     background: rgba(239, 68, 68, 0.25) !important;
-    color: #fca5a5 !important;
+    color: var(--theme-status-danger, #fca5a5) !important;
 }
 
 .remove-attachment-btn svg {

@@ -327,8 +327,8 @@ watch(() => props.open, (open) => {
 </script>
 
 <style scoped>
-.settings-backdrop { position: fixed; z-index: 45; inset: 0; display: flex; justify-content: flex-end; background: rgba(3,7,15,.48); backdrop-filter: blur(2px); }
-.settings-drawer { display: grid; width: min(420px, 100%); height: 100%; grid-template-rows: auto minmax(0,1fr); border-left: 1px solid var(--chat-line-strong); background: #101722; box-shadow: -20px 0 60px rgba(0,0,0,.26); }
+.settings-backdrop { position: fixed; z-index: 45; inset: 0; display: flex; justify-content: flex-end; background: rgba(var(--theme-rgb-deep, 3, 7, 15), 0.48); backdrop-filter: blur(2px); }
+.settings-drawer { display: grid; width: min(420px, 100%); height: 100%; grid-template-rows: auto minmax(0,1fr); border-left: 1px solid var(--chat-line-strong); background: var(--theme-bg-panel, #101722); box-shadow: -20px 0 60px rgba(0,0,0,.26); }
 .settings-drawer header { display: flex; justify-content: space-between; gap: 16px; padding: 21px 20px 17px; border-bottom: 1px solid var(--chat-line); }
 .settings-drawer header span { display: block; color: var(--chat-accent); font-size: 10px; font-weight: 800; letter-spacing: .1em; }
 .settings-drawer h2 { margin: 6px 0 4px; color: var(--chat-text); font-size: 18px; }
@@ -346,11 +346,11 @@ watch(() => props.open, (open) => {
     appearance: none;
     width: 100%;
     padding: 9px 32px 9px 12px;
-    border: 1px solid rgba(255, 255, 255, 0.12);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.12);
     border-radius: 8px;
     outline: none;
-    color: #f4f4f5;
-    background-color: #0d1420;
+    color: var(--theme-text-primary, #f4f4f5);
+    background-color: var(--theme-bg-base, #0d1420);
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238f9bb3' stroke-width='2.2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
     background-position: right 12px center;
@@ -359,26 +359,26 @@ watch(() => props.open, (open) => {
     cursor: pointer;
 }
 .settings-scroll select:hover:not(:disabled) {
-    border-color: rgba(255, 255, 255, 0.22);
-    background-color: #111a28;
+    border-color: rgba(var(--theme-foreground-rgb), 0.22);
+    background-color: var(--theme-bg-panel, #111a28);
 }
 .settings-scroll select:focus {
     border-color: var(--chat-accent);
     box-shadow: 0 0 0 3px rgba(100, 165, 255, .15);
 }
 .settings-scroll select option, .settings-scroll select optgroup {
-    background-color: #101722;
-    color: #f4f4f5;
+    background-color: var(--theme-bg-panel, #101722);
+    color: var(--theme-text-primary, #f4f4f5);
 }
 .routing-grid { display: grid; gap: 10px; margin-top: 12px; }
-.routing-card { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--chat-line); border-radius: 10px; background: linear-gradient(135deg, rgba(255,255,255,.025), rgba(255,255,255,.01)); }
+.routing-card { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--chat-line); border-radius: 10px; background: linear-gradient(135deg, rgba(var(--theme-foreground-rgb), 0.025), rgba(var(--theme-foreground-rgb), 0.01)); }
 .routing-card:hover { border-color: var(--chat-line-strong); }
 .routing-card-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .routing-card-heading strong { color: var(--chat-text); font-size: 12px; }
 .routing-card-heading small { color: var(--chat-text-faint); font-size: 10px; }
 .routing-card label { margin: 0; }
 .routing-card label > span { color: var(--chat-text-faint); font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
-.routing-card select { min-height: 38px; padding: 8px 32px 8px 10px; background-color: rgba(7, 11, 18, .85); }
+.routing-card select { min-height: 38px; padding: 8px 32px 8px 10px; background-color: rgba(var(--theme-rgb-deep, 7, 11, 18), 0.85); }
 .routing-note { margin: 12px 0 0; color: var(--chat-text-faint); font-size: 10px; line-height: 1.55; }
 .context-toggle { grid-template-columns: auto 1fr; align-items: center; gap: 10px !important; margin: 0 !important; cursor: pointer; }
 .context-toggle input { width: 15px; height: 15px; accent-color: var(--chat-accent); }
@@ -399,16 +399,16 @@ watch(() => props.open, (open) => {
 .mcp-connection-main > div { display: grid; min-width: 0; gap: 3px; }
 .mcp-connection-main strong { overflow: hidden; color: var(--chat-text); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .mcp-connection-main small { color: var(--chat-text-faint); font-size: 10px; }
-.mcp-status-dot { width: 7px; height: 7px; margin-top: 4px; flex: 0 0 auto; border-radius: 50%; background: #6f7785; }
+.mcp-status-dot { width: 7px; height: 7px; margin-top: 4px; flex: 0 0 auto; border-radius: 50%; background: var(--theme-bg-muted, #6f7785); }
 .mcp-status-dot.ready { background: #61c096; box-shadow: 0 0 0 3px rgba(97,192,150,.12); }
 .mcp-status-dot.testing { background: var(--chat-accent); animation: mcp-pulse 1.05s ease-in-out infinite; }
 .mcp-status-dot.error { background: #df7b80; }
-.mcp-last-err { color:#df7b80; font-size:10px; }
-.mcp-refresh,.manage-mcp { border: 1px solid var(--chat-line-strong); border-radius: 7px; color: var(--chat-text-soft); cursor: pointer; background: #0d1420; font: 600 10px inherit; }
+.mcp-last-err { color:var(--theme-status-danger, #df7b80); font-size:10px; }
+.mcp-refresh,.manage-mcp { border: 1px solid var(--chat-line-strong); border-radius: 7px; color: var(--chat-text-soft); cursor: pointer; background: var(--theme-bg-base, #0d1420); font: 600 10px inherit; }
 .mcp-refresh { align-self: start; padding: 6px 7px; }
 .mcp-refresh:hover:not(:disabled),.manage-mcp:hover { border-color: var(--chat-accent); color: var(--chat-text); background: var(--chat-hover); }
 .mcp-refresh:disabled { cursor: wait; opacity: .65; }
-.mcp-error { grid-column: 1 / -1; margin: 0; color: #df8b91; font-size: 10px; line-height: 1.45; word-break: break-word; }
+.mcp-error { grid-column: 1 / -1; margin: 0; color: var(--theme-status-danger, #df8b91); font-size: 10px; line-height: 1.45; word-break: break-word; }
 .mcp-empty { padding: 9px; border: 1px dashed var(--chat-line-strong); border-radius: 8px; color: var(--chat-text-faint); font-size: 11px; }
 .manage-mcp { width: 100%; padding: 8px; }
 @keyframes mcp-pulse { 50% { opacity: .35; transform: scale(.82); } }
@@ -423,8 +423,8 @@ watch(() => props.open, (open) => {
     padding: 7px 10px;
     border: 1px solid var(--chat-line-strong);
     border-radius: 7px;
-    background: #0d1420;
-    color: #f4f4f5;
+    background: var(--theme-bg-base, #0d1420);
+    color: var(--theme-text-primary, #f4f4f5);
     font: 600 13px inherit;
     text-align: center;
     outline: none;
@@ -462,7 +462,7 @@ watch(() => props.open, (open) => {
     margin: 4px 0 0;
     padding: 8px 10px;
     border-radius: 7px;
-    background: rgba(255, 255, 255, 0.02);
+    background: rgba(var(--theme-foreground-rgb), 0.02);
     border: 1px solid var(--chat-line);
     color: var(--chat-text-faint);
     font-size: 10.5px;
@@ -485,20 +485,20 @@ watch(() => props.open, (open) => {
     gap: 12px;
     padding: 10px 12px;
     border-radius: 10px;
-    background: #181822;
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: var(--theme-bg-panel, #181822);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
     transition: all 0.18s ease;
 }
 
 .role-card-item:hover {
-    border-color: rgba(255, 255, 255, 0.18);
-    background: #1d1d2b;
+    border-color: rgba(var(--theme-foreground-rgb), 0.18);
+    background: var(--theme-bg-raised, #1d1d2b);
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
 }
 
 .role-card-item.disabled {
     opacity: 0.5;
-    background: rgba(255, 255, 255, 0.02);
+    background: rgba(var(--theme-foreground-rgb), 0.02);
 }
 
 .role-card-main {
@@ -510,14 +510,14 @@ watch(() => props.open, (open) => {
 
 .role-card-main strong {
     font-size: 12px;
-    color: #f4f4f5;
+    color: var(--theme-text-primary, #f4f4f5);
     display: inline-flex;
     align-items: center;
     gap: 6px;
 }
 
 .role-card-main strong small {
-    color: #38bdf8;
+    color: var(--theme-status-info, #38bdf8);
     background: rgba(56, 189, 248, 0.12);
     padding: 1px 5px;
     border-radius: 4px;
@@ -526,14 +526,14 @@ watch(() => props.open, (open) => {
 }
 
 .role-card-main small {
-    color: #a1a1aa;
+    color: var(--theme-text-secondary, #a1a1aa);
     font-size: 10.5px;
 }
 
 .role-card-main p {
     margin: 2px 0 0;
     font-size: 11px;
-    color: #71717a;
+    color: var(--theme-text-muted, #71717a);
     line-height: 1.45;
 }
 
@@ -549,21 +549,21 @@ watch(() => props.open, (open) => {
     font-weight: 600;
     padding: 4px 10px;
     border-radius: 6px;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    background: #20202c;
-    color: #e4e4e7;
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.1);
+    background: var(--theme-bg-raised, #20202c);
+    color: var(--theme-text-primary, #e4e4e7);
     cursor: pointer;
     transition: all 0.15s ease;
 }
 
 .role-card-actions button:hover {
-    border-color: rgba(255, 255, 255, 0.22);
-    background: #282838;
-    color: #f4f4f5;
+    border-color: rgba(var(--theme-foreground-rgb), 0.22);
+    background: var(--theme-bg-raised, #282838);
+    color: var(--theme-text-primary, #f4f4f5);
 }
 
 .role-card-actions button.danger {
-    color: #f87171;
+    color: var(--theme-status-danger, #f87171);
     background: rgba(239, 68, 68, 0.1);
     border-color: rgba(239, 68, 68, 0.25);
 }
@@ -579,8 +579,8 @@ watch(() => props.open, (open) => {
     gap: 10px;
     padding: 14px;
     border-radius: 10px;
-    background: #14141d;
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: var(--theme-bg-base, #14141d);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.1);
     margin-top: 8px;
 }
 
@@ -591,22 +591,22 @@ watch(() => props.open, (open) => {
     gap: 4px;
     font-size: 11px;
     font-weight: 600;
-    color: #d4d4d8;
+    color: var(--theme-text-primary, #d4d4d8);
 }
 
 .role-field-label {
     font-size: 11px;
     font-weight: 600;
-    color: #d4d4d8;
+    color: var(--theme-text-primary, #d4d4d8);
 }
 
 .role-form input,
 .role-form textarea,
 .role-form select {
     border-radius: 7px;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    background: #1c1c28;
-    color: #f4f4f5;
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.12);
+    background: var(--theme-bg-panel, #1c1c28);
+    color: var(--theme-text-primary, #f4f4f5);
     padding: 7px 10px;
     font-size: 11.5px;
     outline: none;
@@ -625,22 +625,22 @@ watch(() => props.open, (open) => {
 }
 
 .role-form select option {
-    background-color: #161622;
-    color: #f4f4f5;
+    background-color: var(--theme-bg-panel, #161622);
+    color: var(--theme-text-primary, #f4f4f5);
 }
 
 .role-form input:hover,
 .role-form textarea:hover,
 .role-form select:hover {
-    border-color: rgba(255, 255, 255, 0.22);
-    background: #20202e;
+    border-color: rgba(var(--theme-foreground-rgb), 0.22);
+    background: var(--theme-bg-raised, #20202e);
 }
 
 .role-form input:focus,
 .role-form textarea:focus,
 .role-form select:focus {
     border-color: #38bdf8;
-    background: #222232;
+    background: var(--theme-bg-raised, #222232);
     box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.15);
 }
 

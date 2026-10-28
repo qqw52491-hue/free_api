@@ -2,6 +2,10 @@ import { createApp } from 'vue'
 import { createRouter, createWebHistory } from 'vue-router'
 import App from './App.vue'
 import './style.css'
+import './themes.css'
+import { initializeTheme } from './composables/useTheme'
+
+initializeTheme()
 
 const AgentView = () => import('./views/AgentView.vue')
 const PluginView = () => import('./views/PluginView.vue')

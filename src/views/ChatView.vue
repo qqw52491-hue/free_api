@@ -589,7 +589,7 @@ watch(userInput, () => { nextTick(() => { const el = inputRef.value; if (el) { e
 .chat-input { flex: 1; background: transparent; border: none; outline: none; color: var(--text-1); font-family: var(--font); font-size: 14px; padding: 8px 10px; resize: none; max-height: 150px; line-height: 1.5; }
 .chat-input::placeholder { color: var(--text-4); }
 .chat-input:disabled { opacity: 0.5; }
-.btn-send { width: 38px; height: 38px; border-radius: 10px; background: linear-gradient(135deg, var(--accent), var(--accent-dark)); border: none; color: #fff; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: all 0.18s; box-shadow: 0 2px 12px var(--accent-glow); }
+.btn-send { width: 38px; height: 38px; border-radius: 10px; background: linear-gradient(135deg, var(--accent), var(--accent-dark)); border: none; color: var(--on-accent); cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: all 0.18s; box-shadow: 0 2px 12px var(--accent-glow); }
 .btn-send:hover:not(:disabled) { transform: scale(1.06); box-shadow: 0 4px 20px var(--accent-glow); }
 .btn-send:disabled { opacity: 0.35; cursor: not-allowed; }
 .btn-send.btn-stop {
@@ -770,7 +770,7 @@ watch(userInput, () => { nextTick(() => { const el = inputRef.value; if (el) { e
   transition: all 0.2s ease;
 }
 .load-more-history-btn:hover {
-  color: #fff;
+  color: var(--on-accent);
   background: var(--accent, #6c63ff);
   border-color: var(--accent, #6c63ff);
 }

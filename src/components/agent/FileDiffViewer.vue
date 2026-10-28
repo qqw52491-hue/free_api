@@ -703,8 +703,8 @@ async function handleCopyCardDiff(file: FileDiffPayload, idx: number) {
     flex-direction: column;
     height: 100%;
     width: 100%;
-    background: #141416;
-    color: #e4e4e7;
+    background: var(--theme-bg-base, #141416);
+    color: var(--theme-text-primary, #e4e4e7);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     overflow: hidden;
     box-sizing: border-box;
@@ -716,8 +716,8 @@ async function handleCopyCardDiff(file: FileDiffPayload, idx: number) {
     align-items: center;
     justify-content: space-between;
     height: 38px;
-    background: #18181b;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    background: var(--theme-bg-panel, #18181b);
+    border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
     padding: 0 10px;
     flex-shrink: 0;
     user-select: none;
@@ -748,7 +748,7 @@ async function handleCopyCardDiff(file: FileDiffPayload, idx: number) {
     border-radius: 5px;
     border: 1px solid transparent;
     font-size: 12px;
-    color: #a1a1aa;
+    color: var(--theme-text-secondary, #a1a1aa);
     font-weight: 500;
     white-space: nowrap;
     max-width: 220px;
@@ -758,14 +758,14 @@ async function handleCopyCardDiff(file: FileDiffPayload, idx: number) {
 }
 
 .diff-tab-btn:hover {
-    background: rgba(255, 255, 255, 0.05);
-    color: #e4e4e7;
+    background: rgba(var(--theme-foreground-rgb), 0.05);
+    color: var(--theme-text-primary, #e4e4e7);
 }
 
 .diff-tab-btn.is-active {
-    background: #27272a;
-    border-color: rgba(255, 255, 255, 0.12);
-    color: #f4f4f5;
+    background: var(--theme-bg-raised, #27272a);
+    border-color: rgba(var(--theme-foreground-rgb), 0.12);
+    color: var(--theme-text-primary, #f4f4f5);
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
 }
 
@@ -794,12 +794,12 @@ async function handleCopyCardDiff(file: FileDiffPayload, idx: number) {
 }
 
 .stat-add {
-    color: #22c55e !important;
+    color: var(--theme-status-success, #22c55e) !important;
     font-weight: 600;
 }
 
 .stat-del {
-    color: #ef4444 !important;
+    color: var(--theme-status-danger, #ef4444) !important;
     font-weight: 600;
 }
 
@@ -817,17 +817,17 @@ async function handleCopyCardDiff(file: FileDiffPayload, idx: number) {
     height: 24px;
     padding: 0 8px;
     border-radius: 5px;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    color: #a1a1aa;
+    background: rgba(var(--theme-foreground-rgb), 0.05);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
+    color: var(--theme-text-secondary, #a1a1aa);
     font-size: 11px;
     cursor: pointer;
     transition: all 0.15s ease;
 }
 
 .btn-diff-action:hover {
-    background: rgba(255, 255, 255, 0.09);
-    color: #e4e4e7;
+    background: rgba(var(--theme-foreground-rgb), 0.09);
+    color: var(--theme-text-primary, #e4e4e7);
 }
 
 .btn-diff-action.btn-close {
@@ -851,14 +851,14 @@ async function handleCopyCardDiff(file: FileDiffPayload, idx: number) {
 }
 
 .diff-all-files-scroll::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.18);
+    background: rgba(var(--theme-foreground-rgb), 0.18);
     border-radius: 4px;
 }
 
 /* 单个文件卡片 */
 .diff-file-card {
-    background: #18181b;
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: var(--theme-bg-panel, #18181b);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
     border-radius: 8px;
     overflow: hidden;
     box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
@@ -869,15 +869,15 @@ async function handleCopyCardDiff(file: FileDiffPayload, idx: number) {
     align-items: center;
     justify-content: space-between;
     padding: 7px 12px;
-    background: rgba(255, 255, 255, 0.025);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    background: rgba(var(--theme-foreground-rgb), 0.025);
+    border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.06);
     user-select: none;
     cursor: pointer;
     transition: background 0.12s ease;
 }
 
 .diff-file-card-header:hover {
-    background: rgba(255, 255, 255, 0.04);
+    background: rgba(var(--theme-foreground-rgb), 0.04);
 }
 
 .card-header-left {
@@ -891,7 +891,7 @@ async function handleCopyCardDiff(file: FileDiffPayload, idx: number) {
     background: transparent;
     border: none;
     padding: 0;
-    color: #71717a;
+    color: var(--theme-text-muted, #71717a);
     display: inline-flex;
     align-items: center;
     cursor: pointer;
@@ -913,7 +913,7 @@ async function handleCopyCardDiff(file: FileDiffPayload, idx: number) {
 .card-dir {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 12px;
-    color: #71717a;
+    color: var(--theme-text-muted, #71717a);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -922,7 +922,7 @@ async function handleCopyCardDiff(file: FileDiffPayload, idx: number) {
 .card-filename {
     font-size: 13px;
     font-weight: 500;
-    color: #f4f4f5;
+    color: var(--theme-text-primary, #f4f4f5);
     white-space: nowrap;
 }
 
@@ -940,7 +940,7 @@ async function handleCopyCardDiff(file: FileDiffPayload, idx: number) {
     padding: 1px 5px;
     border-radius: 3px;
     background: rgba(239, 68, 68, 0.18);
-    color: #fca5a5;
+    color: var(--theme-status-danger, #fca5a5);
     border: 1px solid rgba(239, 68, 68, 0.3);
 }
 
@@ -952,19 +952,19 @@ async function handleCopyCardDiff(file: FileDiffPayload, idx: number) {
 }
 
 .btn-card-action {
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(var(--theme-foreground-rgb), 0.04);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
     border-radius: 4px;
     padding: 2px 7px;
     font-size: 11px;
-    color: #a1a1aa;
+    color: var(--theme-text-secondary, #a1a1aa);
     cursor: pointer;
     transition: all 0.12s ease;
 }
 
 .btn-card-action:hover {
-    background: rgba(255, 255, 255, 0.09);
-    color: #f1f5f9;
+    background: rgba(var(--theme-foreground-rgb), 0.09);
+    color: var(--theme-text-primary, #f1f5f9);
 }
 
 .card-diff-content {
@@ -979,10 +979,10 @@ async function handleCopyCardDiff(file: FileDiffPayload, idx: number) {
     justify-content: space-between;
     height: 28px;
     padding: 0 12px;
-    background: #141416;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    background: var(--theme-bg-base, #141416);
+    border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.05);
     font-size: 11px;
-    color: #71717a;
+    color: var(--theme-text-muted, #71717a);
     flex-shrink: 0;
 }
 
@@ -996,21 +996,21 @@ async function handleCopyCardDiff(file: FileDiffPayload, idx: number) {
 }
 
 .seg-text {
-    color: #71717a;
+    color: var(--theme-text-muted, #71717a);
 }
 
 .seg-text.is-last {
-    color: #e4e4e7;
+    color: var(--theme-text-primary, #e4e4e7);
     font-weight: 500;
 }
 
 .seg-divider {
-    color: #3f3f46;
+    color: var(--theme-text-dim, #3f3f46);
 }
 
 .diff-hunk-count {
     font-size: 11px;
-    color: #71717a;
+    color: var(--theme-text-muted, #71717a);
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
@@ -1018,7 +1018,7 @@ async function handleCopyCardDiff(file: FileDiffPayload, idx: number) {
     padding: 6px 14px;
     background: rgba(239, 68, 68, 0.12);
     border-bottom: 1px solid rgba(239, 68, 68, 0.25);
-    color: #fca5a5;
+    color: var(--theme-status-danger, #fca5a5);
     font-size: 12px;
     font-weight: 500;
     display: flex;
@@ -1034,7 +1034,7 @@ async function handleCopyCardDiff(file: FileDiffPayload, idx: number) {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 12px;
     line-height: 1.5;
-    background: #141416;
+    background: var(--theme-bg-base, #141416);
 }
 
 .diff-empty-state {
@@ -1042,7 +1042,7 @@ async function handleCopyCardDiff(file: FileDiffPayload, idx: number) {
     align-items: center;
     justify-content: center;
     padding: 36px 20px;
-    color: #71717a;
+    color: var(--theme-text-muted, #71717a);
     font-size: 12.5px;
 }
 
@@ -1066,10 +1066,10 @@ async function handleCopyCardDiff(file: FileDiffPayload, idx: number) {
     width: 38px;
     padding: 0 6px;
     text-align: right;
-    color: #52525b;
+    color: var(--theme-text-dim, #52525b);
     user-select: none;
     flex-shrink: 0;
-    border-right: 1px solid rgba(255, 255, 255, 0.05);
+    border-right: 1px solid rgba(var(--theme-foreground-rgb), 0.05);
 }
 
 .line-marker {
@@ -1093,29 +1093,29 @@ async function handleCopyCardDiff(file: FileDiffPayload, idx: number) {
 /* 增、删、普通行视觉着色 */
 .diff-line-add {
     background: rgba(34, 197, 94, 0.12);
-    color: #e4e4e7;
+    color: var(--theme-text-primary, #e4e4e7);
 }
 
 .diff-line-add .line-marker {
-    color: #22c55e;
+    color: var(--theme-status-success, #22c55e);
 }
 
 .diff-line-delete {
     background: rgba(239, 68, 68, 0.12);
-    color: #e4e4e7;
+    color: var(--theme-text-primary, #e4e4e7);
 }
 
 .diff-line-delete .line-marker {
-    color: #ef4444;
+    color: var(--theme-status-danger, #ef4444);
 }
 
 .diff-line-normal {
     background: transparent;
-    color: #d4d4d8;
+    color: var(--theme-text-primary, #d4d4d8);
 }
 
 .diff-line-empty {
-    background: rgba(255, 255, 255, 0.015);
+    background: rgba(var(--theme-foreground-rgb), 0.015);
 }
 
 /* 分栏布局 (Split View) */
@@ -1129,7 +1129,7 @@ async function handleCopyCardDiff(file: FileDiffPayload, idx: number) {
     flex: 1;
     overflow-x: auto;
     overflow-y: auto;
-    border-right: 1px solid rgba(255, 255, 255, 0.06);
+    border-right: 1px solid rgba(var(--theme-foreground-rgb), 0.06);
 }
 
 .split-column:last-child {
@@ -1140,11 +1140,11 @@ async function handleCopyCardDiff(file: FileDiffPayload, idx: number) {
     position: sticky;
     top: 0;
     z-index: 10;
-    background: #18181b;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    background: var(--theme-bg-panel, #18181b);
+    border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.06);
     padding: 3px 12px;
     font-size: 11px;
-    color: #71717a;
+    color: var(--theme-text-muted, #71717a);
     text-transform: uppercase;
     letter-spacing: 0.5px;
 }

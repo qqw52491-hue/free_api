@@ -223,10 +223,10 @@ async function handleCopy() {
 .image-preview-dialog {
     max-width: min(1000px, 92vw);
     max-height: 90vh;
-    background: #18181c;
-    border: 1px solid rgba(255, 255, 255, 0.16);
+    background: var(--theme-bg-panel, #18181c);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.16);
     border-radius: 12px;
-    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.9);
+    box-shadow: var(--theme-shadow, 0 24px 60px rgba(0, 0, 0, 0.9));
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -236,10 +236,10 @@ async function handleCopy() {
     width: min(1080px, 94vw);
     height: min(850px, 90vh);
     max-height: 92vh;
-    background: #18181c;
-    border: 1px solid rgba(255, 255, 255, 0.16);
+    background: var(--theme-bg-panel, #18181c);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.16);
     border-radius: 12px;
-    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.9);
+    box-shadow: var(--theme-shadow, 0 24px 60px rgba(0, 0, 0, 0.9));
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -250,14 +250,14 @@ async function handleCopy() {
     align-items: center;
     justify-content: space-between;
     padding: 12px 18px;
-    background: #1f1f24;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    background: var(--theme-bg-panel, #1f1f24);
+    border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
 }
 
 .dialog-title {
     font-size: 13.5px;
     font-weight: 600;
-    color: #f4f4f5;
+    color: var(--theme-text-primary, #f4f4f5);
 }
 
 .dialog-title-row {
@@ -274,11 +274,11 @@ async function handleCopy() {
     margin: 0;
     font-size: 13.5px;
     font-weight: 600;
-    color: #f4f4f5;
+    color: var(--theme-text-primary, #f4f4f5);
 }
 
 .dialog-file-meta small {
-    color: #71717a;
+    color: var(--theme-text-muted, #71717a);
     font-size: 11.5px;
 }
 
@@ -289,9 +289,9 @@ async function handleCopy() {
 }
 
 .btn-copy-doc {
-    background: rgba(255, 255, 255, 0.08);
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    color: #e4e4e7;
+    background: rgba(var(--theme-foreground-rgb), 0.08);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.15);
+    color: var(--theme-text-primary, #e4e4e7);
     font-size: 12px;
     padding: 5px 12px;
     border-radius: 6px;
@@ -300,14 +300,14 @@ async function handleCopy() {
 }
 
 .btn-copy-doc:hover {
-    background: rgba(255, 255, 255, 0.16);
-    color: #fff;
+    background: rgba(var(--theme-foreground-rgb), 0.16);
+    color: var(--theme-text-primary, #fff);
 }
 
 .btn-close-dialog {
     background: transparent;
     border: 0;
-    color: #a1a1aa;
+    color: var(--theme-text-secondary, #a1a1aa);
     font-size: 20px;
     cursor: pointer;
     padding: 0 4px;
@@ -315,7 +315,7 @@ async function handleCopy() {
 }
 
 .btn-close-dialog:hover {
-    color: #ffffff;
+    color: var(--theme-text-primary, #ffffff);
 }
 
 .dialog-body {
@@ -330,7 +330,7 @@ async function handleCopy() {
     max-height: calc(85vh - 70px);
     object-fit: contain;
     border-radius: 6px;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
+    box-shadow: var(--theme-shadow, 0 4px 20px rgba(0, 0, 0, 0.6));
     opacity: 0;
 }
 
@@ -341,7 +341,7 @@ async function handleCopy() {
 .doc-dialog-body {
     flex: 1;
     overflow-y: auto;
-    background: #ffffff;
+    background: var(--paper-bg);
     padding: 0;
     display: flex !important;
     flex-direction: column;
@@ -367,14 +367,14 @@ async function handleCopy() {
     border: none !important;
     border-radius: 0 !important;
     box-shadow: none !important;
-    background: #ffffff !important;
+    background: var(--paper-bg) !important;
 }
 
 .doc-dialog-body :deep(.card-body) {
     flex: 1;
     height: 100% !important;
     min-height: 100% !important;
-    background: #ffffff !important;
+    background: var(--paper-bg) !important;
 }
 
 .doc-dialog-body :deep(.preview-container),
@@ -384,14 +384,14 @@ async function handleCopy() {
     min-height: 100% !important;
     border: none !important;
     border-radius: 0 !important;
-    background: #ffffff !important;
+    background: var(--paper-bg) !important;
     flex: 1;
 }
 
 .doc-markdown-content {
     flex: 1;
-    color: #18181b;
-    background: #ffffff;
+    color: var(--paper-text);
+    background: var(--paper-bg);
     font-size: 13.5px;
     line-height: 1.7;
     padding: 28px 36px;
@@ -401,12 +401,12 @@ async function handleCopy() {
 .doc-markdown-content :deep(h2),
 .doc-markdown-content :deep(h3),
 .doc-markdown-content :deep(strong) {
-    color: #09090b;
+    color: var(--paper-heading);
 }
 
 .doc-markdown-content :deep(p),
 .doc-markdown-content :deep(li) {
-    color: #27272a;
+    color: var(--paper-body);
 }
 
 .doc-raw-preview {
@@ -416,15 +416,15 @@ async function handleCopy() {
     word-break: break-word;
     font-family: monospace;
     font-size: 12px;
-    color: #d4d4d8;
-    background: #0d0d10;
+    color: var(--theme-text-primary, #d4d4d8);
+    background: var(--theme-bg-deep, #0d0d10);
     padding: 20px;
     border-radius: 0;
     overflow: auto;
 }
 
 .doc-empty-hint {
-    color: #71717a;
+    color: var(--theme-text-muted, #71717a);
     font-size: 13px;
     text-align: center;
     padding: 40px 0;
@@ -435,8 +435,8 @@ async function handleCopy() {
     width: 100%;
     height: 100%;
     min-height: 420px;
-    background: #0d0d10;
-    color: #e4e4e7;
+    background: var(--theme-bg-deep, #0d0d10);
+    color: var(--theme-text-primary, #e4e4e7);
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
     font-size: 13px;
     line-height: 1.65;
@@ -457,45 +457,45 @@ async function handleCopy() {
     font-size: 12px;
     font-weight: 500;
     border-radius: 6px;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    background: rgba(255, 255, 255, 0.06);
-    color: #d4d4d8;
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.12);
+    background: rgba(var(--theme-foreground-rgb), 0.06);
+    color: var(--theme-text-primary, #d4d4d8);
     cursor: pointer;
     transition: all 0.15s;
 }
 
 .btn-action:hover {
-    background: rgba(255, 255, 255, 0.12);
-    color: #ffffff;
+    background: rgba(var(--theme-foreground-rgb), 0.12);
+    color: var(--theme-text-primary, #ffffff);
 }
 
 .btn-action.btn-unpack {
     background: rgba(59, 130, 246, 0.15);
     border-color: rgba(59, 130, 246, 0.35);
-    color: #93c5fd;
+    color: var(--theme-status-info, #93c5fd);
 }
 
 .btn-action.btn-unpack:hover {
     background: rgba(59, 130, 246, 0.28);
-    color: #bfdbfe;
+    color: var(--theme-status-info, #bfdbfe);
     transform: translateY(-1px);
 }
 
 .btn-action.btn-save {
     background: rgba(34, 197, 94, 0.18);
     border-color: rgba(34, 197, 94, 0.4);
-    color: #86efac;
+    color: var(--theme-status-success, #86efac);
 }
 
 .btn-action.btn-save:hover {
     background: rgba(34, 197, 94, 0.3);
-    color: #bbf7d0;
+    color: var(--theme-status-success, #bbf7d0);
 }
 
 .btn-action.btn-edit-toggle.active {
-    background: rgba(255, 255, 255, 0.18);
-    color: #ffffff;
-    border-color: rgba(255, 255, 255, 0.3);
+    background: rgba(var(--theme-foreground-rgb), 0.18);
+    color: var(--theme-text-primary, #ffffff);
+    border-color: rgba(var(--theme-foreground-rgb), 0.3);
 }
 
 /* 渐变过渡动画 */

@@ -304,9 +304,19 @@ function getBlockHtml(block: ContentBlock, idx: number): string {
 
 .markdown-segment {
   width: 100%;
-  color: #e4e4e7;
-  line-height: 1.65;
-  font-size: 13.5px;
+  color: var(--theme-md-body, #cccccc);
+  line-height: 1.7;
+  font-size: 14px;
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  letter-spacing: 0.004em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.markdown-segment :deep(strong),
+.markdown-segment :deep(b) {
+  color: var(--theme-text-primary, #f0f0f2);
+  font-weight: 600;
 }
 
 /* 🌟 类似 ChatGPT 的自然平滑流式渐入微动效（极快但有丝滑渐显质感） */
@@ -359,81 +369,114 @@ function getBlockHtml(block: ContentBlock, idx: number): string {
   will-change: opacity, filter;
 }
 
-/* 标题样式 */
+/* 标题样式：拉开上下段落呼吸感与层级区分 */
 .markdown-segment :deep(h1),
 .markdown-segment :deep(h2),
 .markdown-segment :deep(h3),
-.markdown-segment :deep(h4) {
-  margin: 12px 0 6px;
-  color: #f4f4f5;
-  font-weight: 650;
+.markdown-segment :deep(h4),
+.markdown-segment :deep(h5),
+.markdown-segment :deep(h6) {
+  margin: 22px 0 10px;
+  color: var(--theme-text-primary, #ededf0);
+  font-weight: 600;
   line-height: 1.4;
+  letter-spacing: -0.012em;
 }
-.markdown-segment :deep(h1) { font-size: 16px; }
-.markdown-segment :deep(h2) { font-size: 15px; }
-.markdown-segment :deep(h3) { font-size: 14px; }
-.markdown-segment :deep(h4) { font-size: 13px; }
+.markdown-segment :deep(h1:first-child),
+.markdown-segment :deep(h2:first-child),
+.markdown-segment :deep(h3:first-child),
+.markdown-segment :deep(h4:first-child) {
+  margin-top: 2px;
+}
+.markdown-segment :deep(h1) { font-size: 19px; font-weight: 650; }
+.markdown-segment :deep(h2) { font-size: 17px; font-weight: 620; }
+.markdown-segment :deep(h3) { font-size: 15.5px; font-weight: 600; }
+.markdown-segment :deep(h4) { font-size: 14px; font-weight: 600; }
 
 /* 分割线 (弱化水平分割线) */
 .markdown-segment :deep(hr) {
   border: none;
   height: 1px;
-  background: rgba(255, 255, 255, 0.08);
-  margin: 14px 0;
+  background: rgba(var(--theme-foreground-rgb), 0.08);
+  margin: 16px 0;
 }
 
-/* 段落与列表 */
+/* 段落与列表（支持多级嵌套圆点与舒适行距） */
 .markdown-segment :deep(p) {
-  margin: 4px 0 8px;
+  margin: 0 0 12px;
+  line-height: 1.7;
+}
+.markdown-segment :deep(p:last-child) {
+  margin-bottom: 0;
 }
 .markdown-segment :deep(ul),
 .markdown-segment :deep(ol) {
-  margin: 4px 0 8px;
-  padding-left: 20px;
+  margin: 8px 0 14px;
+  padding-left: 22px;
+}
+.markdown-segment :deep(ul) {
+  list-style-type: disc;
 }
 .markdown-segment :deep(li) {
-  margin: 2px 0;
+  margin: 5px 0;
+  line-height: 1.66;
+  padding-left: 2px;
+}
+.markdown-segment :deep(li::marker) {
+  color: var(--theme-text-muted, #7c7f87);
+}
+.markdown-segment :deep(li > ul),
+.markdown-segment :deep(li > ol) {
+  margin: 6px 0 8px;
+  padding-left: 24px;
+}
+.markdown-segment :deep(li > ul) {
+  list-style-type: disc;
+}
+.markdown-segment :deep(li > ul > li),
+.markdown-segment :deep(li > ol > li) {
+  margin: 4px 0;
 }
 
 /* 引用块 */
 .markdown-segment :deep(blockquote) {
-  margin: 8px 0;
+  margin: 10px 0;
   padding: 6px 14px;
   border-left: 3px solid #fbbf24;
   background: rgba(251, 191, 36, 0.05);
   border-radius: 0 6px 6px 0;
-  color: #a1a1aa;
+  color: var(--theme-text-secondary, #a1a1aa);
 }
 
 /* 表格 (Obsidian 曜石暗色网格与悬停高亮) */
 .markdown-segment :deep(table) {
   width: 100%;
-  margin: 10px 0 14px;
+  margin: 12px 0 16px;
   border-collapse: separate;
   border-spacing: 0;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.12);
   border-radius: 8px;
   overflow: hidden;
-  font-size: 12.5px;
+  font-size: 13px;
 }
 .markdown-segment :deep(th) {
   padding: 8px 12px;
-  background: #1f2026;
-  color: #f4f4f5;
+  background: var(--theme-bg-raised, #1f2026);
+  color: var(--theme-text-primary, #f4f4f5);
   font-weight: 600;
   text-align: left;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.1);
+  border-right: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
 }
 .markdown-segment :deep(th:last-child) {
   border-right: none;
 }
 .markdown-segment :deep(td) {
   padding: 7px 12px;
-  background: #161619;
-  color: #d4d4d8;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  background: var(--theme-bg-base, #161619);
+  color: var(--theme-md-body, #d4d4d8);
+  border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.06);
+  border-right: 1px solid rgba(var(--theme-foreground-rgb), 0.06);
 }
 .markdown-segment :deep(td:last-child) {
   border-right: none;
@@ -442,15 +485,53 @@ function getBlockHtml(block: ContentBlock, idx: number): string {
   border-bottom: none;
 }
 .markdown-segment :deep(tr:hover td) {
-  background: #1e1e24;
+  background: var(--theme-bg-panel, #1e1e24);
 }
 
-/* 行内代码 */
+/* 行内代码（暖琥珀金微胶囊） */
 .markdown-segment :deep(code:not(pre code)) {
-  padding: 2px 5px;
+  padding: 1.5px 6px;
+  margin: 0 1px;
+  border-radius: 5px;
+  color: var(--theme-md-code-fg, #e2b86b);
+  background: var(--theme-md-code-bg, rgba(226, 184, 107, 0.085));
+  border: 1px solid var(--theme-md-code-border, rgba(226, 184, 107, 0.12));
+  font-family: "JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12.5px;
+  font-weight: 450;
+  letter-spacing: -0.01em;
+}
+
+/* 行内文件引用（语言图标 + 银白半粗体路径） */
+.markdown-segment :deep(.markdown-file-ref),
+.markdown-segment :deep(a.markdown-file-ref) {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 4px;
+  margin: 0 1px;
   border-radius: 4px;
-  color: #e5c07b;
-  background: #1e1e23;
-  font: 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  color: var(--theme-text-primary, #e2e4e9);
+  background: transparent;
+  border: none !important;
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.45;
+  letter-spacing: -0.005em;
+  text-decoration: none !important;
+  vertical-align: baseline;
+  transition: background 0.14s ease, color 0.14s ease;
+}
+.markdown-segment :deep(a.markdown-file-ref:hover),
+.markdown-segment :deep(.markdown-file-ref:hover) {
+  color: var(--theme-text-primary, #ffffff);
+  background: rgba(var(--theme-foreground-rgb), 0.07);
+  text-decoration: none !important;
+}
+.markdown-segment :deep(.md-file-icon) {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
 }
 </style>

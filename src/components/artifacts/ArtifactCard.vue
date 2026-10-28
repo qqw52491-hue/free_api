@@ -296,8 +296,8 @@ async function handleDownload() {
   display: flex;
   align-items: center;
   gap: 12px;
-  background: rgba(24, 24, 28, 0.75);
-  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(var(--theme-rgb-panel, 24, 24, 28), 0.75);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.09);
   border-radius: 10px;
   padding: 10px 14px;
   transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
@@ -308,9 +308,9 @@ async function handleDownload() {
 }
 
 .artifact-card:hover {
-  background: rgba(30, 30, 36, 0.9);
-  border-color: rgba(255, 255, 255, 0.18);
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+  background: rgba(var(--theme-rgb-panel, 30, 30, 36), 0.9);
+  border-color: rgba(var(--theme-foreground-rgb), 0.18);
+  box-shadow: var(--theme-shadow, 0 4px 20px rgba(0, 0, 0, 0.35));
   transform: translateY(-1px);
 }
 
@@ -323,8 +323,8 @@ async function handleDownload() {
   width: 42px;
   height: 42px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(var(--theme-foreground-rgb), 0.05);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
   flex-shrink: 0;
 }
 
@@ -364,7 +364,7 @@ async function handleDownload() {
 .artifact-name {
   font-size: 13px;
   font-weight: 600;
-  color: #f4f4f5;
+  color: var(--theme-text-primary, #f4f4f5);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -394,23 +394,23 @@ async function handleDownload() {
 
 .kind-tag {
   background: rgba(99, 102, 241, 0.12);
-  color: #a5b4fc;
+  color: var(--theme-status-accent, #a5b4fc);
   border: 1px solid rgba(99, 102, 241, 0.2);
 }
 
 .size-tag {
-  background: rgba(255, 255, 255, 0.06);
-  color: #a1a1aa;
+  background: rgba(var(--theme-foreground-rgb), 0.06);
+  color: var(--theme-text-secondary, #a1a1aa);
 }
 
 .path-tag {
   background: rgba(16, 185, 129, 0.12);
-  color: #6ee7b7;
+  color: var(--theme-status-success, #6ee7b7);
   border: 1px solid rgba(16, 185, 129, 0.2);
 }
 
 .meta-desc {
-  color: #71717a;
+  color: var(--theme-text-muted, #71717a);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -436,9 +436,9 @@ async function handleDownload() {
   font-weight: 500 !important;
   cursor: pointer;
   transition: all 0.15s ease;
-  border: 1px solid rgba(255, 255, 255, 0.1) !important;
-  background: rgba(255, 255, 255, 0.04) !important;
-  color: #e4e4e7 !important;
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.1) !important;
+  background: rgba(var(--theme-foreground-rgb), 0.04) !important;
+  color: var(--theme-text-primary, #e4e4e7) !important;
 }
 
 .artifact-action-btn svg {
@@ -450,24 +450,24 @@ async function handleDownload() {
 }
 
 .artifact-action-btn:hover {
-  background: rgba(255, 255, 255, 0.1) !important;
-  border-color: rgba(255, 255, 255, 0.25) !important;
-  color: #ffffff !important;
+  background: rgba(var(--theme-foreground-rgb), 0.1) !important;
+  border-color: rgba(var(--theme-foreground-rgb), 0.25) !important;
+  color: var(--theme-text-primary, #ffffff) !important;
 }
 
 .btn-preview {
   background: rgba(99, 102, 241, 0.16) !important;
   border-color: rgba(99, 102, 241, 0.35) !important;
-  color: #c7d2fe !important;
+  color: var(--theme-status-accent, #c7d2fe) !important;
 }
 
 .btn-preview:hover {
   background: rgba(99, 102, 241, 0.3) !important;
   border-color: rgba(99, 102, 241, 0.6) !important;
-  color: #ffffff !important;
+  color: var(--theme-text-primary, #ffffff) !important;
 }
 
 .text-green {
-  color: #34d399 !important;
+  color: var(--theme-status-success, #34d399) !important;
 }
 </style>

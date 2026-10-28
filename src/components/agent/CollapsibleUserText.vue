@@ -78,7 +78,7 @@ function toggle() {
 
 .user-text-content {
     margin: 0;
-    color: #f4f4f5;
+    color: var(--theme-text-primary, #f4f4f5);
     font-size: 13px;
     line-height: 1.6;
     white-space: pre-wrap;
@@ -106,7 +106,7 @@ function toggle() {
     right: 0;
     bottom: 0;
     height: 3.2em;
-    background: linear-gradient(to bottom, rgba(39, 39, 42, 0), #27272a);
+    background: linear-gradient(to bottom, rgba(var(--theme-rgb-raised, 39, 39, 42), 0), var(--theme-bg-raised, #27272a));
     pointer-events: none;
 }
 
@@ -117,7 +117,7 @@ function toggle() {
     justify-content: center;
     margin-top: 4px;
     padding: 2px 0;
-    color: #71717a;
+    color: var(--theme-text-muted, #71717a);
     cursor: pointer;
     border-radius: 6px;
     transition: color 0.15s ease, background 0.15s ease;
@@ -127,8 +127,8 @@ function toggle() {
 
 .user-text-expandbar:hover,
 .user-text-expandbar:focus-visible {
-    color: #a1a1aa;
-    background: rgba(255, 255, 255, 0.06);
+    color: var(--theme-text-secondary, #a1a1aa);
+    background: rgba(var(--theme-foreground-rgb), 0.06);
 }
 
 .user-text-expandbar .chev {
@@ -141,7 +141,7 @@ function toggle() {
 
 .user-text-trunc-note {
     margin: 4px 0 0;
-    color: #a1a1aa;
+    color: var(--theme-text-secondary, #a1a1aa);
     font-size: 11px;
     font-style: italic;
 }

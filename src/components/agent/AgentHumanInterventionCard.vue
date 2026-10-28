@@ -526,8 +526,8 @@ function handleCustomHtmlCancel(reason: string) {
   padding: 16px 18px;
   border: 1px solid rgba(251, 191, 36, 0.3);
   border-radius: 12px;
-  background: #18181b;
-  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+  background: var(--theme-bg-panel, #18181b);
+  box-shadow: var(--theme-shadow, 0 4px 24px rgba(0, 0, 0, 0.4));
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
 
@@ -546,7 +546,7 @@ function handleCustomHtmlCancel(reason: string) {
   border-radius: 99px;
   background: rgba(251, 191, 36, 0.12);
   border: 1px solid rgba(251, 191, 36, 0.25);
-  color: #fbbf24;
+  color: var(--theme-status-warning, #fbbf24);
   font-size: 11px;
   font-weight: 600;
 }
@@ -560,13 +560,13 @@ function handleCustomHtmlCancel(reason: string) {
 }
 
 .card-prompt-type {
-  color: #8e8e93;
+  color: var(--theme-text-secondary, #8e8e93);
   font-size: 11px;
 }
 
 .intervention-title {
   margin: 0 0 6px 0;
-  color: #f4f4f5;
+  color: var(--theme-text-primary, #f4f4f5);
   font-size: 14.5px;
   font-weight: 650;
   line-height: 1.4;
@@ -574,7 +574,7 @@ function handleCustomHtmlCancel(reason: string) {
 
 .intervention-title-md {
   margin: 0 0 10px 0;
-  color: #f4f4f5;
+  color: var(--theme-text-primary, #f4f4f5);
   font-size: 13.5px;
   line-height: 1.6;
 }
@@ -584,7 +584,7 @@ function handleCustomHtmlCancel(reason: string) {
 .intervention-title-md :deep(h3),
 .intervention-title-md :deep(h4) {
   margin: 8px 0 4px 0;
-  color: #f4f4f5;
+  color: var(--theme-text-primary, #f4f4f5);
   font-size: 14px;
   font-weight: 650;
 }
@@ -619,9 +619,9 @@ function handleCustomHtmlCancel(reason: string) {
   padding: 3px 8px;
   font-size: 11.5px;
   font-weight: 500;
-  color: #a1a1aa;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--theme-text-secondary, #a1a1aa);
+  background: rgba(var(--theme-foreground-rgb), 0.06);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.12);
   border-radius: 6px;
   cursor: pointer;
   transition: all 0.2s ease;
@@ -630,13 +630,13 @@ function handleCustomHtmlCancel(reason: string) {
 }
 
 .copy-plan-btn:hover {
-  color: #e4e4e7;
-  background: rgba(255, 255, 255, 0.12);
-  border-color: rgba(255, 255, 255, 0.2);
+  color: var(--theme-text-primary, #e4e4e7);
+  background: rgba(var(--theme-foreground-rgb), 0.12);
+  border-color: rgba(var(--theme-foreground-rgb), 0.2);
 }
 
 .copy-plan-btn.copied {
-  color: #34d399;
+  color: var(--theme-status-success, #34d399);
   background: rgba(52, 211, 153, 0.12);
   border-color: rgba(52, 211, 153, 0.3);
 }
@@ -652,7 +652,7 @@ function handleCustomHtmlCancel(reason: string) {
 
 .intervention-desc {
   margin: 0 0 12px 0;
-  color: #a1a1aa;
+  color: var(--theme-text-secondary, #a1a1aa);
   font-size: 12.5px;
   line-height: 1.5;
 }
@@ -692,9 +692,9 @@ function handleCustomHtmlCancel(reason: string) {
   gap: 6px;
   padding: 10px 16px;
   border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: #1f1f23;
-  color: #a1a1aa;
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.1);
+  background: var(--theme-bg-panel, #1f1f23);
+  color: var(--theme-text-secondary, #a1a1aa);
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
@@ -704,13 +704,13 @@ function handleCustomHtmlCancel(reason: string) {
 .confirm-btn.active {
   background: rgba(46, 213, 115, 0.15);
   border-color: #2ed573;
-  color: #2ed573;
+  color: var(--theme-status-success, #2ed573);
 }
 
 .cancel-btn.active {
   background: rgba(255, 71, 87, 0.15);
   border-color: #ff4757;
-  color: #ff4757;
+  color: var(--theme-status-danger, #ff4757);
 }
 
 /* 选项列表 */
@@ -722,21 +722,21 @@ function handleCustomHtmlCancel(reason: string) {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  color: #8e8e93;
+  color: var(--theme-text-secondary, #8e8e93);
   font-size: 11.5px;
   margin-bottom: 2px;
 }
 
 .mini-btn {
   border: 0;
-  color: #a1a1aa;
+  color: var(--theme-text-secondary, #a1a1aa);
   background: transparent;
   cursor: pointer;
   padding: 2px 6px;
   font-size: 11.5px;
   border-radius: 4px;
 }
-.mini-btn:hover { color: #fff; background: rgba(255, 255, 255, 0.08); }
+.mini-btn:hover { color: var(--theme-text-primary, #fff); background: rgba(var(--theme-foreground-rgb), 0.08); }
 
 .option-item {
   display: flex;
@@ -744,15 +744,15 @@ function handleCustomHtmlCancel(reason: string) {
   gap: 10px;
   padding: 8px 12px;
   border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: #1f1f23;
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
+  background: var(--theme-bg-panel, #1f1f23);
   cursor: pointer;
   transition: all 0.12s;
 }
 
 .option-item:hover {
-  background: #27272a;
-  border-color: rgba(255, 255, 255, 0.15);
+  background: var(--theme-bg-raised, #27272a);
+  border-color: rgba(var(--theme-foreground-rgb), 0.15);
 }
 
 .option-item.selected {
@@ -764,7 +764,7 @@ function handleCustomHtmlCancel(reason: string) {
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  border: 1px solid rgba(255, 255, 255, 0.3);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.3);
   display: grid;
   place-items: center;
 }
@@ -782,7 +782,7 @@ function handleCustomHtmlCancel(reason: string) {
   width: 16px;
   height: 16px;
   border-radius: 4px;
-  border: 1px solid rgba(255, 255, 255, 0.3);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.3);
   display: grid;
   place-items: center;
 }
@@ -793,7 +793,7 @@ function handleCustomHtmlCancel(reason: string) {
 .checkbox-box svg {
   width: 11px;
   height: 11px;
-  stroke: #fff;
+  stroke: var(--theme-text-primary, #fff);
   stroke-width: 2.5;
   fill: none;
 }
@@ -804,12 +804,12 @@ function handleCustomHtmlCancel(reason: string) {
   gap: 2px;
 }
 .option-label {
-  color: #f4f4f5;
+  color: var(--theme-text-primary, #f4f4f5);
   font-size: 13px;
   font-weight: 550;
 }
 .option-sub {
-  color: #8e8e93;
+  color: var(--theme-text-secondary, #8e8e93);
   font-size: 11.5px;
 }
 
@@ -819,9 +819,9 @@ function handleCustomHtmlCancel(reason: string) {
   align-items: center;
   gap: 12px;
   padding: 12px 14px;
-  border: 1px dashed rgba(255, 255, 255, 0.2);
+  border: 1px dashed rgba(var(--theme-foreground-rgb), 0.2);
   border-radius: 8px;
-  background: #141416;
+  background: var(--theme-bg-base, #141416);
   cursor: pointer;
   transition: all 0.15s;
 }
@@ -831,14 +831,14 @@ function handleCustomHtmlCancel(reason: string) {
 }
 .picker-icon { font-size: 20px; }
 .picker-hint { flex: 1; display: flex; flex-direction: column; gap: 2px; }
-.picker-hint strong { color: #f4f4f5; font-size: 12.5px; }
-.picker-hint span { color: #71717a; font-size: 11px; }
+.picker-hint strong { color: var(--theme-text-primary, #f4f4f5); font-size: 12.5px; }
+.picker-hint span { color: var(--theme-text-muted, #71717a); font-size: 11px; }
 .btn-picker-action {
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.15);
   border-radius: 6px;
   padding: 5px 12px;
-  color: #f4f4f5;
-  background: #27272a;
+  color: var(--theme-text-primary, #f4f4f5);
+  background: var(--theme-bg-raised, #27272a);
   font-size: 12px;
   cursor: pointer;
 }
@@ -854,11 +854,11 @@ function handleCustomHtmlCancel(reason: string) {
   align-items: center;
   gap: 6px;
   padding: 3px 8px;
-  background: #1f1f23;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--theme-bg-panel, #1f1f23);
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.1);
   border-radius: 6px;
   font-size: 11.5px;
-  color: #e4e4e7;
+  color: var(--theme-text-primary, #e4e4e7);
 }
 .file-chip-name {
   max-width: 320px;
@@ -869,12 +869,12 @@ function handleCustomHtmlCancel(reason: string) {
 .file-chip-del {
   border: 0;
   background: transparent;
-  color: #71717a;
+  color: var(--theme-text-muted, #71717a);
   cursor: pointer;
   font-size: 14px;
   line-height: 1;
 }
-.file-chip-del:hover { color: #ff4757; }
+.file-chip-del:hover { color: var(--theme-status-danger, #ff4757); }
 
 /* 纯文本问答输入框 */
 .text-input-box {
@@ -884,9 +884,9 @@ function handleCustomHtmlCancel(reason: string) {
   width: 100%;
   padding: 10px 12px;
   border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  background: #121214;
-  color: #f4f4f5;
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.15);
+  background: var(--theme-bg-base, #121214);
+  color: var(--theme-text-primary, #f4f4f5);
   font-family: inherit;
   font-size: 13.5px;
   line-height: 1.5;
@@ -901,7 +901,7 @@ function handleCustomHtmlCancel(reason: string) {
   box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.15);
 }
 .intervention-textarea::placeholder {
-  color: #71717a;
+  color: var(--theme-text-muted, #71717a);
 }
 
 /* 自定义补充输入 */
@@ -913,7 +913,7 @@ function handleCustomHtmlCancel(reason: string) {
   cursor: text;
 }
 .write-in-label {
-  color: #8e8e93;
+  color: var(--theme-text-secondary, #8e8e93);
   font-size: 11px;
   cursor: pointer;
   user-select: none;
@@ -923,9 +923,9 @@ function handleCustomHtmlCancel(reason: string) {
   width: 100%;
   padding: 8px 10px;
   border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: #121214;
-  color: #f4f4f5;
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.12);
+  background: var(--theme-bg-base, #121214);
+  color: var(--theme-text-primary, #f4f4f5);
   font-family: inherit;
   font-size: 12.5px;
   line-height: 1.5;
@@ -953,8 +953,8 @@ function handleCustomHtmlCancel(reason: string) {
   padding: 6px 16px;
   border-radius: 6px;
   border: 0;
-  background: #f4f4f5;
-  color: #18181b;
+  background: var(--theme-inverse-bg, #f4f4f5);
+  color: var(--theme-on-inverse, #18181b);
   font-size: 12.5px;
   font-weight: 600;
   cursor: pointer;
@@ -968,7 +968,7 @@ function handleCustomHtmlCancel(reason: string) {
   fill: none;
 }
 .submit-intervention-btn:hover:not(:disabled) {
-  background: #ffffff;
+  background: var(--theme-inverse-bg, #ffffff);
   transform: translateY(-1px);
 }
 .submit-intervention-btn:disabled {
@@ -979,14 +979,14 @@ function handleCustomHtmlCancel(reason: string) {
 /* 📋 架构方案审查与审批卡片专用美化 */
 .human-intervention-card.is-plan-approval {
   border: 1px solid rgba(99, 102, 241, 0.4);
-  background: linear-gradient(180deg, #181822 0%, #121217 100%);
-  box-shadow: 0 6px 28px rgba(0, 0, 0, 0.55), 0 0 20px rgba(99, 102, 241, 0.1);
+  background: linear-gradient(180deg, var(--theme-bg-panel, #181822) 0%, var(--theme-bg-base, #121217) 100%);
+  box-shadow: var(--theme-shadow, 0 6px 28px rgba(0, 0, 0, 0.55), 0 0 20px rgba(99, 102, 241, 0.1));
 }
 
 .card-badge.plan-badge {
   background: rgba(99, 102, 241, 0.15);
   border: 1px solid rgba(99, 102, 241, 0.4);
-  color: #a5b4fc;
+  color: var(--theme-status-accent, #a5b4fc);
 }
 
 .card-badge.plan-badge .pulse-dot {
@@ -1019,12 +1019,12 @@ function handleCustomHtmlCancel(reason: string) {
 
 .banner-text strong {
   font-size: 13px;
-  color: #e0e7ff;
+  color: var(--theme-text-primary, #e0e7ff);
 }
 
 .banner-text span {
   font-size: 12px;
-  color: #94a3b8;
+  color: var(--theme-status-info, #94a3b8);
   line-height: 1.4;
 }
 
@@ -1043,7 +1043,7 @@ function handleCustomHtmlCancel(reason: string) {
   flex: 1;
   min-width: 200px;
   background: linear-gradient(135deg, #10b981 0%, #059669 100%) !important;
-  color: #ffffff !important;
+  color: var(--on-accent) !important;
   border: none !important;
   font-weight: 650;
   padding: 10px 18px;
@@ -1058,30 +1058,30 @@ function handleCustomHtmlCancel(reason: string) {
 }
 
 .revise-btn {
-  background: rgba(255, 255, 255, 0.05) !important;
-  border: 1px solid rgba(255, 255, 255, 0.15) !important;
-  color: #cbd5e1 !important;
+  background: rgba(var(--theme-foreground-rgb), 0.05) !important;
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.15) !important;
+  color: var(--theme-text-primary, #cbd5e1) !important;
   padding: 10px 16px;
   transition: all 0.2s ease;
 }
 
 .revise-btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.1) !important;
+  background: rgba(var(--theme-foreground-rgb), 0.1) !important;
   border-color: rgba(245, 158, 11, 0.4) !important;
-  color: #fbbf24 !important;
+  color: var(--theme-status-warning, #fbbf24) !important;
 }
 
 .revise-btn.active {
   border-color: #f59e0b !important;
   background: rgba(245, 158, 11, 0.12) !important;
-  color: #f59e0b !important;
+  color: var(--theme-status-warning, #f59e0b) !important;
 }
 
 .plan-revision-wrap {
   margin-top: 12px;
   padding: 12px;
   border-radius: 8px;
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--theme-inset-bg, rgba(0, 0, 0, 0.35));
   border: 1px solid rgba(245, 158, 11, 0.3);
   display: flex;
   flex-direction: column;
@@ -1091,17 +1091,17 @@ function handleCustomHtmlCancel(reason: string) {
 .revision-label {
   font-size: 12px;
   font-weight: 600;
-  color: #fbbf24;
+  color: var(--theme-status-warning, #fbbf24);
 }
 
 .revision-textarea {
   width: 100%;
   resize: vertical;
-  background: #111113;
-  border: 1px solid #27272a;
+  background: var(--theme-bg-base, #111113);
+  border: 1px solid var(--theme-border, #27272a);
   border-radius: 6px;
   padding: 8px 10px;
-  color: #f4f4f5;
+  color: var(--theme-text-primary, #f4f4f5);
   font-size: 12.5px;
   line-height: 1.5;
 }

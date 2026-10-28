@@ -1,0 +1,227 @@
+/* Theme values live on html so menus/dialogs teleported to body inherit them too. */
+:root {
+  --theme-color-scheme: dark;
+  --theme-foreground-rgb: 255, 255, 255;
+  --bg-primary: var(--bg-1);
+  --bg-secondary: var(--bg-2);
+  --text-primary: var(--text-1);
+  --text-secondary: var(--text-2);
+  --text-muted: var(--text-3);
+  --border-color: var(--border-2);
+  --on-accent: #ffffff;
+  --control-thumb: #ffffff;
+  --paper-bg: #ffffff;
+  --paper-text: #18181b;
+  --paper-heading: #09090b;
+  --paper-body: #27272a;
+  --theme-md-body: #cccccc;
+  --theme-md-code-fg: #e2b86b;
+  --theme-md-code-bg: rgba(226, 184, 107, 0.085);
+  --theme-md-code-border: rgba(226, 184, 107, 0.12);
+  --motion-quick: 120ms;
+  --motion-normal: 180ms;
+  --motion-ease: cubic-bezier(.2, .8, .2, 1);
+  color-scheme: var(--theme-color-scheme);
+}
+
+/* 石墨灰层次：页面、卡片与输入区共用色阶，强调色保持柔和。 */
+:root[data-theme="dark"] {
+  --bg-0: #15171b;
+  --bg-1: #1b1e23;
+  --bg-2: #23272f;
+  --bg-3: #2d323b;
+  --bg-4: #414957;
+  --theme-foreground-rgb: 225, 230, 240;
+  --surface-1: rgba(225, 230, 240, .025);
+  --surface-2: rgba(225, 230, 240, .045);
+  --surface-3: rgba(225, 230, 240, .075);
+  --border-1: rgba(225, 230, 240, .075);
+  --border-2: rgba(225, 230, 240, .12);
+  --border-3: rgba(225, 230, 240, .19);
+  --text-1: #e8ebf2;
+  --text-2: #a9b1c1;
+  --text-3: #838d9f;
+  --text-4: #647084;
+  --accent: #7567ce;
+  --accent-light: #b0a5ef;
+  --accent-dark: #6658ba;
+  --accent-glow: rgba(117, 103, 206, .16);
+  --teal: #66c1ae;
+  --teal-glow: rgba(102, 193, 174, .14);
+  --red: #df8293;
+  --red-light: #ed9caa;
+  --orange: #dfb575;
+  --green: #7bc59d;
+  --green-dim: rgba(123, 197, 157, .12);
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, .16);
+  --shadow-md: 0 10px 30px rgba(0, 0, 0, .24);
+  --shadow-lg: 0 20px 60px rgba(0, 0, 0, .34);
+  --shadow-accent: 0 4px 16px rgba(117, 103, 206, .12);
+  --glass-bg-base: rgba(27, 30, 35, .9);
+  --glass-bg-elevated: rgba(35, 39, 47, .94);
+  --glass-border-subtle: var(--border-1);
+  --glass-border-glow: rgba(117, 103, 206, .2);
+  --theme-bg-deep: #111318;
+  --theme-bg-base: var(--bg-0);
+  --theme-bg-panel: var(--bg-1);
+  --theme-bg-raised: var(--bg-2);
+  --theme-bg-muted: var(--bg-3);
+  --theme-rgb-deep: 17, 19, 24;
+  --theme-rgb-base: 21, 23, 27;
+  --theme-rgb-panel: 27, 30, 35;
+  --theme-rgb-raised: 35, 39, 47;
+  --theme-rgb-muted: 45, 50, 59;
+  --theme-inverse-bg: #e2e6ee;
+  --theme-on-inverse: #1b1e23;
+  --theme-text-primary: var(--text-1);
+  --theme-text-secondary: var(--text-2);
+  --theme-text-muted: var(--text-3);
+  --theme-text-dim: var(--text-4);
+  --theme-border: var(--border-2);
+  --theme-border-strong: var(--border-3);
+  --theme-inset-bg: rgba(5, 8, 14, .16);
+  --theme-shadow: var(--shadow-md);
+  --theme-status-success: #7bc59d;
+  --theme-status-warning: #dfb575;
+  --theme-status-danger: #ed9caa;
+  --theme-status-info: #8ab9e8;
+  --theme-status-accent: #b0a5ef;
+  --theme-status-pink: #d79ac1;
+}
+
+:root[data-theme="light"] {
+  --theme-color-scheme: light;
+  --theme-foreground-rgb: 28, 32, 47;
+  --bg-0: #f6f7fb;
+  --bg-1: #ffffff;
+  --bg-2: #f0f2f8;
+  --bg-3: #e8ebf3;
+  --bg-4: #d5dbe8;
+  --surface-1: rgba(28, 32, 47, .025);
+  --surface-2: rgba(28, 32, 47, .045);
+  --surface-3: rgba(28, 32, 47, .075);
+  --border-1: rgba(28, 32, 47, .08);
+  --border-2: rgba(28, 32, 47, .14);
+  --border-3: rgba(28, 32, 47, .23);
+  --text-1: #222638;
+  --text-2: #596178;
+  --text-3: #707991;
+  --text-4: #848ca0;
+  --accent: #6258dc;
+  --accent-light: #594dcc;
+  --accent-dark: #4e43bd;
+  --accent-glow: rgba(98, 88, 220, .14);
+  --teal: #087f70;
+  --teal-glow: rgba(8, 127, 112, .14);
+  --red: #c7364d;
+  --red-light: #c7364d;
+  --orange: #9c6411;
+  --green: #17804b;
+  --green-dim: rgba(23, 128, 75, .1);
+  --shadow-sm: 0 2px 8px rgba(28, 32, 47, .06);
+  --shadow-md: 0 8px 28px rgba(28, 32, 47, .1);
+  --shadow-lg: 0 20px 64px rgba(28, 32, 47, .15);
+  --shadow-accent: 0 4px 16px rgba(98, 88, 220, .12);
+  --glass-bg-base: rgba(255, 255, 255, .83);
+  --glass-bg-elevated: rgba(246, 247, 251, .92);
+  --glass-border-subtle: var(--border-1);
+  --glass-border-glow: rgba(98, 88, 220, .22);
+
+  /* 与深色共用语义变量，组件只负责布局与交互。 */
+  --theme-bg-deep: #eef0f6;
+  --theme-bg-base: var(--bg-0);
+  --theme-bg-panel: var(--bg-1);
+  --theme-bg-raised: var(--bg-2);
+  --theme-bg-muted: var(--bg-3);
+  --theme-rgb-deep: 238, 240, 246;
+  --theme-rgb-base: 246, 247, 251;
+  --theme-rgb-panel: 255, 255, 255;
+  --theme-rgb-raised: 240, 242, 248;
+  --theme-rgb-muted: 232, 235, 243;
+  --theme-inverse-bg: #282638;
+  --theme-on-inverse: #ffffff;
+  --theme-text-primary: var(--text-1);
+  --theme-text-secondary: var(--text-2);
+  --theme-text-muted: var(--text-3);
+  --theme-text-dim: var(--text-4);
+  --theme-border: var(--border-2);
+  --theme-border-strong: var(--border-3);
+  --theme-inset-bg: rgba(28, 32, 47, .035);
+  --theme-shadow: var(--shadow-md);
+  --theme-status-success: #17804b;
+  --theme-status-warning: #96600f;
+  --theme-status-danger: #c7364d;
+  --theme-status-info: #126ca6;
+  --theme-status-accent: #6258c9;
+  --theme-status-pink: #b3377d;
+  --theme-md-body: #343b52;
+  --theme-md-code-fg: #965a0c;
+  --theme-md-code-bg: rgba(180, 110, 14, 0.08);
+  --theme-md-code-border: rgba(180, 110, 14, 0.18);
+}
+
+/* 过渡放在实际可见的背景层，侧栏先变、中间轻微跟随；不动画消息节点。 */
+@media (prefers-reduced-motion: no-preference) {
+  body,
+  html[data-theme] .app-layout,
+  html[data-theme] .app-main-content {
+    transition: background-color .16s ease;
+  }
+  html[data-theme] .app-sidebar {
+    transition: background-color .18s ease, width .18s ease, flex-basis .18s ease;
+  }
+
+  html[data-theme] .manus-agent-shell,
+  html[data-theme] .manus-chat-header,
+  html[data-theme] .chat-column,
+  html[data-theme] .process-tree,
+  html[data-theme] .manager-layout,
+  html[data-theme] .project-workspace-view,
+  html[data-theme] .plugin-container,
+  html[data-theme] .role-manager-view,
+  html[data-theme] .scheduled-view,
+  html[data-theme] .wechat-view-container {
+    transition: background-color .24s ease .05s;
+  }
+
+  html[data-theme] .manus-composer-wrap {
+    /* 原来的实色渐变会盖住父层过渡；输入区底色单独参与颜色插值。 */
+    background-image: none;
+    background-color: var(--theme-bg-base);
+    transition: background-color .24s ease .05s;
+  }
+  html[data-theme] .manus-composer {
+    transition: background-color .24s ease .07s, border-color .16s ease, box-shadow .16s ease;
+  }
+
+  /* 交互时才触发的小范围动效，不对聊天历史逐节点动画。 */
+  html[data-theme] .primary-nav > .nav-row {
+    transition: background-color var(--motion-quick) ease, color var(--motion-quick) ease, transform var(--motion-quick) var(--motion-ease);
+  }
+  html[data-theme] .primary-nav > .nav-row:active {
+    transform: scale(.98);
+  }
+  .btn:not(:disabled):active {
+    transform: translateY(0) scale(.98);
+  }
+  html[data-theme] .modal-overlay > .modal {
+    animation: app-dialog-in var(--motion-normal) var(--motion-ease);
+  }
+  .modal-overlay.fade-enter-active,
+  .modal-overlay.fade-leave-active {
+    transition: opacity var(--motion-normal) ease;
+  }
+}
+
+@keyframes app-dialog-in {
+  from { opacity: 0; transform: translateY(6px) scale(.99); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-theme] .modal-overlay,
+  html[data-theme] .modal-overlay > .modal {
+    animation: none;
+    transition: none;
+  }
+}
