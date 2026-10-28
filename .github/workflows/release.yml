@@ -130,7 +130,7 @@ jobs:
           releaseCommitish: ${{ needs.release-config.outputs.commit }}
           releaseName: 'Free API Chat v__VERSION__'
           releaseBody: 'macOS: 按处理器架构选择 .dmg；Windows: .msi 或 .exe；Linux: .deb、.rpm 或 AppImage。应用更新直接通过本 Release 的 latest.json 和签名产物分发。当前未配置 Apple 公证及 Windows 发布者证书，系统可能显示开发者验证提示。'
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           # 清单在四路完成后统一上传，避免各路对同一资产做删除/覆盖。
           uploadUpdaterJson: false
