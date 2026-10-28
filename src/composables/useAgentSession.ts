@@ -447,6 +447,32 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
 
     let elapsedTimer: ReturnType<typeof setInterval> | null = null;
     let unlisteners: UnlistenFn[] = [];
+    let streamDisplayTimer: ReturnType<typeof setTimeout> | null = null;
+    let pendingThought: string | undefined;
+    let pendingSummary: string | undefined;
+
+    function clearStreamDisplay() {
+        if (streamDisplayTimer !== null) clearTimeout(streamDisplayTimer);
+        streamDisplayTimer = null;
+        pendingThought = undefined;
+        pendingSummary = undefined;
+    }
+
+    function flushStreamDisplay() {
+        if (streamDisplayTimer !== null) clearTimeout(streamDisplayTimer);
+        streamDisplayTimer = null;
+        if (pendingThought !== undefined) thought.value = pendingThought;
+        if (pendingSummary !== undefined) streamingSummary.value = pendingSummary;
+        pendingThought = undefined;
+        pendingSummary = undefined;
+    }
+
+    function queueStreamDisplay(kind: "thought" | "summary", text: string) {
+        // 两者都是完整文本快照；只合并显示赋值，不合并 chunk、步骤或控制事件。
+        if (kind === "thought") pendingThought = text;
+        else pendingSummary = text;
+        if (streamDisplayTimer === null) streamDisplayTimer = setTimeout(flushStreamDisplay, 32);
+    }
     let logSequence = 0;
     let runGeneration = 0;
     // 启动窗口标记：新一代 runAgent 的 invoke 在途且 channel-run-started 未到期间为 true，
@@ -789,6 +815,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     }
 
     function setRunState(nextState: AgentRunState, description?: string) {
+        if (["succeeded", "failed", "cancelled"].includes(nextState)) flushStreamDisplay();
         runState.value = nextState;
         let cleanDesc = description?.trim();
         if (cleanDesc) {
@@ -861,6 +888,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     }
 
     function handleRunState(payload: Record<string, unknown>) {
+        flushStreamDisplay();
         if (runTerminal.value) return;
         const state = normalizeState(payload.state);
         const message = toText(payload.message || payload.description);
@@ -961,6 +989,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     }
 
     function handleToolEvent(payload: Record<string, unknown>) {
+        flushStreamDisplay();
         if (runTerminal.value) return;
         const eventType = String(payload.event_type || payload.type || "started").toLowerCase();
         const stepId = numberOrUndefined(payload.step_id) ?? 0;
@@ -1050,6 +1079,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     }
 
     function completeRun(payload: Record<string, unknown>, succeeded: boolean) {
+        flushStreamDisplay();
         if (runTerminal.value) return;
         const message = toText(payload.message) || (succeeded ? "任务已全部完成。" : "任务未能顺利完成。");
         completionMessage.value = message;
@@ -1109,6 +1139,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     }
 
     function handleProgress(payload: Record<string, unknown>) {
+        const displayEvent = String(payload.event_type || payload.type || payload.stage || "").toLowerCase();
+        if (displayEvent !== "thinking" && displayEvent !== "summary_stream") flushStreamDisplay();
         // 终态通知可能晚于父任务结束；只允许已知尝试补齐诊断，不能重开任务或引入旧成员。
         const reviewEvent = String(payload.event_type || payload.type || payload.stage || '').toLowerCase() === 'finish_review_progress';
         if (runTerminal.value && (!reviewEvent || !reviewProgress.value.some(item => item.id === payload.review_id))) return;
@@ -1427,9 +1459,10 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         if (eventType === "summary_stream" || payload.streaming_summary) {
             const content = toText(payload.content || payload.streaming_summary);
             if (content) {
-                streamingSummary.value = content;
+                queueStreamDisplay("summary", content);
             }
             if (eventType === "summary_stream") {
+                if (payload.done === true) flushStreamDisplay();
                 return;
             }
         }
@@ -1438,9 +1471,10 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             const content = toText(payload.content);
             const done = payload.done === true;
             if (content) {
-                thought.value = content;
+                queueStreamDisplay("thought", content);
             }
             if (done) {
+                flushStreamDisplay();
                 isThinking.value = false;
                 thinkingCollapsed.value = true;
                 if (thinkingStartTime.value) {
@@ -1713,6 +1747,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     }
 
     function clearSession(preserveReview = false) {
+        clearStreamDisplay();
         runTerminal.value = true;
         clearLiveShellOutput();
         steps.value = [];
@@ -1755,6 +1790,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     }
 
     async function setupListeners(sid: string) {
+        clearStreamDisplay();
         unlisteners.forEach((unlisten) => unlisten());
         unlisteners = [];
         const register = async (channel: string, handler: (payload: unknown) => void) => {
@@ -1783,6 +1819,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         await register(`agent-tool-event-${sid}`, (payload) => handleToolEvent(asRecord(payload)));
         await register("channel-run-started", async (payload: any) => {
             if (payload?.session_id === sid) {
+                clearStreamDisplay();
                 // 新一代任务已亮明身份，启动窗口结束；此后属于本代的 done 事件正常重置运行态
                 awaitingRunStart = false;
                 reviewProgress.value = [];
@@ -1990,6 +2027,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
 
     async function requestStop() {
         if (!isRunning.value || stopRequested.value) return;
+        flushStreamDisplay();
         stopRequested.value = true;
         setRunState("cancelled", "正在向模型发送中断信号并安全停止任务...");
         appendLog("[停止请求] 正在向模型与工具发送中断信号...");
@@ -2171,6 +2209,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     });
 
     onUnmounted(() => {
+        clearStreamDisplay();
         workerPreviewStreams.clear();
         stopElapsedTimer();
         disposeResources();

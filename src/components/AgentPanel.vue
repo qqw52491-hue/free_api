@@ -99,6 +99,7 @@
                 <!-- 💬 全宽主对话流 (无左侧狭窄侧栏挤压) -->
                 <div class="chat-stream-column">
                     <AgentChatStream
+                        :view-active="viewActive"
                         :session-id="session.activeSessionId.value"
                         :current-goal="session.currentGoal.value"
                         :legacy-messages="session.legacyConversationMessages.value"
@@ -272,12 +273,13 @@ import type { AgentModelOption, FileDiffPayload } from "./agent/types";
 import { useAgentSession } from "../composables/useAgentSession";
 import { stopReviewKey } from "./agent/reviewCancellation";
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
     panelId: string;
     allModels: AgentModelOption[];
     projectId?: string;
     initialDraft?: string;
-}>();
+    viewActive?: boolean;
+}>(), { viewActive: true });
 const emit = defineEmits<{
     "new-session": [];
     "open-plugins": [];

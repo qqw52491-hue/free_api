@@ -387,6 +387,7 @@ mod tests {
     fn merge_idempotent() {
         let (out, changed) =
             merge_ingress_rule(BASE, "agent.example.com", "http://localhost:8790").unwrap();
+        assert!(changed, "首次合并应插入规则");
         let (_, changed2) =
             merge_ingress_rule(&out, "agent.example.com", "http://localhost:8790").unwrap();
         assert!(!changed2, "同规则二次合并应为幂等: {out}");

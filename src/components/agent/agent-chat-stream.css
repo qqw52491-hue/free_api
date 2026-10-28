@@ -90,6 +90,7 @@
 
 /* 对话历史 */
 .conversation-history {
+    --stream-entry-gap: 10px;
     display: flex;
     width: 100%;
     flex-direction: column;
@@ -1190,7 +1191,7 @@
 }
 
 /* 连续阶段的动作流沿用内部的 2px 间隔，不叠加对话块的 8px gap。 */
-.stream-centered-content.is-ambient > .ambient-plan-wrapper + .ambient-plan-wrapper {
+.stream-centered-content.is-ambient .agent-timeline-list > .ambient-plan-wrapper + .ambient-plan-wrapper {
     margin-top: calc(2px - var(--stream-entry-gap)) !important;
 }
 
@@ -2135,7 +2136,7 @@
     line-height: 22px;
     height: 22px;
     color: var(--theme-text-primary, #cbd5e1);
-    -webkit-text-fill-color: #cbd5e1;
+    -webkit-text-fill-color: currentColor;
     background: none;
     display: block;
     width: 100%;

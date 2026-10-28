@@ -224,6 +224,7 @@
                 <template v-for="tab in tabs" :key="tab.uid">
                     <div v-if="activatedPanelIds.has(tab.id)" v-show="activeTabId === tab.id" class="agent-panel-frame">
                         <AgentPanel
+                            :view-active="currentNavView === 'agent' && activeTabId === tab.id"
                             :ref="(el) => { if (el) panelRefs[tab.id] = el }"
                             :panel-id="tab.id"
                             :project-id="tab.projectId"

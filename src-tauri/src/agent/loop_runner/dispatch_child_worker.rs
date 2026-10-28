@@ -54,7 +54,7 @@ pub(super) async fn dispatch_child_worker(
                 dispatch_input_incomplete = true;
                 continue;
             }
-            let mut scout_persona = String::new();
+            let mut scout_persona: String;
             let mut scout_model = routing.model_id.clone();
             let mut effective_worker_params = worker_params.clone();
             if let Some(obj) = effective_worker_params.as_object_mut() {

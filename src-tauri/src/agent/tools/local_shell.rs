@@ -126,6 +126,8 @@ pub(crate) fn kill_process_group(pid: u32, signal: &str) {
     }
     #[cfg(windows)]
     {
+        // taskkill has no POSIX signal argument; both stages terminate the tree.
+        let _ = signal;
         let _ = std::process::Command::new("taskkill")
             .args(&["/F", "/T", "/PID", &pid.to_string()])
             .status();

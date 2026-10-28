@@ -39,7 +39,11 @@
 
             <!-- 早期对话记录 -->
             <section v-if="legacyMessages.length" class="conversation-history" aria-label="早期对话记录">
-                <article v-for="message in legacyMessages" :key="message.id" :ref="el => setQuestionAnchor(`legacy-${message.id}`, el)" :data-tl="`legacy-${message.id}`" class="saved-message" :class="message.role === 'user' ? 'from-user' : 'from-agent'">
+                <AgentTimelineList ref="legacyHistoryList" :entries="legacyMessages" lazy :initial-count="24"
+                    :scroll-element="streamElement" :view-active="viewActive" @before-expand="pauseLiveFollow">
+                <template #default="{ entry: message }">
+                <article
+                    :ref="el => setQuestionAnchor(`legacy-${message.id}`, el)" :data-tl="`legacy-${message.id}`" class="saved-message" :class="message.role === 'user' ? 'from-user' : 'from-agent'">
                     <template v-if="message.role === 'agent' || message.role === 'assistant'">
                         <div class="agent-msg-header">
                             <span class="agent-logo-pill">⚡ Free API</span>
@@ -130,9 +134,13 @@
                         </div>
                     </template>
                 </article>
+                </template>
+                </AgentTimelineList>
             </section>
 
-            <template v-for="entry in timelineEntries" :key="entry.id">
+            <AgentTimelineSections ref="timelineSectionsRef" :history="timelineSections.history" :live="timelineSections.live"
+                :scroll-element="streamElement" :view-active="viewActive" @before-expand="pauseLiveFollow">
+            <template #default="{ entry }">
                 <article v-if="entry.type === 'user'" :ref="el => setQuestionAnchor(entry.id, el)" class="user-message" :data-tl="entry.id">
                     <!-- 📎 附件缩略图与文件卡片预览托盘 (完全复用 AttachmentCard) -->
                     <div v-if="parseUserMessageAttachments(entry.content).attachments.length > 0" class="stream-attachments-tray">
@@ -1232,10 +1240,10 @@
                                                 {{ formatStepOperation(step).badgeLabel }}
                                             </span>
                                             <!-- 子 agent 运行中：换成 worker 实时动作行（翻牌+尾随滚动），不再是死文案 -->
-                                            <span v-if="workerLiveLines.get(step.id)" class="subagent-live-wrap">
+                                            <span v-if="getStepWorkerLiveLine(step)" class="subagent-live-wrap">
                                                 <Transition name="ticker-flip">
-                                                    <span :key="workerLiveLines.get(step.id)!.key" v-scroll-tail class="ambient-live-scroll-text subagent-live-line">
-                                                        ⚡ {{ workerLiveLines.get(step.id)!.text }}
+                                                    <span :key="getStepWorkerLiveLine(step)!.key" v-scroll-tail class="ambient-live-scroll-text subagent-live-line">
+                                                        ⚡ {{ getStepWorkerLiveLine(step)!.text }}
                                                     </span>
                                                 </Transition>
                                             </span>
@@ -1477,6 +1485,7 @@
                     </div>
                 </article>
             </template>
+            </AgentTimelineSections>
 
             <div v-if="completionPending && isRunning && !completionMessage" class="completion-pending-banner" role="status">
                 <span class="completion-pending-tag">
@@ -1512,7 +1521,7 @@
     </div>
 </template>
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowReactive, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowReactive, watch, type ComputedRef } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { vDeferredHistory } from "../../directives/deferredHistory";
 import AttachmentCard from "./AttachmentCard.vue";
@@ -1531,12 +1540,36 @@ import FileIcon from "./FileIcon.vue";
 import { workerRowOwners } from "./workerAssociation";
 import AgentWorkerProgress from "./AgentWorkerProgress.vue";
 import AgentQuestionNav from "./AgentQuestionNav.vue";
+import AgentTimelineList from "./AgentTimelineList.vue";
+import AgentTimelineSections from "./AgentTimelineSections.vue";
 import { buildQuestionMarks, type QuestionNavigationEntry } from "./questionNavigation";
 import { placeReviewRows, type ReviewProgressItem, type ReviewLocation } from "./reviewProgress";
 import { extractSubagentsFromStep } from "./workerUtils";
 import { getWorkerLiveLine } from "./liveThoughtPreview";
 
+const attachmentParseCache = new Map<string, { cleanText: string; attachments: ParsedAttachment[] }>();
+let attachmentCacheChars = 0;
+
 function parseUserMessageAttachments(content: string): { cleanText: string; attachments: ParsedAttachment[] } {
+    if (!content) return { cleanText: "", attachments: [] };
+    const cached = attachmentParseCache.get(content);
+    if (cached) return cached;
+    const parsed = parseUserMessageAttachmentsUncached(content);
+    // 同一消息在模板内读取多次；复用附件对象也避免子组件因对象重建而更新。
+    if (content.length <= 64_000) {
+        while (attachmentParseCache.size >= 256 || attachmentCacheChars + content.length > 1_000_000) {
+            const oldest = attachmentParseCache.keys().next();
+            if (oldest.done) break;
+            attachmentParseCache.delete(oldest.value);
+            attachmentCacheChars -= oldest.value.length;
+        }
+        attachmentParseCache.set(content, parsed);
+        attachmentCacheChars += content.length;
+    }
+    return parsed;
+}
+
+function parseUserMessageAttachmentsUncached(content: string): { cleanText: string; attachments: ParsedAttachment[] } {
     if (!content) return { cleanText: "", attachments: [] };
     const attRegex = /📎\s*\[附件:\s*([^\s()\]]+(?:\s+[^\s()\]]+)*?)(?:\s*\(([^)]+)\))?(?:\s*\|\s*路径:\s*([^\]]+))?\]/g;
     const attachments: ParsedAttachment[] = [];
@@ -1687,12 +1720,22 @@ const stepInterventions = computed<Map<string, StepInterventionRow[]>>(() => {
     return map;
 });
 
-function scrollToTimelineEntry(id: string) {
-    const el = streamElement.value?.querySelector(`[data-tl="${CSS.escape(id)}"]`);
-    if (!el) return;
+function pauseLiveFollow() {
     navigationLeavingBottom = true;
     followLiveTail.value = false;
     if (scrollRafId !== null) { cancelAnimationFrame(scrollRafId); scrollRafId = null; }
+}
+
+let timelineNavigationRequest = 0;
+async function scrollToTimelineEntry(id: string) {
+    const request = ++timelineNavigationRequest;
+    pauseLiveFollow();
+    if (id.startsWith("legacy-")) await legacyHistoryList.value?.reveal(id.slice("legacy-".length));
+    else await timelineSectionsRef.value?.reveal(id);
+    await nextTick();
+    if (request !== timelineNavigationRequest || !props.viewActive) return;
+    const el = streamElement.value?.querySelector(`[data-tl="${CSS.escape(id)}"]`);
+    if (!el) return;
     el.scrollIntoView({ behavior: "smooth", block: "center" });
     // 短暂高亮锚定目标，让"跳到的是哪步"肉眼可辨
     el.classList.add("tl-anchor-flash");
@@ -1785,6 +1828,7 @@ type TimelineEntry =
 const props = withDefaults(
     defineProps<{
         sessionId?: string;
+        viewActive?: boolean;
         currentGoal: string;
         legacyMessages: { id: string; role: string; content: string; created_at: string }[];
         historyTurns: HistoryTurn[];
@@ -1813,6 +1857,7 @@ const props = withDefaults(
     }>(),
     {
         sessionId: "",
+        viewActive: true,
         humanForm: null,
         completionPending: false,
         pauseReason: "",
@@ -1868,25 +1913,28 @@ function extractSubagentTask(step: any): string {
 }
 
 // Object keys keep history and current-run steps isolated, even when step numbers repeat.
-const stepWorkersByStep = computed(() => {
+const historicalStepWorkers = computed(() => {
     const map = new Map<AgentStepItem, AgentWorkerItem[]>();
-    const collect = (steps: AgentStepItem[], workers: AgentWorkerItem[]) => {
-        for (const step of steps) map.set(step, extractSubagentsFromStep(step, steps, workers));
-    };
-    collect(props.steps, props.teamState?.workers || []);
-    for (const turn of props.historyTurns) collect(turn.steps, []);
+    for (const turn of props.historyTurns) {
+        if (props.isRunning && turn.status === "running") continue;
+        for (const step of turn.steps) map.set(step, extractSubagentsFromStep(step, turn.steps, []));
+    }
     return map;
 });
+const liveStepWorkers = computed(() => new Map<AgentStepItem, AgentWorkerItem[]>(props.steps.map(step => [
+    step, extractSubagentsFromStep(step, props.steps, props.teamState?.workers || []),
+])));
 function getStepActiveWorkers(step: AgentStepItem): AgentWorkerItem[] {
-    return stepWorkersByStep.value.get(step) || [];
+    return historicalStepWorkers.value.get(step) || liveStepWorkers.value.get(step) || [];
 }
-const ambientWorkerRows = computed(() => {
-    const rows = workerRowOwners(props.steps, stepWorkersByStep.value);
+const historicalWorkerRows = computed(() => {
+    const rows = new Map<AgentStepItem, AgentWorkerItem[]>();
     for (const turn of props.historyTurns) {
-        for (const [step, workers] of workerRowOwners(turn.steps, stepWorkersByStep.value)) rows.set(step, workers);
+        for (const [step, workers] of workerRowOwners(turn.steps, historicalStepWorkers.value)) rows.set(step, workers);
     }
     return rows;
 });
+const liveWorkerRows = computed(() => workerRowOwners(props.steps, liveStepWorkers.value));
 function getOrchestrationTitle(step: AgentStepItem): string {
     const workers = getStepActiveWorkers(step);
     if (!workers.length) return "并发协作 · 子任务调度记录";
@@ -1894,7 +1942,7 @@ function getOrchestrationTitle(step: AgentStepItem): string {
         ? "并发协作 · 子任务执行中" : "并发协作 · 子任务已结束";
 }
 function getAmbientWorkerRows(step: AgentStepItem) {
-    return ambientWorkerRows.value.get(step) || [];
+    return historicalWorkerRows.value.get(step) || liveWorkerRows.value.get(step) || [];
 }
 
 
@@ -1950,6 +1998,8 @@ function handleDownloadArtifact(_artifact: ArtifactDescriptor) {
     // 下载逻辑由 ArtifactCard 自带处理，此处保留钩子
 }
 const streamElement = ref<HTMLElement | null>(null);
+const legacyHistoryList = ref<{ reveal(id: string): Promise<boolean> } | null>(null);
+const timelineSectionsRef = ref<{ reveal(id: string): Promise<boolean> } | null>(null);
 const activeQuestionId = ref<string | null>(null);
 const questionAnchors = new Map<string, HTMLElement>();
 let questionAnchorOrderDirty = true;
@@ -1959,7 +2009,7 @@ let questionNavDisposed = false;
 function updateActiveQuestion() {
     questionNavRaf = null;
     const root = streamElement.value;
-    if (!root || !root.clientHeight) return;
+    if (!props.viewActive || !root || !root.clientHeight) return;
     const marks = questionMarks.value;
     // 跟随输出时通常已经在底部，无需再测量整段历史。
     if (root.scrollHeight > root.clientHeight + 8 && isNearBottom(root)) {
@@ -1974,7 +2024,7 @@ function updateActiveQuestion() {
         questionAnchorOrderDirty = false;
     }
     const readingLine = root.getBoundingClientRect().top + root.clientHeight * 0.5;
-    let active = marks[0]?.id || null;
+    let active = orderedQuestionAnchors[0]?.id || null;
     // 问答锚点按展示顺序排列；二分测量代替每次滚动逐条读取布局。
     let left = 0;
     let right = orderedQuestionAnchors.length - 1;
@@ -1991,7 +2041,7 @@ function updateActiveQuestion() {
     activeQuestionId.value = active;
 }
 function scheduleQuestionPosition() {
-    if (!questionNavDisposed && questionNavRaf === null) questionNavRaf = requestAnimationFrame(updateActiveQuestion);
+    if (props.viewActive && !questionNavDisposed && questionNavRaf === null) questionNavRaf = requestAnimationFrame(updateActiveQuestion);
 }
 function setQuestionAnchor(id: string, element: unknown) {
     const previous = questionAnchors.get(id);
@@ -2110,6 +2160,10 @@ const typewriterTargets = new Map<string, string>();
 
 function updateSmoothStream(id: string, targetText: string) {
     typewriterTargets.set(id, targetText);
+    if (!props.viewActive) {
+        finishTypewriterInstantly(id, targetText);
+        return;
+    }
     if (typewriterDoneIds.has(id)) {
         typewriterTexts[id] = targetText;
         return;
@@ -2124,6 +2178,10 @@ function updateSmoothStream(id: string, targetText: string) {
     }
 
     function tick() {
+        if (!props.viewActive) {
+            finishTypewriterInstantly(id, typewriterTargets.get(id));
+            return;
+        }
         const target = typewriterTargets.get(id) || '';
         const current = typewriterTexts[id] || '';
         const remaining = target.length - current.length;
@@ -2699,7 +2757,7 @@ function pushAmbientInterventions(step: AgentStepItem, items: AmbientDisplayItem
     }
 }
 
-const ambientActionMemo = new WeakMap<object, AmbientActionDisplay>();
+const ambientActionMemo = new WeakMap<AgentStepItem, ComputedRef<AmbientActionDisplay>>();
 
 function getAmbientAction(step: AgentStepItem): AmbientActionDisplay {
     if (!step) {
@@ -2712,20 +2770,22 @@ function getAmbientAction(step: AgentStepItem): AmbientActionDisplay {
             tooltip: '',
         };
     }
-    const hit = ambientActionMemo.get(step);
-    if (hit) return hit;
-    const action = computeAmbientAction(step);
-    // 耗时统一后置微标：如果底层 metrics 提供了 toolDurationMs，统一写入 durationBadge
-    if (!action.durationBadge && step.metrics?.toolDurationMs != null) {
-        action.durationBadge = formatDurationSeconds(step.metrics.toolDurationMs);
+    let cached = ambientActionMemo.get(step);
+    if (!cached) {
+        cached = computed(() => {
+            const action = computeAmbientAction(step);
+            if (!action.durationBadge && step.metrics?.toolDurationMs != null) {
+                action.durationBadge = formatDurationSeconds(step.metrics.toolDurationMs);
+            }
+            const thought = (step.thought || '').trim();
+            if (thought && thought !== action.explanation && !action.tooltip?.includes(thought)) {
+                action.tooltip = action.tooltip ? `${action.tooltip} · ${thought}` : thought;
+            }
+            return action;
+        });
+        ambientActionMemo.set(step, cached);
     }
-    // 步骤内部思考/重试原因保留挂载在 tooltip 中，悬停即可查看完整详情
-    const thought = (step.thought || '').trim();
-    if (thought && thought !== action.explanation && !action.tooltip?.includes(thought)) {
-        action.tooltip = action.tooltip ? `${action.tooltip} · ${thought}` : thought;
-    }
-    try { ambientActionMemo.set(step, action); } catch {}
-    return action;
+    return cached.value;
 }
 
 function computeAmbientAction(step: AgentStepItem): AmbientActionDisplay {
@@ -3277,8 +3337,11 @@ function onPlanScroll(event: Event, entry: PlanEntry) {
 }
 
 function scrollPlanToBottom(planId: string, smooth = false) {
+    if (!props.viewActive) return;
     nextTick(() => {
+        if (!props.viewActive || questionNavDisposed) return;
         requestAnimationFrame(() => {
+            if (!props.viewActive || questionNavDisposed) return;
             const el = planInnerRefs[planId];
             if (el) {
                 if (smooth) {
@@ -3304,8 +3367,8 @@ function getVisiblePlanSteps(entry: PlanEntry): AgentStepItem[] {
 watch(
     () => props.steps.map(s => `${s.id}-${s.status}-${s.description || ''}`).join('|'),
     () => {
-        if (!props.isRunning) return;
-        for (const entry of timelineEntries.value) {
+        if (!props.viewActive || !props.isRunning) return;
+        for (const entry of liveTimelineEntries.value) {
             if (entry.type === 'plan' && isPlanRunning(entry) && isPlanExpanded(entry)) {
                 if (planFollowTailState[entry.id] !== false) {
                     scrollPlanToBottom(entry.id, false);
@@ -3346,7 +3409,17 @@ interface PlanDigest {
     durationMs: number;
 }
 
+const planDigestCache = new WeakMap<AgentStepItem[], ComputedRef<PlanDigest>>();
 function getPlanDigest(steps: AgentStepItem[]): PlanDigest {
+    let cached = planDigestCache.get(steps);
+    if (!cached) {
+        cached = computed(() => buildPlanDigest(steps));
+        planDigestCache.set(steps, cached);
+    }
+    return cached.value;
+}
+
+function buildPlanDigest(steps: AgentStepItem[]): PlanDigest {
     let readCount = 0;
     let searchCount = 0;
     let failedCount = 0;
@@ -3425,10 +3498,10 @@ function getPlanDigest(steps: AgentStepItem[]): PlanDigest {
     };
 }
 
-const planOrderMap = computed(() => {
+function buildPlanOrderMap(entries: TimelineEntry[]) {
     const map = new Map<string, number>();
     let currentTurnPlanCount = 1;
-    for (const entry of timelineEntries.value) {
+    for (const entry of entries) {
         if (entry.type === 'user') {
             // 🌟 核心需求：每次开始新一轮对话/回合，大阶段序号重新从 1 开始独立排序
             currentTurnPlanCount = 1;
@@ -3437,10 +3510,12 @@ const planOrderMap = computed(() => {
         }
     }
     return map;
-});
+}
+const historicalPlanOrderMap = computed(() => buildPlanOrderMap(historyTimelineEntries.value));
+const livePlanOrderMap = computed(() => buildPlanOrderMap(liveTimelineEntries.value));
 
 function getStageDisplayTitle(entry: PlanEntry): string {
-    const idx = planOrderMap.value.get(entry.id) || 1;
+    const idx = historicalPlanOrderMap.value.get(entry.id) || livePlanOrderMap.value.get(entry.id) || 1;
     return formatStageTitle(entry.title, idx);
 }
 
@@ -3499,10 +3574,10 @@ const BOTTOM_THRESHOLD_PX = 56;
 function isNearBottom(element: HTMLElement) { return element.scrollHeight - element.scrollTop - element.clientHeight <= BOTTOM_THRESHOLD_PX; }
 let scrollRafId: number | null = null;
 function followLatest() {
-    if (followLiveTail.value && props.isRunning && streamElement.value) {
+    if (props.viewActive && followLiveTail.value && props.isRunning && streamElement.value) {
         if (scrollRafId !== null) cancelAnimationFrame(scrollRafId);
         scrollRafId = requestAnimationFrame(() => {
-            if (streamElement.value) {
+            if (props.viewActive && streamElement.value) {
                 streamElement.value.scrollTop = streamElement.value.scrollHeight;
             }
             scrollRafId = null;
@@ -3556,12 +3631,21 @@ onBeforeUnmount(() => {
     streamElement.value?.removeEventListener("touchmove", onPaneTouchCapture, true);
     streamElement.value?.removeEventListener("scroll", onPaneScrollCapture, true);
     if (thoughtScrollRaf !== null) { cancelAnimationFrame(thoughtScrollRaf); thoughtScrollRaf = null; }
+    if (scrollRafId !== null) cancelAnimationFrame(scrollRafId);
+    for (const frame of typewriterAnimFrames.values()) cancelAnimationFrame(frame);
+    typewriterAnimFrames.clear();
+    typewriterTargets.clear();
+    typewriterDoneIds.clear();
 });
 function followThoughtTail() {
     // 已有一个滚动动画在跑就不用再起——tick 每帧会重新读 scrollHeight，
     // 新内容来了自动把剩余距离拉大 → 步长自动变大，天然"追不上就加速"
-    if (thoughtScrollRaf !== null) return;
+    if (!props.viewActive || thoughtScrollRaf !== null) return;
     const tick = () => {
+        if (!props.viewActive) {
+            thoughtScrollRaf = null;
+            return;
+        }
         // 折叠态的 .active-thought-content 与展开态的 .thought-expanded-body
         // 都可能存在，一起追底（展开面板此前没人滚，一直钉在第一行）
         const els = streamElement.value?.querySelectorAll<HTMLElement>(
@@ -3605,14 +3689,16 @@ function followThoughtTail() {
 const liveTermBodyRef = ref<HTMLElement | null>(null);
 // 小框位于阶段 v-for 内：字符串 ref 会被 Vue 收成数组，用函数 ref 取单元素
 // 简报流实时输出吸底
+function followAmbientTermViews() {
+    if (!props.viewActive) return;
+    streamElement.value?.querySelectorAll<HTMLElement>(".ambient-term-live").forEach((el) => {
+        el.scrollTop = el.scrollHeight;
+    });
+}
 watch(
     () => props.liveShellOutput?.tail,
     () => {
-        nextTick(() => {
-            document.querySelectorAll<HTMLElement>(".ambient-term-live").forEach((el) => {
-                el.scrollTop = el.scrollHeight;
-            });
-        });
+        if (props.viewActive) nextTick(followAmbientTermViews);
     },
 );
 
@@ -3635,10 +3721,33 @@ watch(
         if (prev === undefined) liveTermFollowBottom = true;
         await nextTick();
         const el = liveTermBodyRef.value;
-        if (el && liveTermFollowBottom) el.scrollTop = el.scrollHeight;
+        if (props.viewActive && el && liveTermFollowBottom) el.scrollTop = el.scrollHeight;
     },
     { flush: "post" }
 );
+watch(() => props.viewActive, async (active) => {
+    if (!active) {
+        if (questionNavRaf !== null) cancelAnimationFrame(questionNavRaf);
+        questionNavRaf = null;
+        if (scrollRafId !== null) cancelAnimationFrame(scrollRafId);
+        scrollRafId = null;
+        if (thoughtScrollRaf !== null) cancelAnimationFrame(thoughtScrollRaf);
+        thoughtScrollRaf = null;
+        thoughtScrollRetries = 0;
+        for (const id of [...typewriterAnimFrames.keys()]) finishTypewriterInstantly(id, typewriterTargets.get(id));
+        return;
+    }
+    await nextTick();
+    if (!props.viewActive) return;
+    scheduleQuestionPosition();
+    if (props.isRunning) {
+        followLatest();
+        followThoughtTail();
+    }
+    followAmbientTermViews();
+    const el = liveTermBodyRef.value;
+    if (el && liveTermFollowBottom) el.scrollTop = el.scrollHeight;
+}, { flush: "post" });
 watch(() => props.isThinking, (running, wasRunning) => { if (running && !wasRunning) activeThoughtStartedAt.value = Date.now(); if (!running && wasRunning) activeThoughtStartedAt.value = null; }, { immediate: true });
 
 function formatMetricTokenCount(n: number): string {
@@ -3689,12 +3798,12 @@ watch(
 );
 
 function isPlanRunning(entry: PlanEntry): boolean {
+    if (!entry || (entry.status !== "running" && !entry.isThinking)) return false;
     if (!props.isRunning) return false;
     // 只有已提交的最终结果才停止阶段运行态；生成候选总结不等于验收完成。
     if (props.finalSummary && props.finalSummary.trim().length > 0) return false;
     if (props.completionMessage && props.completionMessage.trim().length > 0) return false;
-    if (!entry) return false;
-    return entry.status === "running" || Boolean(entry.isThinking);
+    return true;
 }
 
 function planStatus(steps: AgentStepItem[], isLiveTaskActive = false): AgentToolStatus {
@@ -3893,13 +4002,22 @@ function currentTimeline(): TimelineEntry[] {
     return timeline;
 }
 
-const baseTimelineEntries = computed<TimelineEntry[]>(() => [...historyTimelineEntries.value, ...currentTimeline()]);
+const liveTimelineEntries = computed<TimelineEntry[]>(currentTimeline);
+const baseTimelineEntries = computed<TimelineEntry[]>(() => [...historyTimelineEntries.value, ...liveTimelineEntries.value]);
 const historyEntryIds = computed(() => new Set(historyTimelineEntries.value.map(entry => entry.id)));
 // 只以身份/锚点变更重算位置；心跳和片段计数不重建步骤分组。
 const reviewLocationKey = computed(() => JSON.stringify(props.reviewProgress.map(review => ({ id: review.id, anchor: review.anchor }))));
-const reviewPlacement = computed(() => placeReviewRows(JSON.parse(reviewLocationKey.value) as ReviewLocation[], baseTimelineEntries.value));
+const reviewPlacement = computed<ReturnType<typeof placeReviewRows>>((previous) => {
+    const reviews = JSON.parse(reviewLocationKey.value) as ReviewLocation[];
+    const next = placeReviewRows(reviews, reviews.length ? baseTimelineEntries.value : []);
+    const sameIds = (left: string[], right: string[]) => left.length === right.length && left.every((id, index) => id === right[index]);
+    if (previous && sameIds(next.unplaced, previous.unplaced) && next.owners.size === previous.owners.size
+        && [...next.owners].every(([id, rows]) => sameIds(rows, previous.owners.get(id) || []))) return previous;
+    return next;
+});
 const reviewById = computed(() => new Map(props.reviewProgress.map(review => [review.id, review])));
 const unplacedReviews = computed(() => reviewPlacement.value.unplaced.flatMap(id => reviewById.value.get(id) || []));
+const unplacedReviewEntry: TimelineEntry = { id: 'unplaced-final-review', type: 'review', timestamp: 0 };
 function getStepReviewRows(step: AgentStepItem): ReviewProgressItem[] {
     return (reviewPlacement.value.owners.get(step.id) || []).flatMap(id => reviewById.value.get(id) || []);
 }
@@ -3910,39 +4028,66 @@ const timelineEntries = computed<TimelineEntry[]>(() => {
         const lastCompletion = props.isRunning ? -1 : entries.map(entry => entry.type).lastIndexOf('completion');
         const index = liveCompletion >= 0 ? liveCompletion : lastCompletion >= 0 ? lastCompletion : entries.length;
         // 缺少可靠归属时仍放在交付之前的步骤区，绝不粘在答案/产物之后。
-        entries.splice(index, 0, { id: 'unplaced-final-review', type: 'review', timestamp: 0 });
+        entries.splice(index, 0, unplacedReviewEntry);
     }
     return entries;
 });
+// Stable history props keep its slot render effect separate from the live list.
+// Preserve the review marker's original position, including before a saved completion.
+const timelineSections = computed<{ history: TimelineEntry[]; live: TimelineEntry[] }>((previous) => {
+    const entries = timelineEntries.value;
+    const history = historyTimelineEntries.value;
+    const lastHistoryId = history[history.length - 1]?.id;
+    const boundary = lastHistoryId ? entries.findIndex(entry => entry.id === lastHistoryId) + 1 : 0;
+    const reuse = (next: TimelineEntry[], old: TimelineEntry[] | undefined) =>
+        old && next.length === old.length && next.every((entry, index) => entry === old[index]) ? old : next;
+    return {
+        history: reuse(entries.slice(0, boundary), previous?.history),
+        live: reuse(entries.slice(boundary), previous?.live),
+    };
+});
 // 只投影已显示的用户提问和回答；子任务心跳、取证与人工确认不生成额外刻度。
 // 稳定的字符串投影避免每个思考片段都重新生成全部问答预览。
-const questionNavigationKey = computed(() => {
+function questionNavigationEntries(entries: TimelineEntry[], running: boolean): QuestionNavigationEntry[] {
+    const result: QuestionNavigationEntry[] = [];
+    for (const entry of entries) {
+        if (entry.type === 'user') result.push({ id: entry.id, kind: 'question', text: entry.content, pending: entry.id === 'live-user-goal' && running });
+        else if (entry.type === 'message' && !entry.isHuman) {
+            if (entry.role === 'user') result.push({ id: entry.id, kind: 'question', text: entry.content });
+            else if (['agent', 'assistant'].includes(entry.role)) result.push({ id: entry.id, kind: 'answer', text: entry.content });
+        } else if (entry.type === 'completion') result.push({ id: entry.id, kind: 'answer', text: entry.summary });
+    }
+    return result;
+}
+
+const historicalQuestionNavigationKey = computed(() => {
     const entries: QuestionNavigationEntry[] = [];
     for (const message of props.legacyMessages) {
         if (message.role === 'user') entries.push({ id: `legacy-${message.id}`, kind: 'question', text: message.content });
         else if (['agent', 'assistant'].includes(message.role)) entries.push({ id: `legacy-${message.id}`, kind: 'answer', text: message.content });
     }
-    for (const entry of timelineEntries.value) {
-        if (entry.type === 'user') entries.push({ id: entry.id, kind: 'question', text: entry.content, pending: entry.id === 'live-user-goal' && props.isRunning });
-        else if (entry.type === 'message' && !entry.isHuman) {
-            if (entry.role === 'user') entries.push({ id: entry.id, kind: 'question', text: entry.content });
-            else if (['agent', 'assistant'].includes(entry.role)) entries.push({ id: entry.id, kind: 'answer', text: entry.content });
-        } else if (entry.type === 'completion') entries.push({ id: entry.id, kind: 'answer', text: entry.summary });
-    }
+    entries.push(...questionNavigationEntries(historyTimelineEntries.value, false));
     return JSON.stringify(entries);
 });
-const questionMarks = computed(() => buildQuestionMarks(JSON.parse(questionNavigationKey.value)));
+const liveQuestionNavigationKey = computed(() => JSON.stringify(questionNavigationEntries(liveTimelineEntries.value, props.isRunning)));
+const questionMarks = computed(() => buildQuestionMarks([
+    ...JSON.parse(historicalQuestionNavigationKey.value),
+    ...JSON.parse(liveQuestionNavigationKey.value),
+]));
 watch(questionMarks, () => {
     questionAnchorOrderDirty = true;
     scheduleQuestionPosition();
 }, { flush: 'post' });
 watch(streamViewMode, scheduleQuestionPosition, { flush: 'post' });
 // Cache grouping/operation parsing independently of child-agent token streams.
-const ambientDisplayItems = computed(() => new Map(timelineEntries.value
-    .filter((entry): entry is PlanEntry => entry.type === "plan")
-    .map(entry => [entry.id, buildAmbientDisplayItems(entry)])));
+const ambientDisplayItems = new WeakMap<PlanEntry, ComputedRef<AmbientDisplayItem[]>>();
 function getAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
-    return ambientDisplayItems.value.get(entry.id) || [];
+    let cached = ambientDisplayItems.get(entry);
+    if (!cached) {
+        cached = computed(() => buildAmbientDisplayItems(entry));
+        ambientDisplayItems.set(entry, cached);
+    }
+    return cached.value;
 }
 
 function statusLabel(status: AgentToolStatus) { return { pending: "等待", running: "执行中", succeeded: "完成", failed: "失败", challenged: "验证未闭合" }[status] || "未知"; }
@@ -3981,6 +4126,11 @@ const workerLiveLines = computed(() => {
     }
     return map;
 });
+function getStepWorkerLiveLine(step: AgentStepItem) {
+    // A historical step never displays the current run's live worker text.
+    if (historicalStepWorkers.value.has(step)) return undefined;
+    return workerLiveLines.value.get(step.id);
+}
 
 function getSubAgentBadgeText(step: any): string {
     const tool = (step?.tool || step?.action || "").toLowerCase();

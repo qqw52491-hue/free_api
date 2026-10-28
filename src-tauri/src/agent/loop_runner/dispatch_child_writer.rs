@@ -106,7 +106,7 @@ pub(super) async fn dispatch_child_writer(
                 dispatch_input_incomplete = true;
                 continue;
             }
-            let mut writer_persona = String::new();
+            let mut writer_persona: String;
             let mut writer_model = routing.model_id.clone();
             let mut effective_params = writer_params.clone();
             if let Some(obj) = effective_params.as_object_mut() {

@@ -43,7 +43,13 @@ function updateOverflowClasses(targetEl: HTMLElement, hostEl: HTMLElement, pos: 
 }
 
 export function animateScrollTail(hostEl: HTMLElement) {
+    if (!hostEl.isConnected) return;
     let state = scrollStateMap.get(hostEl);
+    if (!hostEl.getClientRects().length) {
+        if (state?.rafId != null) cancelAnimationFrame(state.rafId);
+        if (state) state.rafId = null;
+        return;
+    }
     if (!state) {
         const scrollEl = resolveScrollElement(hostEl);
         state = {
@@ -93,6 +99,10 @@ export function animateScrollTail(hostEl: HTMLElement) {
     function tick() {
         if (!state || state.unmounted || !state.scrollEl.isConnected) {
             if (state) state.rafId = null;
+            return;
+        }
+        if (!hostEl.getClientRects().length) {
+            state.rafId = null;
             return;
         }
 
