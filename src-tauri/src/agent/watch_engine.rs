@@ -168,6 +168,30 @@ pub fn stop_all_watches(db: &DbState, parent_run_id: &str) -> Result<usize, Stri
     Ok(rows)
 }
 
+/// 顶层与组合调用共用停止入口，始终只操作当前 run 的监听。
+pub(crate) fn stop_watches_with_summary(
+    db: &DbState,
+    parent_run_id: &str,
+    watch_id: Option<&str>,
+) -> Result<String, String> {
+    match watch_id {
+        Some(id) => stop_watch(db, parent_run_id, id).map(|rows| {
+            if rows == 0 {
+                format!("当前运行中没有仍在执行的监听 {}，本次停止 0 个监听", id)
+            } else {
+                format!("已停止监听 {}（{} 个）", id, rows)
+            }
+        }),
+        None => stop_all_watches(db, parent_run_id).map(|rows| {
+            if rows == 0 {
+                "当前运行中没有仍在执行的持续监听，本次停止 0 个监听".to_string()
+            } else {
+                format!("已停止当前运行的全部持续监听（{} 个）", rows)
+            }
+        }),
+    }
+}
+
 /// 读取并校验监听行；行已不再 running 时返回 None（监听循环据此退出）
 pub fn load_watch_state(db: &DbState, watch_id: &str) -> Option<WatchState> {
     let conn = db.0.lock().ok()?;

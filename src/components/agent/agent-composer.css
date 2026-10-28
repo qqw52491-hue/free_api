@@ -1936,6 +1936,14 @@ textarea::placeholder {
     gap: 8px;
 }
 
+.model-choice-note {
+    margin: 0;
+    padding: 2px 2px 6px;
+    color: var(--text-2);
+    font-size: 12px;
+    line-height: 1.6;
+}
+
 /* 🎯 核心工种独立算力指派 */
 .role-slots-section {
     background: rgba(255, 255, 255, 0.02) !important;

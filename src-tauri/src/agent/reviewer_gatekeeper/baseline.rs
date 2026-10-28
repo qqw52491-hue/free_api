@@ -241,7 +241,7 @@ impl GitBaseline {
         Self::collect_fallback_workspace_changes(workspace, context, run_started_at)
     }
 
-    /// 提取任务期间新增或修改的文件相对路径列表（用于写后范围防逃逸校验）
+    /// 提取工作区差异路径（用于与计划范围比对，不证明写入归属）。
     pub fn collect_changed_file_paths(
         &self,
         workspace: &Path,

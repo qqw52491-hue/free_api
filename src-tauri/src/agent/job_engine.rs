@@ -661,6 +661,49 @@ pub fn has_running_jobs(db: &DbState, parent_run_id: &str) -> bool {
     count > 0
 }
 
+/// 收尾时按真实任务类型给出操作，避免把仍在运行的 reviewer 误当成 watch。
+pub(crate) fn running_job_finish_blockers(
+    db: &DbState,
+    parent_run_id: &str,
+) -> Result<Vec<String>, String> {
+    let conn = db.0.lock().map_err(|error| error.to_string())?;
+    let mut stmt = conn.prepare(
+        "SELECT id, job_type, title FROM agent_background_jobs
+         WHERE parent_run_id = ?1 AND status = 'running'
+         UNION ALL
+         SELECT id, 'child_' || COALESCE(NULLIF(kind, ''), 'review'), COALESCE(purpose, '')
+         FROM agent_child_runs WHERE parent_run_id = ?1 AND status = 'running'
+         ORDER BY 1",
+    ).map_err(|error| error.to_string())?;
+    let rows = stmt.query_map(params![parent_run_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+    }).map_err(|error| error.to_string())?;
+    let mut blockers = Vec::new();
+    let mut waiting = Vec::new();
+    let mut wait_ids = Vec::new();
+    for row in rows {
+        let (id, kind, title) = row.map_err(|error| error.to_string())?;
+        if kind == "watch" {
+            let call = serde_json::json!({"tool": "watch_stop", "params": {"watch_id": id}});
+            blockers.push(format!(
+                "持续监听仍在运行（watch_id={}）：{}。收尾前请调用 {} 释放该监听。",
+                id, title, call
+            ));
+        } else {
+            waiting.push(serde_json::json!({"job_id": id, "type": kind, "title": title}));
+            wait_ids.push(id);
+        }
+    }
+    if !waiting.is_empty() {
+        let call = serde_json::json!({"tool": "wait_jobs", "params": {"job_ids": wait_ids}});
+        blockers.push(format!(
+            "后台任务仍在执行：{}。请调用 {} 等待并接收结论；完成后再提交 finish。watch_stop 只能释放持续监听，不能结束这些任务。",
+            serde_json::Value::Array(waiting), call
+        ));
+    }
+    Ok(blockers)
+}
+
 /// 将指定 parent_run 下所有仍处于 running 状态的后台任务标记为 cancelled
 pub fn cancel_all_running_jobs(db: &DbState, parent_run_id: &str) -> Result<usize, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;

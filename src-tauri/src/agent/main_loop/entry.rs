@@ -111,6 +111,9 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
             .map(|d| d.as_millis().to_string())
             .unwrap_or_else(|_| "default".to_string())
     });
+    let (goal, attachments) = crate::commands::chat::attachment_storage::adopt_draft_attachments(
+        &final_session_id, goal, attachments,
+    )?;
     let run_id = run_id_override.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let retries = transient_llm_request_retries
         .unwrap_or(DEFAULT_TRANSIENT_LLM_REQUEST_RETRIES)

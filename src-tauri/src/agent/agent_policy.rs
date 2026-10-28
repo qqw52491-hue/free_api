@@ -506,10 +506,8 @@ pub fn evaluate_plan_policy(
     }
 }
 
-/// 补丁 1：写后真实 Git Diff 范围防逃逸校验
-///
-/// 当主 Agent 在 Plan 阶段自报了目标文件白名单后，写盘完成后比对实际的改动文件清单。
-/// 若实际改动了未经批准的高危文件，立即判定越权逃逸！
+/// 比对工作区差异与计划文件清单，提示计划外的高风险路径。
+/// 差异可能包含既有修改或并发写入；本函数不判断写入归属，也不作越权裁决。
 pub fn verify_scope_drift(
     approved_files: Option<&[String]>,
     actual_changed_files: &[String],
@@ -549,8 +547,8 @@ pub fn verify_scope_drift(
 
     if !unapproved_high_risk.is_empty() {
         return Err(format!(
-            "【越权逃逸拦截】检测到实际代码改动了未经 Plan 审批的高危文件: {:?}！Plan 中仅申报了: {:?}。\n\
-             💡 排查中发现必须修改未申报文件是正常的——补救通道：把这些文件与原因补入方案（更新计划申报），重新派发 child_reviewer 评审通过后，写入时名单会自动扩容；切勿不申报直接交付。",
+            "【计划外高风险路径观察】工作区差异包含未列入当前计划的高风险路径: {:?}；当前计划文件: {:?}。\n\
+             此清单只说明路径与计划不一致，不证明这些差异由本轮 Agent 写入。请结合本轮工具记录核对任务关联和来源；证据不足时标记归属未确认，不得仅凭此清单判定越权或要求撤销共享工作区修改。已确认属于本轮的必要扩围，应在方案和交付说明中说明原因；内容风险仍需按实际证据审查。",
             unapproved_high_risk, approved
         ));
     }
@@ -626,13 +624,13 @@ mod tests {
         let actual_clean = vec!["src/components/Button.vue".to_string()];
         assert!(verify_scope_drift(Some(&approved), &actual_clean, &policy).is_ok());
 
-        // 实际偷偷动了高危的 src-tauri/src/main.rs -> 必须精准拦截！
+        // 计划外高风险路径应作为观察返回，不据此推断修改者。
         let actual_sneaky = vec![
             "src/components/Button.vue".to_string(),
             "src-tauri/src/main.rs".to_string(),
         ];
         let err = verify_scope_drift(Some(&approved), &actual_sneaky, &policy).unwrap_err();
-        assert!(err.contains("越权逃逸拦截"));
+        assert!(err.contains("计划外高风险路径观察"));
         assert!(err.contains("src-tauri/src/main.rs"));
     }
 

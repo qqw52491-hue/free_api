@@ -781,10 +781,12 @@ async fn collect_checks(
             }
         }
     }
-    if crate::agent::child_reviewer::has_running_child_runs(db, run_id)
-        || crate::agent::job_engine::has_running_jobs(db, run_id)
-    {
-        open_todos.push("仍有后台异步任务或持续监听正在执行中：后台任务请调用 wait_jobs 挂起等待并接收结论；持续监听（watch）请调用 watch_stop 显式释放后再提交 finish，或执行其他独立操作后重试".to_string());
+    match crate::agent::job_engine::running_job_finish_blockers(db, run_id) {
+        Ok(blockers) => open_todos.extend(blockers),
+        Err(error) => open_todos.push(format!(
+            "无法读取后台任务状态，尚未确认任务已结束：{}。请恢复任务状态读取后再提交 finish。",
+            error
+        )),
     }
     if checkpoint.stage_review_blockers_open > 0 {
         open_todos.push(format!(

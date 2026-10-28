@@ -4,6 +4,7 @@
         :class="{ 'is-image': isImage }"
         :title="attachment.upload_failed
             ? '附件落盘失败：仅作为本条消息的内存数据发送，历史记录中无法回显'
+            : imageUnavailable ? '无法读取图片，原文件或历史副本不可用'
             : (isImage ? '点击放大预览图片' : '点击预览解析内容')"
         @click.stop="handleClick"
     >
@@ -14,12 +15,15 @@
             <div class="thumb-wrap">
                 <img
                     v-if="displayImgSrc"
+                    :key="displayImgSrc"
                     :src="displayImgSrc"
                     :alt="attachment.file_name"
                     class="img-thumbnail"
+                    :class="{ 'is-ready': imageLoaded }"
+                    @load="imageLoaded = true"
                     @error="handleImgError"
                 />
-                <div v-else class="thumb-placeholder">
+                <div v-if="!displayImgSrc || !imageLoaded" class="thumb-placeholder">
                     <FileIcon kind="image" :size="20" />
                 </div>
                 <div class="thumb-overlay">
@@ -68,7 +72,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type { ParsedAttachment } from "./types";
 import FileIcon from "./FileIcon.vue";
@@ -77,9 +81,11 @@ const props = withDefaults(
     defineProps<{
         attachment: ParsedAttachment;
         removable?: boolean;
+        sessionId?: string;
     }>(),
     {
         removable: false,
+        sessionId: "",
     }
 );
 
@@ -91,6 +97,21 @@ const emit = defineEmits<{
 }>();
 
 const asyncImgSrc = ref<string>("");
+const imageUnavailable = ref(false);
+const imageLoaded = ref(false);
+let imageRequest = 0;
+let loadingImage = false;
+watch([
+    () => props.attachment.file_path,
+    () => props.attachment.image_data_url,
+    () => props.sessionId,
+], () => {
+    imageRequest++;
+    asyncImgSrc.value = "";
+    imageUnavailable.value = false;
+    imageLoaded.value = false;
+    loadingImage = false;
+});
 
 const isImage = computed(() => {
     const name = props.attachment.file_name || "";
@@ -103,6 +124,7 @@ const isImage = computed(() => {
 });
 
 const displayImgSrc = computed(() => {
+    if (imageUnavailable.value) return "";
     if (props.attachment.image_data_url) {
         return props.attachment.image_data_url;
     }
@@ -123,18 +145,28 @@ const displayImgSrc = computed(() => {
 });
 
 async function handleImgError() {
+    imageLoaded.value = false;
+    if (loadingImage) return;
     if (props.attachment.file_path && !asyncImgSrc.value) {
+        loadingImage = true;
+        const request = ++imageRequest;
         try {
-            const parsed = await invoke<ParsedAttachment>("parse_attachment_file", {
+            const parsed = await invoke<ParsedAttachment>(props.sessionId ? "parse_session_attachment" : "parse_attachment_file", {
                 path: props.attachment.file_path,
+                sessionId: props.sessionId,
             });
+            if (request !== imageRequest) return;
             if (parsed?.image_data_url) {
                 asyncImgSrc.value = parsed.image_data_url;
-            }
+            } else imageUnavailable.value = true;
         } catch (e) {
+            if (request !== imageRequest) return;
+            imageUnavailable.value = true;
             console.warn("读取缩略图失败:", e);
+        } finally {
+            if (request === imageRequest) loadingImage = false;
         }
-    }
+    } else imageUnavailable.value = true;
 }
 
 const badgeClass = computed(() => {
@@ -156,7 +188,10 @@ const formattedSize = computed(() => {
 
 function handleClick() {
     if (isImage.value) {
-        emit("preview-image", props.attachment);
+        const imageDataUrl = props.attachment.image_data_url || asyncImgSrc.value;
+        emit("preview-image", imageDataUrl
+            ? { ...props.attachment, image_data_url: imageDataUrl }
+            : props.attachment);
     } else {
         emit("preview-doc", props.attachment);
     }
@@ -218,9 +253,14 @@ function handleClick() {
     height: 100%;
     object-fit: cover;
     display: block;
+    opacity: 0;
 }
 
+.img-thumbnail.is-ready { opacity: 1; }
+
 .thumb-placeholder {
+    position: absolute;
+    inset: 0;
     width: 100%;
     height: 100%;
     display: grid;

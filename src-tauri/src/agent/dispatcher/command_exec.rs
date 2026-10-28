@@ -201,6 +201,37 @@ fn execute_command_in_run(
         return task_store::dispatch(db, session_id, "get_step_output", params);
     }
 
+    // watch_stop 是同步的宿主操作，流水线/并行叶子与顶层共用相同的 run 边界。
+    if tool.eq_ignore_ascii_case("watch_stop") {
+        let Some(run_id) = run_id else {
+            return DispatchResult {
+                view: None,
+                stdout: String::new(),
+                stderr: "watch_stop 缺少当前运行标识，未停止任何监听；请在当前 Agent 运行中单独调用。".to_string(),
+                success: false,
+                route: "watch:missing_run".to_string(),
+            };
+        };
+        return match crate::agent::watch_engine::stop_watches_with_summary(
+            db, run_id, params.get("watch_id").and_then(|value| value.as_str()),
+        ) {
+            Ok(summary) => DispatchResult {
+                view: None,
+                stdout: summary,
+                stderr: String::new(),
+                success: true,
+                route: "watch:stopped".to_string(),
+            },
+            Err(error) => DispatchResult {
+                view: None,
+                stdout: String::new(),
+                stderr: error,
+                success: false,
+                route: "watch:stop_failed".to_string(),
+            },
+        };
+    }
+
     // 2. 核心原生工具 B: task_store (会话任务数据区结构化操作)
     if tool.eq_ignore_ascii_case("task_store") {
         let final_action = if action.is_empty() {

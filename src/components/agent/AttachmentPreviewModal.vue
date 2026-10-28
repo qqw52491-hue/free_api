@@ -8,12 +8,20 @@
                         <span class="dialog-title">{{ imageModal.file_name }}</span>
                         <button type="button" class="btn-close-dialog" @click="$emit('close-image')">×</button>
                     </div>
-                    <div class="dialog-body">
+                    <div class="dialog-body image-dialog-body">
                         <img
+                            v-if="imageSrc && !imageFailed"
+                            :key="imageSrc"
                             :src="imageSrc"
                             :alt="imageModal.file_name"
                             class="full-preview-img"
+                            :class="{ 'is-ready': imageReady }"
+                            @load="imageReady = true"
+                            @error="imageFailed = true"
                         />
+                        <div v-if="!imageReady || imageFailed" class="image-preview-status" role="status">
+                            {{ imageFailed || !imageSrc ? '图片无法加载，请关闭后重试' : '正在加载图片…' }}
+                        </div>
                     </div>
                 </div>
             </div>
@@ -159,6 +167,13 @@ const imageSrc = computed(() => {
         }
     }
     return "";
+});
+
+const imageReady = ref(false);
+const imageFailed = ref(false);
+watch(imageSrc, () => {
+    imageReady.value = false;
+    imageFailed.value = false;
 });
 
 function getFileBadgeIcon(fileName: string): string {
@@ -316,7 +331,12 @@ async function handleCopy() {
     object-fit: contain;
     border-radius: 6px;
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
+    opacity: 0;
 }
+
+.full-preview-img.is-ready { opacity: 1; }
+.image-dialog-body { position: relative; min-height: 120px; min-width: min(280px, 70vw); }
+.image-preview-status { position: absolute; inset: 0; display: grid; place-items: center; padding: 20px; color: var(--text-2, #a1a1aa); font-size: 13px; }
 
 .doc-dialog-body {
     flex: 1;

@@ -102,7 +102,7 @@ impl ReviewResult {
             blocking_issues: vec![BlockingIssue {
                 file: "global".to_string(),
                 issue: reason.to_string(),
-                requirement: "立即撤销未经审批的高危文件改动，或在 Plan 中向人类申请特赦/扩展审批".to_string(),
+                requirement: "结合本轮工具记录核实计划外差异的来源、任务关联和内容风险；归属未确认时不得要求撤销共享工作区修改，已确认的本轮扩围应说明原因并更新方案范围".to_string(),
             }],
             nit_issues: Vec::new(),
             summary: reason.to_string(),

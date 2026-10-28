@@ -17,7 +17,7 @@ use tokio::sync::watch;
 
 
 // 验收语义变更时升版：旧裁决不能在新规则下继续复用；Git 基线保持原样。
-const FINISH_REVIEW_RULES_VERSION: &str = "review-search-v9-task-origin";
+const FINISH_REVIEW_RULES_VERSION: &str = "review-search-v10-write-origin-evidence";
 const MAX_FINISH_FORMAT_RETRIES: u32 = 5;
 const MAX_FINISH_REQUEST_RETRIES: u32 = 5;
 
@@ -112,6 +112,26 @@ fn with_execution_evidence_fingerprint(base: &str, evidence: Option<&str>) -> St
     format!("{:x}", h.finalize())
 }
 
+/// 只交接本轮台账中的路径线索，不把工作区差异或 shell 脏文件探针当成归属证明。
+fn collect_write_origin_evidence(context: &SandwichContext) -> String {
+    let effects = context
+        .side_effects
+        .get(context.inherited_side_effects_count..)
+        .unwrap_or(&[]);
+    let records: Vec<_> = effects
+        .iter()
+        .map(|effect| json!({
+            "step_id": effect.step_id,
+            "tool": effect.tool,
+            "affected_paths": effect.affected_paths,
+        }))
+        .collect();
+    format!(
+        "\n\n【本轮工具副作用台账：路径归属线索（不含继承记录）】\n{}\n路径来自工具参数或 shell 步骤前后的脏文件探针，不是逐行写入证明；并发修改可能混入同一文件或探针结果。路径未登记、路径为空或来源无法区分时，归属未确认，不能认定一定由其他任务写入，也不能将整个差异归给本轮。请据具体工具回执核实；不得仅因计划外差异而要求撤销共享工作区修改。\n",
+        serde_json::Value::Array(records)
+    )
+}
+
 /// 将完整模型申报移交终审；不截掉后四条证据，也不把 evidenced 当成已验收。
 fn append_contract_claims(
     material: &mut String,
@@ -148,7 +168,7 @@ fn finish_review_bypass(
         && collect_session_tmp_material(session_id, run_started_at).is_none()
     {
         return Some(ReviewResult::mechanical_pass(
-            "本轮为只读问答（无新增写入、无本轮产物），已跳过终审；工作区已有的未提交改动属于此前任务，不在本次交付范围",
+            "本轮未登记新增写入，且未发现本轮会话产物，已跳过终审；工作区未提交差异的写入归属未确认，不据此认定为本轮交付",
         ));
     }
     None
@@ -334,11 +354,9 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
         review_material.push_str(&write_context);
     }
 
-    // 🌟 1.5 范围漂移校验（全模式降级为审查重点提示，不再硬拦）：
-    // 排查是发现驱动的，实现阶段扩围是常态——人类审批方案时同样无法预知全部涉改文件，
-    // 文件清单硬拦在所有模式下都会误伤必要修复（评测实测）。
-    // 控制面改动的监督由披露纪律（交付说明列出监管行为变化）+ 评测考卷 + diff 审查承担，
-    // 不再设独立硬拦（单机单人场景下该规则退化为全民打断）。
+    // 1.5 计划外高风险路径仅作观察：共享工作区差异不能证明本轮写入或越权。
+    let write_origin_evidence = collect_write_origin_evidence(context);
+    review_material.push_str(&write_origin_evidence);
     let changed_files = baseline.collect_changed_file_paths(workspace, run_started_at);
     let policy = crate::agent::agent_policy::PolicyConfig::load_from_workspace_or_default(Some(workspace));
     if let Err(scope_err) = crate::agent::agent_policy::verify_scope_drift(
@@ -347,7 +365,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
         &policy,
     ) {
         review_material.push_str(&format!(
-            "\n\n【⚠️ 审查重点：工作区差异涉及计划外高危文件】\n{}\n（差异已纳入可见材料；请先核对与任务的关系及写入归属，再评估必要性与安全性）\n",
+            "\n\n【审查参考：工作区差异涉及计划外高风险路径】\n{}\n",
             scope_err
         ));
     }
@@ -370,8 +388,12 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     if let Some(digest) = execution_evidence.as_ref() {
         review_material.push_str(digest);
     }
+    // 路径归属线索变化后也须重新审查，不能沿用旧材料下的裁决。
+    let evidence_fingerprint = with_execution_evidence_fingerprint(
+        &base_review_fingerprint, Some(&write_origin_evidence),
+    );
     let review_fingerprint = with_execution_evidence_fingerprint(
-        &base_review_fingerprint, execution_evidence.as_deref(),
+        &evidence_fingerprint, execution_evidence.as_deref(),
     );
     let excluded = crate::agent::review_control::excluded_models(db, session_id).unwrap_or_default();
     let review_fingerprint = if excluded.is_empty() { review_fingerprint } else {

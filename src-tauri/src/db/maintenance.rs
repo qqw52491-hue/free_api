@@ -297,6 +297,9 @@ pub(crate) fn cleanup_orphaned_session_data_at(
                 let Some(sid) = entry.file_name().to_str().map(|s| s.to_string()) else {
                     continue;
                 };
+                // Draft uploads have no chat_sessions row yet. Absence of that row
+                // does not establish deletion, including while another window is composing.
+                if sid.starts_with("draft-") { continue; }
                 let alive: bool = conn
                     .query_row(
                         "SELECT EXISTS(SELECT 1 FROM chat_sessions WHERE id=?1)",
@@ -305,7 +308,12 @@ pub(crate) fn cleanup_orphaned_session_data_at(
                     )
                     .map(|v| v == 1)
                     .unwrap_or(true); // 查询失败宁可保留，不赌误删
-                if !alive && std::fs::remove_dir_all(&path).is_ok() {
+                let prefix = format!("{}{}", path.display(), std::path::MAIN_SEPARATOR);
+                let referenced = alive || conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM chat_messages m JOIN chat_sessions s ON s.id=m.session_id WHERE instr(m.content, ?1)>0 UNION ALL SELECT 1 FROM agent_run_traces r JOIN chat_sessions s ON s.id=r.session_id WHERE instr(r.goal, ?1)>0 UNION ALL SELECT 1 FROM agent_project_resources WHERE instr(canonical_path, ?1)=1)",
+                    [&prefix], |r| r.get::<_, bool>(0),
+                ).unwrap_or(true);
+                if !alive && !referenced && std::fs::remove_dir_all(&path).is_ok() {
                     total_cleaned += 1;
                 }
             }

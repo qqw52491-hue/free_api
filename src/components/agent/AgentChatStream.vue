@@ -87,6 +87,7 @@
                                 v-for="(att, aIdx) in parseUserMessageAttachments(message.content).attachments"
                                 :key="aIdx"
                                 :attachment="att"
+                                :session-id="sessionId"
                                 @preview-image="openImagePreview"
                                 @preview-doc="openDocPreview"
                             />
@@ -139,6 +140,7 @@
                             v-for="(att, aIdx) in parseUserMessageAttachments(entry.content).attachments"
                             :key="aIdx"
                             :attachment="att"
+                            :session-id="sessionId"
                             @preview-image="openImagePreview"
                             @preview-doc="openDocPreview"
                         />
@@ -252,6 +254,7 @@
                                 v-for="(att, aIdx) in parseUserMessageAttachments(entry.content).attachments"
                                 :key="aIdx"
                                 :attachment="att"
+                                :session-id="sessionId"
                                 @preview-image="openImagePreview"
                                 @preview-doc="openDocPreview"
                             />
@@ -1734,7 +1737,7 @@ async function openImagePreview(att: ParsedAttachment) {
     const path = att.file_path || att.file_name;
     if (path) {
         try {
-            const parsed = await invoke<ParsedAttachment>("parse_attachment_file", { path });
+            const parsed = await invoke<ParsedAttachment>(props.sessionId ? "parse_session_attachment" : "parse_attachment_file", { path, sessionId: props.sessionId });
             if (parsed && parsed.image_data_url) {
                 previewImageModal.value = parsed;
                 return;
@@ -1754,7 +1757,7 @@ async function openDocPreview(att: ParsedAttachment) {
     const path = att.file_path || att.file_name;
     if (path) {
         try {
-            const parsed = await invoke<ParsedAttachment>("parse_attachment_file", { path });
+            const parsed = await invoke<ParsedAttachment>(props.sessionId ? "parse_session_attachment" : "parse_attachment_file", { path, sessionId: props.sessionId });
             if (parsed) {
                 previewDocModal.value = parsed;
                 return;
@@ -1779,6 +1782,7 @@ type TimelineEntry =
 
 const props = withDefaults(
     defineProps<{
+        sessionId?: string;
         currentGoal: string;
         legacyMessages: { id: string; role: string; content: string; created_at: string }[];
         historyTurns: HistoryTurn[];
@@ -1806,6 +1810,7 @@ const props = withDefaults(
         liveShellOutput?: { command: string; tail: string; elapsedMs: number; done: boolean } | null;
     }>(),
     {
+        sessionId: "",
         humanForm: null,
         completionPending: false,
         pauseReason: "",

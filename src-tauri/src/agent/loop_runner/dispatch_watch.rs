@@ -92,14 +92,11 @@ pub(super) async fn dispatch_watch_stop(
         if let Some(result) = crate::agent::tools::input_validation::native_rejection("watch_stop", "", &params) {
             return Ok(ArmOutcome::Early(result));
         }
-        let stop_outcome = match params.get("watch_id").and_then(|v| v.as_str()) {
-            Some(watch_id) => {
-                crate::agent::watch_engine::stop_watch(ctx.state.inner(), ctx.parent_run_id, watch_id)
-                    .map(|rows| format!("已停止监听 {}（{} 行）", watch_id, rows))
-            }
-            None => crate::agent::watch_engine::stop_all_watches(ctx.state.inner(), ctx.parent_run_id)
-                .map(|rows| format!("已停止全部持续监听（{} 行）", rows)),
-        };
+        let stop_outcome = crate::agent::watch_engine::stop_watches_with_summary(
+            ctx.state.inner(),
+            ctx.parent_run_id,
+            params.get("watch_id").and_then(|v| v.as_str()),
+        );
         match stop_outcome {
             Ok(summary) => DispatchResult { view: None,
                 stdout: summary,

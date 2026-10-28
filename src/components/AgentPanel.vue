@@ -99,6 +99,7 @@
                 <!-- 💬 全宽主对话流 (无左侧狭窄侧栏挤压) -->
                 <div class="chat-stream-column">
                     <AgentChatStream
+                        :session-id="session.activeSessionId.value"
                         :current-goal="session.currentGoal.value"
                         :legacy-messages="session.legacyConversationMessages.value"
                         :history-turns="session.historyTurns.value"

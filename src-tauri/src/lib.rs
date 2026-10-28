@@ -126,6 +126,10 @@ pub fn run() {
             commands::add_model_with_spec,
             commands::fetch_remote_models,
             commands::import_remote_models,
+            commands::export_model_config,
+            commands::preview_model_config,
+            commands::import_model_config,
+            commands::save_model_config_file,
             // 会话
             commands::get_sessions,
             commands::create_session,
@@ -203,6 +207,7 @@ pub fn run() {
             commands::render_artifact_preview,
             commands::resolve_artifact_absolute_path,
             commands::parse_attachment_file,
+            commands::parse_session_attachment,
             commands::save_and_parse_uploaded_attachment,
             commands::search_web,
             commands::fetch_url_markdown,

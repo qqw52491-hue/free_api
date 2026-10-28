@@ -29,8 +29,8 @@
           </button>
         </div>
       </div>
-      <div class="nav-right-tip" v-if="activeTab === 'platforms'">
-        <span>💡 提示：添加模型时可直接引用【规格词典】，免去重复填写上下文大小</span>
+      <div class="nav-right-group" v-if="activeTab === 'platforms'">
+        <ModelConfigTransfer @imported="onConfigImported" />
       </div>
       <div class="nav-right-tip" v-else>
         <span>⚡ 物理规格全局统一维护，修改后所有引用该规格的配置均可继承</span>
@@ -39,6 +39,7 @@
 
     <!-- 主体内容区 -->
     <main class="main-content-body">
+      <p v-if="configRefreshError" class="form-error" role="alert">{{ configRefreshError }}</p>
       <!-- ==================== 视图 1：渠道与模型管理 ==================== -->
       <div v-if="activeTab === 'platforms'" class="tab-content-wrap platforms-view">
         <!-- 左侧: 平台列表 -->
@@ -127,13 +128,12 @@
             <div class="add-model-container">
               <div class="add-model-bar">
                 <div class="spec-picker-wrap">
-                  <span class="spec-picker-icon">⚡</span>
-                  <select v-model="quickSelectedSpecId" @change="onQuickSpecSelect" class="spec-select-box">
-                    <option value="">-- 从规格词典自动代入参数 --</option>
-                    <option v-for="spec in modelSpecs" :key="spec.id" :value="spec.id">
-                      {{ spec.name }} ({{ formatTok(spec.context_window) }} 上下文 / {{ formatTok(spec.max_tokens) }} 输出)
-                    </option>
-                  </select>
+                  <SpecSelectDropdown
+                    v-model="quickSelectedSpecId"
+                    :specs="modelSpecs"
+                    placeholder="从规格词典自动代入参数"
+                    size="md"
+                  />
                 </div>
 
                 <div class="add-model-input-wrap">
@@ -141,6 +141,7 @@
                   <input
                     class="add-model-input"
                     v-model="newModelName"
+                    ref="newModelInput"
                     placeholder="输入平台调用的 API 模型标识，如 deepseek-chat 或 deepseek-ai/DeepSeek-V3"
                     @keydown.enter="addModel"
                   />
@@ -297,9 +298,9 @@
                   v-if="selectedPlatformId && currentPlatform"
                   class="btn btn-primary btn-sm btn-quick-apply"
                   @click="quickApplySpecToPlatform(spec)"
-                  title="直接将此规格添加为当前选定平台的模型"
+                  title="套用参数后填写模型标识，再确认添加"
                 >
-                  + 添加至 {{ currentPlatform.name }}
+                  使用此规格
                 </button>
               </div>
             </div>
@@ -449,14 +450,14 @@
             </div>
             <div class="modal-body">
               <!-- 从规格模板套用 -->
-              <div class="form-group" style="background:var(--bg-2);padding:10px 12px;border-radius:6px;border:1px solid var(--border-1)">
-                <label class="form-label" style="margin-bottom:6px">⚡ 从规格词典一键套用:</label>
-                <select @change="onApplySpecToEditModel($event)" class="spec-select-box" style="width:100%">
-                  <option value="">-- 选择预设规格以覆盖参数 --</option>
-                  <option v-for="spec in modelSpecs" :key="spec.id" :value="spec.id">
-                    {{ spec.name }} ({{ formatTok(spec.context_window) }} 上下文 / {{ formatTok(spec.max_tokens) }} 输出)
-                  </option>
-                </select>
+              <div class="form-group" style="background:rgba(255, 255, 255, 0.02);padding:10px 12px;border-radius:8px;border:1px solid rgba(255, 255, 255, 0.08)">
+                <label class="form-label" style="margin-bottom:8px;font-size:12px;color:var(--text-2)">⚡ 从规格词典一键套用:</label>
+                <SpecSelectDropdown
+                  :specs="modelSpecs"
+                  placeholder="-- 选择预设规格以覆盖参数 --"
+                  @change="onApplySpecToEditModel"
+                  style="width: 100%"
+                />
               </div>
 
               <div class="form-group">
@@ -828,8 +829,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, nextTick, onMounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import ModelConfigTransfer from '../components/ModelConfigTransfer.vue'
+import SpecSelectDropdown from '../components/common/SpecSelectDropdown.vue'
 
 const emit = defineEmits<{
   'models-updated': [];
@@ -936,6 +939,7 @@ const copiedDiag = ref(false)
 
 // 快速添加模型
 const newModelName = ref('')
+const newModelInput = ref<HTMLInputElement | null>(null)
 const quickSelectedSpecId = ref('')
 const showKey = ref(false)
 const formError = ref('')
@@ -948,6 +952,7 @@ const batchTestTotal = ref(0)
 const batchTestSummary = ref('')
 const batchTestPlatformId = ref('')
 const modelConfigError = ref('')
+const configRefreshError = ref('')
 
 // 表单对象
 const pForm = ref({ name: '', base_url: '', api_key: '' })
@@ -1123,6 +1128,18 @@ function getModelCount(platformId: string) {
 }
 
 // ==================== 数据加载 ====================
+async function onConfigImported() {
+  configRefreshError.value = ''
+  emit('models-updated')
+  try {
+    await loadPlatforms()
+    const id = selectedPlatformId.value || platforms.value[0]?.id
+    if (id) await selectPlatform(id)
+  } catch (e) {
+    configRefreshError.value = '配置已导入，刷新列表失败，请重新打开模型管理：' + String(e)
+  }
+}
+
 async function loadPlatforms() {
   platforms.value = await invoke<PlatformData[]>('get_platforms')
   await refreshModelCounts()
@@ -1187,14 +1204,6 @@ function confirmDeletePlatform(p: PlatformData) {
 }
 
 // ==================== 模型增删改 ====================
-function onQuickSpecSelect() {
-  if (activeQuickSpec.value) {
-    if (!newModelName.value.trim()) {
-      newModelName.value = activeQuickSpec.value.name.toLowerCase()
-    }
-  }
-}
-
 function clearQuickSpec() {
   quickSelectedSpecId.value = ''
 }
@@ -1206,7 +1215,7 @@ async function addModel() {
   const ctx = spec ? spec.context_window : 0
   const maxTok = spec ? spec.max_tokens : 4096
   const temp = spec ? spec.default_temperature : 0.7
-  const dispName = spec ? spec.name : newModelName.value.trim()
+  const dispName = newModelName.value.trim()
 
   await invoke('add_model_with_spec', {
     platformId: selectedPlatformId.value,
@@ -1235,12 +1244,16 @@ function editModel(m: ModelData) {
   modelConfigError.value = ''
 }
 
-function onApplySpecToEditModel(e: Event) {
-  const specId = (e.target as HTMLSelectElement).value
-  const spec = modelSpecs.value.find(s => s.id === specId)
+function onApplySpecToEditModel(specId: string, spec: any) {
   if (spec) {
-    mForm.value.context_window = spec.context_window
-    mForm.value.max_tokens = spec.max_tokens
+    mForm.value.context_window = spec.context_window || 0
+    mForm.value.max_tokens = spec.max_tokens || 4096
+  } else if (specId) {
+    const found = modelSpecs.value.find(s => s.id === specId)
+    if (found) {
+      mForm.value.context_window = found.context_window || 0
+      mForm.value.max_tokens = found.max_tokens || 4096
+    }
   }
 }
 
@@ -1433,17 +1446,10 @@ function confirmDeleteSpec(spec: ModelSpecData) {
 
 async function quickApplySpecToPlatform(spec: ModelSpecData) {
   if (!selectedPlatformId.value) return
-  await invoke('add_model_with_spec', {
-    platformId: selectedPlatformId.value,
-    name: spec.name.toLowerCase(),
-    displayName: spec.name,
-    maxTokens: spec.max_tokens,
-    temperature: spec.default_temperature,
-    contextWindow: spec.context_window,
-  })
-  await selectPlatform(selectedPlatformId.value)
+  quickSelectedSpecId.value = spec.id
   activeTab.value = 'platforms'
-  emit('models-updated')
+  await nextTick()
+  newModelInput.value?.focus()
 }
 
 // ==================== 统一确认删除处理器 ====================

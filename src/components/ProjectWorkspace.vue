@@ -86,7 +86,7 @@
                   class="model-chip"
                   type="button"
                   :class="{ active: modelMenuOpen }"
-                  title="配置模型路由 (推理 / 执行 / 视觉)"
+                  title="选择规划、执行和视觉模型"
                   @click="toggleModelMenu"
                 >
                   <span class="model-icon">🤖</span>
@@ -111,7 +111,7 @@
                         <button
                           type="button"
                           class="sync-all-btn"
-                          :title="`将执行与视觉模型一键设为当前推理模型 (${currentProModelName})`"
+                          :title="`将执行与视觉模型一键设为当前规划模型 (${currentProModelName})`"
                           @click="syncAllToPro"
                         >
                           一键同款
@@ -179,12 +179,13 @@
                     <div class="popover-body">
                       <!-- Tab 1: 模型分工 (前三个推理、执行、视觉合并展示) -->
                       <div v-if="activeRoutingTab === 'models'" class="tab-pane-content models-unified-pane">
+                        <p class="model-choice-note">规划和执行都需要选择，可使用同一个已配置模型，无需名称中带 Pro 或 Flash。</p>
                         <!-- 1. 推理规划模型 (Pro) -->
                         <div class="route-item pro-tier">
                           <div class="route-item-head">
                             <div class="head-left">
-                              <span class="route-badge pro">🧠 推理规划模型 (Pro)</span>
-                              <small>长程规划与深层自愈救场</small>
+                              <span class="route-badge pro">🧠 规划模型（必选）</span>
+                              <small>负责制定方案与复杂推理</small>
                             </div>
                             <!-- 🎯 Codex / Claude 风格档位切换器 -->
                             <div class="effort-segmented-wrap" title="思考档位切换">
@@ -208,7 +209,7 @@
                             <ModelSelectDropdown
                               :model-value="modelRouting.pro"
                               :models="allModels || []"
-                              placeholder="选择推理模型 (如 Gemini 2.5 Pro, DeepSeek-R1)..."
+                              placeholder="请选择用于规划的模型"
                               @update:model-value="updateRouteValue('pro', $event)"
                               size="md"
                             />
@@ -219,7 +220,7 @@
                         <div class="route-item flash-tier">
                           <div class="route-item-head">
                             <div class="head-left">
-                              <span class="route-badge flash">⚡ 极速执行模型 (Flash)</span>
+                              <span class="route-badge flash">⚡ 执行模型（必选）</span>
                               <small>高频工具调用与快速改码</small>
                             </div>
                             <!-- 🎯 Codex / Claude 风格档位切换器 -->
@@ -244,7 +245,7 @@
                             <ModelSelectDropdown
                               :model-value="modelRouting.flash"
                               :models="allModels || []"
-                              placeholder="选择执行模型 (如 Gemini 2.5 Flash, DeepSeek-V3)..."
+                              placeholder="请选择用于执行的模型"
                               @update:model-value="updateRouteValue('flash', $event)"
                               size="md"
                             />
@@ -856,8 +857,8 @@ const roleMappingItems: Array<{ key: RoleKey; label: string; desc: string }> = [
 
 const roleTierOptions: Array<{ value: string; label: string; icon: string; tooltip: string }> = [
   { value: "", label: "跟随自动", icon: "⚡", tooltip: "跟随自动分流策略 (Auto)" },
-  { value: "pro", label: "强模型 Pro", icon: "🧠", tooltip: "钉死为强模型槽 (Pro)" },
-  { value: "flash", label: "快模型 Flash", icon: "⚡", tooltip: "钉死为快模型槽 (Flash)" },
+  { value: "pro", label: "规划模型", icon: "🧠", tooltip: "使用已选择的规划模型" },
+  { value: "flash", label: "执行模型", icon: "⚡", tooltip: "使用已选择的执行模型" },
   { value: "vision", label: "视觉 Vision", icon: "👁️", tooltip: "钉死为视觉模型槽 (Vision)" },
 ];
 
@@ -1748,6 +1749,14 @@ defineExpose({
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.model-choice-note {
+  margin: 0;
+  padding: 2px 2px 6px;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .popover-body {

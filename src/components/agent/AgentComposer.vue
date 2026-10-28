@@ -17,6 +17,7 @@
                     v-for="(item, idx) in attachments"
                     :key="idx"
                     :attachment="item"
+                    :session-id="sessionId"
                     :removable="true"
                     @preview-image="openImagePreview"
                     @preview-doc="openDocPreview"
@@ -116,14 +117,14 @@
                             >
                                 <div class="popover-header">
                                     <div class="header-left">
-                                        <div class="popover-title">🤖 Agent 模型路由与专家小队</div>
-                                        <div class="popover-sub">主脑核心算力与业务专家人才库</div>
+                                        <div class="popover-title">🤖 模型与分工</div>
+                                        <div class="popover-sub">选择规划、执行与其他分工使用的模型</div>
                                     </div>
                                     <div class="header-actions">
                                         <button
                                             type="button"
                                             class="sync-all-btn"
-                                            :title="`将执行与视觉模型一键设为当前推理模型 (${currentModelName})`"
+                                            :title="`将执行与视觉模型一键设为当前规划模型 (${currentModelName})`"
                                             @click="syncAllToPro"
                                         >
                                             一键同款
@@ -149,7 +150,7 @@
                                             @click="activeRoutingTab = 'brain'"
                                         >
                                             <span class="tab-btn-icon">🧠</span>
-                                            <span class="tab-btn-text">主脑</span>
+                                            <span class="tab-btn-text">模型</span>
                                         </button>
                                         <button
                                             type="button"
@@ -221,12 +222,13 @@
                                 <div class="popover-body">
                                     <!-- Station 1: 🧠 主脑算力基线 (推理规划、极速执行、视觉模型) -->
                                     <div v-if="activeRoutingTab === 'brain'" class="tab-pane-content models-unified-pane">
+                                        <p class="model-choice-note">规划和执行都需要选择，可使用同一个已配置模型，无需名称中带 Pro 或 Flash。</p>
                                         <!-- 1. 推理规划模型 (Pro / 模型 1) -->
                                         <div class="route-item pro-tier">
                                             <div class="route-item-head">
                                                 <div class="head-left">
-                                                    <span class="route-badge pro">🧠 Pro：推理规划</span>
-                                                    <small>长程规划与深层自愈救场</small>
+                                                    <span class="route-badge pro">🧠 规划模型（必选）</span>
+                                                    <small>负责制定方案与复杂推理</small>
                                                 </div>
                                                 <div class="effort-segmented-wrap" title="思考档位切换">
                                                     <span class="effort-label">思考:</span>
@@ -251,7 +253,7 @@
                                                     :model-value="modelRouting.pro"
                                                     :models="allModels"
                                                     :disabled="isRunning"
-                                                    placeholder="选择推理模型 (如 Gemini 2.5 Pro, DeepSeek-R1)..."
+                                                    placeholder="请选择用于规划的模型"
                                                     @update:model-value="updateRouteValue('pro', $event)"
                                                     size="md"
                                                 />
@@ -262,7 +264,7 @@
                                         <div class="route-item flash-tier">
                                             <div class="route-item-head">
                                                 <div class="head-left">
-                                                    <span class="route-badge flash">⚡ Flash：极速执行</span>
+                                                    <span class="route-badge flash">⚡ 执行模型（必选）</span>
                                                     <small>高频工具调用与快速推进</small>
                                                 </div>
                                                 <div class="effort-segmented-wrap" title="思考档位切换">
@@ -288,7 +290,7 @@
                                                     :model-value="modelRouting.flash"
                                                     :models="allModels"
                                                     :disabled="isRunning"
-                                                    placeholder="选择执行模型 (如 Gemini 2.5 Flash, DeepSeek-V3)..."
+                                                    placeholder="请选择用于执行的模型"
                                                     @update:model-value="updateRouteValue('flash', $event)"
                                                     size="md"
                                                 />
@@ -395,21 +397,21 @@
                                                         type="button"
                                                         class="slot-choice-pill"
                                                         :class="{ active: getSlotChoice('writer') === 'pro' }"
-                                                        :title="`指定使用 Pro: ${getModelDisplayName(modelRouting.pro)}`"
+                                                        :title="`使用规划模型: ${getModelDisplayName(modelRouting.pro)}`"
                                                         :disabled="isRunning"
                                                         @click="setSlotChoice('writer', 'pro')"
                                                     >
-                                                        🧠 Pro
+                                                        🧠 规划
                                                     </button>
                                                     <button
                                                         type="button"
                                                         class="slot-choice-pill"
                                                         :class="{ active: getSlotChoice('writer') === 'flash' || !getSlotChoice('writer') }"
-                                                        :title="`指定使用 Flash: ${getModelDisplayName(modelRouting.flash)}`"
+                                                        :title="`使用执行模型: ${getModelDisplayName(modelRouting.flash)}`"
                                                         :disabled="isRunning"
                                                         @click="setSlotChoice('writer', 'flash')"
                                                     >
-                                                        ⚡ Flash
+                                                        ⚡ 执行
                                                     </button>
                                                     <ModelSelectDropdown
                                                         class="slot-model-picker"
@@ -669,21 +671,21 @@
                                                         type="button"
                                                         class="slot-choice-pill"
                                                         :class="{ active: getSlotChoice('reviewer') === 'pro' }"
-                                                        :title="`指定使用 Pro: ${getModelDisplayName(modelRouting.pro)}`"
+                                                        :title="`使用规划模型: ${getModelDisplayName(modelRouting.pro)}`"
                                                         :disabled="isRunning"
                                                         @click="setSlotChoice('reviewer', 'pro')"
                                                     >
-                                                        🧠 Pro
+                                                        🧠 规划
                                                     </button>
                                                     <button
                                                         type="button"
                                                         class="slot-choice-pill"
                                                         :class="{ active: getSlotChoice('reviewer') === 'flash' }"
-                                                        :title="`指定使用 Flash: ${getModelDisplayName(modelRouting.flash)}`"
+                                                        :title="`使用执行模型: ${getModelDisplayName(modelRouting.flash)}`"
                                                         :disabled="isRunning"
                                                         @click="setSlotChoice('reviewer', 'flash')"
                                                     >
-                                                        ⚡ Flash
+                                                        ⚡ 执行
                                                     </button>
                                                     <ModelSelectDropdown
                                                         class="slot-model-picker"
@@ -844,21 +846,21 @@
                                                         type="button"
                                                         class="slot-choice-pill"
                                                         :class="{ active: getSlotChoice('scout') === 'pro' }"
-                                                        :title="`指定使用 Pro: ${getModelDisplayName(modelRouting.pro)}`"
+                                                        :title="`使用规划模型: ${getModelDisplayName(modelRouting.pro)}`"
                                                         :disabled="isRunning"
                                                         @click="setSlotChoice('scout', 'pro')"
                                                     >
-                                                        🧠 Pro
+                                                        🧠 规划
                                                     </button>
                                                     <button
                                                         type="button"
                                                         class="slot-choice-pill"
                                                         :class="{ active: getSlotChoice('scout') === 'flash' || !getSlotChoice('scout') }"
-                                                        :title="`指定使用 Flash: ${getModelDisplayName(modelRouting.flash)}`"
+                                                        :title="`使用执行模型: ${getModelDisplayName(modelRouting.flash)}`"
                                                         :disabled="isRunning"
                                                         @click="setSlotChoice('scout', 'flash')"
                                                     >
-                                                        ⚡ Flash
+                                                        ⚡ 执行
                                                     </button>
                                                     <ModelSelectDropdown
                                                         class="slot-model-picker"
@@ -1154,7 +1156,7 @@
                         }"
                         type="button"
                         :disabled="!canSubmit || isSending"
-                        :title="!isRunning && !hasSelectedModel ? '请先添加模型，并选择推理和执行模型' : isRunning ? (isWaitingForHuman ? '回答当前请求' : (submitMode === 'interrupt' ? '⚡ 立即打断当前任务并切换为新目标' : '⏳ 加入队列，等当前任务完成后自动执行')) : (taskStartMode === 'resume' ? '继续原任务，保留审查状态' : '开始新任务')"
+                        :title="!isRunning && !hasSelectedModel ? '请先选择规划模型和执行模型，两处可以选择同一个模型' : isRunning ? (isWaitingForHuman ? '回答当前请求' : (submitMode === 'interrupt' ? '⚡ 立即打断当前任务并切换为新目标' : '⏳ 加入队列，等当前任务完成后自动执行')) : (taskStartMode === 'resume' ? '继续原任务，保留审查状态' : '开始新任务')"
                         @click="submit"
                     >
                         <svg viewBox="0 0 24 24"><path d="m7 12 5-5 5 5M12 7v10"/></svg>
@@ -1164,7 +1166,7 @@
         </div>
 
         <div v-if="!isRunning && !hasSelectedModel" class="model-setup-hint" role="status">
-            请先在平台与模型管理中添加模型，并选择推理（Pro）和执行（Flash）模型后发送；两者可以相同。
+            请先选择规划模型和执行模型，两处可以选择同一个已配置模型。
         </div>
 
         <!-- 🚀 实时性能流式状态行 (连续字体排版 · 柔和间距 · 实时流式跳动) -->
@@ -1805,7 +1807,7 @@ const allEnabledRoleCards = computed(() => {
 });
 
 function getCardModelName(modelId?: string): string {
-    if (!modelId) return "跟随主脑快模型";
+    if (!modelId) return "跟随执行模型";
     const found = props.allModels.find((m) => m.id === modelId);
     return found ? (found.display_name || found.name) : modelId;
 }

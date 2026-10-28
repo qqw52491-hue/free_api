@@ -60,7 +60,7 @@
               ref="searchInputRef"
               v-model="searchQuery"
               class="dropdown-search-input"
-              placeholder="搜索模型标识、名称或平台 (如 flash, r1, deepseek)..."
+              placeholder="搜索模型名称、标识或平台"
               @keydown.esc="closeDropdown"
               @keydown.enter="handleSearchEnter"
             />

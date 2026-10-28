@@ -211,7 +211,7 @@ pub(crate) fn configured_reviewer_backup(
 impl ModelRoutingConfig {
     /// 桌面启动前只核验配置事实；不发请求，不要求无鉴权服务填写 API Key。
     pub(crate) fn validate_desktop_start(&self, conn: &rusqlite::Connection) -> Result<(), String> {
-        for (label, id) in [("推理（Pro）", &self.pro), ("执行（Flash）", &self.flash)] {
+        for (label, id) in [("规划", &self.pro), ("执行", &self.flash)] {
             if id.trim().is_empty() {
                 return Err(format!("尚未选择{label}模型，请先在平台与模型管理中配置并选择模型。任务未启动。"));
             }
@@ -630,12 +630,12 @@ mod tests {
     fn desktop_preflight_checks_both_slots_before_start() {
         let conn = crate::db::init_db(&std::path::PathBuf::from(":memory:")).unwrap();
         let mut routing = super::ModelRoutingConfig::default();
-        assert!(routing.validate_desktop_start(&conn).unwrap_err().contains("Pro"));
+        assert!(routing.validate_desktop_start(&conn).unwrap_err().contains("规划"));
         routing.pro = "m".into();
         assert!(routing.validate_desktop_start(&conn).unwrap_err().contains("不存在或已禁用"));
         conn.execute("INSERT INTO platforms (id,name,base_url,api_key,created_at) VALUES ('p','local','http://localhost:1234/v1','','now')", []).unwrap();
         conn.execute("INSERT INTO models (id,platform_id,name,display_name,created_at) VALUES ('m','p','local','local','now')", []).unwrap();
-        assert!(routing.validate_desktop_start(&conn).unwrap_err().contains("Flash"));
+        assert!(routing.validate_desktop_start(&conn).unwrap_err().contains("执行"));
         routing.flash = "m".into();
         routing.validate_desktop_start(&conn).unwrap();
         conn.execute("UPDATE models SET enabled=0", []).unwrap();

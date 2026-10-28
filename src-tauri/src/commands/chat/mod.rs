@@ -12,12 +12,14 @@ mod chat_messages;
 mod chat_send;
 mod chat_misc;
 mod chat_artifacts;
+pub(crate) mod attachment_storage;
 
 pub use chat_sessions::*;
 pub use chat_messages::*;
 pub use chat_send::*;
 pub use chat_misc::*;
 pub use chat_artifacts::*;
+pub use attachment_storage::*;
 
 
 #[cfg(test)]
