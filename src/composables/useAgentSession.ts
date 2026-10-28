@@ -1647,6 +1647,9 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             const existing = getLatestStep(stepId);
             if (existing) {
                 existing.status = "failed";
+                if (payload.view && typeof payload.view === "object") {
+                    existing.view = payload.view as AgentStepItem["view"];
+                }
                 if (payload.metrics || payload.token_usage) {
                     const rawM = asRecord(payload.metrics || payload.token_usage);
                     existing.metrics = {

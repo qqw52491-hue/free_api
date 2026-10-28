@@ -92,6 +92,61 @@ fn read_leaf() -> Value {
 }
 
 #[test]
+fn composite_file_views_keep_successes_before_failure_and_survive_mcp_archiving() {
+    let f = Fixture::new();
+    std::fs::write(f.root.join("edit.txt"), "old\n").unwrap();
+    let mut result = f.execute(json!({"commands":[
+        {"tool":"local_file","params":{"action":"read","path":"edit.txt"}},
+        {"tool":"local_file","args":{"action":"edit","path":"edit.txt","target_content":"old","replacement_content":"new"}},
+        {"tool":"local_file","params":{"action":"edit","path":"edit.txt","target_content":"missing","replacement_content":"bad"}},
+        {"tool":"local_file","params":{"action":"write","path":"never.txt","content":"must not run"}}
+    ]}));
+    assert!(!result.success);
+    let files = result.view.as_ref().unwrap()["tool_views"].as_array().unwrap().clone();
+    assert_eq!(files.len(), 3);
+    assert_eq!(files[1]["success"], true);
+    assert_eq!(files[1]["view"]["removed_lines"], json!(["old"]));
+    assert_eq!(files[1]["view"]["added_lines"], json!(["new"]));
+    assert_eq!(files[2]["success"], false);
+    assert!(!f.root.join("never.txt").exists());
+    assert_eq!(std::fs::read_to_string(f.root.join("edit.txt")).unwrap(), "new\n");
+    let mut mcp = Vec::new();
+    append_mcp_raw_results(&mut mcp, Some(&mcp_raw_result_view("p", "t", &json!({}), &json!({"content":[]}))));
+    result.view = composite_results_view(mcp, files.clone());
+    let id = f.archive(&mut result);
+    assert_eq!(result.view.as_ref().unwrap()["tool_views"], json!(files));
+    let saved = f.read(&id, 0);
+    assert!(saved.to_string().contains("old"));
+    let round_trip: Value = serde_json::from_str(&serde_json::to_string(&result.view).unwrap()).unwrap();
+    assert_eq!(round_trip["tool_views"][1]["view"]["kind"], "diff");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nested_parallel_file_views_preserve_individual_results() {
+    let f = Fixture::new();
+    for name in ["a.txt", "b.txt"] { std::fs::write(f.root.join(name), "old\n").unwrap(); }
+    let mut result = f.execute(json!({"plan_tree":[
+        {"parallel":[
+            [{"tool":"local_file","params":{"action":"read","path":"a.txt"}},
+             {"tool":"local_file","params":{"action":"edit","path":"a.txt","target_content":"old","replacement_content":"A"}}],
+            [{"tool":"local_file","command":{"action":"read","path":"b.txt"}},
+             {"tool":"local_file","command":{"action":"edit","path":"b.txt","target_content":"absent","replacement_content":"B"}}]
+        ]}
+    ]}));
+    assert!(!result.success);
+    let files = result.view.as_ref().unwrap()["tool_views"].as_array().unwrap();
+    assert_eq!(files.len(), 4);
+    let edits: Vec<_> = files.iter().filter(|v| v["params"]["action"] == "edit").collect();
+    assert_eq!(edits.len(), 2);
+    assert_eq!(edits.iter().filter(|v| v["success"] == true).count(), 1);
+    assert_eq!(std::fs::read_to_string(f.root.join("a.txt")).unwrap(), "A\n");
+    assert_eq!(std::fs::read_to_string(f.root.join("b.txt")).unwrap(), "old\n");
+    let before = result.view.clone();
+    f.archive(&mut result);
+    assert_eq!(result.view, before);
+}
+
+#[test]
 fn failed_tool_streams_remain_retrievable_even_without_stderr() {
     let f = Fixture::new();
     for stderr in ["", "执行失败的错误信息"] {

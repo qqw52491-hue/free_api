@@ -163,5 +163,6 @@ export function stepFingerprint(step: AgentStepItem): string {
         cheapLen(step.rawResult),
         cheapLen(step.description),
         cheapLen(step.explanation),
+        cheapLen(step.view),
     ].join("~");
 }

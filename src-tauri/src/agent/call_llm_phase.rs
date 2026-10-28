@@ -765,6 +765,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                 "status": "failed",
                 "output": error_detail,
                 "output_id": failed_output_id,
+                "view": archival_result.view.clone(),
                 "metrics": metrics_val.clone(),
                 "duration_ms": total_dur,
                 "timestamp": chrono::Utc::now().timestamp_millis(),
@@ -802,6 +803,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                     "tool": inst.get_tool(),
                     "output": error_detail,
                     "output_id": failed_output_id,
+                    "view": archival_result.view.clone(),
                     "metrics": metrics_val,
                 }),
             )

@@ -5,7 +5,8 @@
 //! 不超过 MAX_CONTROLLED_PARALLEL_BRANCHES（响亮拒绝而非静默截断）。
 
 use crate::agent::dispatcher::{
-    append_mcp_raw_results, emit_tool_event, execute_command_with_images, mcp_raw_results_view,
+    append_mcp_raw_results, emit_tool_event, execute_command_with_images,
+    append_file_tool_result, composite_results_view,
 };
 use crate::agent::mcp::PluginRegistry;
 use crate::agent::plan_tree::PlanNode;
@@ -52,6 +53,8 @@ pub(crate) fn run_plan_tree_sync_with_images(
     let ws_owned: Option<std::path::PathBuf> = workspace_root.map(|p| p.to_path_buf());
     let mcp_raw_items = Arc::new(Mutex::new(Vec::<Value>::new()));
     let mcp_raw_collector = mcp_raw_items.clone();
+    let file_views = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let file_collector = file_views.clone();
 
     let pending = pending.cloned();
     let run_id = run_id.map(str::to_owned);
@@ -61,6 +64,7 @@ pub(crate) fn run_plan_tree_sync_with_images(
         let sid_c = sid.clone();
         let reg_c = reg_clone.clone();
         let items_c = mcp_raw_items.clone();
+        let files_c = file_views.clone();
         let ws_c = ws_owned.clone();
         let pending_c = pending.clone();
         let run_id_c = run_id.clone();
@@ -76,7 +80,7 @@ pub(crate) fn run_plan_tree_sync_with_images(
             // 对 MCP 插件使用 handle.block_on，在 runtime 内嵌套 block_on 会直接 panic。
             // 用 spawn_blocking 把同步分发放到 blocking 线程执行，消除 runtime 嵌套。
             let res = tokio::task::spawn_blocking(move || {
-                execute_command_with_images(
+                let result = execute_command_with_images(
                     &db_c,
                     &sid_c,
                     &tool,
@@ -87,7 +91,11 @@ pub(crate) fn run_plan_tree_sync_with_images(
                     pending_c.as_ref(),
                     run_id_c.as_deref(),
                     shell_guard_c.as_ref(),
-                )
+                );
+                if let Ok(mut files) = files_c.lock() {
+                    append_file_tool_result(&mut files, &tool, &args, &result);
+                }
+                result
             })
             .await
             .map_err(|e| format!("工具执行任务崩溃: {}", e))?;
@@ -119,7 +127,8 @@ pub(crate) fn run_plan_tree_sync_with_images(
         .map(|items| items.clone())
         .unwrap_or_default();
 
-    DispatchResult { view: mcp_raw_results_view(collected),
+    let files = file_collector.lock().map(|files| files.clone()).unwrap_or_default();
+    DispatchResult { view: composite_results_view(collected, files),
         stdout: feedback.clone(),
         stderr: if success { String::new() } else { feedback },
         success,

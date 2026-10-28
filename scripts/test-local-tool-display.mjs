@@ -58,3 +58,37 @@ for (const tool of ['local_file','local_shell','parallel','pipeline','commands',
 assert.equal(box.exports.isMcpStep({tool:'remote/local_file',source:'MCP'}),true);
 assert.equal(box.exports.isMcpStep({tool:'remote/custom_tool'}),true);
 console.log('Local tool display regression tests passed');
+
+const { computeParseStepFileChanges: parseFiles, parseStepFileChanges: memoFiles } = load('src/components/agent/diff/stepFileParser.ts');
+const edit = { action:'edit',path:'a.vue',target_content:'old',replacement_content:'new' };
+for (const key of ['params','args','command']) {
+    const parsed = parseFiles({id:'s',tool:'pipeline',status:'succeeded',params:{commands:[{tool:'local_file',[key]:edit}]}});
+    assert.equal(parsed.chips.length,1,key);
+    assert.equal(parsed.chips[0].newContent,'new',key);
+}
+assert.equal(parseFiles({id:'s',tool:'pipeline',status:'running',params:{commands:[{tool:'local_file',params:edit}]}}).chips.length,0);
+const legacyFail={id:'s',tool:'pipeline',status:'failed',result:'流水线第 2 步参数预检拒绝',params:{commands:[{tool:'local_file',params:edit},{tool:'local_file',params:{...edit,path:'b.vue'}},{tool:'local_file',params:{...edit,path:'c.vue'}}]}};
+assert.equal(parseFiles(legacyFail).chips.length,1);
+const receipts=[
+    {tool:'local_file',success:true,route:'local_file:read:success',params:{action:'read',path:'a.vue'},view:{kind:'read',path:'a.vue'}},
+    {tool:'local_file',success:true,route:'local_file:edit:success',params:edit,view:{kind:'diff',path:'a.vue',start_line:12}},
+    {tool:'local_file',success:false,route:'local_file:edit:failed',params:{...edit,path:'a.vue',replacement_content:'never'}},
+    {tool:'local_file',success:true,route:'local_file:delete:success',params:{action:'delete',path:'removed.txt'},view:null},
+];
+for(const tool of ['pipeline','parallel','plan_tree']) {
+    const step={id:'s',tool,status:'failed',view:{kind:'tool_results',tool_views:receipts}};
+    const parsed=parseFiles(step);
+    assert.equal(parsed.chips.length,2,tool);
+    assert.equal(parsed.readFiles[0],'a.vue',tool);
+    assert.equal(parsed.chips[0].isIntercepted,false,tool);
+    assert.equal(parsed.chips[0].newContent,'new',tool);
+    assert.equal(parsed.chips[0].startLine,12,tool);
+    assert.equal(parsed.chips[0].additions,1,tool);
+    assert.equal(parsed.chips[1].actionKind,'delete',tool);
+    assert.equal(parseFiles(JSON.parse(JSON.stringify(step))).chips.length,2,'history');
+}
+const streaming={id:'s',tool:'pipeline',status:'succeeded',view:null};
+assert.equal(memoFiles(streaming).chips.length,0);
+streaming.view={kind:'tool_results',tool_views:receipts};
+assert.equal(memoFiles(streaming).chips.length,2,'view arrival must invalidate memo');
+console.log('Composite file receipt display regression tests passed');

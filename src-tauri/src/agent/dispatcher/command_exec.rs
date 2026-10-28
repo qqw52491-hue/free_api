@@ -555,6 +555,24 @@ pub(crate) fn mcp_raw_results_view(items: Vec<serde_json::Value>) -> Option<serd
     }))
 }
 
+/// Preserve native file receipts alongside MCP evidence in composite calls.
+pub(crate) fn append_file_tool_result(target: &mut Vec<serde_json::Value>, tool: &str, params: &serde_json::Value, result: &DispatchResult) {
+    if let Some(items) = result.view.as_ref().and_then(|v| v.get("tool_views")).and_then(|v| v.as_array()) {
+        target.extend(items.iter().cloned());
+    } else if tool.eq_ignore_ascii_case("local_file") {
+        target.push(json!({"tool":tool,"params":params,"success":result.success,"route":result.route,"view":result.view}));
+    }
+}
+
+pub(crate) fn composite_results_view(mcp: Vec<serde_json::Value>, files: Vec<serde_json::Value>) -> Option<serde_json::Value> {
+    let mut view = mcp_raw_results_view(mcp);
+    if !files.is_empty() {
+        let value = view.get_or_insert_with(|| json!({"kind":"tool_results"}));
+        value["tool_views"] = json!(files);
+    }
+    view
+}
+
 pub(crate) fn take_mcp_durable_output(
     view: &mut Option<serde_json::Value>,
 ) -> Option<String> {
@@ -562,9 +580,13 @@ pub(crate) fn take_mcp_durable_output(
     if !is_exact {
         return None;
     }
-    view.take().map(|v| {
-        serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string())
-    })
+    let value = view.take()?;
+    // MCP durable evidence moves to output storage; native file views must stay
+    // attached to the step so both live events and history retain the same diff.
+    if let Some(files) = value.get("tool_views").and_then(|v| v.as_array()) {
+        *view = composite_results_view(vec![], files.clone());
+    }
+    Some(serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()))
 }
 
 /// Preserve both streams on failure. Composite MCP sidecars must also retain

@@ -1,7 +1,7 @@
 import type { AgentStepItem, FileChangeChip, ReviewerVerdict } from "../types";
 import { parseWorkerArtifacts } from "../workerUtils";
 import { cleanFilePath, truncateFileName, stepFingerprint, isSubAgentTool, isWaitJobsTool, extractResultPayloads, tryParseJson } from "./diffTypes";
-import { extractDiffFromStep, statsFromUnifiedDiff, isInterceptedStep, isStepWithDiff } from "./diffCore";
+import { extractDiffFromStep, statsFromUnifiedDiff, computeLineDiffStats, isInterceptedStep, isStepWithDiff } from "./diffCore";
 import { formatStepOperation } from "./toolOperation";
 
 export interface ParsedStepFiles {
@@ -106,7 +106,7 @@ export function computeParseStepFileChanges(step: AgentStepItem): ParsedStepFile
             if (!existing.newContent && chip.newContent) existing.newContent = chip.newContent;
             if (!existing.oldContent && chip.oldContent) existing.oldContent = chip.oldContent;
             if (existing.actionKind !== "create" && chip.actionKind === "create") existing.actionKind = "create";
-            if (chip.isIntercepted) existing.isIntercepted = true;
+            existing.isIntercepted = Boolean(existing.isIntercepted) && Boolean(chip.isIntercepted);
         }
     };
     const pushWriteChip = (path: string, actionKind: "modify" | "create", params?: any) => {
@@ -128,6 +128,39 @@ export function computeParseStepFileChanges(step: AgentStepItem): ParsedStepFile
 
     const rawTool = (step.tool || step.action || "").trim();
     const t = rawTool.toLowerCase();
+
+    // New composite receipts describe calls that actually ran, including
+    // successful siblings of a failed batch. Never infer them from the plan.
+    const receipts = (step.view as any)?.tool_views;
+    if (Array.isArray(receipts)) {
+        for (const receipt of receipts) {
+            if (receipt?.tool !== "local_file" || typeof receipt.success !== "boolean") continue;
+            if (!receipt.success) continue;
+            const params = receipt.params && typeof receipt.params === "object" ? receipt.params : {};
+            const action = String(receipt.route || "").split(":")[1] || params.action || "read";
+            if ((action === "delete" || action === "remove") && params.path) {
+                const path = cleanFilePath(String(params.path));
+                const fileName = path.split("/").pop() || path;
+                pushChip({ path, fileName, displayLabel: truncateFileName(fileName), actionKind: "delete", additions: 0, deletions: 0, stepId: step.id });
+                continue;
+            }
+            const child = computeParseStepFileChanges({
+                ...step,
+                tool: receipt.tool,
+                action,
+                status: receipt.success ? "succeeded" : "failed",
+                params: { ...params, start_line: params.start_line ?? receipt.view?.start_line },
+                rawParams: undefined,
+                result: "",
+                rawResult: "",
+                view: receipt.view,
+            });
+            child.readFiles.forEach(pushRead);
+            child.chips.forEach(pushChip);
+        }
+        if (res.chips.length) res.chip = res.chips[0];
+        return res;
+    }
 
     // -------------------------------------------------------------
     // 1. 深度解析子智能体与后台挂起执行结果 (child_reviewer, child_writer, child_worker, wait_jobs, sub_agent)
@@ -245,7 +278,8 @@ export function computeParseStepFileChanges(step: AgentStepItem): ParsedStepFile
     //     local_file 等子命令，逐条按嵌套 action 语义解析（edit/write/delete/read），
     //     否则批量写盘在托盘全隐形
     // -------------------------------------------------------------
-    if (t === "pipeline" || t === "parallel" || t.includes("pipeline") || t.includes("parallel")) {
+    if (t === "commands" || t === "pipeline" || t === "parallel" || t.includes("pipeline") || t.includes("parallel")) {
+        if (step.status !== "succeeded" && step.status !== "failed" && step.status !== "challenged") return res;
         let p: any = step.params ?? step.rawParams;
         if (typeof p === "string") {
             try { p = JSON.parse(p); } catch { p = {}; }
@@ -260,7 +294,7 @@ export function computeParseStepFileChanges(step: AgentStepItem): ParsedStepFile
         let parallelOk: boolean[] | null = null;
         if (stepFailed) {
             const text = `${step.result ?? ""}\n${step.rawResult ?? ""}`;
-            const m = text.match(/第\s*(\d+)\s*步崩溃/) || text.match(/pipeline_fail_at_(\d+)/);
+            const m = text.match(/第\s*(\d+)\s*步(?:崩溃|参数预检)/) || text.match(/pipeline_fail_at_(\d+)/);
             if (m) crashIdx = parseInt(m[1], 10);
             // parallel 分支语义：分支相互独立，部分失败≠全部未落地。
             // 后端执行报告的 results 为与 commands 严格同序的逐分支数组，
@@ -281,9 +315,16 @@ export function computeParseStepFileChanges(step: AgentStepItem): ParsedStepFile
             const cmdLanded = parallelOk
                 ? parallelOk[ci] === true
                 : (!stepFailed || (crashIdx > 0 ? ord < crashIdx : false));
-            const cmd = entry && typeof entry === "object" ? entry.command : undefined;
+            if (!cmdLanded) continue;
+            // Match the native dispatcher: args > command object > params >
+            // other command forms; legacy flat parameters remain readable.
+            const cmd = entry && typeof entry === "object"
+                ? (entry.args ?? (entry.command && typeof entry.command === "object" ? entry.command : undefined)
+                    ?? entry.params ?? entry.command ?? entry)
+                : undefined;
             if (!cmd || typeof cmd !== "object") continue;
-            const action = String(cmd.action || "").toLowerCase();
+            if (entry.tool && entry.tool !== "local_file") continue;
+            const action = String(cmd.action || entry.action || "read").toLowerCase();
             const path = cleanFilePath(String(cmd.path || cmd.file || cmd.target_file || ""));
             if (!path || path.includes("{")) continue;
             if (action === "read" || action === "view") {
@@ -294,6 +335,7 @@ export function computeParseStepFileChanges(step: AgentStepItem): ParsedStepFile
                 const newContent = typeof cmd.replacement_content === "string" ? cmd.replacement_content
                     : (typeof cmd.content === "string" ? cmd.content : (typeof cmd.CodeContent === "string" ? cmd.CodeContent : undefined));
                 const oldContent = typeof cmd.target_content === "string" ? cmd.target_content : undefined;
+                const stats = computeLineDiffStats(oldContent, newContent);
                 const fileName = path.split("/").pop() || path;
                 pushChip({
                     path,
@@ -301,8 +343,8 @@ export function computeParseStepFileChanges(step: AgentStepItem): ParsedStepFile
                     displayLabel: truncateFileName(fileName),
                     actionKind: (action === "delete" || action === "remove") ? "delete"
                         : ((action === "write" || action === "create") ? (oldContent ? "modify" : "create") : "modify"),
-                    additions: newContent ? newContent.split("\n").length : 0,
-                    deletions: oldContent ? oldContent.split("\n").length : 0,
+                    additions: stats.additions,
+                    deletions: stats.deletions,
                     oldContent,
                     newContent,
                     stepId: step.id,
