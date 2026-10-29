@@ -434,12 +434,16 @@ pub(crate) fn read_review_step_output(
         return Err("read_step_output.limit 必须在 1..16000 之间（按字符）".into());
     }
     let raw = crate::agent::run_trace::get_step_output(db, session_id, output_id)?;
+    let branch = crate::agent::plan_tree::output::select_branch(&raw, request)?;
+    let selection = branch.as_ref().map(|branch| branch.selection.clone());
+    let raw = branch.map(|branch| branch.text).unwrap_or(raw);
     let total_chars = raw.chars().count();
     let content: String = raw.chars().skip(offset).take(limit).collect();
     let end_offset = offset.saturating_add(content.chars().count());
     let mut result = json!({"output_id":output_id,"offset":offset,"next_offset":end_offset,
         "total_chars":total_chars,"has_more":end_offset<total_chars,"content":content});
     result["source"] = review_output_source(db, session_id, output_id, task_started_at)?;
+    if let Some(selection) = selection { result["selection"] = selection; }
     Ok(result.to_string())
 }
 
@@ -471,7 +475,7 @@ pub(crate) fn search_review_step_output(
     let mut value: serde_json::Value = serde_json::from_str(&result.stdout).map_err(|e| e.to_string())?;
     value["has_more"] = json!(value["total_matches"].as_u64().unwrap_or(0) > value["returned_matches"].as_u64().unwrap_or(0));
     value["search_complete"] = json!(true);
-    value["search_scope"] = json!(if value["projected"] == true { "model_projection" } else { "persisted_output" });
+    value["search_scope"] = json!(if value.get("selection").is_some() { "selected_branch" } else if value["projected"] == true { "model_projection" } else { "persisted_output" });
     value["source"] = crate::agent::run_trace::source_for_task(value["source"].take(), task_started_at);
     value["scope_notice"] = json!("仅检索该工具已保存的输出；上游命令过滤、tail 或输出截断未保留的日志不在搜索范围。");
     Ok(value.to_string())

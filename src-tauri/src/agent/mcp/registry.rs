@@ -299,7 +299,7 @@ impl PluginRegistry {
 
         let mut lines: Vec<String> = Vec::new();
         lines
-            .push("\n## 🛠️ MCP 插件箱 (如需参数细节请返回 next_tool_hint: \"插件名\" 或 \"插件名/工具名\"；不知确切名称时先用 capability_search 检索)".to_string());
+            .push("\n## 🛠️ MCP 插件箱 (已有名称和足够参数可直接调用；缺参数细节可用 next_tool_hint: \"插件名/工具名\"。不知动作名时用 capability_search 搜关键词或按插件名浏览；搜索结果含 input_schema 时无需再查)".to_string());
         lines.extend(
             menu.trim_start_matches(
                 "\n## MCP 工具目录（动态能力卡缓存；如需完整参数规范请使用 next_tool_hint）",
@@ -347,10 +347,10 @@ impl PluginRegistry {
         );
         if target_tool.is_none() && matched.len() > 8 {
             detail.push_str(&format!(
-                "该插件共包含 {} 个工具。在调用具体动作（如 {}/{}）时系统将自动精确提供该工具的参数 Schema：\n",
+                "该插件共包含 {} 个工具。以下为目录节选；可用 capability_search(query: \"{}\", kind: \"mcp\") 分页浏览，或按动作关键词并带 namespace 搜索。需要具体规格时点名 {}/工具名：\n",
                 matched.len(),
                 target_plugin,
-                matched.first().map(|(_, t)| t.name.as_str()).unwrap_or("tool_name")
+                target_plugin
             ));
             // 超大插件截断展示，完整清单按需逐条点名 {插件名/工具名} 取回
             const MAX_TOOL_DETAIL_ENTRIES: usize = 40;
@@ -360,7 +360,7 @@ impl PluginRegistry {
             }
             if matched.len() > MAX_TOOL_DETAIL_ENTRIES {
                 detail.push_str(&format!(
-                    "- …（另有 {} 个未列出，按 {{\"next_tool_hint\": \"{}/工具名\"}} 点名取回规格）\n",
+                    "- …（另有 {} 个未列出，用 capability_search(query: \"{}\", kind: \"mcp\") 按 next_request 翻页；已知完整 ID 可直接点名规格）\n",
                     matched.len() - MAX_TOOL_DETAIL_ENTRIES,
                     target_plugin
                 ));

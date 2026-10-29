@@ -109,6 +109,9 @@ pub fn dispatch_in_workspace(
                 .ok_or_else(|| "task_store 参数缺少 'output_id'。\n💡 正确示例: {\"action\": \"get_step_output\", \"params\": {\"output_id\": \"out-xxx\"}}".to_string())?;
             let persisted = crate::agent::run_trace::get_step_output(db, session_id, &output_id)?;
             let source = crate::agent::run_trace::saved_output_source(db, session_id, &output_id)?;
+            let branch = crate::agent::plan_tree::output::select_branch(&persisted, params_value)?;
+            let selection = branch.as_ref().map(|branch| branch.selection.clone());
+            let persisted = branch.map(|branch| branch.text).unwrap_or(persisted);
             let projected = !raw_requested
                 && crate::agent::dispatcher::project_mcp_durable_output(&persisted).is_some();
             let text = if projected {
@@ -134,10 +137,11 @@ pub fn dispatch_in_workspace(
                 .take(effective_limit)
                 .collect::<String>();
             let returned_chars = sliced.chars().count();
-            return Ok(json!({
+            let mut payload = json!({
                 "output_id": output_id,
                 "source": source,
                 "offset": offset,
+                "next_offset": offset.saturating_add(returned_chars),
                 "requested_limit": requested_limit,
                 "effective_limit": effective_limit,
                 "total_chars": total,
@@ -149,7 +153,9 @@ pub fn dispatch_in_workspace(
                 } else {
                     "工件回查按页返回。若仍需证据，请先用关键词、文件路径、函数/符号或 diff hunk 缩小范围，再请求下一个最小片段。"
                 }
-            }));
+            });
+            if let Some(selection) = selection { payload["selection"] = selection; }
+            return Ok(payload);
         }
 
         if action == "search_step_output"
@@ -172,6 +178,9 @@ pub fn dispatch_in_workspace(
             let max_matches = requested_max_matches.clamp(1, MAX_STEP_OUTPUT_MATCHES);
             let persisted = crate::agent::run_trace::get_step_output(db, session_id, &output_id)?;
             let source = crate::agent::run_trace::saved_output_source(db, session_id, &output_id)?;
+            let branch = crate::agent::plan_tree::output::select_branch(&persisted, params_value)?;
+            let selection = branch.as_ref().map(|branch| branch.selection.clone());
+            let persisted = branch.map(|branch| branch.text).unwrap_or(persisted);
             let projected = !raw_requested
                 && crate::agent::dispatcher::project_mcp_durable_output(&persisted).is_some();
             let text = if projected {
@@ -201,7 +210,7 @@ pub fn dispatch_in_workspace(
                 }
             }
 
-            return Ok(json!({
+            let mut payload = json!({
                 "output_id": output_id,
                 "source": source,
                 "pattern": pattern,
@@ -218,7 +227,9 @@ pub fn dispatch_in_workspace(
                 } else {
                     "搜索结果已受预算限制。若命中过多，请使用更具体的函数名、路径、错误码或 diff hunk 再次定向检索。"
                 }
-            }));
+            });
+            if let Some(selection) = selection { payload["selection"] = selection; }
+            return Ok(payload);
         }
 
         let mut conn = db.0.lock().map_err(|e| e.to_string())?;

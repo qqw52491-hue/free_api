@@ -68,13 +68,13 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     BuiltinToolSpec {
         name: "get_step_output",
         summary: "分页取回已有工具输出的原文",
-        actions: &["get_step_output(output_id: string, offset?: number, limit?: number)"],
+        actions: &["get_step_output(output_id: string, branch_id?: string [批量回执中的原始分支 ID，选中后 offset 在分支内计数], offset?: number, limit?: number, raw?: boolean)"],
     },
     BuiltinToolSpec {
         name: "capability_search",
-        summary: "统一能力检索：按关键词找工具/Skill 候选；query 精确填写 MCP 完整 ID（插件名/工具名）时，回执直接包含该工具的完整 input_schema。宽泛搜索返回 load_request，照其调用取得参数；next_tool_hint 是可选的指令顶层预加载字段，不放进 command。",
+        summary: "统一能力检索：按动作关键词搜索时，少量 MCP 候选直接带完整 input_schema，可立即调用；精确填写插件名/工具名返回该工具完整规格。query 只填插件名则分页浏览真实动作目录；has_more 时沿 next_request 继续。已有名称和足够参数时可直接使用，不要求先查询；缺规格的候选可用 load_request 精确加载。next_tool_hint 是可选的指令顶层预加载字段，不放进 command。",
         actions: &[
-            "search(query: string, kind?: builtin|mcp|skill|instruction|role, namespace?: string [插件名/目录名], limit?: <=15)",
+            "search(query: string [动作关键词或插件名或完整工具 ID], kind?: builtin|mcp|skill|instruction|role, namespace?: string [插件名/目录名，定向搜索可用], limit?: <=40 [默认动作搜索 5、插件目录 40], offset?: number)",
         ],
     },
     BuiltinToolSpec {

@@ -173,9 +173,11 @@ impl PlanExecutionReport {
             md.push_str(&format!("⚠️ 错误原因: {}\n\n", err));
         }
 
+        md.push_str(&super::output::branch_directory(&self.results));
+
         // Return the complete execution result. The caller persists it before the
         // shared SandwichContext ingress sampler creates a bounded model view.
-        md.push_str("详细返回数据 (JSON):\n```json\n");
+        md.push_str(super::output::RESULTS_MARKER);
         let json_str = serde_json::to_string_pretty(&self.results)
             .unwrap_or_else(|_| self.results.to_string());
         md.push_str(&json_str);

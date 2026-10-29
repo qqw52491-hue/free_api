@@ -463,11 +463,11 @@ impl ContextRenderer {
     ) -> String {
         let instruction = if let Some(tools) = compact_tools.filter(|s| !s.trim().is_empty()) {
             format!(
-                "【当前可用工具快速索引】(插件级条目先经 capability_search / next_tool_hint 取得完整工具名和 schema；勿猜名称)\n{}\n\n请基于上述上下文执行下一步。只能输出纯文本 JSON（禁止裹 ```），tool 名必须来自当前工具清单或本会话已加载的工具 schema。thought 字段默认留空——仅在关键转折/矛盾发现/方案切换/受阻时简要写出思考推断（支持直截了当的 Markdown 表述说清楚），严禁问候/客套/向用户汇报进度、不复述 description，常规连续执行严格静默；description 字段保持一句话进度标签；仅当上一步失败或被拦截时在 reflection 补一句原因与改法；本轮若取得阶段突破、关键结论、里程碑进展或发现风险阻碍，额外输出 finding(1~2 句结论) 与 finding_kind(start|breakthrough|milestone|summary|warning|blocker)——finding 与 thought 互斥，输出 finding 时 thought 必须为 ''，严禁同一轮两处各说一遍。",
+                "【当前可用工具快速索引】(已有具体名称和足够参数可直接调用；缺信息时用 capability_search / next_tool_hint；结果含 input_schema 时无需再查；勿猜名称)\n{}\n\n请基于上述上下文执行下一步。只能输出纯文本 JSON（禁止裹 ```），tool 名必须来自当前工具清单或本会话已加载的工具 schema。thought 字段默认留空——仅在关键转折/矛盾发现/方案切换/受阻时简要写出思考推断（支持直截了当的 Markdown 表述说清楚），严禁问候/客套/向用户汇报进度、不复述 description，常规连续执行严格静默；description 字段保持一句话进度标签；仅当上一步失败或被拦截时在 reflection 补一句原因与改法；本轮若取得阶段突破、关键结论、里程碑进展或发现风险阻碍，额外输出 finding(1~2 句结论) 与 finding_kind(start|breakthrough|milestone|summary|warning|blocker)——finding 与 thought 互斥，输出 finding 时 thought 必须为 ''，严禁同一轮两处各说一遍。",
                 tools
             )
         } else {
-            "请基于上述上下文执行下一步。只能输出纯文本 JSON（禁止裹 ```），tool 名必须来自上方工具菜单或本会话已加载的工具 schema；目录仅列插件时先经 capability_search / next_tool_hint 取得完整名称与参数。thought 字段默认留空——仅在关键转折/矛盾发现/方案切换/受阻时简要写出思考推断（支持直截了当的 Markdown 表述说清楚），严禁问候/客套/向用户汇报进度、不复述 description，常规连续执行严格静默；description 字段保持一句话进度标签；仅当上一步失败或被拦截时在 reflection 补一句原因与改法；本轮若取得阶段突破、关键结论、里程碑进展或发现风险阻碍，额外输出 finding(1~2 句结论) 与 finding_kind(start|breakthrough|milestone|summary|warning|blocker)——finding 与 thought 互斥，输出 finding 时 thought 必须为 ''，严禁同一轮两处各说一遍。".to_string()
+            "请基于上述上下文执行下一步。只能输出纯文本 JSON（禁止裹 ```），tool 名必须来自上方工具菜单或本会话已加载的工具 schema；目录仅列插件且缺名称或参数时可经 capability_search / next_tool_hint 获取；已有足够信息或搜索已返回 input_schema 时可直接调用。thought 字段默认留空——仅在关键转折/矛盾发现/方案切换/受阻时简要写出思考推断（支持直截了当的 Markdown 表述说清楚），严禁问候/客套/向用户汇报进度、不复述 description，常规连续执行严格静默；description 字段保持一句话进度标签；仅当上一步失败或被拦截时在 reflection 补一句原因与改法；本轮若取得阶段突破、关键结论、里程碑进展或发现风险阻碍，额外输出 finding(1~2 句结论) 与 finding_kind(start|breakthrough|milestone|summary|warning|blocker)——finding 与 thought 互斥，输出 finding 时 thought 必须为 ''，严禁同一轮两处各说一遍。".to_string()
         };
         format!(
             "【宿主当前日期】{}（宿主本地时区 UTC{}；用于时间定位，不证明版本或发布信息）\n\n{}",

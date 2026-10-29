@@ -2,6 +2,7 @@ pub mod executor;
 pub mod scope;
 pub mod timeout;
 pub mod types;
+pub(crate) mod output;
 
 pub use executor::execute_plan_tree;
 pub use scope::Scope;

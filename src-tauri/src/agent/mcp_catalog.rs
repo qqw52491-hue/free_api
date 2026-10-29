@@ -304,7 +304,7 @@ pub fn invalidate_plugin(name: &str) {
     }
 }
 
-fn concise_schema_fields(schema: &serde_json::Value) -> String {
+pub(crate) fn concise_schema_fields(schema: &serde_json::Value) -> String {
     let Some(properties) = schema
         .get("properties")
         .and_then(serde_json::Value::as_object)
@@ -408,7 +408,7 @@ pub fn concise_menu(
                 .as_deref()
                 .and_then(|c| c.lines().find(|l| !l.trim().is_empty()))
                 .map(|l| l.trim().chars().take(100).collect::<String>())
-                .unwrap_or_default();
+                .unwrap_or_else(|| generate_rule_based_mcp_card(&tools).chars().take(100).collect());
             if card_line.is_empty() {
                 lines.push(format!("- {}: {} 个工具", name, tools.len()));
             } else {
@@ -418,7 +418,7 @@ pub fn concise_menu(
         if valid_count == 0 {
             return String::new();
         }
-        lines.push("- 调用格式: {\"tool\": \"插件名/工具名\", \"command\": {参数对象}}；参数契约经检索/点名取回后严格按服务声明字段调用。".to_string());
+        lines.push("- 按插件浏览：capability_search(query: \"插件名\", kind: \"mcp\")；按动作搜索可带 namespace 限定插件。结果含 input_schema 时可直接调用，目录已有足够字段时也可直接使用；仅缺参数细节时再点名加载。调用格式: {\"tool\": \"插件名/工具名\", \"command\": {参数对象}}。".to_string());
         return lines.join("\n");
     }
 
@@ -428,34 +428,37 @@ pub fn concise_menu(
     ];
     let mut valid_count = 0;
 
-    // 单插件工具数上限：超大插件截断展示，完整清单走 next_tool_hint 按需取回
+    // 大插件只列插件概要，避免字母序前 25 项让后面的动作隐形。
     const MAX_TOOLS_PER_PLUGIN_MENU: usize = 25;
 
-    for (name, mut tools, _card_opt) in sorted_items {
+    for (name, mut tools, card_opt) in sorted_items {
         // 🚨 核心过滤：若该插件工具列表为空（连接失败、离线或无可用动作），绝不注入工具目录，杜绝诱导模型调用幽灵工具
         if tools.is_empty() {
             continue;
         }
         valid_count += 1;
-        // 工具列表也严格按名称字母序排序。能力卡由模型生成，不能充当参数契约，
-        // 因此不投影到执行提示词；模型只能看到服务声明的字段。
+        // 稳定排序保护前缀缓存；插件摘要只是定位线索，实际调用仍以服务声明字段为准。
         tools.sort_by(|a, b| a.name.cmp(&b.name));
         let total = tools.len();
-        let shown: Vec<_> = tools.iter().take(MAX_TOOLS_PER_PLUGIN_MENU).collect();
-        let mut tool_summaries = shown
+        if total > MAX_TOOLS_PER_PLUGIN_MENU {
+            let card = card_opt.filter(|c| !c.trim().is_empty())
+                .unwrap_or_else(|| generate_rule_based_mcp_card(&tools));
+            let brief: String = card.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(100).collect();
+            lines.push(format!("- {}: {} 个工具 — {}（按插件名查询可分页浏览全部动作）", name, total, brief));
+            continue;
+        }
+        let tool_summaries = tools
             .iter()
             .map(|tool| {
                 format!(
-                    "{}({}){}",
+                    "{}({}){} — {}",
                     tool.name,
                     concise_schema_fields(&tool.schema),
-                    annotation_flags(tool)
+                    annotation_flags(tool),
+                    tool.description.lines().next().unwrap_or("").trim().chars().take(80).collect::<String>()
                 )
             })
             .collect::<Vec<_>>();
-        if total > shown.len() {
-            tool_summaries.push(format!("…+{} 更多(next_tool_hint 取全量)", total - shown.len()));
-        }
         lines.push(format!("- {}: [{}]", name, tool_summaries.join("; ")));
     }
     if valid_count == 0 {
@@ -562,7 +565,19 @@ mod tests {
             ),
         ]);
         assert!(!mixed_menu.contains("offline_plugin"));
-        assert!(mixed_menu.contains("active_plugin: [do_something(无参数)]"));
+        assert!(mixed_menu.contains("active_plugin: [do_something(无参数) — active tool]"));
+    }
+
+    #[test]
+    fn single_large_plugin_uses_browseable_summary_instead_of_partial_alphabetical_actions() {
+        let tools = (0..55).map(|i| McpToolDef {
+            name: format!("action_{i:02}"), description: "Workbook operation".into(),
+            schema: json!({"properties":{}}), annotations: serde_json::Value::Null,
+        }).collect();
+        let menu = concise_menu(vec![("workbooks".into(),tools,Some("表格读写与分析".into()))]);
+        assert!(menu.contains("55 个工具 — 表格读写与分析"));
+        assert!(menu.contains("分页浏览全部动作"));
+        assert!(!menu.contains("action_00("));
     }
 
     #[test]

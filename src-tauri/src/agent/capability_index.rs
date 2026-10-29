@@ -1,23 +1,24 @@
 //! 统一能力索引与检索（capability_search）：把内置工具、MCP 工具、文件系统 Skill、
 //! 自定义指令与角色卡汇总成一张轻量索引，模型用关键词检索而非凭目录猜名。
 //!
-//! 设计动机：目录型注入在规模增大时必然截断（Skill 目录 60 条、MCP 菜单每插件
-//! 25 条、大插件手册 40 条），截断后的条目对模型完全不可见——名字都不知道就
-//! 无法 next_tool_hint 点名。本模块提供"搜索全部能力"的发现层，与
+//! 设计动机：工具多时常驻目录只保留插件概要；有限目录无法显示所有动作。
+//! 本模块提供覆盖全部能力的关键词检索、插件目录分页与少量完整规格直返，与
 //! Anthropic tool search / OpenAI defer_loading 同构，但完全本地实现、
 //! 不依赖 provider 特性、保持前缀缓存友好（目录仍是静态文本，检索是显式调用）。
 //!
 //! 索引每次调用现算：各源（registry 缓存、skills 目录、DB 表）本身就是
 //! 热缓存/小表，重建成本远低于维护失效逻辑。评分规则是确定性的纯函数。
 
-use crate::agent::mcp::PluginRegistry;
+use crate::agent::mcp::{McpToolDef, PluginRegistry};
 use crate::agent::types::DispatchResult;
 use crate::db::DbState;
 use serde_json::{json, Value};
 
 /// 单次返回的命中上限；再多的候选对模型也只是噪声。
-const MAX_SEARCH_RESULTS: usize = 15;
+const MAX_SEARCH_RESULTS: usize = 40;
 const DEFAULT_SEARCH_RESULTS: usize = 5;
+const MAX_INLINE_SCHEMAS: usize = 3;
+const INLINE_SCHEMA_CHARS: usize = 12_000;
 /// 索引内 description 的展示上限，避免超长字段撑爆结果。
 const DESCRIPTION_PREVIEW_CHARS: usize = 120;
 
@@ -36,7 +37,7 @@ struct CapabilityEntry {
 /// 汇总所有能力源。每源失败只跳过该源，绝不因单一源故障让整个搜索不可用。
 fn collect_entries(
     db: &DbState,
-    registry: &PluginRegistry,
+    mcp_tools: &[(String, McpToolDef)],
     workspace_root: Option<&std::path::Path>,
 ) -> Vec<CapabilityEntry> {
     let mut entries = Vec::new();
@@ -54,30 +55,40 @@ fn collect_entries(
     }
 
     // 2. MCP 工具（含 annotations，参与评分但 hint 文案只作提示）
-    for (plugin, tool) in registry.list_all_tools() {
+    for (plugin, tool) in mcp_tools {
         let arg_names = tool
             .schema
             .get("properties")
             .and_then(|p| p.as_object())
             .map(|props| props.keys().cloned().collect::<Vec<_>>().join(" "))
             .unwrap_or_default();
-        let hint_flags = ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"]
-            .iter()
-            .filter(|key| {
-                tool.annotations
-                    .get(**key)
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-            })
-            .copied()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let hint_flags = [
+            "readOnlyHint",
+            "destructiveHint",
+            "idempotentHint",
+            "openWorldHint",
+        ]
+        .iter()
+        .filter(|key| {
+            tool.annotations
+                .get(**key)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        })
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" ");
         entries.push(CapabilityEntry {
             kind: "mcp_tool",
             namespace: plugin.clone(),
             id: format!("{}/{}", plugin, tool.name),
             description: tool.description.lines().next().unwrap_or("").to_string(),
-            extra_text: format!("{} {}", arg_names, hint_flags),
+            extra_text: format!(
+                "{} {} {}",
+                arg_names,
+                hint_flags,
+                tool.description.chars().take(4000).collect::<String>()
+            ),
             load_hint: format!("next_tool_hint: \"{}/{}\"", plugin, tool.name),
         });
     }
@@ -164,7 +175,10 @@ fn collect_entries(
                 kind: "role",
                 namespace: "roles".to_string(),
                 id: card.name.clone(),
-                description: format!("{}｜模型 {}｜{}", card.label, card.model_id, card.scope_hints),
+                description: format!(
+                    "{}｜模型 {}｜{}",
+                    card.label, card.model_id, card.scope_hints
+                ),
                 extra_text: card.persona_prompt.chars().take(200).collect(),
                 load_hint: format!(
                     "派发 child_worker/child_writer/child_reviewer 时传 role: \"{}\"",
@@ -192,7 +206,15 @@ fn tokenize(query: &str) -> Vec<String> {
             continue;
         }
         let lower = raw.to_lowercase();
-        tokens.push(lower.clone());
+        if !tokens.contains(&lower) {
+            tokens.push(lower.clone());
+        }
+        // 保留完整 ID 的同时拆开标识符，让 write_range 也能按 write/range 找到。
+        for part in lower.split(['_', '/']).filter(|s| !s.is_empty()) {
+            if !tokens.iter().any(|token| token == part) {
+                tokens.push(part.to_string());
+            }
+        }
         let chars: Vec<char> = lower.chars().collect();
         if chars.len() > 2 && chars.iter().any(|c| is_cjk_char(*c)) {
             for pair in chars.windows(2) {
@@ -213,14 +235,20 @@ fn score_entry(entry: &CapabilityEntry, tokens: &[String], whole_query: &str) ->
     let ns = entry.namespace.to_lowercase();
     let mut score = 0i64;
 
-    if !whole_query.is_empty() && id.contains(whole_query) {
+    if id == whole_query {
+        score += 10_000;
+    } else if !whole_query.is_empty() && id.contains(whole_query) {
         score += 60;
     }
     for token in tokens {
         // 短 token（CJK 二元组、两字符缩写）只给部分权重：
         // 它们用于召回而非定名，防止碎片命中刷掉真正的整词匹配。
         let strong = token.chars().count() > 2;
-        let (id_w, desc_w, extra_w, ns_w) = if strong { (40, 12, 6, 8) } else { (10, 4, 2, 2) };
+        let (id_w, desc_w, extra_w, ns_w) = if strong {
+            (40, 12, 6, 8)
+        } else {
+            (10, 4, 2, 2)
+        };
         if id == *token {
             score += 100;
         } else if id.contains(token.as_str()) {
@@ -241,7 +269,7 @@ fn score_entry(entry: &CapabilityEntry, tokens: &[String], whole_query: &str) ->
 
 /// capability_search 的统一入口：按关键词在全部能力源中检索。
 /// 参数：query(string) 必填；kind? = builtin|mcp|skill|instruction|role；
-/// namespace? = 插件名/目录名子串；limit? 默认 5，上限 15。
+/// namespace? = 插件名/目录名子串；limit? 默认 5（插件目录 40），上限 40；offset? 翻页。
 pub fn search(
     db: &DbState,
     registry: &PluginRegistry,
@@ -273,16 +301,43 @@ pub fn search(
         .or_else(|| params.get("plugin"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_lowercase());
-    let limit = params
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(DEFAULT_SEARCH_RESULTS as u64)
-        .clamp(1, MAX_SEARCH_RESULTS as u64) as usize;
-
-    let entries = collect_entries(db, registry, workspace_root);
+    let catalog = registry.list_all_tools();
+    let entries = collect_entries(db, &catalog, workspace_root);
     let total_scanned = entries.len();
     let whole_query = query.to_lowercase();
     let tokens = tokenize(&query);
+    let mcp_tools: std::collections::HashMap<_, _> = catalog
+        .iter()
+        .map(|(plugin, tool)| (format!("{plugin}/{}", tool.name), tool))
+        .collect();
+    let exact_tool_exists = entries
+        .iter()
+        .any(|e| e.kind == "mcp_tool" && e.id.eq_ignore_ascii_case(&query));
+    let missing_tool_plugin = query
+        .split_once('/')
+        .filter(|(_, tool)| !tool.is_empty())
+        .filter(|_| !exact_tool_exists)
+        .map(|(plugin, _)| plugin);
+    // 插件名查询是浏览目录，不把字母序前几项伪装成最相关动作。
+    // 点名不存在的动作时，也给出该插件真实目录，避免空回执后继续猜名字。
+    let prefer_non_mcp = kind_filter.is_none()
+        && entries
+            .iter()
+            .any(|e| e.kind != "mcp_tool" && e.id.eq_ignore_ascii_case(&query));
+    let mut browse_namespace = entries
+        .iter()
+        .find(|e| {
+            e.kind == "mcp_tool"
+                && (e.namespace.eq_ignore_ascii_case(&query)
+                    || missing_tool_plugin.is_some_and(|p| e.namespace.eq_ignore_ascii_case(p)))
+        })
+        .map(|e| e.namespace.as_str())
+        .filter(|_| !prefer_non_mcp && kind_filter.as_deref().is_none_or(|k| k == "mcp"));
+    let offset = params
+        .get("offset")
+        .and_then(Value::as_u64)
+        .map(|n| usize::try_from(n).unwrap_or(usize::MAX))
+        .unwrap_or(0);
 
     let mut scored: Vec<(i64, &CapabilityEntry)> = entries
         .iter()
@@ -302,14 +357,53 @@ pub fn search(
                     .as_deref()
                     .map(|n| e.namespace.to_lowercase().contains(n))
                     .unwrap_or(true)
+                && browse_namespace.is_none_or(|ns| e.kind == "mcp_tool" && e.namespace == ns)
         })
-        .map(|e| (score_entry(e, &tokens, &whole_query), e))
+        .map(|e| {
+            (
+                if browse_namespace.is_some() {
+                    1
+                } else {
+                    score_entry(e, &tokens, &whole_query)
+                },
+                e,
+            )
+        })
         .filter(|(score, _)| *score > 0)
         .collect();
+    let mut unmatched_action = browse_namespace.is_some() && missing_tool_plugin.is_some();
+    if scored.is_empty() && kind_filter.as_deref().is_none_or(|k| k == "mcp") {
+        if let Some(ns) = namespace_filter.as_deref().and_then(|filter| {
+            entries
+                .iter()
+                .find(|e| e.kind == "mcp_tool" && e.namespace.eq_ignore_ascii_case(filter))
+        }) {
+            // 关键词（例如另一种语言）没有匹配时，限定插件的真实动作仍可浏览。
+            browse_namespace = Some(ns.namespace.as_str());
+            unmatched_action = true;
+            scored = entries
+                .iter()
+                .filter(|e| e.kind == "mcp_tool" && e.namespace == ns.namespace)
+                .map(|e| (1, e))
+                .collect();
+        }
+    }
     scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
+    let limit = params
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(if browse_namespace.is_some() {
+            MAX_SEARCH_RESULTS
+        } else {
+            DEFAULT_SEARCH_RESULTS
+        } as u64)
+        .clamp(1, MAX_SEARCH_RESULTS as u64) as usize;
 
-    let matches: Vec<Value> = scored
+    let mut schema_chars = 0;
+    let mut schema_count = 0;
+    let mut matches: Vec<Value> = scored
         .iter()
+        .skip(offset)
         .take(limit)
         .map(|(score, e)| {
             let mut entry = json!({
@@ -318,39 +412,116 @@ pub fn search(
                 "namespace": e.namespace,
                 "description": e.description.chars().take(DESCRIPTION_PREVIEW_CHARS).collect::<String>(),
                 "load_hint": e.load_hint,
-                "score": score,
             });
-            // 只展开明确点名的工具，宽泛搜索仍保留轻量目录；不执行 MCP。
-            if e.kind == "mcp_tool" && e.id == query {
-                if let Some((_, tool)) = registry.list_all_tools().into_iter()
-                    .find(|(plugin, tool)| format!("{plugin}/{}", tool.name) == e.id)
-                {
-                    entry["input_schema"] = tool.schema;
-                    entry["description"] = json!(tool.description);
+            if browse_namespace.is_none() { entry["score"] = json!(score); }
+            if let Some(tool) = mcp_tools.get(&e.id) {
+                entry["parameters"] = json!(crate::agent::mcp_catalog::concise_schema_fields(&tool.schema));
+                let exact = e.id.eq_ignore_ascii_case(&query);
+                // 具体动作搜索直接附少量完整规格，省去第二次查询；预算不足不截断 schema。
+                // 插件浏览只给轻量目录，精确点名沿用完整返回，不受自动展开预算影响。
+                if exact || (!exact_tool_exists && browse_namespace.is_none() && schema_count < MAX_INLINE_SCHEMAS) {
+                    let size = serde_json::to_string_pretty(&json!({"input_schema":tool.schema, "description":tool.description}))
+                        .unwrap_or_default().chars().count();
+                    if exact || size <= INLINE_SCHEMA_CHARS.saturating_sub(schema_chars) {
+                        entry["input_schema"] = tool.schema.clone();
+                        entry["description"] = json!(tool.description);
+                        schema_chars = schema_chars.saturating_add(size);
+                        schema_count += 1;
+                    }
                 }
             }
-            entry["load_request"] = if e.kind == "mcp_tool" {
+            if entry.get("input_schema").is_some() {
+                entry["load_hint"] = json!(format!("{} 的完整 input_schema 已随本项返回，可直接调用，无需再次加载。", e.id));
+            }
+            entry["load_request"] = if e.kind == "mcp_tool" && entry.get("input_schema").is_none() {
                 json!({"tool":"capability_search","command":{"query":e.id,"kind":"mcp"}})
             } else { Value::Null };
             entry
         })
         .collect();
 
-    let note = if matches.is_empty() {
-        "无命中。可换关键词（工具名/动作/中文描述均可），或去掉 kind/namespace 过滤再试。"
-    } else {
-        "命中项按相关性排序。MCP 项含 input_schema 表示已返回该工具完整参数，可按 Schema 调用；未含时执行该项 load_request 精确取得参数，不要反复搜索描述词。也可在指令顶层设置 next_tool_hint 预加载。Skill 沿用 load_hint；内置工具与角色已可直接使用。"
+    let total_matches = scored.len();
+    // 发现结果也走通用观测入口；先按同一 token 估算收成完整页，避免随后被头尾采样
+    // 切坏目录或自动附带的 schema。下一页基于实际保留条数，不跳过删减的候选。
+    let stdout = loop {
+        let next_offset = offset.saturating_add(matches.len());
+        let has_more = next_offset < total_matches;
+        let next_request = if has_more {
+            let mut command = params.clone();
+            command["query"] = json!(query);
+            command["offset"] = json!(next_offset);
+            command["limit"] = json!(limit);
+            json!({"tool":"capability_search", "command":command})
+        } else {
+            Value::Null
+        };
+        let note = if total_matches == 0 {
+            "无命中。可换关键词（工具名/动作/中文描述均可），或去掉 kind/namespace 过滤再试。"
+        } else if matches.is_empty() {
+            "offset 已超出本次结果范围，可从 offset=0 重新读取；结果未持久化，工具连接变化后目录可能改变。"
+        } else if unmatched_action {
+            "点名的工具不存在或动作关键词未匹配；下面是限定插件的真实工具目录，按 ID 排序，不是同义替代。可按目录中的实际名称选择，或用 next_request 继续浏览。"
+        } else if browse_namespace.is_some() {
+            "这是插件工具目录，按 ID 排序，不是相关性排名。可按动作关键词并带 namespace 定向搜索；含 input_schema 的项可直接使用，缺参数细节时再按 load_request 加载。has_more=true 可用 next_request 继续浏览。"
+        } else {
+            "命中项按相关性排序，不保证语义适用。含 input_schema 的 MCP 项已返回完整参数，可直接调用，无需重复查询；其余项可按 load_request 精确加载。has_more=true 可用 next_request 翻页，不必反复换描述词。Skill 沿用 load_hint；内置工具与角色已可直接使用。"
+        };
+
+        let text = serde_json::to_string_pretty(&json!({
+            "query": query,
+            "total_scanned": total_scanned,
+            "mode": if browse_namespace.is_some() { "namespace_directory" } else { "search" },
+            "total_matches": total_matches,
+            "offset": offset,
+            "returned_matches": matches.len(),
+            "has_more": has_more,
+            "next_offset": if has_more { Some(next_offset) } else { None },
+            "next_request": next_request,
+            "matches": matches,
+            "note": note,
+        }))
+        .unwrap_or_else(|_| "{}".to_string());
+        let ingress_cap =
+            crate::agent::context::budget::ContextBudget::SINGLE_OBSERVATION_INGRESS_CAP;
+        if matches.iter().any(|m| {
+            m.get("input_schema").is_some()
+                && m["id"]
+                    .as_str()
+                    .is_some_and(|id| id.eq_ignore_ascii_case(&query))
+        }) || crate::agent::context::budget::conservative_token_estimate(&text)
+            <= ingress_cap.saturating_sub(400)
+        {
+            break text;
+        }
+        let Some(last) = matches.last_mut() else {
+            break text;
+        };
+        if last.get("input_schema").is_some() {
+            last.as_object_mut().unwrap().remove("input_schema");
+            let id = last["id"].as_str().unwrap_or("").to_string();
+            last["load_hint"] = json!(format!("next_tool_hint: \"{id}\""));
+            last["load_request"] =
+                json!({"tool":"capability_search","command":{"query":id,"kind":"mcp"}});
+            // 自动展开时的长描述一并恢复为轻量摘要。
+            last["description"] = json!(last["description"]
+                .as_str()
+                .unwrap_or("")
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(DESCRIPTION_PREVIEW_CHARS)
+                .collect::<String>());
+        } else if matches.len() > 1 {
+            matches.pop();
+        } else {
+            break text;
+        }
     };
 
     DispatchResult {
         view: None,
-        stdout: serde_json::to_string_pretty(&json!({
-            "query": query,
-            "total_scanned": total_scanned,
-            "matches": matches,
-            "note": note,
-        }))
-        .unwrap_or_else(|_| "{}".to_string()),
+        stdout,
         stderr: String::new(),
         success: true,
         route: "capability_search:search".to_string(),
@@ -422,7 +593,12 @@ mod tests {
         // 端到端：中文查询能把描述相关的中文内置工具召回进 matches
         let db = test_db();
         let registry = PluginRegistry::default();
-        let res = search(&db, &registry, None, &json!({"query": "文件读取", "limit": 15}));
+        let res = search(
+            &db,
+            &registry,
+            None,
+            &json!({"query": "文件读取", "limit": 15}),
+        );
         let out: Value = serde_json::from_str(&res.stdout).unwrap();
         let ids: Vec<&str> = out["matches"]
             .as_array()
@@ -534,7 +710,10 @@ mod tests {
         for i in 0..120 {
             std::fs::write(
                 skills_dir.join(format!("skill_{:03}.md", i)),
-                format!("# Skill {:03}\n<summary>第 {} 号数据处理技能，处理报表_{:03} 任务</summary>\n", i, i, i),
+                format!(
+                    "# Skill {:03}\n<summary>第 {} 号数据处理技能，处理报表_{:03} 任务</summary>\n",
+                    i, i, i
+                ),
             )
             .unwrap();
         }
@@ -550,30 +729,52 @@ mod tests {
         // 1) 超截断的 Skill 可按关键词搜到
         let res = search(&db, &registry, Some(&base), &json!({"query": "发票差异"}));
         let out: Value = serde_json::from_str(&res.stdout).unwrap();
-        let ids: Vec<&str> = out["matches"].as_array().unwrap()
-            .iter().filter_map(|m| m["id"].as_str()).collect();
-        assert!(ids.contains(&"zzz_hidden_audit"),
-            "超出目录截断的 Skill 必须可检索: {:?}", ids);
+        let ids: Vec<&str> = out["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m["id"].as_str())
+            .collect();
+        assert!(
+            ids.contains(&"zzz_hidden_audit"),
+            "超出目录截断的 Skill 必须可检索: {:?}",
+            ids
+        );
 
         // 2) 超截断的 MCP 工具可按名搜到（bulk7/tool_29 在每插件25条+全局80双截断之外）
-        let res = search(&db, &registry, Some(&base), &json!({"query": "tool_bulk7_29"}));
+        let res = search(
+            &db,
+            &registry,
+            Some(&base),
+            &json!({"query": "tool_bulk7_29"}),
+        );
         let out: Value = serde_json::from_str(&res.stdout).unwrap();
         let m = &out["matches"].as_array().unwrap()[0];
         assert_eq!(m["id"], "bulk7/tool_bulk7_29");
         assert_eq!(m["kind"], "mcp_tool");
-        assert!(m["load_hint"].as_str().unwrap().contains("bulk7/tool_bulk7_29"));
+        assert!(m["load_hint"]
+            .as_str()
+            .unwrap()
+            .contains("bulk7/tool_bulk7_29"));
 
         // 3) 插件命名空间过滤 + 中文描述命中
-        let res = search(&db, &registry, Some(&base),
-            &json!({"query": "处理 bulk3 数据", "kind": "mcp", "namespace": "bulk3", "limit": 3}));
+        let res = search(
+            &db,
+            &registry,
+            Some(&base),
+            &json!({"query": "处理 bulk3 数据", "kind": "mcp", "namespace": "bulk3", "limit": 3}),
+        );
         let out: Value = serde_json::from_str(&res.stdout).unwrap();
         let matches = out["matches"].as_array().unwrap();
         assert!(!matches.is_empty() && matches.len() <= 3);
         assert!(matches.iter().all(|m| m["namespace"] == "bulk3"));
 
         // 4) 索引规模断言：240 MCP + ≥121 skill + ≥20 builtin
-        assert!(out["total_scanned"].as_u64().unwrap() >= 380,
-            "索引应覆盖全部源: {}", out["total_scanned"]);
+        assert!(
+            out["total_scanned"].as_u64().unwrap() >= 380,
+            "索引应覆盖全部源: {}",
+            out["total_scanned"]
+        );
 
         std::fs::remove_dir_all(&base).ok();
     }
@@ -584,19 +785,315 @@ mod tests {
         let db = test_db();
         let mut registry = PluginRegistry::new();
         let (name, config) = make_plugin("schema-replay", 2);
-        registry.insert_with_source(name, Arc::new(McpClient::spawn(config).unwrap()), PluginSource::Yaml).unwrap();
-        let broad = search(&db, &registry, None, &json!({"query":"schema-replay", "kind":"mcp"}));
+        registry
+            .insert_with_source(
+                name,
+                Arc::new(McpClient::spawn(config).unwrap()),
+                PluginSource::Yaml,
+            )
+            .unwrap();
+        let broad = search(
+            &db,
+            &registry,
+            None,
+            &json!({"query":"schema-replay", "kind":"mcp"}),
+        );
         let broad: Value = serde_json::from_str(&broad.stdout).unwrap();
         let candidate = &broad["matches"][0];
-        assert!(candidate.get("input_schema").is_none(), "宽泛搜索不展开整个插件");
+        assert!(
+            candidate.get("input_schema").is_none(),
+            "宽泛搜索不展开整个插件"
+        );
         let exact = search(&db, &registry, None, &candidate["load_request"]["command"]);
         let exact: Value = serde_json::from_str(&exact.stdout).unwrap();
-        let loaded = exact["matches"].as_array().unwrap().iter().find(|item| item["id"] == candidate["id"]).unwrap();
+        let loaded = exact["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == candidate["id"])
+            .unwrap();
         assert_eq!(loaded["input_schema"]["required"], json!(["input"]));
-        assert_eq!(loaded["input_schema"]["properties"]["input"]["type"], "string");
-        let excluded = search(&db, &registry, None, &json!({"query":candidate["id"],"kind":"builtin"}));
+        assert_eq!(
+            loaded["input_schema"]["properties"]["input"]["type"],
+            "string"
+        );
+        let excluded = search(
+            &db,
+            &registry,
+            None,
+            &json!({"query":candidate["id"],"kind":"builtin"}),
+        );
         assert!(!excluded.stdout.contains("input_schema\": {"));
-        let invalid = search(&db, &registry, None, &json!({"next_tool_hint":candidate["id"]}));
-        assert!(!invalid.success && invalid.stderr.contains("指令顶层") && invalid.stderr.contains("未执行搜索"));
+        let invalid = search(
+            &db,
+            &registry,
+            None,
+            &json!({"next_tool_hint":candidate["id"]}),
+        );
+        assert!(
+            !invalid.success
+                && invalid.stderr.contains("指令顶层")
+                && invalid.stderr.contains("未执行搜索")
+        );
+    }
+
+    fn add_catalog(
+        registry: &mut PluginRegistry,
+        name: &str,
+        tools: Vec<crate::agent::mcp::McpToolDef>,
+    ) {
+        use crate::agent::mcp::{McpClient, PluginSource};
+        let (_, config) = make_plugin(name, 0);
+        crate::agent::mcp_catalog::remember_tools(&config, &tools);
+        registry
+            .insert_with_source(
+                name.to_string(),
+                Arc::new(McpClient::spawn(config).unwrap()),
+                PluginSource::Yaml,
+            )
+            .unwrap();
+    }
+
+    fn tool(name: &str, description: &str, schema: Value) -> crate::agent::mcp::McpToolDef {
+        crate::agent::mcp::McpToolDef {
+            name: name.into(),
+            description: description.into(),
+            schema,
+            annotations: Value::Null,
+        }
+    }
+
+    fn result(db: &DbState, registry: &PluginRegistry, params: Value) -> Value {
+        let res = search(db, registry, None, &params);
+        assert!(res.success, "{}", res.stderr);
+        serde_json::from_str(&res.stdout).unwrap()
+    }
+
+    #[test]
+    fn large_plugin_browse_reaches_last_action_and_focused_search_returns_callable_schema() {
+        let db = test_db();
+        let mut registry = PluginRegistry::new();
+        let schema = json!({"type":"object", "properties":{
+            "path":{"type":"string"}, "sheet":{"type":"string"},
+            "rows":{"type":"array","items":{"type":"array","items":{"type":"string"}}},
+            "mode":{"type":"string","enum":["values","formulas"]}
+        },"required":["path","sheet","rows"]});
+        let mut tools = (0..55)
+            .map(|i| {
+                tool(
+                    &format!("action_{i:02}"),
+                    "Manage workbook display settings.",
+                    json!({"properties":{}}),
+                )
+            })
+            .collect::<Vec<_>>();
+        tools.push(tool(
+            "write_range",
+            "Write cell values into an Excel workbook range.",
+            schema.clone(),
+        ));
+        add_catalog(&mut registry, "excel-discovery", tools);
+        // 其它插件只存在本地缓存，不建连接；目录规模超过常驻菜单上限。
+        for p in 0..5 {
+            let (name, config) = make_plugin(&format!("discovery-bulk-{p}"), 30);
+            registry
+                .insert_with_source(
+                    name,
+                    Arc::new(crate::agent::mcp::McpClient::spawn(config).unwrap()),
+                    crate::agent::mcp::PluginSource::Yaml,
+                )
+                .unwrap();
+        }
+        let mut request = json!({"query":"EXCEL-DISCOVERY","kind":"mcp","limit":15});
+        let mut ids = Vec::new();
+        loop {
+            let page = result(&db, &registry, request);
+            assert!(
+                crate::agent::context::budget::conservative_token_estimate(
+                    &serde_json::to_string_pretty(&page).unwrap()
+                ) <= crate::agent::context::budget::ContextBudget::SINGLE_OBSERVATION_INGRESS_CAP
+                    .saturating_sub(400),
+                "目录必须在通用观测入口采样前组成完整页"
+            );
+            assert_eq!(page["mode"], "namespace_directory");
+            assert_eq!(page["total_matches"], 56);
+            assert!(!page["note"]
+                .as_str()
+                .unwrap()
+                .contains("命中项按相关性排序"));
+            for item in page["matches"].as_array().unwrap() {
+                assert_eq!(item["namespace"], "excel-discovery");
+                assert!(item.get("input_schema").is_none());
+                assert!(item.get("parameters").is_some());
+                ids.push(item["id"].as_str().unwrap().to_owned());
+            }
+            if page["has_more"] == false {
+                assert!(page["next_request"].is_null());
+                break;
+            }
+            request = page["next_request"]["command"].clone();
+            assert_eq!(request["offset"], ids.len());
+        }
+        assert_eq!(ids.len(), 56);
+        assert_eq!(
+            ids.iter().collect::<std::collections::HashSet<_>>().len(),
+            56
+        );
+        assert_eq!(ids.last().unwrap(), "excel-discovery/write_range");
+        let direct = result(
+            &db,
+            &registry,
+            json!({"query":"write cell values", "kind":"mcp", "namespace":"excel-discovery"}),
+        );
+        let first = &direct["matches"][0];
+        assert_eq!(first["id"], "excel-discovery/write_range");
+        assert_eq!(first["input_schema"], schema);
+        assert!(
+            first["load_request"].is_null(),
+            "已经带规格时不能再催模型加载"
+        );
+        assert!(first["load_hint"]
+            .as_str()
+            .unwrap()
+            .contains("无需再次加载"));
+    }
+
+    #[test]
+    fn schema_budget_preserves_full_contract_and_exact_lookup_while_filters_still_apply() {
+        let db = test_db();
+        let mut registry = PluginRegistry::new();
+        let huge = json!({"properties":{"input":{"type":"string", "description":"完整参数🎉".repeat(4000)}},"required":["input"]});
+        let small = json!({"properties":{"mode":{"enum":["read","write"]}},"required":["mode"],"additionalProperties":false});
+        let mut tools = vec![tool("a_process", "Process data", huge.clone())];
+        for i in 0..5 {
+            tools.push(tool(&format!("process_{i}"), "Process data", small.clone()));
+        }
+        add_catalog(&mut registry, "schema-budget", tools);
+        let out = result(
+            &db,
+            &registry,
+            json!({"query":"process","kind":"mcp","namespace":"schema-budget","limit":40}),
+        );
+        assert_eq!(out["total_matches"], 6);
+        let matches = out["matches"].as_array().unwrap();
+        let skipped = matches
+            .iter()
+            .find(|m| m["id"] == "schema-budget/a_process")
+            .unwrap();
+        assert!(skipped.get("input_schema").is_none());
+        assert_eq!(
+            skipped["load_request"]["command"]["query"],
+            "schema-budget/a_process"
+        );
+        let included = matches
+            .iter()
+            .filter(|m| m.get("input_schema").is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(included.len(), 3);
+        for entry in included {
+            assert_eq!(entry["input_schema"], small);
+        }
+        let exact = result(&db, &registry, skipped["load_request"]["command"].clone());
+        assert_eq!(
+            exact["matches"][0]["input_schema"], huge,
+            "精确点名不截断完整 Schema"
+        );
+        let excluded = result(
+            &db,
+            &registry,
+            json!({"query":"schema-budget/a_process","kind":"builtin"}),
+        );
+        assert!(excluded["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["kind"] == "builtin" && m.get("input_schema").is_none()));
+        let excluded = result(
+            &db,
+            &registry,
+            json!({"query":"schema-budget/a_process","kind":"mcp","namespace":"other-plugin"}),
+        );
+        assert!(excluded["matches"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn missing_action_exposes_real_namespace_and_paging_does_not_claim_an_empty_catalog() {
+        let db = test_db();
+        let mut registry = PluginRegistry::new();
+        add_catalog(
+            &mut registry,
+            "miss-action",
+            vec![tool(
+                "write_range",
+                "Workbook operation\nSupports write_cell_values in a selected sheet.",
+                json!({"properties":{"rows":{"type":"array"}}}),
+            )],
+        );
+        let miss = result(
+            &db,
+            &registry,
+            json!({"query":"miss-action/write_data_to_excel","kind":"mcp"}),
+        );
+        assert_eq!(miss["mode"], "namespace_directory");
+        assert!(miss["note"].as_str().unwrap().contains("点名的工具不存在"));
+        assert_eq!(miss["matches"][0]["id"], "miss-action/write_range");
+        assert!(miss["matches"][0].get("input_schema").is_none());
+        let tail = result(
+            &db,
+            &registry,
+            json!({"query":"miss-action","kind":"mcp","offset":999}),
+        );
+        assert_eq!(tail["total_matches"], 1);
+        assert_eq!(tail["has_more"], false);
+        assert!(tail["note"].as_str().unwrap().contains("offset"));
+        let action = result(
+            &db,
+            &registry,
+            json!({"query":"write_cell_values","kind":"mcp"}),
+        );
+        assert_eq!(action["matches"][0]["id"], "miss-action/write_range");
+        assert!(action["matches"][0].get("input_schema").is_some());
+        let translated = result(
+            &db,
+            &registry,
+            json!({"query":"写入表格","kind":"mcp","namespace":"miss-action"}),
+        );
+        assert_eq!(translated["mode"], "namespace_directory");
+        assert!(translated["note"]
+            .as_str()
+            .unwrap()
+            .contains("动作关键词未匹配"));
+        assert_eq!(translated["matches"][0]["id"], "miss-action/write_range");
+        let tokens = tokenize("write_range/write_range");
+        assert!(tokens.iter().any(|t| t == "write") && tokens.iter().any(|t| t == "range"));
+        assert_eq!(
+            tokens
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            tokens.len()
+        );
+    }
+
+    #[test]
+    fn plugin_name_collision_keeps_builtin_discovery_and_explicit_plugin_browse_available() {
+        let db = test_db();
+        let mut registry = PluginRegistry::new();
+        add_catalog(
+            &mut registry,
+            "search",
+            vec![tool(
+                "lookup",
+                "Search external records",
+                json!({"properties":{}}),
+            )],
+        );
+        let mixed = result(&db, &registry, json!({"query":"search"}));
+        assert_eq!(mixed["mode"], "search");
+        assert_eq!(mixed["matches"][0]["id"], "search");
+        assert_eq!(mixed["matches"][0]["kind"], "builtin");
+        let plugin = result(&db, &registry, json!({"query":"search","kind":"mcp"}));
+        assert_eq!(plugin["mode"], "namespace_directory");
+        assert_eq!(plugin["matches"][0]["id"], "search/lookup");
     }
 }
