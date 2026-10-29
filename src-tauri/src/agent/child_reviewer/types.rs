@@ -325,6 +325,13 @@ impl ReviewFinding {
         if !self.severity.is_empty() && self.severity != "suggestion" {
             prefix.push(format!("[{}]", self.severity.to_uppercase()));
         }
+        if self.severity == "blocking" {
+            prefix.push(if matches!(self.finality.as_str(), "final_only" | "blocking_if_final") {
+                "[交付前核销；当前中间态可接受]".to_string()
+            } else {
+                "[当前阶段阻塞]".to_string()
+            });
+        }
         if !self.location.is_empty() {
             prefix.push(format!("at {}", self.location));
         }

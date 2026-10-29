@@ -66,10 +66,10 @@
             Some("out-1".to_string()),
         );
         assert!(ctx
-            .repeated_failure_blocker("remote-hub/list_directory", "list_directory", &params)
+            .repeated_failure_notice("remote-hub/list_directory", "list_directory", &params)
             .is_some());
         assert!(ctx
-            .repeated_failure_blocker(
+            .repeated_failure_notice(
                 "remote-hub/list_directory",
                 "list_directory",
                 &json!({"path": "/different/project"}),
@@ -86,7 +86,7 @@
             None,
         );
         assert!(ctx
-            .repeated_failure_blocker("web_search", "search", &transient)
+            .repeated_failure_notice("web_search", "search", &transient)
             .is_none());
     }
 

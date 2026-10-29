@@ -1267,7 +1267,7 @@ mod tests {
 
         // 核心提示词中的举证范例必须能通过真实校验。
         let core = include_str!("../../prompts/core_logic.md");
-        let marker = r#"{"status": "verified", "evidence_refs":"#;
+        let marker = r#"{"status":"verified", "evidence_refs":"#;
         let mut example_count = 0;
         for (start, _) in core.match_indices(marker) {
             // 只取内层验证对象，避开外层 Markdown/JSON 正文中的反引号。
@@ -1277,7 +1277,7 @@ mod tests {
             apply_change_verification_update(&mut None, update, &window).unwrap();
             example_count += 1;
         }
-        assert!(example_count >= 3);
+        assert!(example_count >= 1, "至少保留一条可执行引用范例，不要求反复抄写");
         assert!(!crate::agent::context::render::VERIFICATION_RULES_TEXT.contains("step_N 或 命令输出摘要"));
     }
 

@@ -43,30 +43,9 @@ pub(super) async fn dispatch_ask_human(
         let is_plan_approval_kind =
             ask_kind == "plan_approval" || ask_kind == "plan" || ask_kind == "approval";
 
-        // 【方向 3：冷却作用域收窄至 approval 类】
-        // 门禁冷却（evaluate_ask_human_cooldown）核心目的在于防止模型刚被前置写入门禁拦截就立刻甩锅让人类审批放行。
-        // - plan_approval / 门禁放行类：冷却生效（必须先按拦截意见行动，严禁立即甩锅绕门禁）。
-        // - 缺参数、缺凭据、偏好或普通信息提问（非 approval 类，含过渡期 missing_parameter）：永远放行，不受冷却限制！
         if is_plan_approval_kind {
-            if let Some(cooldown_msg) = evaluate_ask_human_cooldown(ctx.checkpoint, ctx.step_id) {
-                crate::agent::dispatcher::emit_tool_event(
-                    ctx.app,
-                    ctx.final_session_id,
-                    ctx.step_id,
-                    inst,
-                    "failed",
-                    Some("ask_human_cooldown".to_string()),
-                    Some(false),
-                    &cooldown_msg,
-                    Some(ctx.tool_started_at.elapsed().as_millis()),
-                    None,
-                );
-                return Ok(ArmOutcome::Early(DispatchResult { view: None,
-                    stdout: String::new(),
-                    stderr: cooldown_msg,
-                    success: false,
-                    route: "host_rejection:ask_human_cooldown".to_string(),
-                }));
+            if let Some(notice) = ask_human_recent_gate_notice(ctx.checkpoint, ctx.step_id) {
+                ctx.context.add_host_feedback(&notice);
             }
         }
 
@@ -87,53 +66,16 @@ pub(super) async fn dispatch_ask_human(
             .take(500)
             .collect();
 
-        // 【防问个没完：信息类提问全局配额兜底 (默认 5 次，可由配置调节；私密凭据类提问豁免)】
-        // 提问信息类在同一任务里只允许问有限次数，超出直接拦截并强制采用默认值推进；且同一问题只允许问一次。
+        // 历史提问次数和文本相似度只作建议，不推断此前已有答案或本次不应询问。
         if !is_plan_approval_kind {
-            let is_credential = crate::agent::checkpoint::is_credential_inquiry_kind(&ask_kind);
-            if !is_credential {
+            if !crate::agent::checkpoint::is_credential_inquiry_kind(&ask_kind) {
                 let budget = crate::agent::channel::config::max_human_inquiry_budget();
-                if let Some(quota_err) = ctx.checkpoint.check_inquiry_quota_exceeded(budget) {
-                    crate::agent::dispatcher::emit_tool_event(
-                        ctx.app,
-                        ctx.final_session_id,
-                        ctx.step_id,
-                        inst,
-                        "failed",
-                        Some("ask_human_quota_exhausted".to_string()),
-                        Some(false),
-                        &quota_err,
-                        Some(ctx.tool_started_at.elapsed().as_millis()),
-                        None,
-                    );
-                    return Ok(ArmOutcome::Early(DispatchResult { view: None,
-                        stdout: String::new(),
-                        stderr: quota_err,
-                        success: false,
-                        route: "host_rejection:ask_human_quota_exhausted".to_string(),
-                    }));
+                if let Some(notice) = ctx.checkpoint.inquiry_budget_notice(budget) {
+                    ctx.context.add_host_feedback(&notice);
                 }
             }
-
-            if let Some(dup_err) = ctx.checkpoint.check_duplicate_question(&ask_msg) {
-                crate::agent::dispatcher::emit_tool_event(
-                    ctx.app,
-                    ctx.final_session_id,
-                    ctx.step_id,
-                    inst,
-                    "failed",
-                    Some("ask_human_duplicate".to_string()),
-                    Some(false),
-                    &dup_err,
-                    Some(ctx.tool_started_at.elapsed().as_millis()),
-                    None,
-                );
-                return Ok(ArmOutcome::Early(DispatchResult { view: None,
-                    stdout: String::new(),
-                    stderr: dup_err,
-                    success: false,
-                    route: "host_rejection:ask_human_duplicate".to_string(),
-                }));
+            if let Some(notice) = ctx.checkpoint.similar_question_notice(&ask_msg) {
+                ctx.context.add_host_feedback(&notice);
             }
             ctx.checkpoint.record_asked_question(&ask_msg);
         }
@@ -162,70 +104,22 @@ pub(super) async fn dispatch_ask_human(
             Some(json!({
                 "kind": "plan_approval",
                 "title": "方案与安全审查人工仲裁",
-                "description": ask_msg
+                "description": params.get("message").and_then(Value::as_str).unwrap_or("")
             }))
         } else {
             None
         };
 
-        // 模型把方案正文写进 message、form.description 留空是高频格式摩擦（白烧一步）：
-        // message 足够长时直接搬进 description 展示，不必打回。
         if is_approval_context {
-            if let Some(obj) = final_form_val.as_mut().and_then(|f| f.as_object_mut()) {
-                let cur = obj
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .trim()
-                    .chars()
-                    .count();
-                if cur < 30 && ask_msg.trim().chars().count() >= 30 {
-                    obj.insert("description".to_string(), json!(ask_msg.trim()));
-                }
-            }
-        }
-
-        // 【审批内容必填】plan_approval 卡片的可审阅区域渲染的是 form.description；
-        // 模型只给标题不带正文时，人类面对的就是一张"裸审批卡"——无法判断在批什么。
-        // 机械校验（非语义）：最终将要展示的正文必须达到最低信息量（≥30 字符，
-        // 约一句完整方案的长度），不足则拒收并要求补齐方案正文后重发——
-        // 不消耗挂起/人工通道。
-        if is_approval_context {
-            let effective_desc = final_form_val
-                .as_ref()
-                .and_then(|f| f.get("description"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .trim();
-            const MIN_APPROVAL_DESC_CHARS: usize = 30;
-            if effective_desc.chars().count() < MIN_APPROVAL_DESC_CHARS {
-                let reject_msg = format!(
-                    "【方案审批内容缺失】kind=plan_approval 的审批卡片必须携带可审阅的方案正文，\
-                     当前 description 仅 {} 字符（要求 ≥ {}）。\
-                     请把完整方案（目标 / 改动范围 target_files / 根因与证据 / 验证方式）写入 \
-                     form.description 字段（未提供 form 时写入 message 字段）后重新调用 ask_human；\
-                     人类无法批准一份看不见内容的方案。",
-                    effective_desc.chars().count(),
-                    MIN_APPROVAL_DESC_CHARS
-                );
-                crate::agent::dispatcher::emit_tool_event(
-                    ctx.app,
-                    ctx.final_session_id,
-                    ctx.step_id,
-                    inst,
-                    "failed",
-                    Some("plan_approval_content_missing".to_string()),
-                    Some(false),
-                    &reject_msg,
-                    Some(ctx.tool_started_at.elapsed().as_millis()),
-                    None,
-                );
-                return Ok(ArmOutcome::Early(DispatchResult { view: None,
-                    stdout: String::new(),
-                    stderr: reject_msg,
-                    success: false,
-                    route: "host_rejection:plan_approval_content_missing".to_string(),
-                }));
+            if let Err(reject_msg) = normalize_approval_description(
+                &mut final_form_val, params.get("message").and_then(Value::as_str),
+            ) {
+                emit_tool_event(ctx.app, ctx.final_session_id, ctx.step_id, inst, "failed",
+                    Some("plan_approval_content_missing".into()), Some(false), &reject_msg,
+                    Some(ctx.tool_started_at.elapsed().as_millis()), None);
+                return Ok(ArmOutcome::Early(DispatchResult { view: None, stdout: String::new(),
+                    stderr: reject_msg, success: false,
+                    route: "host_rejection:plan_approval_content_missing".into() }));
             }
         }
 
@@ -323,4 +217,35 @@ pub(super) async fn dispatch_ask_human(
             route: "ask_human_resolved".to_string(),
         }
     }))
+}
+
+/// 只保证审批正文可展示，不根据长度推断内容是否足够；标题不冒充方案正文。
+fn normalize_approval_description(form: &mut Option<Value>, message: Option<&str>) -> Result<(), String> {
+    let obj = form.as_mut().and_then(Value::as_object_mut)
+        .ok_or("审批表单应为对象，本次尚未请求人工审批。")?;
+    if obj.get("description").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty()) {
+        return Ok(());
+    }
+    if let Some(text) = message.map(str::trim).filter(|s| !s.is_empty()) {
+        obj.insert("description".into(), json!(text));
+        return Ok(());
+    }
+    Err("【方案审批内容缺失】审批卡片没有可展示的正文；请在 form.description 或 message 写明请求批准的操作。本次尚未请求人工审批。".into())
+}
+
+#[cfg(test)]
+mod approval_content_tests {
+    use super::*;
+    #[test]
+    fn short_real_body_is_displayed_but_title_and_missing_body_are_not_authorization() {
+        let mut form = Some(json!({"kind":"plan_approval","title":"批准方案"}));
+        assert!(normalize_approval_description(&mut form, None).is_err());
+        assert!(normalize_approval_description(&mut form, Some("  ")).is_err());
+        normalize_approval_description(&mut form, Some("修空值判断")).unwrap();
+        assert_eq!(form.as_ref().unwrap()["description"], "修空值判断");
+        normalize_approval_description(&mut form, Some("另一个请求")).unwrap();
+        assert_eq!(form.as_ref().unwrap()["description"], "修空值判断", "已有正文不被覆盖");
+        let mut invalid = Some(json!([]));
+        assert!(normalize_approval_description(&mut invalid, Some("正文")).is_err());
+    }
 }

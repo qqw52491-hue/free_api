@@ -165,6 +165,7 @@ async fn wide_references_reach_async_reviewer_and_storage_without_losing_blocker
     assert_eq!(returned.evidence_refs, expected);
     let requests = mock.requests.lock().unwrap();
     assert_eq!(requests.len(), 1, "合法引用不应触发补答");
+    assert!(requests[0]["messages"][0]["content"].as_str().unwrap().contains("本次验收对象：执行前方案"));
     for reference in &expected {
         assert!(requests[0]["messages"].as_array().unwrap().iter().any(|m|
             m["content"].as_str().is_some_and(|content| content.contains(reference))));

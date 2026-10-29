@@ -51,6 +51,19 @@ export function toggleConfigPlatform(row: SelectablePlatform, selected: boolean)
   row.models.forEach(item => { item.selected = selected })
 }
 
+export function toggleConfigModel(
+  row: SelectablePlatform,
+  item: SelectablePlatform['models'][number],
+  selected: boolean,
+) {
+  item.selected = selected
+  if (selected) {
+    row.selected = true
+  } else if (row.models.length > 0 && !row.models.some(m => m.selected)) {
+    row.selected = false
+  }
+}
+
 export interface FilteredConfigPlatform {
   row: SelectablePlatform
   sourceIndex: number

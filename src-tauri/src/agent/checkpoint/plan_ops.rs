@@ -529,6 +529,21 @@ impl AgentCheckpoint {
         self.current_review_findings().into_iter().map(|(_, finding)| finding).collect()
     }
 
+    /// 方案写入阶段只认当前阻塞；final_only 仍留在完整发现和待办中，交付前核销。
+    pub(crate) fn plan_stage_blockings(&self) -> Vec<crate::agent::child_reviewer::ReviewFinding> {
+        self.aggregate_unwithdrawn_blockings().into_iter().filter(|finding|
+            !matches!(finding.finality.as_str(), "final_only" | "blocking_if_final")
+        ).collect()
+    }
+
+    pub(crate) fn plan_stage_blocking_count(&self) -> u32 {
+        if self.plan_review_deliveries.is_empty() {
+            self.last_review_blocking_count // 旧检查点仅有标量时仍保留已有阻塞
+        } else {
+            self.plan_stage_blockings().len() as u32
+        }
+    }
+
     /// 同一道审查题的续跑以已落账的最新 attempt 为准；独立审查员的修订裁决各自保留。
     /// 复用台账 task_id/attempt_id，不让历史 rebuttal 在后续 approved 后永久锁住方案。
     pub(crate) fn plan_revisions_required(&self, db: &DbState) -> bool {
@@ -582,12 +597,8 @@ impl AgentCheckpoint {
     /// 无 db 访问：批次口径用锚点标量（expected_count）+ 交付内容缓存 + consumed 标志，
     /// 与台账推导口径一致（delivered=已登记交付数，expected=派发时既定成员数）。
     pub fn plan_gate_projection(&self) -> crate::agent::context::types::PlanGateProjection {
-        let unwithdrawn_blockings = self.aggregate_unwithdrawn_blockings();
-        let blocking_count = if unwithdrawn_blockings.is_empty() {
-            self.last_review_blocking_count
-        } else {
-            unwithdrawn_blockings.len() as u32
-        };
+        let unwithdrawn_blockings = self.plan_stage_blockings();
+        let blocking_count = self.plan_stage_blocking_count();
 
         let blocking_summary = if blocking_count > 0 {
             if !unwithdrawn_blockings.is_empty() {

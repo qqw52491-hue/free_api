@@ -230,19 +230,19 @@ pub fn format_obligation_failure(result: &ObligationVerifyResult) -> String {
         "timeout" => "验证命令已启动，执行超时",
         _ => "验证命令已执行，未通过",
     };
-    format!("义务 [{}] 验证失败（退出码 {}；{}）\n验证命令: `{}`\n宿主启动目录: {}\n输出/诊断:\n{}", result.obligation_id, result.exit_code, execution, result.command, result.working_dir.display(), result.output_tail)
+    let failure = format!("义务 [{}] 验证失败（退出码 {}；{}）\n验证命令: `{}`\n宿主启动目录: {}\n输出/诊断:\n{}", result.obligation_id, result.exit_code, execution, result.command, result.working_dir.display(), result.output_tail);
+    // finish/prepare_finish 直接使用本函数，不能只在旧反馈包装器中附修法。
+    let hint = obligation_missing_file_hint(std::slice::from_ref(&failure)).unwrap_or("");
+    format!("{failure}{hint}")
 }
 
 pub fn obligation_failure_report(failures: &[String]) -> String {
-    let report = format!("【⚠️ 交付门禁拦截打回：契约绑定的宿主验证命令未通过，finish 未生效！】\n{}\n（说明：命令退出码即为判定依据，冻结脚本不可修改）。\n下一步：依据上述真实诊断定位失败原因（验证命令、运行环境或代码），处理后重跑验证；未验证通过不得宣称交付完成。", failures.join("\n"));
-    match obligation_missing_file_hint(failures) {
-        Some(hint) => format!("{}{}", report, hint),
-        None => report,
-    }
+    let report = format!("【⚠️ 交付门禁拦截打回：契约绑定的宿主验证命令未通过，finish 未生效！】\n{}\n（说明：命令退出码即为判定依据，脚本可显式修订；执行结果仍须核实）。\n下一步：依据上述真实诊断定位失败原因（验证命令、运行环境或代码），处理后重跑验证；未验证通过不得宣称交付完成。", failures.join("\n"));
+    report
 }
 
-/// 【B 路径执行器】运行契约义务绑定的冻结验证脚本/命令。
-/// 冻结副本语义：脚本内容取自 checkpoint 里的快照（批准时冻结），写临时文件执行，
+/// 【B 路径执行器】运行契约义务绑定的契约验证脚本/命令。
+/// 执行快照语义：脚本内容取自当前 checkpoint 的申报版本，写临时文件执行，
 /// 工作区内同名脚本被模型改动不影响判定；sha256 不匹配 = 快照损坏，fail-closed。
 /// 任一验证失败 = 返回集合里存在 passed=false（调用方进 blocker），基础设施故障
 /// （无法写临时文件等）同样判 failed 并注明——验证器故障绝不放行。
@@ -258,7 +258,7 @@ pub async fn run_obligation_verifications(
         };
         let id = ob.id.clone();
         let working_dir = resolve_verify_dir(workspace, command);
-        // 冻结脚本：写临时文件运行（sha256 核验快照完整性）
+        // 脚本快照：写临时文件运行（sha256 核验快照完整性）
         let mut script_path: Option<std::path::PathBuf> = None;
         if let Some(script) = ob.verify_script.as_deref().filter(|c| !c.trim().is_empty()) {
             let digest = format!("{:x}", Sha256::digest(script.as_bytes()));
@@ -270,7 +270,7 @@ pub async fn run_obligation_verifications(
                         command: command.to_string(),
                         working_dir: working_dir.clone(),
                         exit_code: "fail-closed".to_string(),
-                        output_tail: "冻结脚本哈希不匹配（快照损坏或被篡改），按失败处理".to_string(),
+                        output_tail: "脚本快照哈希不匹配（快照损坏或被篡改），按失败处理".to_string(),
                         passed: false,
                     });
                     continue;
@@ -289,14 +289,14 @@ pub async fn run_obligation_verifications(
                         command: command.to_string(),
                         working_dir: working_dir.clone(),
                         exit_code: "fail-closed".to_string(),
-                        output_tail: format!("冻结脚本写入临时文件失败: {e}"),
+                        output_tail: format!("脚本快照写入临时文件失败: {e}"),
                         passed: false,
                     });
                     continue;
                 }
             }
         }
-        // 命令若引用脚本，统一改指冻结副本（工作区内路径不再可信）
+        // 命令若引用脚本，统一改指当前申报快照，明确实际执行版本
         let effective_command = match (&script_path, ob.verify_script.as_deref()) {
             (Some(tmp), Some(script)) => {
                 let base = std::path::Path::new(script)
@@ -415,16 +415,16 @@ mod tool_unavailable_tests {
 }
 
 
-/// 冻结验证命令失败原因是「引用的文件不存在」（多为产物实际文件名和契约里的路径不一致）时，
+/// 契约验证命令失败原因是「引用的文件不存在」（多为产物实际文件名和契约里的路径不一致）时，
 /// 给模型的补充说明——默认文案只说「修复代码」，对改了产物名的情形会误导。
-/// 冻结机制本身不变（命令仍不可改），这里只点明合法出路。
+/// 方法可显式修订；这里只披露路径与工作目录的核对方式，不猜测失败原因。
 pub fn obligation_missing_file_hint(failure_lines: &[String]) -> Option<&'static str> {
     let missing = failure_lines.iter().any(|l| {
         l.contains("No such file or directory") || l.contains("没有那个文件或目录")
     });
     if missing {
         Some(
-            "\n【若失败原因是验证命令引用的文件不存在】多半是产物实际文件名与契约里的路径不一致。检查本身冻结不能改，但**命令里的文件路径可以改成真实产物路径**：①用 review_contract_update 只把该义务 verify_command 里的路径换成实际交付文件（其余参数一字不动），并保证 artifacts 登记的是该最终路径；②或让产物出现在原路径（重命名、`ln` 硬链接，避免复制大文件）；③若该义务整体不再适用，标 waived 并写明理由、新增新义务。请如实说明，不要为通过验证而造假。",
+            "\n【路径核对】先核对宿主启动目录与最终产物的物理路径。可用 review_contract_update 按原义务 id 更新 verify_command 或 verify_script（包括内嵌脚本里的路径），说明修订原因后核验当前对象；无需另造副本迎合旧文件名。验证方法已允许修订，用户要求与真实检查结果仍交终审核验，不能以修改命令代替验证通过。文件工具的 tmp/ 别名不等于 shell 的相对 tmp/ 目录。",
         )
     } else {
         None
@@ -442,6 +442,19 @@ mod missing_file_hint_tests {
         let other = vec!["- 义务 [t] 验证命令 `cargo test` 退出码 101: tests failed".to_string()];
         assert!(hint(&other).is_none());
         assert!(hint(&[]).is_none());
+    }
+
+    #[test]
+    fn actual_finish_failure_contains_path_repair_without_loosening_assertions() {
+        let result = super::ObligationVerifyResult {
+            obligation_id:"excel".into(), command:"python -c \"p='tmp/today_news.xlsx'\"".into(),
+            working_dir:"/session".into(), exit_code:"1".into(), passed:false,
+            output_tail:"FileNotFoundError: No such file or directory: tmp/today_news.xlsx".into(),
+        };
+        let feedback = super::format_obligation_failure(&result);
+        assert!(feedback.contains("review_contract_update") && feedback.contains("内嵌脚本"));
+        assert!(feedback.contains("退出码 1") && feedback.contains("宿主启动目录: /session"));
+        assert!(!feedback.contains("硬链接"));
     }
 }
 
@@ -517,7 +530,7 @@ mod feedback_tests {
         assert_eq!(results[0].exit_code, "fail-closed");
         let feedback = format_obligation_failure(&results[0]);
         assert!(feedback.contains("验证命令未能执行"));
-        assert!(feedback.contains("冻结脚本哈希不匹配"));
+        assert!(feedback.contains("脚本快照哈希不匹配"));
     }
 
     #[tokio::test]

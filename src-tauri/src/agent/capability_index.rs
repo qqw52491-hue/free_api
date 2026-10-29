@@ -259,7 +259,7 @@ pub fn search(
         return DispatchResult {
             view: None,
             stdout: String::new(),
-            stderr: "capability_search 缺少 query 参数。\n💡 正确示例: {\"tool\": \"capability_search\", \"command\": {\"query\": \"文件搜索\"}}；可按 kind=mcp|skill|builtin|instruction|role 或 namespace=插件名 过滤。".to_string(),
+            stderr: "capability_search 缺少 query 参数，未执行搜索。next_tool_hint 是指令顶层的预加载字段，不是搜索参数。\n💡 查目录: {\"tool\":\"capability_search\",\"command\":{\"query\":\"文件搜索\"}}；取得已知 MCP 工具完整参数: {\"tool\":\"capability_search\",\"command\":{\"query\":\"插件名/工具名\",\"kind\":\"mcp\"}}。精确命中完整 ID 时直接返回 input_schema；按当前实际名称替换示例。".to_string(),
             success: false,
             route: "capability_search:invalid".to_string(),
         };
@@ -312,21 +312,34 @@ pub fn search(
         .iter()
         .take(limit)
         .map(|(score, e)| {
-            json!({
+            let mut entry = json!({
                 "id": e.id,
                 "kind": e.kind,
                 "namespace": e.namespace,
                 "description": e.description.chars().take(DESCRIPTION_PREVIEW_CHARS).collect::<String>(),
                 "load_hint": e.load_hint,
                 "score": score,
-            })
+            });
+            // 只展开明确点名的工具，宽泛搜索仍保留轻量目录；不执行 MCP。
+            if e.kind == "mcp_tool" && e.id == query {
+                if let Some((_, tool)) = registry.list_all_tools().into_iter()
+                    .find(|(plugin, tool)| format!("{plugin}/{}", tool.name) == e.id)
+                {
+                    entry["input_schema"] = tool.schema;
+                    entry["description"] = json!(tool.description);
+                }
+            }
+            entry["load_request"] = if e.kind == "mcp_tool" {
+                json!({"tool":"capability_search","command":{"query":e.id,"kind":"mcp"}})
+            } else { Value::Null };
+            entry
         })
         .collect();
 
     let note = if matches.is_empty() {
         "无命中。可换关键词（工具名/动作/中文描述均可），或去掉 kind/namespace 过滤再试。"
     } else {
-        "命中项按相关性排序。Skill/MCP 工具用 load_hint 的 next_tool_hint 加载完整手册或 Schema；内置工具与角色已可直接使用。"
+        "命中项按相关性排序。MCP 项含 input_schema 表示已返回该工具完整参数，可按 Schema 调用；未含时执行该项 load_request 精确取得参数，不要反复搜索描述词。也可在指令顶层设置 next_tool_hint 预加载。Skill 沿用 load_hint；内置工具与角色已可直接使用。"
     };
 
     DispatchResult {
@@ -563,5 +576,27 @@ mod tests {
             "索引应覆盖全部源: {}", out["total_scanned"]);
 
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn exact_mcp_search_returns_schema_and_broad_search_returns_executable_load_request() {
+        use crate::agent::mcp::{McpClient, PluginSource};
+        let db = test_db();
+        let mut registry = PluginRegistry::new();
+        let (name, config) = make_plugin("schema-replay", 2);
+        registry.insert_with_source(name, Arc::new(McpClient::spawn(config).unwrap()), PluginSource::Yaml).unwrap();
+        let broad = search(&db, &registry, None, &json!({"query":"schema-replay", "kind":"mcp"}));
+        let broad: Value = serde_json::from_str(&broad.stdout).unwrap();
+        let candidate = &broad["matches"][0];
+        assert!(candidate.get("input_schema").is_none(), "宽泛搜索不展开整个插件");
+        let exact = search(&db, &registry, None, &candidate["load_request"]["command"]);
+        let exact: Value = serde_json::from_str(&exact.stdout).unwrap();
+        let loaded = exact["matches"].as_array().unwrap().iter().find(|item| item["id"] == candidate["id"]).unwrap();
+        assert_eq!(loaded["input_schema"]["required"], json!(["input"]));
+        assert_eq!(loaded["input_schema"]["properties"]["input"]["type"], "string");
+        let excluded = search(&db, &registry, None, &json!({"query":candidate["id"],"kind":"builtin"}));
+        assert!(!excluded.stdout.contains("input_schema\": {"));
+        let invalid = search(&db, &registry, None, &json!({"next_tool_hint":candidate["id"]}));
+        assert!(!invalid.success && invalid.stderr.contains("指令顶层") && invalid.stderr.contains("未执行搜索"));
     }
 }

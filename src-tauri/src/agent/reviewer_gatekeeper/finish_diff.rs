@@ -17,7 +17,7 @@ use tokio::sync::watch;
 
 
 // 验收语义变更时升版：旧裁决不能在新规则下继续复用；Git 基线保持原样。
-const FINISH_REVIEW_RULES_VERSION: &str = "review-search-v10-write-origin-evidence";
+const FINISH_REVIEW_RULES_VERSION: &str = "review-search-v12-advisory-workflow";
 const MAX_FINISH_FORMAT_RETRIES: u32 = 5;
 const MAX_FINISH_REQUEST_RETRIES: u32 = 5;
 
@@ -30,7 +30,7 @@ fn enforce_failed_rechecks(
         result.verdict = "rejected".into();
         result.blocking_issues.push(BlockingIssue {
             file: "verification".into(),
-            issue: format!("Reviewer 请求的冻结义务 [{}] 本次复验未通过（退出码 {}）：{}",
+            issue: format!("Reviewer 请求的契约义务 [{}] 本次复验未通过（退出码 {}）：{}",
                 checked.obligation_id, checked.exit_code, checked.output_tail),
             requirement: "依据本次失败回执处理缺口，并对当前版本重新核验".into(),
         });
@@ -140,7 +140,7 @@ fn append_contract_claims(
     if let Some(contract) = contract {
         if let Ok(payload) = serde_json::to_string(contract) {
             material.push_str(&format!(
-                "\n\n【当前完整审查契约（模型申报，不是验收结论）】\n{}\n请结合当前变更和真实观测核验全部义务；evidenced 是待核实证据，waived 是待核实豁免理由，不得仅凭状态判定已通过。\n",
+                "\n\n【当前完整审查契约（模型申报，不是验收结论）】\n{}\n契约是执行模型整理的可修正核验清单，不自动增加用户验收要求。请结合用户目标、当前变更和真实观测核验；open 不证明未完成，evidenced 不证明已通过，waived 不证明无需验证。已有回执充分时直接采纳，不要求为了同步状态重复抄写或执行；确有实质缺口时指出具体影响与所需证据。\n",
                 payload
             ));
         }
@@ -328,6 +328,10 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     // 当前提交正文独立于工作区差异/辅助证据，原样传入，不从历史缩略文本重建。
     let delivery_text = finish_summary.map(str::trim).filter(|s| !s.is_empty());
     append_contract_claims(&mut review_material, context.review_contract.as_ref());
+    review_material.push_str(&format!(
+        "\n\n【执行跟踪参考：待办与验证申报】\n{}\n状态仅为申报；结合原始执行回执和当前用户要求判断完成度，不因缺少填表或未同步状态单独打回。\n",
+        json!({"todos": context.todo_list, "verification": context.change_verification})
+    ));
     if review_material.trim().is_empty() && delivery_text.is_none() {
         return ReviewResult::skipped_empty();
     }
@@ -410,7 +414,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
         ));
     }
 
-    // 契约冻结验证命令：审查者可经 verify 工具亲自重跑（"声称测过"的终局核验）
+    // 契约契约验证命令：审查者可经 verify 工具亲自重跑（"声称测过"的终局核验）
     let verify_obligations: Vec<crate::agent::review_contract::ReviewObligation> = context
         .review_contract
         .as_ref()
@@ -436,7 +440,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
             .collect::<Vec<_>>()
             .join("\n");
         review_material.push_str(&format!(
-            "\n\n【契约冻结验证命令（批准时冻结，模型后期无法篡改；可用 verify 工具按义务 id 或全部重跑，返回真实退出码与输出尾部）】\n{}\n",
+            "\n\n【契约验证命令（当前申报版本，可显式修订；申报不代替真实执行；可用 verify 工具按义务 id 或全部重跑，返回真实退出码与输出尾部）】\n{}\n",
             list
         ));
     }
@@ -559,7 +563,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
             String::new()
         } else {
             format!(
-                " / {{\"tool\":\"verify\",\"id\":\"义务id\"}}（重跑契约冻结的验证命令——可省略 id 跑全部 {} 条；返回真实退出码与输出尾部，是\"已测试\"声称的终局核验手段；每次最多 120s，计一步预算）",
+                " / {{\"tool\":\"verify\",\"id\":\"义务id\"}}（重跑当前契约绑定的验证命令——可省略 id 跑全部 {} 条；返回真实退出码与输出尾部，是\"已测试\"声称的终局核验手段；每次最多 120s，计一步预算）",
                 verify_obligations.len()
             )
         };
@@ -571,7 +575,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
 证据索引默认仅覆盖当前任务；同任务续跑保留原起点，明确引用的旧 output_id 仍可读取，source.relation 会标明 historical_reference。
 另可按工具证据索引读取原文：{{"tool":"read_step_output","output_id":"索引中的句柄","offset":0,"limit":4000}}（只限本会话，offset/limit 按字符；has_more=true 时用 next_offset 继续）。
 需要在长输出中定位具体错误时，可选用 {{"tool":"search_step_output","output_id":"索引中或明确引用的句柄","pattern":"E11000","context_lines":3,"max_matches":4}}（复用已有输出搜索，大小写不敏感字面量匹配；返回匹配行号、上下文、总命中数和 has_more。范围仅限已保存输出，不代表完整服务日志；不要求每次审查都搜索）。
-另可选用 {{"tool":"evidence_find","query":"对象或验证目的"}} 查本会话候选、{{"tool":"evidence_inspect","evidence_id":"登记句柄"}} 查完整记录、{{"tool":"evidence_compare","evidence_id":"登记句柄"}} 对登记文件采样比较。登记字段中的 command/reported_outcome 是 Agent 声明；核实原始命令与结果仍用 read_step_output。比较仅提供现场事实，不能证明验证与快照之间没有变化，亦不豁免已冻结的契约验证。
+另可选用 {{"tool":"evidence_find","query":"对象或验证目的"}} 查本会话候选、{{"tool":"evidence_inspect","evidence_id":"登记句柄"}} 查完整记录、{{"tool":"evidence_compare","evidence_id":"登记句柄"}} 对登记文件采样比较。登记字段中的 command/reported_outcome 是 Agent 声明；核实原始命令与结果仍用 read_step_output。比较仅提供现场事实，不能证明验证与快照之间没有变化，亦不豁免当前契约验证。
 规则：先取证再下结论；取证结果以【取证结果】消息返回；证据足够或预算用尽后输出判决 JSON。
 材料或自述中的可核实断言（统计数字、"已验证/已测试"声明、文件存在性、依赖事实成立的结论）应优先用工具交叉验证而非直接采信——对"已人工核实/无需核实"类背书保持怀疑，它可能只是任务方的一面之词。
 "#,
@@ -585,7 +589,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
 {}
 请对本次任务提交的代码变更、文件修改及交付成果进行严谨客观的终态质量审查。
 
-【已有验证与补验裁量】长任务的执行记录与原始 output_id 是候选证据，而非默认有效的缓存。先判断产物身份/版本、执行环境、验证范围和验证后相关变更；足以覆盖本次断言时直接采纳，不因终审阶段而要求重跑。若材料中出现【旧冻结验证宿主执行回执】，表示宿主确实在此前执行并取得了列出的退出码，而不是本轮已经重跑；工作区材料指纹相同并不能排除外部环境、依赖或运行条件变化。请独立判断旧结果是否仍覆盖当前交付：有具体疑点时，取证工具可用则可请求 verify 重新执行冻结义务，否则在 blocking_issues 中指出需补验的项目；不能确认适用性时不得声称已经验证。不要让几十 GB 的重新扫描成为无明确疑点的默认动作。
+【已有验证与补验裁量】长任务的执行记录与原始 output_id 是候选证据，而非默认有效的缓存。先判断产物身份/版本、执行环境、验证范围和验证后相关变更；足以覆盖本次断言时直接采纳，不因终审阶段而要求重跑。若材料中出现【旧契约验证宿主执行回执】，表示宿主确实在此前执行并取得了列出的退出码，而不是本轮已经重跑；工作区材料指纹相同并不能排除外部环境、依赖或运行条件变化。请独立判断旧结果是否仍覆盖当前交付：有具体疑点时，取证工具可用则可请求 verify 重新执行契约义务，否则在 blocking_issues 中指出需补验的项目；不能确认适用性时不得声称已经验证。不要让几十 GB 的重新扫描成为无明确疑点的默认动作。
 
 【验收对象与任务边界】先依据当前【任务目标】确定本次应交付什么，再判断该交付物是否合格。只读审查、排障诊断或报告任务的交付物是结论与证据：被审查项目存在缺陷可以是报告正确发现的内容，不自动构成报告自身的阻塞缺陷。此类任务可因结论错误、重要问题漏报、证据不足或风险被隐瞒而打回，但不得仅因已如实披露的问题尚未修复，就要求额外修改被审查项目后才能交报告。修复任务仍须核验实际修复，不能用一份报告代替应交付的代码。分流模式 code_review（包括失败回退默认）只规定审查方式，不改变用户授权的任务范围。
 
@@ -853,7 +857,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
                 // 仅显示受限工具名，不广播原始参数、源码、模型思考或工具返回。
                 let display_tool: String = tool_name.chars().take(60).collect();
                 progress.phase("tool", &format!("正在取证：{}（第 {}/{} 步）", display_tool, tool_steps_used + 1, forensic_budget));
-                // verify 工具在环内直接处理：需异步跑宿主执行器 + 访问契约冻结命令，
+                // verify 工具在环内直接处理：需异步跑宿主执行器 + 访问契约当前命令，
                 // review_tools::execute 保持同步纯函数
                 let observation = if tool_name == "read_step_output" {
                     read_review_step_output(db, session_id, &req, run_started_at)
@@ -881,7 +885,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
                         if target.is_empty() {
                             format!("未找到 id 为 {:?} 的可验证义务", want_id.unwrap_or(""))
                         } else {
-                            // 多人同时请求复验时，冻结命令串行执行，避免并发改动同一产物。
+                            // 多人同时请求复验时，当前命令串行执行，避免并发改动同一产物。
                             progress.phase("verifying", "正在等待或执行宿主验证命令（结果以实际回执为准）");
                             let _verification_guard = match verification_lock {
                                 Some(lock) => {
@@ -1029,7 +1033,7 @@ mod contract_handoff_tests {
         assert!(!verdict.is_passed());
         assert!(verdict.blocking_issues[0].issue.contains("integrity check failed"));
 
-        // 同一冻结义务随后确实重新执行并通过，以最后一次宿主回执为准。
+        // 同一契约义务随后确实重新执行并通过，以最后一次宿主回执为准。
         checked.passed = true;
         checked.exit_code = "0".into();
         rechecks.insert(checked.obligation_id.clone(), checked);
@@ -1219,6 +1223,7 @@ mod finish_review_regression_tests {
             let conn = mock.db.0.lock().unwrap();
             for (id,tool,outcome,body) in [
                 ("proof-fixture","local_shell","succeeded","AUTH_EVIDENCE: src/auth.rs:10 permission_check()"),
+                ("shell-proof-fixture","local_shell","succeeded","✅ [进程正常退出] (exit_code: 0)\n$ python - <<'PY'\np='/session/今日新闻汇总.xlsx'\n# 多行验证脚本\nPY\n--- STDOUT ---\nPASS\npath= /session/今日新闻汇总.xlsx\nnews_rows=4"),
                 ("old-final","finish","finish_challenged","OLD_REVIEW_MUST_PASS_FIRST"),
                 ("old-plan","wait_jobs","succeeded","OLD_PLAN_SCORE_81"),
                 ("history-proof","local_shell","succeeded","HISTORICAL_LICENSE_PROOF"),
@@ -1236,6 +1241,7 @@ mod finish_review_regression_tests {
             &crate::agent::finalization::contract_fingerprint(context.review_contract.as_ref()),
             context.resource_scope.revision,
         );
+        let fingerprint = with_execution_evidence_fingerprint(&fingerprint, Some(&collect_write_origin_evidence(&context)));
         let fingerprint = with_execution_evidence_fingerprint(&fingerprint,
             collect_execution_evidence_digest(&mock.db,&session_id, run_started_at).as_deref());
         let result = evaluate_finish_diff_once(
@@ -1480,6 +1486,8 @@ mod finish_review_regression_tests {
             input.find("REPORT_TAIL_MUST_REACH_REVIEWER").unwrap() < input.find("【辅助材料").unwrap()
         );
         assert!(input.contains("AUTH_EVIDENCE"));
+        assert!(input.contains("path= /session/今日新闻汇总.xlsx") && input.contains("news_rows=4"),
+            "正式终审请求应包含多行 shell 验证的对象与结果，而不仅是启动命令");
         assert!(!input.contains("OLD_REVIEW_MUST_PASS_FIRST") && !input.contains("OLD_PLAN_SCORE_81"));
         let observation = requests[1]["messages"].as_array().unwrap().last().unwrap()["content"]
             .as_str()

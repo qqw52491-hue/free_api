@@ -49,7 +49,7 @@ fn apply_state_updates(
                 ids
             )),
             Err(error) => context.add_host_feedback(&format!(
-                "【审查契约更新未采纳】{}\n本次契约更新未保存，原有契约状态保持不变；不表示同轮工具未执行。可仅提交需要补正的义务 id + status + 对应 evidence_refs/waived_reason；未提交项自动保留。已有项的 question、scope_statement 和冻结字段可省略，不能静默改写原问题或冻结验证标准。",
+                "【审查契约更新未采纳】{}\n本次更新未保存，原状态保持；不表示同轮工具未执行。可只提交需更新的 id、状态、证据或验证方法，未提交项保留。原问题不能静默改写；验证方法可显式修订，并由后续真实执行与终审判断是否足够。",
                 error
             )),
         }

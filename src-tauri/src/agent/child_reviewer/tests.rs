@@ -49,6 +49,19 @@
         }
     }
 
+    #[test]
+    fn receipt_preserves_when_a_finding_blocks() {
+        let mut finding = blocking_finding("F1");
+        assert!(finding.display_line().contains("当前阶段阻塞"));
+        for finality in ["final_only", "blocking_if_final"] {
+            finding.finality = finality.into();
+            let line = finding.display_line();
+            assert!(line.contains("交付前核销") && !line.contains("当前阶段阻塞"));
+        }
+        finding.severity = "question".into();
+        assert!(!finding.display_line().contains("核销"));
+    }
+
     fn verdict(id: &str, v: &str) -> ObjectionVerdict {
         ObjectionVerdict {
             finding_id: id.to_string(),

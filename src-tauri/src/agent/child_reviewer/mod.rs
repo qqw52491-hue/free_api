@@ -41,6 +41,8 @@ pub(crate) fn refresh_review_instructions(messages: &mut [Value]) {
             continue;
         }
         let Some(Value::String(text)) = message.get_mut("content") else { continue; };
+        // 恢复旧审查时同样更新方法说明，不改历史证据与裁决。
+        *text = text.replace("脚本已冻结不得要求修改", "验证方法可显式修订；核对当前方法与已有证据是否足够，不因缺少填表单独打回");
         if !text.contains("【核心强制】必须在顶级 JSON 中完整输出 scorecard") {
             continue;
         }
@@ -174,6 +176,9 @@ pub async fn spawn_child_reviewer(
     } else {
         ""
     };
+    let plan_stage_clause = if is_plan_review {
+        "\n【本次验收对象：执行前方案】审查方案的事实依据、实施可行性和验证设计。尚待生成的最终文件及写入后的测试结果不属于本次应已完成的产物；不能仅因它们尚不存在而否决可行方案。若方案声称已经生成或验证，则核实该声明。只需在交付前完成的检查标 final_only 并交接，不冒充当前阶段阻塞；仍可因事实依据错误、方案不可行或验证设计不足提出当前缺陷。\n"
+    } else { "" };
     let finalize_clause = if is_plan_review && !can_finalize {
         format!("\n10. 【多人方案审查】本批成员独立审查同一份提交方案。请给出 decision（approved|rebuttal|escalate）和具体 findings；不直接定稿或覆盖方案，不输出 revised_*，由父 Agent 汇总意见后修订重提。\n11.{}",
             finalize_clause.split_once("11.").map(|(_,tail)|tail).unwrap_or("请独立核对题面与根因。"))
@@ -199,7 +204,7 @@ pub async fn spawn_child_reviewer(
           \"missing_evidence\": [\"缺少的证据描述\"],\n\
           \"objection_verdicts\": [{{\"finding_id\":\"F1\",\"verdict\":\"maintain|withdraw\",\"reason\":\"裁决理由\"}}]\n\
         }}\n\
-        【审查方法（去锚定）】：先不细读父Agent提交的方案，独立列出「该任务必须满足的硬条件」与「预判的最大风险」；再带着这份清单对照方案审查。findings 的 why 字段须以 [预判内] 或 [预判外] 前缀标注来源。\n\
+        【审查方法建议】：可先独立识别用户要求与主要风险，再对照方案和实际证据；无需另填风险表或给 why 添加固定前缀。\n\
         【硬规则】：\n\
         0. {REVIEW_DECISION_POLICY}\n\
         1. findings 为 0–5 条结构化审查条目，无具体问题时为 []。blocking 须说明证据及对本次目标的具体影响；location 可为文件、命令、方案章节或证据标识，全局问题可留空，不编造定位。\n\
@@ -207,8 +212,8 @@ pub async fn spawn_child_reviewer(
         3. 若证据包中提供了此前审查的 blocking 异议及父Agent的处理说明，必须输出 objection_verdicts 逐条裁决：问题确已解决或经证伪不成立时 verdict 取 withdraw，理由必须引用证据包中父Agent处理说明或修订内容的具体点（空泛模板理由会被系统按 maintain 处理）；仍成立或有新证据支持时取 maintain。无历史异议时省略该字段；\n\
         3b. 【复审轮收敛】证据包含此前审查异议（即第 2 轮及以后）时，你的主要任务是核对历史异议是否已解决；新增 findings 只有“会导致执行失败、产物不可用、或违反用户明确的硬性约束（时长/格式/范围/安全）”才可标 blocking；审美、信息密度、风格取舒、“更好的做法”一律只能标 suggestion，不得再次打回；双方无法达成一致的分歧标 question 并写明，由父 Agent 决定是否向用户确认；\n\
         3c. 【样式类问题不阻塞】代码风格、样式、命名、排版、文案、视觉审美类问题可以提出，但任何轮次都只能标 suggestion，不得标 blocking；\n\
-        4. 【领域检查单】产出 findings 前逐项自查是否覆盖：边界条件与空值、并发与资源生命周期、错误传播与回滚、数据兼容与迁移、安全（注入/越权/密钥泄漏）、测试盲区、奥卡姆剃刀（是否存在明显更简单的充分实现，反对投机取巧的复杂化与过度设计）、高内聚低耦合（职责是否集中、是否引入跨模块缠绕的修改）；确认无法覆盖的维度写入 missing_evidence；\n\
-        5. 【验证命令核对】若义务绑定了 verify_command/冻结脚本：核对每条命令能否客观判定对应义务的完成（覆盖主干与关键边界），明显不足时写入 missing_evidence 并说明缺什么；脚本已冻结不得要求修改；\n\
+        4. 【检查方向建议】按任务风险考虑边界、并发与资源、错误处理、兼容、安全、测试和实现复杂度；不要求每次覆盖所有领域，不把不相关或未检查的维度自动转成 missing_evidence 或新增验收要求；\n\
+        5. 【验证命令核对】若清单提供 verify_command/脚本，核对当前方法与证据是否支持用户要求；方法可随路径、环境和实现变化修订。已有实际验证充分时直接引用，不因没有提前绑定命令、填表或清单未同步而打回；存在实质缺口时说明具体影响和需补证据；\n\
         6. 【需求危害性优先裁决】任务目标本身可能含有害设计（如要求移除事务/熔断/重试上限/资源边界/凭据脱敏等安全机制）。你必须同时评估两个维度：实现是否符合需求、需求本身是否危及安全/一致性/可靠性。冲突时严重度必须对齐安全方向而非符合性方向：实现了有害需求 → blocking（why 以 [需求有害] 前缀标注）；拒绝了有害需求 → 不得以「未按字面执行需求」为由标 blocking，最多标 question 并说明理由。当 fidelity 与 safety 冲突时必须在 why 中显式声明你采纳的立场，禁止在两条 finding 间立场摇摆；\n\
         7. 不要输出任何推理过程、Markdown 标记或额外字段。
 
@@ -219,7 +224,7 @@ pub async fn spawn_child_reviewer(
         } else {
             "不得调用任何工具：只评估证据包内的事实，证据不足时在 missing_evidence 说明。".to_string()
         }
-    ) + &evidence_scope_clause + &finalize_clause;
+    ) + &evidence_scope_clause + &finalize_clause + plan_stage_clause;
     let specialized_context = params
         .get("specialized_context")
         .and_then(|v| v.as_str())

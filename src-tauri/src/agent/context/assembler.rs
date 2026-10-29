@@ -863,19 +863,19 @@ mod tests {
     fn change_verification_card_only_tracks_real_writes_and_their_closure() {
         let mut ctx = SandwichContext::new("SYS".to_string(), "修改上下文".to_string());
         let plain = serde_json::to_string(&ctx.assemble_messages()).unwrap();
-        assert!(!plain.contains("【写入后验证】"));
+        assert!(!plain.contains("【写入后验证参考】"));
         ctx.record_side_effect(1, "edit_file".to_string(), "更新配置".to_string());
         let pending = serde_json::to_string(&ctx.assemble_messages()).unwrap();
-        assert!(pending.contains("【写入后验证】"));
-        assert!(pending.contains("尚无验证证据或明确豁免"));
+        assert!(pending.contains("【写入后验证参考】"));
+        assert!(pending.contains("未收到验证申报") && pending.contains("不代表未验证"));
         ctx.change_verification = Some(crate::agent::change_verification::ChangeVerification {
             status: "verified".to_string(),
             evidence_refs: vec!["output_id: check-42".to_string()],
             waived_reason: None,
         });
         let closed = serde_json::to_string(&ctx.assemble_messages()).unwrap();
-        assert!(closed.contains("最近写入：已验证：output_id: check-42"));
-        assert!(!closed.contains("尚无验证证据或明确豁免"));
+        assert!(closed.contains("已验证：output_id: check-42"));
+        assert!(!closed.contains("未收到验证申报"));
     }
 
     /// 三档状态卡体积对比：构造典型中段任务状态，量化 off/minimal/full 的

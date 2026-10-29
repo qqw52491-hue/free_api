@@ -403,7 +403,7 @@ pub struct SandwichContext {
     /// 对象时记录"再累积多少历史才允许重扫"，避免每步空扫。0 = 立即可触发。
     #[serde(default)]
     pub dehydration_rearm_tokens: usize,
-    /// P4 连续批发派发解析失败计数（达 2 次触发 3 步熔断降级）
+    /// 连续批量派发未成功计数（仅用于建议）
     #[serde(default)]
     pub consecutive_batch_dispatch_errors: usize,
     /// wait_jobs 同批连等计数：同一 job 集合连续等待时窗口自适应放大——
@@ -413,7 +413,7 @@ pub struct SandwichContext {
     pub wait_jobs_streak: u32,
     #[serde(default)]
     pub wait_jobs_last_key: String,
-    /// P4 批发派发熔断保护期剩余步数（>0 时阻止 dispatches 并注入降级单发指引）
+    /// 旧检查点的批量冷却值；恢复后清除，不再阻止派发
     #[serde(default)]
     pub batch_dispatch_circuit_breaker_remaining: usize,
     /// 当前最新一次工具执行的环境观测结果 (Observation)
@@ -543,22 +543,16 @@ impl SandwichContext {
         }
     }
 
-    /// P4 连续批发解析失败降级熔断逻辑：
-    /// 连续 2 次批发解析失败 → 触发 3 步熔断期（期间阻止 dispatches 并注入降级单发指引）
+    /// 连续批量派发未成功时建议缩小批次，不将历史失败当作新批次无效的依据。
     pub fn record_batch_dispatch_outcome(&mut self, success: bool) -> Option<String> {
+        self.batch_dispatch_circuit_breaker_remaining = 0;
         if success {
             self.consecutive_batch_dispatch_errors = 0;
-            None
-        } else {
-            self.consecutive_batch_dispatch_errors += 1;
-            if self.consecutive_batch_dispatch_errors >= 2 {
-                self.batch_dispatch_circuit_breaker_remaining = 3;
-                self.consecutive_batch_dispatch_errors = 0;
-                Some("⚠️ 批发格式近期已连续 2 次解析失败，触发熔断降级！后续 3 步内请使用单工具派发（params: {...}），之后再恢复批发。".to_string())
-            } else {
-                None
-            }
+            return None;
         }
+        self.consecutive_batch_dispatch_errors = self.consecutive_batch_dispatch_errors.saturating_add(1);
+        (self.consecutive_batch_dispatch_errors == 2).then(||
+            "【批量派发提示】最近两批均未成功启动任务。建议核对各项错误，必要时缩小批次或单独派发；修正后的批次仍可立即执行。".into())
     }
 
     /// 获取当前活跃的目标块
@@ -571,23 +565,14 @@ impl SandwichContext {
         self.block_manager.active_block_mut()
     }
 
-    /// 检查当前步骤是否允许调用批发派发（dispatches）
-    pub fn check_batch_dispatch_allowed(&mut self, has_dispatches: bool) -> Result<(), String> {
-        if has_dispatches && self.batch_dispatch_circuit_breaker_remaining > 0 {
-            let remaining = self.batch_dispatch_circuit_breaker_remaining;
-            self.batch_dispatch_circuit_breaker_remaining = remaining.saturating_sub(1);
-            Err(format!(
-                "⚠️ 批发格式近期连续解析失败触发熔断保护期（还剩 {} 步恢复）。本轮请直接使用单工具派发（params: {{...}}），不可使用 dispatches 批发。",
-                remaining
-            ))
-        } else {
-            Ok(())
-        }
+    /// 旧检查点可能带有批量冷却值；恢复时清除并提示，不拒绝当前批次。
+    pub fn batch_dispatch_notice(&mut self, has_dispatches: bool) -> Option<String> {
+        let previous = std::mem::take(&mut self.batch_dispatch_circuit_breaker_remaining);
+        (has_dispatches && previous > 0).then(||
+            "【批量派发提示】历史检查点带有批量冷却记录，已清除；本次仅按当前参数、权限与并发容量校验。".into())
     }
 
-    /// 重复读取硬拦截（四条件签名）：同工具+同路径+同窗口第 3 次读取且内容未变 → 拒绝。
-    /// 返回 Some(拒绝消息) 时宿主不得执行该读取；None = 放行并记账。
-    /// 合法重读自动放行：文件内容变了（改后验证）、首次/前两次读取。
+    /// 同工具、路径、窗口的重复读取观察；返回提示时读取仍正常执行。
     /// path 由调用方传入"路径|窗口"复合键——窗口不同即不同信息，不计复读。
     pub fn check_repeat_read(
         &mut self,
@@ -620,7 +605,7 @@ impl SandwichContext {
             return None;
         }
         entry.count = entry.count.saturating_add(1);
-        if entry.count >= 3 {
+        if entry.count == 3 {
             let sample = entry.sample.clone();
             let lines = entry.line_count;
             let times = entry.count;
@@ -631,12 +616,12 @@ impl SandwichContext {
                     "上次读取内容已持久化（output_id={}）：可用 task_store.search_step_output 按关键词定位片段，或 get_step_output 按 offset/limit 分页回查",
                     oid
                 ),
-                None => "内容仍在你此前的上下文里；要定位片段请用 grep/搜索工具按关键词提取".to_string(),
+                None => "未记录可回查的原始输出句柄；可按当前需要读取或搜索".to_string(),
             };
             // 正常累加计数（不再使用哨兵值：报出"已读取 2147483647 次"既荒谬又无信息量）。
-            // 内容变化时上方已重置指纹，因此 >=3 后持续拦截，直至文件真正被修改。
+            // 仅在首次达到阈值时提醒，后续不因相同内容持续追加提示。
             return Some(format!(
-                "【重复读取拦截】该文件同一读取区间你已连续读取 {} 次且内容未变化（哈希一致，共 {} 行）。上次读取的内容开头：\n{}\n{}；如需重读请先修改文件。严禁原样重读；其它行号区间的读取不受此限制。",
+                "【重复读取提示】该文件同一读取区间你已连续读取 {} 次，采集内容的指纹一致（采集到 {} 行，不保证未采集范围一致）。上次读取的内容开头：\n{}\n{}；如已有内容足够可复用；需要核对或补充上下文时仍可重读，无需先修改文件。",
                 times, lines, sample, handle_hint
             ));
         }
@@ -1093,9 +1078,8 @@ impl SandwichContext {
         .any(|needle| normalized.contains(needle))
     }
 
-    /// 若同一工具、动作和参数已经出现确定性失败，则拒绝再次派发。
-    /// 网络/限流等暂态失败不在此处阻断，仍由既有恢复策略处理。
-    pub fn repeated_failure_blocker(
+    /// 相同参数曾返回路径/参数类错误时提示历史事实；不能由此推断当前仍会失败。
+    pub fn repeated_failure_notice(
         &self,
         tool: &str,
         action: &str,
@@ -1118,7 +1102,7 @@ impl SandwichContext {
                     .map(|id| format!(" 详情见 output_id={}。", id))
                     .unwrap_or_default();
                 format!(
-                    "【重复确定性失败拦截】{} / {} 已以相同参数失败（Step {}）：{}。禁止再次派发同一命令；必须更换工具、动作或参数，必要时 ask_human。{}",
+                    "【历史同参失败提示】{} / {} 曾以相同参数失败（Step {}）：{}。建议核对当前条件；历史错误不证明路径、权限或服务状态仍未变化，本次调用继续按当前工具规则执行。{}",
                     tool, action, attempt.step_id, attempt.error_summary, output_ref
                 )
             })

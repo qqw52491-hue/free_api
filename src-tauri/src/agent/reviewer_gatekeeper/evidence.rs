@@ -382,7 +382,9 @@ fn collect_trace_digest(
     let mut lines = Vec::new();
     for (step_id, output_id, at, raw, tool, outcome) in items {
         let snippet = crate::agent::run_trace::resolve_raw_output(&raw)
-            .map(|text| step_trace_snippet(&text))
+            .map(|text| if matches!(tool.as_deref(), Some("local_shell" | "shell_exec")) {
+                shell_receipt_snippet(&text)
+            } else { step_trace_snippet(&text) })
             .unwrap_or_else(|| {
                 "正文暂不可读取，请按 output_id 核查存储；不能据此判断该操作未执行".into()
             });
@@ -473,6 +475,25 @@ pub(crate) fn search_review_step_output(
     value["source"] = crate::agent::run_trace::source_for_task(value["source"].take(), task_started_at);
     value["scope_notice"] = json!("仅检索该工具已保存的输出；上游命令过滤、tail 或输出截断未保留的日志不在搜索范围。");
     Ok(value.to_string())
+}
+
+/// shell 多行脚本的前两行通常只有启动命令；保留有界的命令开头与输出首尾。
+/// 这里只投影真实回执，不按 PASS 等正文关键词推断业务验证通过。
+fn shell_receipt_snippet(raw: &str) -> String {
+    let raw = raw.split("<!-- 结构化元数据:").next().unwrap_or(raw);
+    let (command, output) = raw.split_once("--- STDOUT ---")
+        .or_else(|| raw.split_once("--- STDERR ---"))
+        .unwrap_or((raw, ""));
+    let excerpt = |text: &str, limit: usize| {
+        let text = text.trim();
+        if text.chars().count() <= limit { return text.to_string(); }
+        let head: String = text.chars().take(limit / 2).collect();
+        let tail: String = text.chars().rev().take(limit / 2).collect::<Vec<_>>()
+            .into_iter().rev().collect();
+        format!("{head}\n[中间节选省略，原文按 output_id 读取]\n{tail}")
+    };
+    format!("[shell 原始回执节选；退出码不证明业务断言成立]\n{}\n[stdout/stderr 节选]\n{}",
+        excerpt(command, 600), excerpt(output, 700))
 }
 
 /// 单步输出的摘要提取：JSON 回执抓关键字段，shell 输出抓状态行+命令回显。
@@ -1000,6 +1021,29 @@ mod review_material_regressions {
         }), None).unwrap();
         let after = collect_execution_evidence_digest(&mock.db, "s", start).unwrap();
         assert_ne!(digest, after, "补充登记应改变终审可见材料，不能沿用旧证据索引");
+    }
+
+    #[tokio::test]
+    async fn multiline_shell_verification_keeps_object_and_result_in_review_index() {
+        // 此回归只核对本地持久化与投影，不需要启动 HTTP 假模型。
+        let root = std::env::temp_dir().join(format!("shell-proof-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = crate::db::DbState(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::db::init_db(&root.join("test.db")).unwrap(),
+        )));
+        let start = Utc::now() - chrono::Duration::seconds(1);
+        let raw = format!("✅ [进程正常退出] (exit_code: 0, 耗时: 145ms)\n$ python - <<'PY'\nfrom pathlib import Path\np=Path('/session/今日新闻汇总.xlsx')\n{}\nPY\n--- STDOUT ---\nPASS\npath= /session/今日新闻汇总.xlsx\nsheets= ['新闻汇总', '说明与核验']\nnews_rows=4\n<!-- 结构化元数据: PRIVATE_DUPLICATE -->", "assert True\n".repeat(80));
+        let id = put(&db, "s", 40, &Utc::now().to_rfc3339(), Some("local_shell"), "succeeded", &raw);
+        let digest = collect_execution_evidence_digest(&db, "s", start).unwrap();
+        assert!(digest.contains(&id) && digest.contains("exit_code: 0"));
+        assert!(digest.contains("path= /session/今日新闻汇总.xlsx") && digest.contains("news_rows=4"));
+        assert!(digest.contains("中间节选省略") && !digest.contains("PRIVATE_DUPLICATE"));
+        let full = read_review_step_output(&db, "s", &json!({"output_id":id,"limit":16000}), start).unwrap();
+        assert!(full.contains("PRIVATE_DUPLICATE"), "索引投影不改原始回执");
+        let failure = shell_receipt_snippet("❌ exit_code: 1\n$ python check.py\n--- STDERR ---\nFileNotFoundError: missing.xlsx");
+        assert!(failure.contains("exit_code: 1") && failure.contains("FileNotFoundError"));
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

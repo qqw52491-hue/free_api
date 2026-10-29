@@ -962,7 +962,7 @@ mod claim_correction_regressions {
             .content
             .as_str()
             .unwrap();
-        assert!(feedback.contains("更新未保存") && feedback.contains("原有契约状态保持不变"));
+        assert!(feedback.contains("本次更新未保存") && feedback.contains("原状态保持"));
         assert!(!feedback.contains("格式或执行错误"));
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -16,7 +16,7 @@ use tokio::sync::watch;
 /// 只渲染共享评估链的收据，不再自己执行另一套门禁。
 pub(crate) fn render_prepare_finish(
     checkpoint: &mut AgentCheckpoint,
-    context: &SandwichContext,
+    _context: &SandwichContext,
     receipt: &crate::agent::finalization::FinalizationReceipt,
 ) -> String {
     // 空转检测（与 finish 质询共用计数字段）：同一组阻塞连续预检未变化，只报告事实，不推断模型行为。
@@ -35,22 +35,6 @@ pub(crate) fn render_prepare_finish(
         }
         prepare_spin_hint(checkpoint.repeated_blocker_count)
     };
-    // 预检未就绪且契约里还有 open 义务：直接给出可照抄的闭合模板（按真实义务 id 生成）。
-    let contract_tpl = if receipt.is_ready() {
-        String::new()
-    } else {
-        context
-            .review_contract
-            .as_ref()
-            .and_then(|c| c.closure_template())
-            .map(|t| {
-                format!(
-                    "\n\n【怎么申报或补正审查义务】把下面这段 JSON 作为字段放进你下一条指令（与 tool/command 同级），只替换 <占位符>：\n{}\n说明：按 id 更新下面列出的义务即可，未提交项自动保留；已有项的 question、scope_statement 和冻结验证字段可省略。被打回的项允许补证或退回 open，申报保存不等于验收通过；evidence_refs 填真实证据（可定位的 `工作区相对路径:起止行`；或指向真实命令观测的 `step_N`）；确实不适用的改成 `\"status\":\"waived\"` 并写 `waived_reason`。跑 echo / git diff --stat 不会闭合任何义务。",
-                    t
-                )
-            })
-            .unwrap_or_default()
-    };
     let mut output_text = if receipt.is_ready() {
         format!(
             "✅ 终态预检就绪（receipt {}）：当前版本验收已就绪。\n现在用本次预检的同一份 summary 和 details 调用 finish；交付内容、scope、契约和验收状态未变时复用本收据，不再重复验证与终审。补充或修改正文后需要重新核验。",
@@ -58,7 +42,7 @@ pub(crate) fn render_prepare_finish(
         )
     } else {
         format!(
-            "⚠️ 终态预检未就绪（receipt {}）：\n{}\n请逐项闭合后重新 prepare_finish，或修复后直接调用 finish。{}{}",
+            "⚠️ 终态预检未就绪（receipt {}）：\n{}\n请逐项闭合后重新 prepare_finish，或修复后直接调用 finish。{}",
             receipt.receipt_id,
             receipt
                 .blockers
@@ -66,7 +50,6 @@ pub(crate) fn render_prepare_finish(
                 .map(|b| format!("- {}", b))
                 .collect::<Vec<_>>()
                 .join("\n"),
-            contract_tpl,
             spin_hint
         )
     };
@@ -103,7 +86,8 @@ fn prepare_spin_hint(repeated: u32) -> String {
         return String::new();
     }
     format!(
-        "\n\n【🚨 同一组阻塞已连续 {} 次预检未变化】上列验收条件仍未满足；重复预检本身不会改变验证结果。对照上方阻塞项选一条：\n① 审查义务缺证据 → 用 `review_contract_update` 把该义务标为 evidenced 并填 evidence_refs（可定位的 文件:行号 或真实步骤引用），或标 waived 并说明理由；\n② 变更验证缺失 → 用 `change_verification_update` 以 verified + evidence_refs 闭合；\n③ 确实无法闭合 → 调用 `ask_human` 向用户呈报阻塞清单。",
+        "\n\n【同一组阻塞已连续 {} 次预检未变化】建议核对上方具体失败、有效审查意见或权限边界。验证方法不适用时可用 review_contract_update 显式修订，并提供理由与已有证据；无需仅为同步状态重填契约或写后验证。意见无法解决时可用 ask_human 呈报分歧。",
+
         repeated
     )
 }

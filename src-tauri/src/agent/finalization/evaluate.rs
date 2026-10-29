@@ -1,6 +1,8 @@
 //! 预检与正式交付共用的唯一评估链。检查事实、执行验证、评审、生成收据；不提交终态。
 use super::*;
-use crate::agent::change_verification::{change_verification_blocker, ChangeVerification};
+use crate::agent::change_verification::ChangeVerification;
+#[cfg(test)]
+use crate::agent::change_verification::change_verification_blocker;
 use crate::agent::reviewer_gatekeeper::{GitBaseline, ReviewResult};
 use crate::agent::router::ModelRoutingConfig;
 use crate::agent::types::AgentInstruction;
@@ -52,7 +54,7 @@ pub(crate) fn acceptance_fingerprint(
 ) -> String {
     use sha2::{Digest, Sha256};
     let raw = json!({
-        "version": 3,
+        "version": 4,
         "current_goal": context.effective_goal(),
         "effects": context.side_effects,
         "inherited": context.inherited_side_effects_count,
@@ -74,7 +76,7 @@ pub(crate) fn acceptance_fingerprint(
     format!("{:x}", Sha256::digest(raw.to_string().as_bytes()))
 }
 
-/// 冻结验证结果的输入身份不包含交付说明、证据索引或 Reviewer 判决。
+/// 契约验证结果的输入身份不包含交付说明、证据索引或 Reviewer 判决。
 /// 这些变更只应影响审查；实际工具副作用、既有验证状态及范围变化仍需重新核对。
 fn verification_effects_fingerprint(context: &SandwichContext) -> String {
     use sha2::{Digest, Sha256};
@@ -86,7 +88,7 @@ fn verification_effects_fingerprint(context: &SandwichContext) -> String {
     format!("{:x}", Sha256::digest(raw.to_string().as_bytes()))
 }
 
-/// 仅接受此前由宿主真正执行且全部通过的同运行冻结命令。
+/// 仅接受此前由宿主真正执行且全部通过的同运行当前命令。
 /// 文件/契约/效果签名是必要的保守边界，不是验证适用性证明；
 /// 后续 Reviewer 仍需看到旧命令的真实出处并决定是否需要补验。
 fn reusable_frozen_verification<'a>(
@@ -125,7 +127,7 @@ pub(crate) fn interrupted_since(receiver: &watch::Receiver<u64>, generation: u64
 }
 
 /// 所有未闭合项使用同一份清单；动态检查每次重跑。
-/// 就绪交付收据与真实冻结验证执行事实分别复用，不让说明修正无故重跑命令。
+/// 就绪交付收据与真实契约验证执行事实分别复用，不让说明修正无故重跑命令。
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -217,7 +219,7 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
         .map(|c| c.obligations.clone())
         .unwrap_or_default();
     // 预检可能先因 TODO / 阶段 Blocking 打回；只要执行来源与输入身份仍有效，
-    // 也应携带此前真实冻结验证回执，不要让这个新收据抹去唯一的宿主执行事实。
+    // 也应携带此前真实契约验证回执，不要让这个新收据抹去唯一的宿主执行事实。
     let prior = if new_effects
         && !checkpoint.triage_verdict.as_ref().is_some_and(|v| {
             v.final_review_mode.eq_ignore_ascii_case("mechanical_only")
@@ -231,11 +233,11 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
     let mut frozen_verification_run = prior.clone();
     if blockers.is_empty() && !interrupted_since(interrupt_rx, generation) {
         // 仅有实际宿主旧回执才可能复用；无回执、命令失败、材料/契约/副作用变化，
-        // 或 mechanical_only 模式无法进行语义审查时，仍按原路径执行冻结验证。
+        // 或 mechanical_only 模式无法进行语义审查时，仍按原路径执行契约验证。
         let reused_frozen = prior.is_some();
         let results = if let Some(ref previous) = prior {
             host_evidence.push(format!(
-                "【旧冻结验证宿主执行回执】执行于 {}（step {}）；本轮未自动重跑。\n相同验收契约与交付材料只是复用候选，可能存在未被文件变更反映的环境/依赖变化；Reviewer 应核查适用性，必要时使用 verify 请求补验。",
+                "【旧契约验证宿主执行回执】执行于 {}（step {}）；本轮未自动重跑。\n相同验收契约与交付材料只是复用候选，可能存在未被文件变更反映的环境/依赖变化；Reviewer 应核查适用性，必要时使用 verify 请求补验。",
                 previous.executed_at, previous.executed_step_id
             ));
             previous.results.clone()
@@ -256,7 +258,7 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
                 r.obligation_id, r.command, r.working_dir.display(), r.exit_code, r.output_tail
             )
         }));
-        // 冻结验证套件已实测通过，就保存宿主回执；不再要求模型另外抄一遍步骤号。
+        // 契约验证套件已实测通过，就保存宿主回执；不再要求模型另外抄一遍步骤号。
         if !reused_frozen && save_successful_obligation_receipt(context, step_id, &results) {
             // 捕获真实执行事实；material_fingerprint 在全部宿主验证结束后落定，
             // 避免命令本身产生构建产物导致误判为工作区发生了新的人工修改。
@@ -281,73 +283,18 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
                 .map_or(true, |v| !v.is_resolved())
             && !interrupted_since(interrupt_rx, generation)
         {
-            if let Some(command) =
-                crate::agent::change_verification::infer_adaptive_verification_command_in(
-                    workspace,
-                    &context.new_affected_paths(),
-                )
-            {
-                let timeout = crate::agent::channel::channel_config_shared()
-                    .read()
-                    .ok()
-                    .and_then(|c| c.verify_timeout_secs)
-                    .unwrap_or(120)
-                    .clamp(10, 600);
-                let outcome =
-                    crate::agent::host_verify::run_command(workspace, &command, timeout).await;
-                let report = format!(
-                    "验证命令: `{}`\n退出码: {}\n{}",
-                    command, outcome.exit_code, outcome.output_tail
-                );
-                host_evidence.push(report.clone());
-                if outcome.passed {
-                    context.change_verification = Some(ChangeVerification {
-                        status: "verified".into(),
-                        evidence_refs: vec![format!(
-                            "host_verify:step_{} (`{}` → exit 0)",
-                            step_id, command
-                        )],
-                        waived_reason: None,
-                    });
-                } else if outcome.tool_unavailable() {
-                    // 保留原有 NotApplicable 策略，但必须移交终审并向用户披露，不伪称测试通过。
-                    context.change_verification = Some(ChangeVerification {
-                        status: "waived".into(),
-                        evidence_refs: vec![],
-                        waived_reason: Some(format!(
-                            "验证工具无法运行，未取得测试通过结论：{}",
-                            report
-                        )),
-                    });
-                    notices.push(format!("验证工具不适用，需终审核对替代证据：{}", report));
-                } else {
-                    blockers.push(format!("宿主验证已执行但未通过；本次未提交交付。\n{}\n请按原始诊断修复后重试；检查确实不适用时可申报 waived + waived_reason，终审核对理由。", report));
-                }
-            } else {
-                let reason = if context.is_only_ui_or_doc_side_effects() {
-                    "仅静态资源/文档改动，未执行自动化测试；终审核对交付内容"
-                } else {
-                    "未推导出可执行的自动验证命令，未取得测试通过结论；终审核对已有证据或豁免理由"
-                };
-                context.change_verification = Some(ChangeVerification {
-                    status: "waived".into(),
-                    evidence_refs: vec![],
-                    waived_reason: Some(reason.into()),
-                });
-                notices.push(reason.into());
-            }
+            // 不再因缺少手填验证状态而自动猜命令重跑；建议与缺口交给终审。
+            let suggestion = crate::agent::change_verification::infer_adaptive_verification_command_in(
+                workspace, &context.new_affected_paths(),
+            ).map(|command| format!("可考虑的检查命令（未执行）：`{command}`。"))
+                .unwrap_or_default();
+            let reason = "本轮未自动追加验证；这不代表测试通过。已有检查及未核验范围交终审核对。".to_string();
+            context.change_verification = Some(ChangeVerification {
+                status: "waived".into(), evidence_refs: vec![], waived_reason: Some(reason.clone()),
+            });
+            notices.push(format!("{reason}{suggestion}"));
         }
-        if blockers.is_empty() {
-            if let Some(b) = change_verification_blocker(
-                context
-                    .side_effects
-                    .len()
-                    .saturating_sub(context.inherited_side_effects_count),
-                context.change_verification.as_ref(),
-            ) {
-                blockers.push(b);
-            }
-        }
+
         verification =
             verification_receipt(new_effects, context.change_verification.as_ref(), &blockers);
         if blockers.is_empty() && !interrupted_since(interrupt_rx, generation) {
@@ -569,7 +516,7 @@ fn save_successful_obligation_receipt(
     context.change_verification = Some(ChangeVerification {
         status: "verified".into(),
         evidence_refs: vec![format!(
-            "host_verify:step_{}：{} 项冻结义务命令全部退出 0",
+            "host_verify:step_{}：{} 项契约义务命令全部退出 0",
             step_id,
             results.len()
         )],
@@ -653,7 +600,7 @@ async fn collect_checks(
         .as_ref()
         .map(|v| v.investigation_questions.as_slice())
         .unwrap_or(&[]);
-    let mut open_todos = crate::agent::finish_guard::completion_claim_blockers_with_diff(
+    let workflow_observations = crate::agent::finish_guard::completion_claim_blockers_with_diff(
         &context.todo_list,
         context.review_contract.as_ref(),
         review_contract_started_this_turn,
@@ -662,6 +609,8 @@ async fn collect_checks(
         Some(workspace),
         diagnostic_questions,
     );
+    // 待办状态、契约申报与引用外观不是完成度判决；保留原观察供终审核实。
+    let mut open_todos = Vec::new();
     let evidence_blockers = context
         .review_contract
         .as_ref()
@@ -720,6 +669,10 @@ async fn collect_checks(
             .collect()
         })
         .unwrap_or_default();
+    gate_notices.extend(workflow_observations.into_iter().map(|observation| format!(
+        "执行跟踪参考（不单独阻断交付）：{}。请结合原始回执判断实际完成情况，不因未填状态或引用未匹配 diff 要求重复填报。",
+        observation
+    )));
     if !gate_notices.is_empty() {
         crate::agent::telemetry::record_gate_fire(
             db,
@@ -880,7 +833,7 @@ fn collect_scope_and_targets(
     touched.dedup();
     let total = touched.len();
     touched.truncate(12);
-    blockers.push(format!("方案声明目标与实际改动/产物零交集，本次未提交交付。\n声明目标：{}\n已观测改动/产物（共 {} 项，最多显示 12 项）：{}\n{}\n尚未实现请继续实现；实现路径改变请用 submit_plan + revision_reason 说明并重审；确实无需改动时请 ask_human 说明。",
+    notices.push(format!("方案目标观察（移交终审，不单独阻断）：声明目标与实际改动/产物零交集。\n声明目标：{}\n已观测改动/产物（共 {} 项，最多显示 12 项）：{}\n{}\n请核对是否改用了其他真实路径或任务转为只读；方案目标是先验，路径未命中本身不证明未完成。终审结合用户要求与真实产物判断，不能仅为匹配早期文件名要求制造副本。",
         targets.join(", "), total, touched.join(", "),
         if near.is_empty() { String::new() } else { format!("同名但目录层级不同：{}", near.join("；")) }));
 }

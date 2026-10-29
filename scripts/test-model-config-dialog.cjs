@@ -172,6 +172,21 @@ async function main() {
   assert.equal(calls.at(-1).args.config.platforms[0].api_key, 'secret-test-key');
   await click('取消全选');
   assert(button('复制 JSON').props.disabled && button('保存 JSON 文件').props.disabled);
+  // 取消全选后，单个模型复选框必须保持可点，且单独勾选某个模型应自动激活该平台导出
+  boxes = checkboxes();
+  assert(!boxes[2].props.disabled, 'model checkbox must not be disabled when platform is unselected');
+  boxes[2].props['onUpdate:modelValue'](true);
+  await settle();
+  assert(!button('复制 JSON').props.disabled, 'selecting an individual model enables export');
+  await click('复制 JSON');
+  const singleExport = JSON.parse(copied.at(-1));
+  assert.equal(singleExport.platforms.length, 1);
+  assert.equal(singleExport.platforms[0].models.length, 1);
+  assert.equal(singleExport.platforms[0].models[0].name, 'model-a');
+  boxes = checkboxes();
+  boxes[2].props['onUpdate:modelValue'](false);
+  await settle();
+  assert(button('复制 JSON').props.disabled, 'unchecking the single model disables export again');
   await click('全选');
   assert(!button('复制 JSON').props.disabled);
   await click('关闭'); await click('导出配置'); await click('复制 JSON');

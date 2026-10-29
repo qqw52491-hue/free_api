@@ -659,9 +659,11 @@
         assert_eq!(files, vec!["src/agent/checkpoint.rs"]);
         assert_eq!(refs, vec!["src/agent/checkpoint.rs:922"]);
 
-        // 摘要过短
+        // 摘要长度不作为质量判据；仅拒绝空白
         let mut s = valid_submission();
         s.plan_summary = "修 bug".to_string();
+        assert!(validate_plan_submission(&s, true).is_ok());
+        s.plan_summary = "  ".into();
         assert!(validate_plan_submission(&s, true).unwrap_err().contains("plan_summary"));
 
         // 目标文件可空（纯分析/只读交付），但上限仍生效

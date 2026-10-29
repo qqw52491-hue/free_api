@@ -72,7 +72,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "capability_search",
-        summary: "统一能力检索：在全部内置工具、MCP 工具、Skill、自定义指令与角色卡中按关键词找候选——当目录被截断或你不确定确切工具/Skill 名时先搜这里，拿到 id 后用 next_tool_hint 加载完整手册或 Schema",
+        summary: "统一能力检索：按关键词找工具/Skill 候选；query 精确填写 MCP 完整 ID（插件名/工具名）时，回执直接包含该工具的完整 input_schema。宽泛搜索返回 load_request，照其调用取得参数；next_tool_hint 是可选的指令顶层预加载字段，不放进 command。",
         actions: &[
             "search(query: string, kind?: builtin|mcp|skill|instruction|role, namespace?: string [插件名/目录名], limit?: <=15)",
         ],
@@ -117,7 +117,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "child_worker",
-        summary: "L2 只读侦察 worker：独立上下文中自行读文件/列目录/执行只读命令完成侦察，回交结构化结论；支持单发或 dispatches 批量派发；结果经 wait_jobs 或信箱自动回收。何时用：探索面横跨多模块、或预计需多步串行检索才能定位时，优先 dispatches 一步批量扇出多个侦察兵分头排查，比主循环逐步搜索更省步数；侦察兵默认跑在 Flash 档（更快更省），摸底、读多个文件、全仓检索、搜集证据这类体力活优先派给它们，你专注推理与出方案",
+        summary: "L2 只读侦察 worker：独立上下文中自行读文件/列目录/执行只读命令完成侦察，回交结构化结论；异步返回 job_id，结果经 wait_jobs 或信箱回收。批量派发直接用 {\"tool\":\"child_worker\",\"dispatches\":[{\"task\":\"调查模块A的调用方\",\"focus_paths\":[\"src/a\"]},{\"task\":\"调查模块B的输入来源\",\"focus_paths\":[\"src/b\"]}]}，替换为实际自包含任务；不要放进同步 parallel 执行树。何时用：互不依赖的多路径调查适合一步批量派发；侦察兵默认使用 Flash 档，主 Agent 负责核对证据与决策",
         actions: &[
             "dispatch(task: string [自包含侦察任务], focus_paths?: string[] <=3 [工作区内路径], role?: string, context_excerpts?: {background?: string, todo_slice?: string[], file_hints?: string[], prior_findings?: string[]}, custom_inputs?: object [专项业务参数；保留键 verified_facts/hard_constraints/definition_of_done 升格一级小节], dispatches?: Array<{task, focus_paths?, role?, ...}> [一步批量派发多个 worker])",
         ],

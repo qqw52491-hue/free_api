@@ -1,4 +1,4 @@
-use crate::agent::change_verification::{change_verification_blocker, ChangeVerification};
+use crate::agent::change_verification::ChangeVerification;
 use crate::agent::context::types::{EvidenceReceiptEntry, FailedAttempt, PlanGateProjection};
 use std::collections::BTreeMap;
 use crate::agent::review_contract::ReviewContract;
@@ -8,11 +8,11 @@ use crate::agent::types::TodoItem;
 /// 写入后验证的完整规则文案（静态）：首次有待闭合写入时作为一次性
 /// 历史事件注入（见 SandwichContext::ensure_rule_events）；此后尾部
 /// 只投影一行待闭合状态，不再每轮重发这段规则。
-pub(crate) const VERIFICATION_RULES_TEXT: &str = "- 写入后验证规则（纯只读且无挂账副作用时不适用，无需申报豁免）：\n  * 可引用已完成的 step_N，或 output_id:<完整句柄>（宿主回查本会话、本运行的已完成记录）；证据步骤须严格晚于最近一次副作用，同一步不满足要求。自由文本摘要不能单独证明时序；引用列表去重后总量最多 16,384 字符，不设固定条数或单条短限。已有有效记录不必仅为转换格式重跑验证。\n  * 若只读查询被记录为可能副作用，核实实际命令后可用 waived 说明未发生变更的具体理由，不要运行无关验证来凑闭合；\n  * 🚀 主动验证授权：代码写入完成后，无需向用户申请许可，请主动调用终端工具运行自测或编译命令；若测试报错，直接依据错误输出就地修复；\n  * 若运行了验证命令（如 cargo test / npm test / pytest 等）且成功通过，系统将自动标记为 verified，无须手动声明；\n  * 非编码任务（运维/系统/文件外产物）的验证手段自选：which/test -e/pacman -Q/systemctl status/curl -f 等状态探针成功即可——但探针命令必须引用本次改动的具体对象（路径/名称），无关探针不自动认账；\n  * 存在性探针返回非零（找不到/不存在）若正是目标状态（卸载/删除/禁用类），请用手动声明 verified + evidence_refs=[\"step_N\"] 举证；\n  * 若工程中无可用测试套件，或改动全为纯静态资源（样式/图片/文档等），系统在提交 finish 时将自动豁免 (waived)；\n- 若需在调用 finish 交付时手动声明闭合（在顶层 JSON 中二选一填空，严禁拼入 summary 正文中）：\n  1. 已验证：\"change_verification_update\": {\"status\": \"verified\", \"evidence_refs\": [\"step_N\"]}\n  2. 免测豁免：\"change_verification_update\": {\"status\": \"waived\", \"waived_reason\": \"说明免测理由，如查询实际未变更对象/无自动化单测环境\"}";
+pub(crate) const VERIFICATION_RULES_TEXT: &str = "- 写后验证建议：按任务风险选择测试或实际观测；主动验证授权已具备，无需向用户申请许可。已有有效回执可直接供终审使用，无需重复填报或重跑。\n- change_verification_update 为可选申报；如使用 verified，引用真实已完成的 step_N / output_id，宿主核对本会话、本运行及晚于最近副作用的时序。系统识别到成功验证时会自动标记为 verified；状态仍不代替证据充分性判断。\n- 缺少申报不单独阻断交付，也不自动猜命令重跑；真实验证失败仍需处理，未测范围如实披露并交终审判断。";
 
 /// 审查契约的闭合规则文案（静态）：契约存在时作为一次性历史事件注入；
 /// 尾部契约卡此后只渲染范围+义务清单动态值。
-pub(crate) const CONTRACT_RULES_TEXT: &str = "终态前：每项需有 evidenced + evidence_refs 或 waived + waived_reason 申报；申报不等于验收通过。review_contract_update 按义务 id 合并，可只提交需补正的项，其余保留；已有项的 question、scope_statement 和冻结字段可省略。允许补证、修改豁免理由或退回 open，但原问题和冻结验证标准仍受保护；最终验收检查完整契约及当前改动。evidence_refs 形态随证据域走：代码任务用可定位的 `工作区相对路径:行号`（与本次改动的关系由终审核验），非代码任务（运维/系统/外部产物）可用 `step_N`、命令+输出摘要等可核验观测（机械行号门将不适用跳过，终审按语义证据核验）；若义务本质是\"命令可通过\"，可给该项挂 `verify_command` 由宿主亲自执行判分（构造 exit 0=义务成立），无需行号证据。";
+pub(crate) const CONTRACT_RULES_TEXT: &str = "review_contract_update 按义务 id 合并（局部更新），未提交项保留；不用重复抄写原问题、范围或验证方法。无执行命令的项可引用现有 output_id/源码位置申报 evidenced，或以 waived + 理由说明不适用，交终审核验。绑定 verify_command 的项由宿主直接执行，不必先手工申报通过或复制同一验证结果。验证命令/脚本允许按实际产物和环境显式修订；请在本轮说明原因，修订不是通过证明，旧执行结果不能冒充新方法结果。申报不等于验收通过；open 不单独阻断交付，交终审结合实际回执判断。普通建议不自动成为额外义务，原用户验收要求及真实阻塞继续核验。";
 
 pub struct ContextRenderer;
 
@@ -145,38 +145,18 @@ impl ContextRenderer {
         if side_effect_count == 0 {
             return String::new();
         }
-        if let Some(blocker) = change_verification_blocker(side_effect_count, verification) {
-            if rules_emitted {
-                // 完整闭合规则已事件化进历史（可缓存前缀），尾部只留一行
-                // 动态待闭合状态 + 推荐验证命令（命令本身是动态探测结果）。
-                let cmd_hint = suggested_cmd
-                    .map(|cmd| format!("；推荐验证命令: `{}`", cmd))
-                    .unwrap_or_default();
-                return format!(
-                    "【写入后验证】⚠️ 待闭合：{}（闭合方式见历史规则卡{}）\n\n",
-                    blocker, cmd_hint
-                );
-            }
-            let cmd_hint = suggested_cmd
-                .map(|cmd| {
-                    format!(
-                        "\n  * 💡 系统自适应探测到当前工程推荐验证命令: `{}`，执行成功后系统将自动标记为 verified，无须手动声明；",
-                        cmd
-                    )
-                })
-                .unwrap_or_default();
-            return format!(
-                "【写入后验证】\n- {}\n{}{}\n\n",
-                blocker, VERIFICATION_RULES_TEXT, cmd_hint
-            );
-        }
+        let state = verification.map(ChangeVerification::summary)
+            .unwrap_or_else(|| "未收到验证申报；终审核对已有执行回执，不代表未验证".into());
+        let cmd_hint = suggested_cmd.map(|cmd| format!(
+            "\n建议检查（按需执行，未自动运行）：`{cmd}`"
+        )).unwrap_or_default();
         format!(
-            "【写入后验证】\n- 最近写入：{}\n终态前：后续若无新增代码写入，调用 finish 将直接放行；若发生新的真实写入，将重新激活闭合要求。\n\n",
-            verification
-                .map(ChangeVerification::summary)
-                .unwrap_or_default()
+            "【写入后验证参考】\n{}{}\n{}\n\n",
+            state, cmd_hint,
+            if rules_emitted { "无需为同步状态重复填报；交付仍由适用审查决定。" } else { VERIFICATION_RULES_TEXT }
         )
     }
+
     /// 方案门禁状态卡：让模型在「决策前」看到当前模式与放行条件，
     /// 避免靠写入被拒（一整轮 LLM 往返的代价）来反推门禁规则。
     /// 指引文案必须与 loop_runner 的 check_pre_write_gatekeeper 拦截语义一一对应。
@@ -679,6 +659,7 @@ mod tests {
         };
         let out = ContextRenderer::render_change_verification(1, Some(&verified), None, false);
         assert!(out.contains("已验证：cargo test all pass"));
-        assert!(out.contains("直接放行"));
+        assert!(out.contains("终审"));
+        assert!(!out.contains("直接放行"));
     }
 }

@@ -5,21 +5,21 @@
     }
 
     #[test]
-    fn repeat_read_allows_first_two_blocks_third_and_resets_on_change() {
+    fn repeat_read_allows_first_two_advises_on_third_and_resets_on_change() {
         let mut context = ctx();
         let content = "line1\nline2\nline3";
         assert!(context.check_repeat_read("read_text_file", "/ws/a.rs", content).is_none(), "第 1 次放行");
         assert!(context.check_repeat_read("read_text_file", "/ws/a.rs", content).is_none(), "第 2 次放行");
         let blocked = context.check_repeat_read("read_text_file", "/ws/a.rs", content);
-        assert!(blocked.is_some(), "第 3 次同内容必须拦截");
-        assert!(blocked.unwrap().contains("已连续读取"), "拦截消息要给抓手");
+        assert!(blocked.is_some(), "第 3 次同内容给出提示");
+        assert!(blocked.unwrap().contains("已连续读取"), "提示消息要给抓手");
 
         // 内容变化（改后重读）→ 放行并重置
         assert!(context.check_repeat_read("read_text_file", "/ws/a.rs", "changed").is_none());
 
-        // 重置后计数从 1 起：再连续两次放行，第 3 次同内容又拦（count ≥ 3）
+        // 重置后计数从 1 起：再连续两次放行，第 3 次同内容再提示
         assert!(context.check_repeat_read("read_text_file", "/ws/a.rs", "changed").is_none(), "重置后第 2 次放行");
-        assert!(context.check_repeat_read("read_text_file", "/ws/a.rs", "changed").is_some(), "第 3 次同内容再拦");
+        assert!(context.check_repeat_read("read_text_file", "/ws/a.rs", "changed").is_some(), "第 3 次同内容再提示");
     }
 
     #[test]
@@ -57,18 +57,18 @@
         assert!(context.check_repeat_read_dispatch(&read_window(151, 300), &ws).is_none(), "窗口2 首读放行");
         assert!(context.check_repeat_read_dispatch(&read_window(301, 400), &ws).is_none(), "窗口3 首读放行");
 
-        // 同一窗口同内容复读：第 3 次仍拦（保护原语义不退化）
+        // 同一窗口同内容复读：第 3 次仅提示（保护原语义不退化）
         assert!(context.check_repeat_read_dispatch(&read_window(1, 150), &ws).is_none(), "窗口1 第 2 次放行");
         assert!(
             context.check_repeat_read_dispatch(&read_window(1, 150), &ws).is_some(),
-            "窗口1 第 3 次同内容必须拦截"
+            "窗口1 第 3 次同内容给出提示"
         );
 
         let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]
-    fn local_file_native_reads_are_deduped_like_mcp_reads() {
+    fn local_file_native_reads_are_observed_like_other_reads() {
         let mut context = ctx();
         let ws = std::env::temp_dir().join(format!("eval-repeat-read-{}", std::process::id()));
         std::fs::create_dir_all(&ws).unwrap();
@@ -87,7 +87,7 @@
         assert!(context.check_repeat_read_dispatch(&read_inst("read"), &ws).is_none(), "第 1 次放行");
         assert!(context.check_repeat_read_dispatch(&read_inst("read"), &ws).is_none(), "第 2 次放行");
         let blocked = context.check_repeat_read_dispatch(&read_inst("read"), &ws);
-        assert!(blocked.is_some(), "第 3 次同内容必须拦截（原生工具此前完全不拦）");
+        assert!(blocked.is_some(), "第 3 次同内容给出提示（原生工具与其他读取使用同一观察口径）");
 
         // write/edit 不按重复读取判据处理（写操作归写前门禁管辖）
         assert!(context.check_repeat_read_dispatch(&read_inst("write"), &ws).is_none());
@@ -112,27 +112,19 @@
     }
 
     #[test]
-    fn test_batch_dispatch_circuit_breaker_trips_and_recovers() {
+    fn batch_failures_only_advise_and_legacy_cooldown_is_cleared() {
         let mut context = ctx();
-        // 1. 首次失败：不触发熔断
         assert!(context.record_batch_dispatch_outcome(false).is_none());
-        assert!(context.check_batch_dispatch_allowed(true).is_ok());
-
-        // 2. 连续第 2 次失败：触发 3 步熔断
-        let alert = context.record_batch_dispatch_outcome(false);
-        assert!(alert.is_some());
-        assert!(alert.unwrap().contains("触发熔断降级"));
-
-        // 3. 熔断期间：阻止批发派发，连续 3 步倒数
-        let err1 = context.check_batch_dispatch_allowed(true).unwrap_err();
-        assert!(err1.contains("还剩 3 步"));
-        let err2 = context.check_batch_dispatch_allowed(true).unwrap_err();
-        assert!(err2.contains("还剩 2 步"));
-        let err3 = context.check_batch_dispatch_allowed(true).unwrap_err();
-        assert!(err3.contains("还剩 1 步"));
-
-        // 4. 熔断保护期结束：恢复允许批发
-        assert!(context.check_batch_dispatch_allowed(true).is_ok());
+        let notice = context.record_batch_dispatch_outcome(false).unwrap();
+        assert!(notice.contains("两批均未成功启动"));
+        assert!(context.batch_dispatch_notice(true).is_none());
+        context.batch_dispatch_circuit_breaker_remaining = 3;
+        let restored: super::SandwichContext = serde_json::from_value(serde_json::to_value(&context).unwrap()).unwrap();
+        let mut context = restored;
+        assert!(context.batch_dispatch_notice(true).unwrap().contains("已清除"));
+        assert_eq!(context.batch_dispatch_circuit_breaker_remaining, 0);
+        assert!(context.batch_dispatch_notice(true).is_none());
+        assert!(context.record_batch_dispatch_outcome(true).is_none());
     }
 
     // ═══ 取证台账（展示投影）═══
@@ -189,7 +181,7 @@
             &inst("local_file", "read", serde_json::json!({"path": "a.rs"})),
             "out-1",
         );
-        // 压缩时只清拦截台账；展示台账保留——脱水后模型更需要这张索引
+        // 压缩时只清读取观察台账；展示台账保留——脱水后模型更需要这张索引
         context.reset_read_ledger();
         assert!(context.read_ledger.is_empty());
         assert_eq!(context.evidence_ledger.len(), 1, "取证台账跨压缩保留");

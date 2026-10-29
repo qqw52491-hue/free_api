@@ -113,7 +113,7 @@ mod tests_inner {
                 waived_reason: None,
             }],
         };
-        assert!(should_challenge_finish_with_blockers(
+        assert!(!should_challenge_finish_with_blockers(
             true,
             true,
             false,

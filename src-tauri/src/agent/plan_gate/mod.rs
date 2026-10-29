@@ -112,9 +112,9 @@ pub(crate) fn validate_plan_submission(
     submission: &crate::agent::types::PlanSubmission,
     evidence_required: bool,
 ) -> Result<(Vec<String>, Vec<String>), String> {
-    if submission.plan_summary.trim().chars().count() < 10 {
+    if submission.plan_summary.trim().is_empty() {
         return Err(
-            "【⚠️ submit_plan 结构不合法】plan_summary 不能为空且至少 10 个字符：请概述根因、改动方式与实施步骤。"
+            "【⚠️ submit_plan 结构不合法】plan_summary 不能为空；请写明本次拟执行的方案。"
                 .to_string(),
         );
     }
@@ -420,12 +420,8 @@ fn gate_interception(
             } else {
                 let budget_exhausted = checkpoint.plan_reviewer_retry_count
                     >= crate::agent::checkpoint::max_plan_reviewer_rounds();
-                let unwithdrawn_blockings = checkpoint.aggregate_unwithdrawn_blockings();
-                let blocking_count = if unwithdrawn_blockings.is_empty() {
-                    checkpoint.last_review_blocking_count
-                } else {
-                    unwithdrawn_blockings.len() as u32
-                };
+                let unwithdrawn_blockings = checkpoint.plan_stage_blockings();
+                let blocking_count = checkpoint.plan_stage_blocking_count();
 
                 if blocking_count > 0 {
                     // 🌟 层次 3 核心：门禁以 blocking 阻塞缺陷为首要依据，存在未闭合 blocking 则必须解决（附带详细清单与归属）

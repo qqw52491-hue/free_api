@@ -90,7 +90,7 @@ pub struct ChannelConfig {
     /// 用于生成扫码直达的二维码
     #[serde(default)]
     pub console_base_url: Option<String>,
-    /// 单个任务允许向用户发起信息类提问的最大配额（防琐碎问题没完没了；None = 默认 5）
+    /// 信息类提问次数的建议提醒阈值（None = 默认 5；不限制提问）
     #[serde(default)]
     pub max_human_inquiry_budget: Option<u32>,
     /// 内网穿透托管开关：启动后自动确保 cloudflared 把 tunnel_hostname
@@ -222,7 +222,7 @@ pub(crate) fn effective_scratch_dir(config: &ChannelConfig) -> PathBuf {
         })
 }
 
-/// 获取全局配置中的信息类提问配额（默认 5 次）
+/// 获取信息类提问建议阈值（默认 5；字段名保留配置兼容）
 pub fn max_human_inquiry_budget() -> usize {
     crate::agent::channel::channel_config_shared()
         .read()

@@ -75,16 +75,13 @@ pub(crate) fn should_challenge_finish(
 pub(crate) fn completion_claim_blockers_with_diff(
     todos: &[TodoItem],
     review_contract: Option<&ReviewContract>,
-    review_contract_started_this_turn: bool,
+    _review_contract_started_this_turn: bool,
     side_effect_count: usize,
     diff_context: Option<&DiffContext>,
     workspace_root: Option<&std::path::Path>,
     diagnostic_questions: &[String],
 ) -> Vec<String> {
     let mut blockers = open_todo_descriptions(todos);
-    if review_contract_started_this_turn {
-        blockers.push("审查契约刚在本轮建立，尚未执行任何契约义务".to_string());
-    }
     if let Some(contract) = review_contract {
         blockers.extend(contract.open_descriptions());
         if side_effect_count > 0 {

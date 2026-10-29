@@ -30,36 +30,31 @@ pub struct ReviewObligation {
     pub evidence_refs: Vec<String>,
     #[serde(default)]
     pub waived_reason: Option<String>,
-    /// 义务绑定的可执行验证命令（契约播种：模型起草、方案审查批准后冻结）。
+    /// 当前义务使用的可执行验证命令；路径、环境或实现变化时允许显式修订。
     /// 退出码 0 = 该义务客观成立；非 0 = 收尾门禁 blocker。None = 纯主观义务。
     #[serde(default)]
     pub verify_command: Option<String>,
-    /// 批准时刻的验证脚本内容快照（冻结副本）。执行时宿主写临时文件运行此副本，
-    /// 工作区内同名脚本被模型改动不影响判定——防"模型改自己的考卷"。
+    /// 当前申报的验证脚本内容。执行此快照以明确实际运行版本，允许后续显式修订。
     #[serde(default)]
     pub verify_script: Option<String>,
-    /// 冻结脚本内容的 SHA-256（执行前核验副本完整性）。
+    /// 当前脚本内容的 SHA-256（执行前核验副本完整性）。
     #[serde(default)]
     pub verify_sha256: Option<String>,
-    /// 义务的闭合通道声明（创建时必填）：
-    /// - "command"：verify_command/verify_script 由宿主执行判分（客观义务首选）；
-    /// - "evidence"：以 evidence_refs 证据闭合，终审语义核销（诊断/审查类）；
-    /// - "human"：agent 沙盒内物理不可验证（真人 UI 操作等）——不得以 open 存在，
-    ///   创建时即 waived + 理由披露，防止生成"永远闭不上"的义务空磨门禁。
-    /// None = 旧契约兼容（既有义务不强制，新 open 义务必须声明）。
+    /// 可选的核验方法建议：command / evidence / human。
+    /// 可留空或待后续修订；human 项可保留 open 如实表示尚未核验。
     #[serde(default)]
     pub closure_form: Option<String>,
 }
 
 impl ReviewContract {
-    /// 检查契约中是否声明了任何可执行的验证命令或冻结验证脚本
+    /// 检查契约中是否声明了任何可执行的验证命令或脚本
     pub fn has_executable_verification(&self) -> bool {
         self.obligations.iter().any(|o| o.verify_command.is_some() || o.verify_script.is_some())
     }
 
     /// 按 id 原子合并申报更新：未提交的义务保留，不代表删除。
     /// evidenced/waived 是模型申报，不是宿主验收结果；允许补证、纠错或退回 open。
-    /// 问题文本与已有验证命令仍保护，最终验收检查合并后的完整契约。
+    /// 问题文本保留，验证方法可修订，最终验收检查合并后的完整契约。
     pub fn apply_update(&mut self, update: ReviewContract) -> Result<(), String> {
         if update.obligations.is_empty() {
             return Err(
@@ -91,40 +86,26 @@ impl ReviewContract {
                         e.id
                     ));
                 }
-                // 省略冻结字段 = 保持原值，不要求模型每次重抄验证标准。
-                if item.verify_command.is_none() {
-                    item.verify_command = e.verify_command.clone();
-                }
-                if item.verify_script.is_none() {
-                    item.verify_script = e.verify_script.clone();
-                }
-                if item.verify_sha256.is_none() {
-                    item.verify_sha256 = e.verify_sha256.clone();
+                let evidence_channel = matches!(item.closure_form.as_deref(), Some("evidence" | "human"));
+                let command_changed = item.verify_command.is_some() && item.verify_command != e.verify_command;
+                let script_changed = item.verify_script.is_some() && item.verify_script != e.verify_script;
+                // 局部状态更新保留原方法；显式换命令不继承旧脚本，显式换通道不残留旧命令。
+                if evidence_channel {
+                    item.verify_command = None;
+                    item.verify_script = None;
+                    item.verify_sha256 = None;
+                } else {
+                    if item.verify_command.is_none() { item.verify_command = e.verify_command.clone(); }
+                    if item.verify_script.is_none() && !command_changed { item.verify_script = e.verify_script.clone(); }
+                    if item.verify_sha256.is_none() && !command_changed && !script_changed {
+                        item.verify_sha256 = e.verify_sha256.clone();
+                    }
                 }
                 if item.closure_form.is_none() {
                     item.closure_form = e.closure_form.clone();
                 }
-                let path_only_change = e.verify_script == item.verify_script
-                    && e.verify_sha256 == item.verify_sha256
-                    && match (&e.verify_command, &item.verify_command) {
-                        (Some(old), Some(new)) => same_command_except_paths(old, new),
-                        _ => false,
-                    };
-                if (e.verify_command.is_some()
-                    || e.verify_script.is_some()
-                    || e.verify_sha256.is_some())
-                    && !path_only_change
-                    && (item.verify_command != e.verify_command
-                        || item.verify_script != e.verify_script
-                        || item.verify_sha256 != e.verify_sha256)
-                {
-                    return Err(format!(
-                        "审查契约义务 {} 的验证命令/脚本已冻结，中途不得改写（仅把命令里的文件路径改成真实产物路径是允许的，其它部分需保持一致）；如需更换验证方式，请新增新义务并在方案审查中说明。",
-                        e.id
-                    ));
-                }
             }
-            validate_obligation_closure(&item, existing.is_none())?;
+            validate_obligation_closure(&item)?;
             if let Some(index) = merged.obligations.iter().position(|o| o.id == item.id) {
                 merged.obligations[index] = item;
             } else {
@@ -141,6 +122,8 @@ impl ReviewContract {
         self.obligations
             .iter()
             .filter(|item| normalized_status(item).as_deref() == Some("open"))
+            // 宿主将执行当前绑定的命令，不要求模型先手动填写一份“已经通过”。
+            .filter(|item| !item.verify_command.as_deref().is_some_and(|cmd| !cmd.trim().is_empty()))
             .map(|item| format!("审查义务 {}：{}", item.id, item.question.trim()))
             .collect()
     }
@@ -154,6 +137,7 @@ impl ReviewContract {
             .obligations
             .iter()
             .filter(|o| normalized_status(o).as_deref() == Some("open"))
+            .filter(|o| !o.verify_command.as_deref().is_some_and(|cmd| !cmd.trim().is_empty()))
             .map(|o| {
                 serde_json::json!({
                     "id": o.id, "status": "evidenced",
@@ -167,7 +151,7 @@ impl ReviewContract {
         .ok()
     }
 
-    /// 仅表示每项都有完成/豁免申报，不代表证据、宿主验证或终审已经通过。
+    /// 仅表示无需额外手动申报（可执行项由宿主处理），不代表宿主验证或终审已通过。
     pub fn has_completion_claims(&self) -> bool {
         self.open_descriptions().is_empty()
     }
@@ -237,7 +221,9 @@ fn validate_contract(contract: &ReviewContract) -> Result<(), String> {
                 }
             }
             Some("evidenced") => {
-                if item.evidence_refs.is_empty() {
+                if item.evidence_refs.is_empty()
+                    && !item.verify_command.as_deref().is_some_and(|cmd| !cmd.trim().is_empty())
+                {
                     return Err(format!(
                         "审查义务 {} 标为 evidenced 时至少需要一个 evidence_refs。",
                         item.id
@@ -296,47 +282,16 @@ fn validate_contract(contract: &ReviewContract) -> Result<(), String> {
     Ok(())
 }
 
-/// 义务闭合通道一致性校验（机械层，不问语义）：
-/// - 所有声明了 closure_form 的义务：command→必须挂 verify_command/verify_script；
-///   human→只能以 waived 存在（真人验证义务不可挂 open）；
-/// - 新增 open 义务（id 不在既有契约中）：closure_form 必填，否则拒绝——
-///   逼着模型在创建时想好"这条怎么闭合"，而不是 finish 时才发现闭不上。
-///   既有 open 义务（旧契约/恢复）不追溯，兼容放行。
-fn validate_obligation_closure(item: &ReviewObligation, is_new: bool) -> Result<(), String> {
-    let status = item.status.trim().to_ascii_lowercase();
+/// 核验通道仅为可选的方法建议；不要求入口提前决定验证方法。
+/// 仍校验枚举，避免拼写错误被保存为无法解释的通道。
+fn validate_obligation_closure(item: &ReviewObligation) -> Result<(), String> {
     if let Some(form) = item.closure_form.as_deref().map(str::trim) {
-        match form {
-            "command" => {
-                if item.verify_command.is_none() && item.verify_script.is_none() {
-                    return Err(format!(
-                        "审查义务 {} 声明 command 闭合通道但未挂 verify_command/verify_script——客观义务请给出宿主可执行的验证命令（exit 0=成立）。",
-                        item.id
-                    ));
-                }
-            }
-            "evidence" => {}
-            "human" => {
-                if status != "waived" {
-                    return Err(format!(
-                        "审查义务 {} 声明 human 闭合通道（agent 沙盒内物理不可验证）却标 {}——此类义务创建时只能以 waived + waived_reason 披露，或改写成机器可验证的等价形式。",
-                        item.id, status
-                    ));
-                }
-            }
-            _ => {
-                return Err(format!(
-                    "审查义务 {} 的 closure_form 仅可为 command/evidence/human，收到 {:?}。",
-                    item.id, form
-                ));
-            }
+        if !matches!(form, "command" | "evidence" | "human") {
+            return Err(format!(
+                "审查义务 {} 的 closure_form 仅可为 command/evidence/human，收到 {:?}。",
+                item.id, form
+            ));
         }
-        return Ok(());
-    }
-    if is_new && status == "open" {
-        return Err(format!(
-            "审查义务 {} 未声明闭合通道 closure_form——每项 open 义务创建时必须想好怎么验证：\n  * 可机器判定 → closure_form:\"command\" + verify_command（宿主执行判分，exit 0=成立）；\n  * 以证据闭合（文件行号/命令输出/step_N 观测）→ closure_form:\"evidence\"；\n  * 只能真人操作验证（UI 点击/真实设备）→ 不得以 open 创建，改写为机器可验证形式或以 waived + 理由披露。",
-            item.id
-        ));
     }
     Ok(())
 }
@@ -344,54 +299,6 @@ fn validate_obligation_closure(item: &ReviewObligation, is_new: bool) -> Result<
 fn normalized_status(item: &ReviewObligation) -> Option<String> {
     let status = item.status.trim().to_ascii_lowercase();
     (!status.is_empty()).then_some(status)
-}
-
-/// 两条命令是否「除文件路径 token 外完全一致」：按空白切 token，数量相同，逐个比较，
-/// 不同的 token 必须两边都像文件路径（含 `/` 或以 `.扩展名` 结尾，且不含 shell 元字符、不以 `-` 开头）。
-fn same_command_except_paths(old: &str, new: &str) -> bool {
-    fn path_like(t: &str) -> bool {
-        if t.is_empty() || t.starts_with('-') {
-            return false;
-        }
-        if t.chars().any(|c| matches!(c, ';' | '|' | '&' | '$' | '`' | '<' | '>' | '(' | ')' | '*' | '?' | '\n')) {
-            return false;
-        }
-        if t.contains('/') {
-            return true;
-        }
-        match t.rsplit_once('.') {
-            Some((stem, ext)) => {
-                !stem.is_empty() && (1..=5).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphanumeric())
-            }
-            None => false,
-        }
-    }
-    let a: Vec<&str> = old.split_whitespace().collect();
-    let b: Vec<&str> = new.split_whitespace().collect();
-    if a.is_empty() || a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b.iter()).all(|(x, y)| x == y || (path_like(x) && path_like(y)))
-}
-
-#[cfg(test)]
-mod path_only_change_tests {
-    use super::same_command_except_paths as same;
-
-    #[test]
-    fn only_paths_may_differ() {
-        assert!(same(
-            "ffprobe -v error -show_entries format=duration -i out/reel.mp4",
-            "ffprobe -v error -show_entries format=duration -i out/history.mp4"
-        ));
-        // 骨架/参数变了不行
-        assert!(!same("ffprobe -i a.mp4", "ffprobe -v quiet a.mp4"));
-        assert!(!same("ffprobe -i a.mp4", "true -i a.mp4"));
-        // 把路径换成带元字符的东西不行
-        assert!(!same("ffprobe -i a.mp4", "ffprobe -i a.mp4;true"));
-        assert!(!same("cargo test -p core", "cargo test -p other"));
-        assert!(!same("", ""));
-    }
 }
 
 #[cfg(test)]
@@ -467,72 +374,25 @@ mod tests {
     }
 
     #[test]
-    fn new_open_obligations_must_declare_closure_channel() {
-        // 未声明 closure_form 的新 open 义务 → 拒绝（e2e 空磨事故防线）
-        let mut unverifiable = obligation("e2e", "粘贴/拖拽是否经真实验证？", "open");
-        unverifiable.closure_form = None;
-        assert!(ReviewContract {
-            scope_statement: "s".into(),
-            obligations: vec![]
+    fn optional_verification_method_can_remain_undecided_or_human_pending() {
+        for form in [None, Some("human"), Some("command"), Some("evidence")] {
+            let mut item = obligation("ui", "真人拖拽是否已验证？", "open");
+            item.closure_form = form.map(str::to_string);
+            let mut c = contract(vec![]);
+            c.apply_update(contract(vec![item])).unwrap();
+            assert_eq!(c.obligations[0].status, "open");
+            assert!(c.obligations[0].waived_reason.is_none());
+            assert!(!c.has_completion_claims(), "未验证不伪装成通过或已豁免");
         }
-        .apply_update(contract(vec![unverifiable.clone()]))
-        .is_err());
-
-        // command 通道没挂 verify_* → 拒绝
-        let mut bad_cmd = unverifiable.clone();
-        bad_cmd.closure_form = Some("command".to_string());
-        assert!(ReviewContract {
-            scope_statement: "s".into(),
-            obligations: vec![]
-        }
-        .apply_update(contract(vec![bad_cmd]))
-        .is_err());
-
-        // human 通道挂 open → 拒绝；waived+理由 → 放行
-        let mut human_open = unverifiable.clone();
-        human_open.closure_form = Some("human".to_string());
-        assert!(ReviewContract {
-            scope_statement: "s".into(),
-            obligations: vec![]
-        }
-        .apply_update(contract(vec![human_open]))
-        .is_err());
-        let mut human_waived = unverifiable.clone();
-        human_waived.closure_form = Some("human".to_string());
-        human_waived.status = "waived".to_string();
-        human_waived.waived_reason = Some("需真人 UI 操作，沙盒不可验证".to_string());
-        assert!(ReviewContract {
-            scope_statement: "s".into(),
-            obligations: vec![]
-        }
-        .apply_update(contract(vec![human_waived]))
-        .is_ok());
-
-        // command + verify_command → 放行
-        let mut good_cmd = unverifiable.clone();
-        good_cmd.closure_form = Some("command".to_string());
-        good_cmd.verify_command = Some("npm test -- upload".to_string());
-        assert!(ReviewContract {
-            scope_statement: "s".into(),
-            obligations: vec![]
-        }
-        .apply_update(contract(vec![good_cmd]))
-        .is_ok());
-
-        // 既有 open 义务无 closure_form（旧契约兼容）→ 不追溯
-        let mut existing = ReviewContract {
-            scope_statement: "s".into(),
-            obligations: vec![unverifiable.clone()],
-        };
-        let mut keep = unverifiable.clone();
-        keep.evidence_refs = vec!["step_5".to_string()];
-        keep.status = "evidenced".to_string();
-        assert!(existing.apply_update(contract(vec![keep])).is_ok());
+        let mut item = obligation("ui", "核验", "open");
+        item.closure_form = Some("typo".into());
+        assert!(contract(vec![]).apply_update(contract(vec![item])).is_err());
     }
+
 }
 
 #[cfg(test)]
-mod omitted_frozen_fields_tests {
+mod verification_revision_tests {
     use super::*;
 
     fn frozen() -> ReviewObligation {
@@ -567,17 +427,27 @@ mod omitted_frozen_fields_tests {
     }
 
     #[test]
-    fn explicit_different_command_still_rejected() {
+    fn explicit_different_command_is_saved_and_clears_stale_script() {
         let mut c = ReviewContract { scope_statement: "s".into(), obligations: vec![frozen()] };
         let mut o = frozen();
         o.verify_command = Some("true".into());
+        o.verify_script = None;
+        o.verify_sha256 = None;
         let upd = ReviewContract { scope_statement: "s".into(), obligations: vec![o] };
-        assert!(c.apply_update(upd).is_err());
+        c.apply_update(upd).unwrap();
+        assert_eq!(c.obligations[0].verify_command.as_deref(), Some("true"));
+        assert!(c.obligations[0].verify_script.is_none());
+        assert!(c.obligations[0].verify_sha256.is_none());
     }
 
     #[test]
     fn template_lists_open_claims_and_none_when_all_claimed() {
-        let c = ReviewContract { scope_statement: "s".into(), obligations: vec![frozen()] };
+        let mut evidence = frozen();
+        evidence.verify_command = None;
+        evidence.verify_script = None;
+        evidence.verify_sha256 = None;
+        evidence.closure_form = Some("evidence".into());
+        let c = ReviewContract { scope_statement: "s".into(), obligations: vec![evidence] };
         let t = c.closure_template().unwrap();
         assert!(t.contains("verify_build") && t.contains("evidenced") && t.contains("<真实工作区相对路径:起止行"));
         let mut done = frozen();
@@ -646,7 +516,7 @@ mod claim_merge_tests {
             {"id":"a","status":"open"},{"id":"c","status":"open"}
         ]})))
         .unwrap();
-        assert_eq!(c.open_descriptions().len(), 4);
+        assert_eq!(c.open_descriptions().len(), 3, "可执行项交由宿主处理，无需再手工申报");
         assert!(c.obligations[0].evidence_refs.is_empty());
         assert!(c.obligations[2].waived_reason.is_none());
         let t = c.closure_template().unwrap();
@@ -655,7 +525,7 @@ mod claim_merge_tests {
     }
 
     #[test]
-    fn frozen_script_only_stays_protected_while_claim_evidence_can_change() {
+    fn script_revision_changes_contract_identity_and_preserves_the_original_requirement() {
         let mut c = current();
         c.obligations[0].verify_script = Some("exit 1".into());
         c.obligations[0].verify_sha256 = Some("original-script-hash".into());
@@ -664,13 +534,14 @@ mod claim_merge_tests {
         }]})))
         .unwrap();
         let saved = c.clone();
-        assert!(c
-            .apply_update(contract(json!({"obligations":[{
+        c.apply_update(contract(json!({"obligations":[{
                 "id":"a","status":"evidenced","evidence_refs":["step_21"],"verify_script":"exit 0"
-            }]})))
-            .unwrap_err()
-            .contains("已冻结"));
-        assert_eq!(c, saved);
+            }]}))).unwrap();
+        assert_eq!(c.obligations[0].question, saved.obligations[0].question);
+        assert_eq!(c.obligations[0].verify_script.as_deref(), Some("exit 0"));
+        assert!(c.obligations[0].verify_sha256.is_none(), "修订不继承旧脚本摘要");
+        assert_ne!(crate::agent::finalization::contract_fingerprint(Some(&saved)),
+            crate::agent::finalization::contract_fingerprint(Some(&c)), "旧执行身份不得复用为新方法的通过");
         // 原有完整更新仍兼容，原样重提不使契约指纹变化。
         let fp = crate::agent::finalization::contract_fingerprint(Some(&c));
         c.apply_update(c.clone()).unwrap();
@@ -688,7 +559,6 @@ mod claim_merge_tests {
             json!([{"id":"a","status":"open"},{"id":"b","question":"偷换原问题","status":"open"}]),
             json!([{"id":"a","status":"open"},{"id":"a","status":"open"}]),
             json!([{"id":"a","status":"evidenced","evidence_refs":[]}]),
-            json!([{"id":"e","status":"open","verify_command":"echo passed"}]),
             json!([]),
         ] {
             assert!(apply_review_contract_update(

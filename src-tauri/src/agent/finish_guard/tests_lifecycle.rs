@@ -130,26 +130,26 @@ mod tests_inner {
     }
 
     #[test]
-    fn ask_human_cooldown_requires_action_before_asking() {
+    fn recent_gate_notice_is_consumed_without_changing_approval() {
         let context = context::SandwichContext::new("system".to_string(), "goal".to_string());
         let mut checkpoint = AgentCheckpoint::new("test_run".to_string(), &context);
 
         // 无拦截记录：放行
-        assert!(crate::agent::loop_runner::evaluate_ask_human_cooldown(&mut checkpoint, 5).is_none());
+        assert!(crate::agent::loop_runner::ask_human_recent_gate_notice(&mut checkpoint, 5).is_none());
 
-        // 本步刚被拦截：冷却拒绝（一次性），且记录被清除
+        // 本步刚被拦截：给出建议（一次性），且记录被清除
         checkpoint.recent_gate_block_step = Some(5);
-        let msg = crate::agent::loop_runner::evaluate_ask_human_cooldown(&mut checkpoint, 5);
+        let msg = crate::agent::loop_runner::ask_human_recent_gate_notice(&mut checkpoint, 5);
         assert!(msg.is_some());
-        assert!(msg.unwrap().contains("先监听"));
+        assert!(msg.unwrap().contains("门禁提示"));
         assert!(checkpoint.recent_gate_block_step.is_none());
 
-        // 冷却后再问：放行（模型有机会行动；死锁豁免）
-        assert!(crate::agent::loop_runner::evaluate_ask_human_cooldown(&mut checkpoint, 6).is_none());
+        // 建议后再问：放行（模型有机会行动；死锁豁免）
+        assert!(crate::agent::loop_runner::ask_human_recent_gate_notice(&mut checkpoint, 6).is_none());
 
         // 预算耗尽等门禁显式指示求助：豁免一次
         checkpoint.gate_human_escape_directed = true;
-        assert!(crate::agent::loop_runner::evaluate_ask_human_cooldown(&mut checkpoint, 7).is_none());
+        assert!(crate::agent::loop_runner::ask_human_recent_gate_notice(&mut checkpoint, 7).is_none());
         assert!(!checkpoint.gate_human_escape_directed, "豁免标记一次性消费");
     }
 
@@ -176,10 +176,10 @@ mod tests_inner {
         assert!(is_info_approval("Plan"));
         assert!(is_info_approval("APPROVAL"));
 
-        // 3. 当处于 approval 类时，冷却生效
-        let cooldown_msg = crate::agent::loop_runner::evaluate_ask_human_cooldown(&mut checkpoint, 5);
-        assert!(cooldown_msg.is_some(), "approval 类请求应触发门禁冷却");
-        assert!(cooldown_msg.unwrap().contains("先监听"));
+        // 3. 当处于 approval 类时，给出近期门禁建议
+        let cooldown_msg = crate::agent::loop_runner::ask_human_recent_gate_notice(&mut checkpoint, 5);
+        assert!(cooldown_msg.is_some(), "approval 类请求应附近期门禁事实");
+        assert!(cooldown_msg.unwrap().contains("门禁提示"));
     }
 
     #[test]
@@ -240,7 +240,7 @@ mod tests_inner {
     fn weather_disaster_chain_end_to_end_replay() {
         // 装配级端到端灾害链回放：
         // 目标：“天天气是啥呢”
-        // 链路：2>/dev/null 探针 -> 不误判为写操作 -> 探测失败 -> 问城市 -> 不捂嘴冷却 -> 用户答北京 -> 正常回答 -> 门禁保持锁定 -> 防复读拦截 -> 配额熔断与凭据豁免
+        // 链路：2>/dev/null 探针 -> 不误判为写操作 -> 探测失败 -> 问城市 -> 不捂嘴冷却 -> 用户答北京 -> 正常回答 -> 门禁保持锁定 -> 历史问题建议 -> 次数提醒与凭据分类
         let mut context = context::SandwichContext::new("system".to_string(), "天天气是啥呢".to_string());
         let mut checkpoint = AgentCheckpoint::new("test_weather_replay".to_string(), &context);
         checkpoint.set_execution_mode(crate::agent::checkpoint::PlanExecutionMode::CrossReview);
@@ -283,20 +283,20 @@ mod tests_inner {
         let is_approval_kind = ask_kind == "plan_approval" || ask_kind == "plan" || ask_kind == "approval";
         assert!(!is_approval_kind);
         let cooldown_blocked = if is_approval_kind {
-            crate::agent::loop_runner::evaluate_ask_human_cooldown(&mut checkpoint, 2).is_some()
+            crate::agent::loop_runner::ask_human_recent_gate_notice(&mut checkpoint, 2).is_some()
         } else {
             false
         };
         assert!(!cooldown_blocked, "信息类提问绝不能被门禁冷却机制捂嘴！");
 
         // 验证 2.2: 提问去重与记录——首次提问顺利放行并登记
-        assert!(checkpoint.check_duplicate_question(ask_message).is_none(), "首问城市必须放行");
+        assert!(checkpoint.similar_question_notice(ask_message).is_none(), "首问城市必须放行");
         checkpoint.record_asked_question(ask_message);
         assert_eq!(checkpoint.asked_human_questions.len(), 1);
 
         // 验证 2.3: 全局配额——配额内顺利放行
         let budget = crate::agent::channel::config::max_human_inquiry_budget();
-        let quota_rejection = checkpoint.check_inquiry_quota_exceeded(budget);
+        let quota_rejection = checkpoint.inquiry_budget_notice(budget);
         assert!(quota_rejection.is_none(), "配额内必须放行");
 
         // 环节 3: 用户交互并回复：“北京”
@@ -336,40 +336,41 @@ mod tests_inner {
         );
         assert!(write_rejection.is_some(), "回答北京后，写操作依然必须受交叉审查门禁保护！");
 
-        // 环节 6: 去重拦截测试——模型若复读相同问题，立即被拦截
+        // 环节 6: 相似文本只出建议，不改变审批状态
         let repeat_ask = "请问你想查询哪个城市的天气呢？";
-        let repeat_dedup = checkpoint.check_duplicate_question(repeat_ask);
-        assert!(repeat_dedup.is_some(), "复读同一提问必须被去重机制硬拦截");
+        let repeat_dedup = checkpoint.similar_question_notice(repeat_ask);
+        assert!(repeat_dedup.is_some(), "相同文本提供历史提问建议");
 
-        // 环节 7: 配额熔断机制与凭据豁免测试
+        // 环节 7: 提问次数建议与凭据分类测试
         // 7.1 消耗剩余的普通信息类提问配额到上限 (5 次)
-        assert!(checkpoint.check_duplicate_question("请问需要摄氏度还是华氏度？").is_none());
+        assert!(checkpoint.similar_question_notice("请问需要摄氏度还是华氏度？").is_none());
         checkpoint.record_asked_question("请问需要摄氏度还是华氏度？");
 
-        assert!(checkpoint.check_duplicate_question("请问需要查询一周天气吗？").is_none());
+        assert!(checkpoint.similar_question_notice("请问需要查询一周天气吗？").is_none());
         checkpoint.record_asked_question("请问需要查询一周天气吗？");
 
-        assert!(checkpoint.check_duplicate_question("请问需要空气质量指数吗？").is_none());
+        assert!(checkpoint.similar_question_notice("请问需要空气质量指数吗？").is_none());
         checkpoint.record_asked_question("请问需要空气质量指数吗？");
 
-        assert!(checkpoint.check_duplicate_question("请问需要穿衣出行指数吗？").is_none());
+        assert!(checkpoint.similar_question_notice("请问需要穿衣出行指数吗？").is_none());
         checkpoint.record_asked_question("请问需要穿衣出行指数吗？");
 
         assert_eq!(checkpoint.asked_human_questions.len(), 5);
 
-        // 7.2 第 6 次普通提问：触发配额熔断
-        let quota_err = checkpoint.check_inquiry_quota_exceeded(budget);
-        assert!(quota_err.is_some(), "超过配额后普通提问必须被熔断");
+        // 7.2 第 6 次普通提问：达到提醒阈值
+        let quota_err = checkpoint.inquiry_budget_notice(budget);
+        assert!(quota_err.is_some(), "达到阈值时应给出提醒");
         let quota_msg = quota_err.unwrap();
-        assert!(quota_msg.contains("信息提问配额已耗尽"));
-        assert!(quota_msg.contains("默认"), "熔断提示强制使用默认设定推进");
+        assert!(quota_msg.contains("信息提问次数提示"));
+        assert!(quota_msg.contains("仍可询问"));
+        assert!(!quota_msg.contains("关闭主动信息提问通道"));
 
         // 7.3 关键豁免：私密凭据类提问（kind: "missing_credential"）
         let cred_kind = "missing_credential";
         assert!(crate::agent::checkpoint::is_credential_inquiry_kind(cred_kind), "missing_credential 必须识别为凭据类");
         let is_cred = crate::agent::checkpoint::is_credential_inquiry_kind(cred_kind);
         let cred_quota_blocked = if !is_cred {
-            checkpoint.check_inquiry_quota_exceeded(budget).is_some()
+            checkpoint.inquiry_budget_notice(budget).is_some()
         } else {
             false
         };
@@ -377,7 +378,7 @@ mod tests_inner {
     }
 
     #[test]
-    fn repeat_read_interception_reports_real_count() {
+    fn repeat_read_notice_reports_real_count_once() {
         use std::io::Write;
         let dir = std::env::temp_dir().join(format!("read-ledger-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -396,12 +397,12 @@ mod tests_inner {
         // 前两次合法读取放行
         assert!(context.check_repeat_read_dispatch(&mk("stage.md"), &dir).is_none());
         assert!(context.check_repeat_read_dispatch(&mk("stage.md"), &dir).is_none());
-        // 第三次拦截：文案必须是真实次数，不允许再出现哨兵值 2147483647
+        // 第三次提示：文案必须是真实次数，不允许再出现哨兵值 2147483647
         let block = context.check_repeat_read_dispatch(&mk("stage.md"), &dir).unwrap();
         assert!(block.contains("已连续读取 3 次"), "文案应报真实次数: {}", block);
         assert!(!block.contains("2147483647"), "哨兵值泄漏: {}", block);
-        // 持续拦截直到内容变化
-        assert!(context.check_repeat_read_dispatch(&mk("stage.md"), &dir).is_some());
+        // 相同内容后续不再重复提示
+        assert!(context.check_repeat_read_dispatch(&mk("stage.md"), &dir).is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

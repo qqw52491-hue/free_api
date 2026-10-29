@@ -42,10 +42,8 @@ pub(crate) use crate::agent::plan_gate::{
     strip_plan_decision_marker,
 };
 
-/// ask_human 冷却判定（先监听后求助）：刚被门禁拦截（本步或上一步）且门禁未指示求助时，
-/// 返回冷却拒绝文案；否则 None 放行。一次性豁免：拒绝后清除拦截记录，
-/// 模型再行动一步后仍被困住可正常求助，避免死锁。
-pub(crate) fn evaluate_ask_human_cooldown(
+/// 仅提示近期门禁事实，不以步骤间隔推断是否已经采取有效行动。
+pub(crate) fn ask_human_recent_gate_notice(
     checkpoint: &mut AgentCheckpoint,
     step_id: usize,
 ) -> Option<String> {
@@ -60,8 +58,24 @@ pub(crate) fn evaluate_ask_human_cooldown(
     }
     checkpoint.recent_gate_block_step = None;
     Some(
-        "【❌ 求助失败：本次 ask_human 已被宿主冷却拒绝（先监听，后求助）】\n【原因】刚刚被系统门禁拦截，尚未做出任何被拦截意见要求的行动即直接呼叫人类。\n【必须执行的操作】：\n请先执行拦截意见中要求的动作（重新取证 read/grep、按审查建议修改方案、重新派发 child_reviewer 复审，或调用 wait_jobs 挂起等待后台结论）；\n完成至少一步有效行动后若仍受阻，再向人类求助并附上你已尝试的动作与结果。".to_string(),
+        "【近期门禁提示】本步或上一步记录过门禁拒绝。建议向用户说明具体阻塞与已尝试动作；人工求助仍正常执行，不要求先凑一步工具调用。".to_string(),
     )
+}
+
+/// 只记录观察，返回类型不携带拒绝动作；当前工具的安全校验在后续执行路径进行。
+fn record_dispatch_advice(
+    context: &mut crate::agent::context::SandwichContext,
+    instruction: &AgentInstruction,
+    workspace_dir: &Path,
+) {
+    if let Some(notice) = context.repeated_failure_notice(
+        &instruction.get_tool(), &instruction.get_action(), &instruction.get_params(),
+    ) {
+        context.add_host_feedback(&notice);
+    }
+    if let Some(notice) = context.check_repeat_read_dispatch(instruction, workspace_dir) {
+        context.add_host_feedback(&notice);
+    }
 }
 
 /// submit_plan 编排已拆至 crate::agent::plan_submit::handle_submit_plan（此处仅 re-export）。
@@ -170,33 +184,7 @@ pub async fn run_tool_phase(
         }
     }
 
-    // --- B. 执行动作 ---
-    if let Some(reason) = context.repeated_failure_blocker(
-        &inst.get_tool(),
-        &inst.get_action(),
-        &inst.get_params(),
-    ) {
-        return Ok(DispatchResult { view: None,
-            success: false,
-            stdout: String::new(),
-            stderr: reason,
-            route: REPEATED_FAILURE_BLOCKED_ROUTE.to_string(),
-        });
-    }
-
-    // --- B0. 重复读取硬拦截：同工具+同路径第 3 次读取且内容未变 → 拒绝并给抓手 ---
-    if let Some(block_msg) = context.check_repeat_read_dispatch(inst, workspace_dir) {
-        let _ = app.emit(
-            &format!("agent-log-{}", final_session_id),
-            "🛑 重复读取已拦截：内容未变化，强制切换策略".to_string(),
-        );
-        return Ok(DispatchResult { view: None,
-            success: false,
-            stdout: String::new(),
-            stderr: block_msg,
-            route: "host_rejection:repeat_read".to_string(),
-        });
-    }
+    record_dispatch_advice(context, inst, workspace_dir);
 
     app.emit(
         &format!("agent-log-{}", final_session_id),
@@ -426,14 +414,8 @@ pub async fn run_tool_phase(
         return Ok(result);
     }
 
-    // --- B1.5 P4 连续批发派发解析失败降级熔断检查 ---
-    if let Err(breaker_msg) = context.check_batch_dispatch_allowed(inst.has_dispatches()) {
-        return Ok(DispatchResult { view: None,
-            stdout: String::new(),
-            stderr: breaker_msg,
-            success: false,
-            route: "host_rejection:batch_circuit_breaker".to_string(),
-        });
+    if let Some(notice) = context.batch_dispatch_notice(inst.has_dispatches()) {
+        context.add_host_feedback(&notice);
     }
 
     // --- B1.8 前置方案门禁拦截：未获得方案审批前，禁止直接调用破坏性修改工具或派发写入类子 Agent ---
@@ -653,3 +635,6 @@ pub async fn run_tool_phase(
     Ok(dispatch_result)
 }
 
+
+#[cfg(test)]
+mod flexibility_tests;

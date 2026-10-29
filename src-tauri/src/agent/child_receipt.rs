@@ -345,6 +345,12 @@ async fn reduce_reviewer_receipt(
         .and_then(|stored| stored.get_extra_str("decision"))
     {
         text.push_str(&format!("\n方案审查生效裁决: {}\n", decision));
+        if decision.eq_ignore_ascii_case("approved") && checkpoint.plan_review_batch_complete(env.db)
+            && checkpoint.submitted_plan.is_some() && checkpoint.plan_stage_blocking_count() == 0
+            && !checkpoint.plan_revisions_required(env.db) && checkpoint.plan_escalation_required.is_none()
+        {
+            text.insert_str(0, "【本批方案审查已通过】按已生效的定稿方案及既有授权流程继续执行；final_only 发现和尚待生成产物的验证结果留待交付前核销。下方成员路由、历史发现和缺失证据不单独表示需要重交方案；后续新证据导致方案变化时仍可修订。\n");
+        }
     }
     // Tech Lead 定稿通知：revised_* 已覆盖 submitted_plan 对应字段，
     // 执行方必须以审查者定稿版本为准。
@@ -433,7 +439,41 @@ mod tests {
             assert_eq!(cp.submitted_plan.as_ref().unwrap().plan_summary, "原方案保持等待修订");
             assert!(effects.ui_notices.is_empty(), "没有定稿不能广播已切换执行方案");
             assert!(!effects.model_text.contains("请按定稿版本执行"));
+            assert!(!effects.model_text.contains("【本批方案审查已通过】"));
         }
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn approved_plan_with_final_only_findings_explains_execution_and_handoff() {
+        let (base, db) = test_db("approved-final-only");
+        let env = test_env(&db, &base);
+        let mut context = SandwichContext::new("sys".into(), "制作新闻表格".into());
+        let mut cp = AgentCheckpoint::new("run-1".into(), &context);
+        cp.plan_mode = crate::agent::checkpoint::PlanExecutionMode::CrossReview;
+        cp.plan_reviewer_retry_count = 1;
+        cp.submitted_plan = Some(crate::agent::types::PlanSubmission {
+            plan_summary:"生成工作簿后验证实际内容".into(), ..Default::default()
+        });
+        cp.set_plan_review_batch("batch", 1);
+        seed_run(&db, "approved-final", "run-1", "batch", "plan_review", "succeeded", true);
+        let r = receipt("review", "approved-final", None, json!({
+            "decision":"approved","root_cause_verdict":"na","confidence":"supported","routing":"needs_alignment",
+            "revised_verification":"生成后核对实际工作簿",
+            "findings":[{"id":"F1","severity":"blocking","finality":"final_only","why":"交付前确认日期"}],
+            "missing_evidence":["尚待生成的工作簿和验证结果"]
+        }));
+        let result = reduce_child_receipt(&env, &mut cp, &mut context, &r).await;
+        assert!(crate::agent::plan_gate::check_pre_write_gatekeeper(
+            &mut cp, &context, &db, "run-1", 5, false
+        ).is_none());
+        assert!(cp.plan_phase.is_approved());
+        assert_eq!(cp.plan_gate_projection().blocking_count, 0);
+        assert_eq!(cp.aggregate_unwithdrawn_blockings().len(), 1);
+        assert!(context.todo_list.iter().any(|todo| todo.status == "pending"), "交付义务仍在");
+        assert!(result.model_text.starts_with("【本批方案审查已通过】"));
+        assert!(result.model_text.contains("交付前核销") && result.model_text.contains("needs_alignment"));
+        assert!(result.model_text.contains("交付前确认日期"), "保留发现，不抹除交付义务");
         std::fs::remove_dir_all(base).unwrap();
     }
 

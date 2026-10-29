@@ -693,43 +693,43 @@
         let mut cp = AgentCheckpoint::new("run-dedup".to_string(), &context);
 
         // 初始无问题：不重复
-        assert!(cp.check_duplicate_question("请问你想查询哪个城市的天气？").is_none());
+        assert!(cp.similar_question_notice("请问你想查询哪个城市的天气？").is_none());
 
         // 记录第一个提问
         cp.record_asked_question("请问你想查询哪个城市的天气？");
         assert_eq!(cp.asked_human_questions.len(), 1);
 
         // 1. 完全相同的问题：拦截
-        let dup1 = cp.check_duplicate_question("请问你想查询哪个城市的天气？");
+        let dup1 = cp.similar_question_notice("请问你想查询哪个城市的天气？");
         assert!(dup1.is_some());
-        assert!(dup1.unwrap().contains("重复提问拦截"));
+        assert!(dup1.unwrap().contains("相似提问提示"));
 
         // 2. 标点符号与空格变种：拦截
-        let dup2 = cp.check_duplicate_question("  请问你想查询哪个城市的天气!  ");
+        let dup2 = cp.similar_question_notice("  请问你想查询哪个城市的天气!  ");
         assert!(dup2.is_some());
 
         // 3. 口癖轻微变种（包含关系且差值纯为语气助词）：拦截
-        let dup3 = cp.check_duplicate_question("请问你想查询哪个城市的天气呢？");
+        let dup3 = cp.similar_question_notice("请问你想查询哪个城市的天气呢？");
         assert!(dup3.is_some());
 
         // 4. 同模板不同槽位提问（城市 vs 日期）：绝不误伤，必须放行！
-        assert!(cp.check_duplicate_question("您想查询哪个日期的天气？").is_none());
-        assert!(cp.check_duplicate_question("请问你想查询哪个日期的天气？").is_none());
+        assert!(cp.similar_question_notice("您想查询哪个日期的天气？").is_none());
+        assert!(cp.similar_question_notice("请问你想查询哪个日期的天气？").is_none());
 
         // 5. 相似指标/参数槽位提问（指标A vs 指标B）：放行
-        assert!(cp.check_duplicate_question("请提供要分析的指标A").is_none());
+        assert!(cp.similar_question_notice("请提供要分析的指标A").is_none());
         cp.record_asked_question("请提供要分析的指标A");
-        assert!(cp.check_duplicate_question("请提供要分析的指标B").is_none());
+        assert!(cp.similar_question_notice("请提供要分析的指标B").is_none());
 
         // 6. 提问配额约束（全局封顶，可配默认 5 次）
-        assert!(cp.check_inquiry_quota_exceeded(DEFAULT_MAX_HUMAN_INQUIRY_BUDGET).is_none());
+        assert!(cp.inquiry_budget_notice(DEFAULT_MAX_HUMAN_INQUIRY_BUDGET).is_none());
         cp.record_asked_question("问题3");
         cp.record_asked_question("问题4");
         cp.record_asked_question("问题5");
         assert_eq!(cp.asked_human_questions.len(), 5);
-        let quota_err = cp.check_inquiry_quota_exceeded(DEFAULT_MAX_HUMAN_INQUIRY_BUDGET);
+        let quota_err = cp.inquiry_budget_notice(DEFAULT_MAX_HUMAN_INQUIRY_BUDGET);
         assert!(quota_err.is_some());
-        assert!(quota_err.unwrap().contains("信息提问配额已耗尽"));
+        assert!(quota_err.unwrap().contains("信息提问次数提示"));
 
         // 7. 凭据类提问识别（豁免配额熔断）
         assert!(is_credential_inquiry_kind("missing_credential"));

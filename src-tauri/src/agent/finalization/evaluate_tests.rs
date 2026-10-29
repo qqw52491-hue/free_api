@@ -294,7 +294,7 @@ async fn rejected_review_reuses_real_frozen_execution_but_changed_artifact_runs_
         "只补说明或登记证据后须重新审查，而非无故重跑已通过的冻结命令");
     let second_prompt = mock.requests.lock().unwrap()[1]["messages"][1]["content"]
         .as_str().unwrap().to_string();
-    assert!(second_prompt.contains("旧冻结验证宿主执行回执"));
+    assert!(second_prompt.contains("旧契约验证宿主执行回执"));
     assert!(second_prompt.contains("补充说明依据"));
     assert!(second.receipt.frozen_verification_run.is_some());
     cp.pending_finalization = Some(second.receipt);
@@ -673,4 +673,103 @@ fn new_current_requirements_change_acceptance_identity_without_changing_frozen_a
     crate::agent::conversation::append_live_goal(&mut context, "also export a PDF");
     assert_eq!(context.user_goal, "original");
     assert_ne!(before, acceptance_fingerprint(&context, &checkpoint, &payload));
+}
+
+mod advisory_workflow_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    struct Fixture {
+        root: std::path::PathBuf,
+        db: DbState,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!("advisory-workflow-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(root.join("workspace")).unwrap();
+            let db = DbState(Arc::new(Mutex::new(crate::db::init_db(&root.join("test.db")).unwrap())));
+            Self { root, db }
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.root); }
+    }
+
+    #[tokio::test]
+    async fn pending_tracking_and_unmatched_evidence_reach_review_without_a_form_gate() {
+        let f = Fixture::new();
+        let workspace = f.root.join("workspace");
+        let mut c = context();
+        c.todo_list = serde_json::from_value(json!([
+            {"id":1,"status":"pending","description":"总结调查结论"}
+        ])).unwrap();
+        c.record_side_effect(1, "local_file".into(), "report".into());
+        c.review_contract = Some(serde_json::from_value(json!({"scope_statement":"报告", "obligations":[
+            {"id":"ui","question":"真人操作是否核验？","status":"open","closure_form":"human"},
+            {"id":"refs","question":"引用核对","status":"evidenced","evidence_refs":["missing.rs:9-10"]}
+        ]})).unwrap());
+        let mut cp = checkpoint(&c);
+        let baseline = GitBaseline::capture(&workspace);
+        let (blockers, notices, _) = collect_checks(&f.db, &c, &cp, "run", "session", 2,
+            &workspace, &baseline, Utc::now(), false, true).await;
+        assert!(blockers.is_empty(), "{blockers:?}");
+        let text = notices.join("\n");
+        assert!(text.contains("总结调查结论") && text.contains("真人操作是否核验") && text.contains("missing.rs"), "{text}");
+        assert_eq!(c.todo_list[0].status, "pending");
+        assert_eq!(c.review_contract.as_ref().unwrap().obligations[0].status, "open");
+        cp.stage_review_blockers_open = 1;
+        let (blockers, _, _) = collect_checks(&f.db, &c, &cp, "run", "session", 2,
+            &workspace, &baseline, Utc::now(), false, false).await;
+        assert!(blockers.iter().any(|b| b.contains("阶段审查")), "实质审查阻塞不被降为建议");
+    }
+
+    #[tokio::test]
+    async fn absent_declaration_does_not_run_inferred_checks_but_explicit_failure_still_blocks() {
+        let f = Fixture::new();
+        let workspace = f.root.join("workspace");
+        // 若自动执行推导的 cargo check，此 manifest 会失败；本例只检验宿主行为，免模型调用。
+        std::fs::write(workspace.join("Cargo.toml"), "invalid manifest").unwrap();
+        let baseline = GitBaseline::capture(&workspace);
+        let mut c = context();
+        c.record_side_effect_with_paths(1, "local_file".into(), "write".into(), vec!["src/lib.rs".into()]);
+        assert!(crate::agent::change_verification::infer_adaptive_verification_command_in(
+            &workspace, &c.new_affected_paths()).is_some());
+        let mut cp = checkpoint(&c);
+        let mut triage = crate::agent::triage::TriageVerdict::fallback("fixture");
+        triage.final_review_mode = "mechanical_only".into();
+        cp.triage_verdict = Some(triage);
+        let app = tauri::test::mock_app();
+        let (_tx, mut rx) = watch::channel(0);
+        let instruction: AgentInstruction = serde_json::from_value(json!({"tool":"finish","params":{"summary":"本例未测试"}})).unwrap();
+        let session = format!("advisory-{}", uuid::Uuid::new_v4());
+        let result = evaluate_completion(app.handle(), &f.db, &mut c, &mut cp, "run", &session,
+            2, &workspace, &baseline, Utc::now(), &ModelRoutingConfig::default(), &mut rx,
+            &instruction, CompletionMode::Finish, false, false).await;
+        assert!(result.receipt.is_ready(), "{:?}", result.receipt);
+        assert!(matches!(result.receipt.verification, ReceiptVerification::Waived { .. }));
+        assert!(result.receipt.frozen_verification_run.is_none(), "无真实执行不得生成通过回执");
+        c.review_contract = Some(serde_json::from_value(json!({"scope_statement":"实际检查", "obligations":[
+            {"id":"explicit","question":"命令通过？","status":"open","verify_command":"printf explicit-failure; exit 1"}
+        ]})).unwrap());
+        let failed = evaluate_completion(app.handle(), &f.db, &mut c, &mut cp, "run", &session,
+            3, &workspace, &baseline, Utc::now(), &ModelRoutingConfig::default(), &mut rx,
+            &instruction, CompletionMode::Finish, false, false).await;
+        assert!(!failed.receipt.is_ready());
+        assert!(failed.receipt.blockers.join("\n").contains("explicit-failure"));
+    }
+
+    #[test]
+    fn early_filename_is_a_review_observation_not_an_instruction_to_create_a_copy() {
+        let f = Fixture::new();
+        let c = context();
+        let mut cp = checkpoint(&c);
+        cp.approved_target_files = Some(vec!["early-name.xlsx".into()]);
+        let mut blockers = vec![];
+        let mut notices = vec![];
+        collect_scope_and_targets(&c, &cp, &f.root.join("workspace"), "session", Utc::now(),
+            false, None, &mut blockers, &mut notices);
+        assert!(blockers.is_empty());
+        assert!(notices.join("\n").contains("early-name.xlsx"));
+        assert!(notices.join("\n").contains("不证明未完成"));
+    }
 }
