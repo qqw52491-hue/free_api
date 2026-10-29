@@ -1224,6 +1224,7 @@ mod finish_review_regression_tests {
             for (id,tool,outcome,body) in [
                 ("proof-fixture","local_shell","succeeded","AUTH_EVIDENCE: src/auth.rs:10 permission_check()"),
                 ("shell-proof-fixture","local_shell","succeeded","✅ [进程正常退出] (exit_code: 0)\n$ python - <<'PY'\np='/session/今日新闻汇总.xlsx'\n# 多行验证脚本\nPY\n--- STDOUT ---\nPASS\npath= /session/今日新闻汇总.xlsx\nnews_rows=4"),
+                ("pipeline-proof-fixture","pipeline","succeeded","\n[Step 1 Result]: {\"message\":\"临时文件写入成功\"}\n[Step 2 Result]: ℹ️ [进程正常退出] (exit_code: 0)\n$ curl http://localhost/audit\n--- STDOUT ---\nHTTP/1.1 302 Found\nLocation: /login"),
                 ("old-final","finish","finish_challenged","OLD_REVIEW_MUST_PASS_FIRST"),
                 ("old-plan","wait_jobs","succeeded","OLD_PLAN_SCORE_81"),
                 ("history-proof","local_shell","succeeded","HISTORICAL_LICENSE_PROOF"),
@@ -1493,6 +1494,25 @@ mod finish_review_regression_tests {
             .as_str()
             .unwrap();
         assert!(observation.contains("AUTH_EVIDENCE") && observation.contains("has_more"));
+    }
+
+    #[tokio::test]
+    async fn finish_pipeline_evidence_reaches_reviewer_and_original_lookup_preserves_rejection() {
+        let mock = MockReviewer::new(vec![
+            json!({"tool":"read_step_output","output_id":"pipeline-proof-fixture"}),
+            json!({"verdict":"rejected","score":60,"summary":"302 登录跳转不能支持页面修复结论",
+                "blocking_issues":[{"file":"report","issue":"实际 HTTP 仍返回302","requirement":"核验用户请求链路"}],"nit_issues":[]}),
+        ]).await;
+        let (result, _) = run_finish_with_summary(&mock, None, true, Some("接口已正常返回 JSON")).await;
+        assert!(!result.is_passed() && !result.is_service_failure());
+        assert_eq!(result.blocking_issues.len(), 1);
+        let requests = mock.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2, "no additional model call introduced");
+        let input = requests[0]["messages"][1]["content"].as_str().unwrap();
+        assert!(input.contains("HTTP/1.1 302 Found") && input.contains("Location: /login"), "{input}");
+        assert!(input.contains("原文读取: ") && input.contains("pipeline-proof-fixture"));
+        let observation = requests[1]["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap();
+        assert!(observation.contains("HTTP/1.1 302 Found") && observation.contains("source"));
     }
 
     #[tokio::test]

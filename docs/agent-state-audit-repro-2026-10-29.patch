@@ -1,0 +1,220 @@
+--- a/src-tauri/src/agent/checkpoint/tests.rs
++++ b/src-tauri/src/agent/checkpoint/tests.rs
+@@ -1425,0 +1426,103 @@
++
++    // Isolated audit regressions: call the unchanged production persistence functions.
++    fn audit_state_db() -> DbState {
++        DbState(std::sync::Arc::new(std::sync::Mutex::new(
++            crate::db::init_db(&std::path::PathBuf::from(":memory:")).unwrap(),
++        )))
++    }
++
++    #[test]
++    fn audit_state_conflict_must_preserve_other_writers_decision() {
++        let db = audit_state_db();
++        let ctx = SandwichContext::new("system".into(), "goal".into());
++        let mut base = AgentCheckpoint::new("audit-session".into(), &ctx);
++        save_checkpoint(&db, &mut base).unwrap();
++        let mut stale = load_checkpoint(&db, &base.run_id).unwrap().unwrap();
++        let mut latest = stale.clone();
++        latest.human_waivers.push("USER_DECISION_NEW".into());
++        latest.stage_review_batch_id = Some("batch-new".into());
++        save_checkpoint(&db, &mut latest).unwrap();
++        stale.data.progress_summary = "unrelated progress update".into();
++        save_checkpoint(&db, &mut stale).unwrap();
++        let actual = load_checkpoint(&db, &base.run_id).unwrap().unwrap();
++        eprintln!("AUDIT writer-conflict version={} human_waivers={:?} stage_batch={:?} progress={}", actual.version, actual.human_waivers, actual.stage_review_batch_id, actual.data.progress_summary);
++        assert_eq!(actual.human_waivers, latest.human_waivers, "unrelated stale save must not lose an independently saved decision");
++        assert_eq!(actual.stage_review_batch_id, latest.stage_review_batch_id);
++    }
++
++    #[test]
++    fn audit_state_stale_writer_must_not_replace_a_new_task() {
++        let db = audit_state_db();
++        let old_ctx = SandwichContext::new("system".into(), "OLD_GOAL".into());
++        let mut cp = AgentCheckpoint::new("audit-session".into(), &old_ctx);
++        save_checkpoint(&db, &mut cp).unwrap();
++        let mut stale = cp.clone();
++        let new_ctx = SandwichContext::new("system".into(), "NEW_GOAL".into());
++        let new_id = new_ctx.history_task_id.clone();
++        cp.refresh_context(&new_ctx);
++        save_checkpoint(&db, &mut cp).unwrap();
++        stale.data.progress_summary = "late old progress".into();
++        save_checkpoint(&db, &mut stale).unwrap();
++        let actual = load_checkpoint(&db, &cp.run_id).unwrap().unwrap();
++        eprintln!("AUDIT task-conflict expected_task={} actual_task={} goal={}", new_id, actual.data.history_task_id, actual.data.current_goal);
++        assert_eq!(actual.data.history_task_id, new_id, "a stale task must not replace the current task identity");
++        assert_eq!(actual.data.current_goal, "NEW_GOAL");
++    }
++
++    #[test]
++    fn audit_state_stale_save_must_not_regress_committed_terminal_phase() {
++        let db = audit_state_db();
++        let ctx = SandwichContext::new("system".into(), "goal".into());
++        let mut cp = AgentCheckpoint::new("audit-session".into(), &ctx);
++        save_checkpoint(&db, &mut cp).unwrap();
++        let mut stale = cp.clone();
++        cp.mark_done(&ctx);
++        save_checkpoint(&db, &mut cp).unwrap();
++        stale.data.progress_summary = "late progress".into();
++        save_checkpoint(&db, &mut stale).unwrap();
++        let actual = load_checkpoint(&db, &cp.run_id).unwrap().unwrap();
++        eprintln!("AUDIT terminal-conflict expected=done actual={}", actual.phase.as_str());
++        assert_eq!(actual.phase, AgentPhase::Done, "a stale save is not an explicit resume and must not reopen a completed task");
++    }
++
++    #[test]
++    fn audit_state_failed_insert_must_not_advance_memory_revision() {
++        let db = audit_state_db();
++        let ctx = SandwichContext::new("system".into(), "goal".into());
++        let mut cp = AgentCheckpoint::new("audit-session".into(), &ctx);
++        db.0.lock().unwrap().execute_batch("CREATE TEMP TRIGGER audit_deny_insert BEFORE INSERT ON agent_checkpoints BEGIN SELECT RAISE(ABORT,'AUDIT simulated write failure'); END;").unwrap();
++        let error = save_checkpoint(&db, &mut cp).unwrap_err();
++        let saved = load_checkpoint(&db, &cp.run_id).unwrap();
++        eprintln!("AUDIT failed-insert error={} memory_version={} stored={}", error, cp.version, saved.is_some());
++        assert!(saved.is_none());
++        assert_eq!(cp.version, 0, "a failed INSERT must not leave the caller holding a committed-looking revision");
++    }
++
++    #[test]
++    fn audit_state_failed_update_must_not_advance_memory_revision() {
++        let db = audit_state_db();
++        let ctx = SandwichContext::new("system".into(), "goal".into());
++        let mut cp = AgentCheckpoint::new("audit-session".into(), &ctx);
++        save_checkpoint(&db, &mut cp).unwrap();
++        let old_version = cp.version;
++        db.0.lock().unwrap().execute_batch("CREATE TEMP TRIGGER audit_deny_update BEFORE UPDATE ON agent_checkpoints BEGIN SELECT RAISE(ABORT,'AUDIT simulated write failure'); END;").unwrap();
++        let error = save_checkpoint(&db, &mut cp).unwrap_err();
++        let saved = load_checkpoint(&db, &cp.run_id).unwrap().unwrap();
++        eprintln!("AUDIT failed-update error={} memory_version={} database_version={}", error, cp.version, saved.version);
++        assert_eq!(saved.version, old_version);
++        assert_eq!(cp.version, old_version, "a SQL error must restore the in-memory optimistic revision");
++    }
++
++    #[test]
++    fn audit_state_exclusion_increment_is_preserved_by_stale_save() {
++        let db = audit_state_db();
++        let ctx = SandwichContext::new("system".into(), "goal".into());
++        let mut cp = AgentCheckpoint::new("audit-session".into(), &ctx);
++        save_checkpoint(&db, &mut cp).unwrap();
++        let mut stale = cp.clone();
++        cp.excluded_review_models.insert("stopped-model".into());
++        save_checkpoint(&db, &mut cp).unwrap();
++        save_checkpoint(&db, &mut stale).unwrap();
++        let actual = load_checkpoint(&db, &cp.run_id).unwrap().unwrap();
++        assert!(actual.excluded_review_models.contains("stopped-model"));
++    }
+--- a/src-tauri/src/agent/channel/http/run_spawn.rs
++++ b/src-tauri/src/agent/channel/http/run_spawn.rs
+@@ -14,2 +14,2 @@
+-pub struct SessionRunGuard {
+-    pub(crate) app: AppHandle,
++pub struct SessionRunGuard<R: tauri::Runtime = tauri::Wry> {
++    pub(crate) app: AppHandle<R>,
+@@ -23 +23 @@
+-impl SessionRunGuard {
++impl<R: tauri::Runtime> SessionRunGuard<R> {
+@@ -25 +25 @@
+-        app: &AppHandle,
++        app: &AppHandle<R>,
+@@ -399,0 +400,67 @@
++
++
++#[cfg(test)]
++mod isolated_state_audit {
++    use super::*;
++    use crate::agent::{checkpoint::{AgentCheckpoint, AgentPhase}, context::SandwichContext, run_state::AgentRunMachine};
++
++    #[tokio::test]
++    async fn audit_state_handled_business_failure_must_not_be_reported_as_done() {
++        let app = tauri::test::mock_app();
++        let conn = crate::db::init_db(&std::path::PathBuf::from(":memory:")).unwrap();
++        let session = format!("audit-fail-{}", uuid::Uuid::new_v4());
++        let run = format!("audit-run-{}", uuid::Uuid::new_v4());
++        conn.execute("INSERT INTO chat_sessions(id,title,model_id,created_at,updated_at) VALUES (?1,'audit','','now','now')", [&session]).unwrap();
++        let db = DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
++        app.manage(db.clone());
++        let guard = SessionRunGuard::new(app.handle(), &session, &run, "cannot finish", 1);
++        let context = SandwichContext::new("sys".into(), "cannot finish".into());
++        let mut cp = AgentCheckpoint::new(session.clone(), &context);
++        let mut machine = AgentRunMachine::new();
++        let outcome = crate::agent::failure::finish_failed_run(app.handle(), &db, &session, &run,
++            "cannot finish", &[], &mut cp, &context, &mut machine, "API 401: task incomplete".into()).await;
++        assert!(outcome.is_ok(), "a handled business failure returns host Ok: {outcome:?}");
++        assert_eq!(cp.phase, AgentPhase::Failed);
++        guard.finish(&outcome);
++        let status = runs_store().lock().unwrap().remove(&run).unwrap().status;
++        let stored: String = db.0.lock().unwrap().query_row("SELECT status FROM agent_run_traces WHERE id=?1", [&run], |r| r.get(0)).unwrap();
++        eprintln!("AUDIT handled-failure host_result=Ok checkpoint=failed trace={} channel={}", stored, status);
++        assert_eq!(stored, "failed");
++        assert_eq!(status, "failed", "host cleanup success is not business task success");
++    }
++
++    #[tokio::test]
++    async fn audit_state_desktop_cancellation_must_not_be_reported_as_done() {
++        let app = tauri::test::mock_app();
++        let conn = crate::db::init_db(&std::path::PathBuf::from(":memory:")).unwrap();
++        let db = DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
++        app.manage(db.clone());
++        let session = format!("audit-cancel-{}", uuid::Uuid::new_v4());
++        let run = format!("audit-run-{}", uuid::Uuid::new_v4());
++        let guard = SessionRunGuard::new(app.handle(), &session, &run, "cancel", 1);
++        let context = SandwichContext::new("sys".into(), "cancel".into());
++        let mut cp = AgentCheckpoint::new(session.clone(), &context);
++        let mut machine = AgentRunMachine::new();
++        let outcome = crate::agent::control::finish_interrupted_run(app.handle(), &db, &session, &run,
++            "cancel", &[], &mut cp, &context, &mut machine, "用户请求停止当前任务。".into()).await;
++        assert!(outcome.is_ok(), "{outcome:?}");
++        guard.finish(&outcome);
++        let status = runs_store().lock().unwrap().remove(&run).unwrap().status;
++        let stored: String = db.0.lock().unwrap().query_row("SELECT status FROM agent_run_traces WHERE id=?1", [&run], |r| r.get(0)).unwrap();
++        eprintln!("AUDIT handled-cancel machine={:?} trace={} channel={}", machine.state(), stored, status);
++        assert_eq!(stored, "cancelled");
++        assert_eq!(status, "cancelled", "desktop cancellation must survive host Ok teardown");
++    }
++
++    #[tokio::test]
++    async fn audit_state_normal_guard_completion_remains_done() {
++        let app = tauri::test::mock_app();
++        let db = DbState(std::sync::Arc::new(std::sync::Mutex::new(crate::db::init_db(&std::path::PathBuf::from(":memory:")).unwrap())));
++        app.manage(db);
++        let session = format!("audit-success-{}", uuid::Uuid::new_v4());
++        let run = format!("audit-run-{}", uuid::Uuid::new_v4());
++        let guard = SessionRunGuard::new(app.handle(), &session, &run, "done", 1);
++        guard.finish(&Ok(()));
++        assert_eq!(runs_store().lock().unwrap().remove(&run).unwrap().status, "done");
++    }
++}
+--- a/src-tauri/src/agent/channel/http/run_control.rs
++++ b/src-tauri/src/agent/channel/http/run_control.rs
+@@ -17 +17 @@
+-pub(crate) fn last_assistant_message(app: &AppHandle, session_id: &str) -> Option<String> {
++pub(crate) fn last_assistant_message<R: tauri::Runtime>(app: &AppHandle<R>, session_id: &str) -> Option<String> {
+--- a/src-tauri/src/agent/channel/http/mod.rs
++++ b/src-tauri/src/agent/channel/http/mod.rs
+@@ -22,2 +22,2 @@
+-fn db_conn<'a>(
+-    app: &'a AppHandle,
++fn db_conn<'a, R: tauri::Runtime>(
++    app: &'a AppHandle<R>,
+--- a/src-tauri/src/agent/failure.rs
++++ b/src-tauri/src/agent/failure.rs
+@@ -83,2 +83,2 @@
+-pub(crate) async fn finish_failed_run(
+-    app: &AppHandle,
++pub(crate) async fn finish_failed_run<R: tauri::Runtime>(
++    app: &AppHandle<R>,
+--- a/src-tauri/src/agent/control.rs
++++ b/src-tauri/src/agent/control.rs
+@@ -175,2 +175,2 @@
+-pub(crate) async fn finish_interrupted_run(
+-    app: &AppHandle,
++pub(crate) async fn finish_interrupted_run<R: tauri::Runtime>(
++    app: &AppHandle<R>,
+--- a/src-tauri/src/agent/main_loop/entry.rs
++++ b/src-tauri/src/agent/main_loop/entry.rs
+@@ -39,2 +39,2 @@
+-pub fn advance_run_state(
+-    app: &AppHandle,
++pub fn advance_run_state<R: tauri::Runtime>(
++    app: &AppHandle<R>,

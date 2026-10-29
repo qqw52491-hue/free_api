@@ -14,7 +14,7 @@ pub(crate) fn model_id_of_session(
     .map_err(|_| bad_request("会话缺少模型，请先在通道配置中填写默认模型"))
 }
 
-pub(crate) fn last_assistant_message(app: &AppHandle, session_id: &str) -> Option<String> {
+pub(crate) fn last_assistant_message<R: tauri::Runtime>(app: &AppHandle<R>, session_id: &str) -> Option<String> {
     let conn = db_conn(app).ok()?;
     load_last_assistant_message(&conn, session_id)
 }

@@ -80,8 +80,8 @@ pub(crate) async fn stop_run_runtime(db: &DbState, session_id: &str, run_id: &st
     warnings
 }
 
-pub(crate) async fn finish_failed_run(
-    app: &AppHandle,
+pub(crate) async fn finish_failed_run<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     db: &DbState,
     session_id: &str,
     run_id: &str,

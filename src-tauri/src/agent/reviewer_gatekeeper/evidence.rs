@@ -277,7 +277,7 @@ pub(crate) fn read_registered_evidence(
     serde_json::to_string(&result).map_err(|e| e.to_string())
 }
 
-/// 长任务的早期 shell 回执补充索引：最近 15 条之外，保留一小段较早的
+/// 长任务的早期 shell / pipeline 回执补充索引：最近 15 条之外，保留一小段较早的
 /// 可回查执行记录。这里只搬运宿主持久化来源，不通过命令名/输出关键词宣称
 /// 它是验证、更不推断旧结果适用于当前产物；适用性由终审核对。
 /// 元数据查询不解压原始日志，也不重新运行昂贵的验证命令。
@@ -294,7 +294,7 @@ fn collect_early_shell_receipt_index(
              FROM agent_step_logs l JOIN agent_step_logs_fts f \
              ON f.output_id=l.output_id AND f.session_id=l.session_id \
              WHERE l.session_id=?1 AND julianday(l.created_at)>=julianday(?2) \
-             AND lower(trim(f.tool)) IN ('local_shell','shell_exec') \
+             AND lower(trim(f.tool)) IN ('local_shell','shell_exec','pipeline') \
              ORDER BY julianday(l.created_at) ASC,l.rowid ASC LIMIT 80"
         ).ok()?;
         let records = stmt.query_map(
@@ -325,7 +325,7 @@ fn collect_early_shell_receipt_index(
     }
     let may_have_more = previous.next().is_some();
     Some(format!(
-        "\n\n【长任务早期 shell 回执补充索引（展示 {} 条，has_more={}；非验证通过证明）】\n         这些是当前任务较早的执行回执，不代表测试成功、覆盖了本次产物或结果仍然有效；需要时按 output_id 回查原文和执行状态，再根据产物版本、环境变化与验证范围裁决是否补验。不能因为终审开始就机械重跑高成本验证。\n{}",
+        "\n\n【长任务早期 shell 回执补充索引（展示 {} 条，has_more={}；非验证通过证明）】\n         这些是当前任务较早的 shell / pipeline 执行回执，不代表测试成功、覆盖了本次产物或结果仍然有效；需要时按 output_id 回查原文和执行状态，再根据产物版本、环境变化与验证范围裁决是否补验。不能因为终审开始就机械重跑高成本验证。\n{}",
         lines.len(), may_have_more, lines.join("\n")
     ))
 }
@@ -382,9 +382,11 @@ fn collect_trace_digest(
     let mut lines = Vec::new();
     for (step_id, output_id, at, raw, tool, outcome) in items {
         let snippet = crate::agent::run_trace::resolve_raw_output(&raw)
-            .map(|text| if matches!(tool.as_deref(), Some("local_shell" | "shell_exec")) {
-                shell_receipt_snippet(&text)
-            } else { step_trace_snippet(&text) })
+            .map(|text| match tool.as_deref() {
+                Some("local_shell" | "shell_exec") => shell_receipt_snippet(&text),
+                Some("pipeline") => pipeline_receipt_snippet(&text, &output_id),
+                _ => step_trace_snippet(&text),
+            })
             .unwrap_or_else(|| {
                 "正文暂不可读取，请按 output_id 核查存储；不能据此判断该操作未执行".into()
             });
@@ -498,6 +500,88 @@ fn shell_receipt_snippet(raw: &str) -> String {
     };
     format!("[shell 原始回执节选；退出码不证明业务断言成立]\n{}\n[stdout/stderr 节选]\n{}",
         excerpt(command, 600), excerpt(output, 700))
+}
+
+/// 旧顺序 pipeline 的标签只是文本定位，不是新的结构化子步骤状态。
+/// 保留首尾各两段，段内单独给命令和输出预算，避免首段写文件回执淹没后续执行。
+/// 所有 offset 均由未修改原文按 Unicode 字符计算，沿用现有会话归属与任务来源校验。
+fn pipeline_receipt_snippet(raw: &str, output_id: &str) -> String {
+    let mut markers = Vec::new();
+    let (mut byte_offset, mut char_offset) = (0, 0);
+    for line in raw.split_inclusive('\n') {
+        if let Some((step, body)) = line.strip_prefix("[Step ").and_then(|s| s.split_once(" Result]: ")) {
+            if !step.is_empty() && step.bytes().all(|b| b.is_ascii_digit()) {
+                if let Ok(step) = step.parse::<usize>() {
+                    let prefix_bytes = line.len() - body.len(); // 标签始终为 ASCII。
+                    markers.push((step, byte_offset, byte_offset + prefix_bytes, char_offset + prefix_bytes));
+                }
+            }
+        }
+        byte_offset += line.len();
+        char_offset += line.chars().count();
+    }
+    let read_at = |offset: usize, end: usize| format!("原文读取: {}", json!({
+        "tool":"read_step_output", "output_id":output_id, "offset":offset,
+        "limit":end.saturating_sub(offset).clamp(1, 1600),
+    }));
+    let mut parts = vec![format!(
+        "[pipeline 原始回执文本分段节选；标签可能来自工具正文，不是独立子步骤状态或业务验收结论；展示 {}/{} 段，has_more={}]",
+        markers.len().min(4), markers.len(), markers.len() > 4,
+    )];
+    if markers.is_empty() {
+        parts.push("未识别旧式文本分段；以下仅为原文首尾，不能据此认定流水线未执行。".into());
+        parts.push(receipt_excerpt(&without_receipt_metadata(raw), 900));
+        parts.push(read_at(0, char_offset));
+        return parts.join("\n");
+    }
+    let preamble = &raw[..markers[0].1];
+    if !preamble.trim().is_empty() {
+        parts.push(format!("[分段前原文]\n{}\n{}", receipt_excerpt(&without_receipt_metadata(preamble), 400),
+            read_at(0, preamble.chars().count())));
+    }
+    for (index, &(step, _, body_byte, body_char)) in markers.iter().enumerate() {
+        let end_byte = markers.get(index + 1).map_or(raw.len(), |m| m.1);
+        let body = &raw[body_byte..end_byte];
+        let end_char = body_char + body.chars().count();
+        if markers.len() > 4 && index >= 2 && index < markers.len() - 2 {
+            if index == 2 { parts.push(format!("[省略中间 {} 个文本段；按 output_id 读取或搜索原文]", markers.len() - 4)); }
+            continue;
+        }
+        let split_at = ["--- STDOUT ---", "--- STDERR ---"].iter()
+            .filter_map(|marker| body.find(marker)).min();
+        let preview = if let Some(at) = split_at {
+            format!("{}\n[stdout/stderr 节选]\n{}",
+                receipt_excerpt(&without_receipt_metadata(&body[..at]), 200),
+                receipt_excerpt(&without_receipt_metadata(&body[at..]), 500))
+        } else { receipt_excerpt(&without_receipt_metadata(body), 700) };
+        // 直接定位输出区，避免审查者先翻过大段脚本；整段范围同时公开。
+        let cursor = body_char + body[..split_at.unwrap_or(0)].chars().count();
+        parts.push(format!("[文本段 Step {step}；原文字符范围 {body_char}..{end_char})]\n{preview}\n{}", read_at(cursor, end_char)));
+    }
+    parts.join("\n")
+}
+
+fn receipt_excerpt(text: &str, limit: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= limit { return text.to_string(); }
+    let head: String = text.chars().take(limit / 2).collect();
+    let tail: String = text.chars().rev().take(limit / 2).collect::<Vec<_>>().into_iter().rev().collect();
+    format!("{head}\n[中间节选省略，原文按 output_id 读取]\n{tail}")
+}
+
+/// 只隐藏投影里的重复结构化注释，不能把注释之后的其他回执/错误一起截掉。
+fn without_receipt_metadata(mut raw: &str) -> String {
+    let mut text = String::new();
+    while let Some(start) = raw.find("<!-- 结构化元数据:") {
+        text.push_str(&raw[..start]);
+        let Some(end) = raw[start..].find("-->") else {
+            text.push_str("[未闭合元数据注释；请读取原文]");
+            return text;
+        };
+        raw = &raw[start + end + 3..];
+    }
+    text.push_str(raw);
+    text
 }
 
 /// 单步输出的摘要提取：JSON 回执抓关键字段，shell 输出抓状态行+命令回显。
@@ -1046,6 +1130,78 @@ mod review_material_regressions {
         assert!(full.contains("PRIVATE_DUPLICATE"), "索引投影不改原始回执");
         let failure = shell_receipt_snippet("❌ exit_code: 1\n$ python check.py\n--- STDERR ---\nFileNotFoundError: missing.xlsx");
         assert!(failure.contains("exit_code: 1") && failure.contains("FileNotFoundError"));
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pipeline_preview_is_bounded_discloses_omissions_and_uses_original_char_offsets() {
+        let mut raw = "前置错误：中文🙂\n".to_string();
+        for step in 1..=12 {
+            raw.push_str(&format!("[Step {step} Result]: 段落{step}：{}\n", "长正文🙂".repeat(4000)));
+        }
+        let preview = pipeline_receipt_snippet(&raw, "known-id");
+        assert!(preview.contains("展示 4/12 段，has_more=true") && preview.contains("省略中间 8 个文本段"));
+        assert!(preview.contains("文本段 Step 1；") && preview.contains("文本段 Step 2；"));
+        assert!(preview.contains("文本段 Step 11；") && preview.contains("文本段 Step 12；"));
+        assert!(!preview.contains("文本段 Step 3；"));
+        assert!(preview.chars().count() < 5000, "preview must stay bounded independently of output size");
+        let reads: Vec<serde_json::Value> = preview.lines().filter_map(|s| s.strip_prefix("原文读取: "))
+            .map(|s| serde_json::from_str(s).unwrap()).collect();
+        assert_eq!(reads.len(), 5); // preamble plus four displayed segments
+        let tail: String = raw.chars().skip(reads[4]["offset"].as_u64().unwrap() as usize).take(10).collect();
+        assert!(tail.starts_with("段落12："), "offsets must be characters, not UTF-8 bytes");
+    }
+
+    #[test]
+    fn pipeline_unrecognized_or_spoofed_labels_are_only_text_not_execution_facts() {
+        let raw = "[Step nope Result]: arbitrary\n[Step 999999999999999999999999999999 Result]: no\nHTTP 302\nBUILD FAILURE";
+        let preview = pipeline_receipt_snippet(raw, "fallback-id");
+        assert!(preview.contains("未识别旧式文本分段") && preview.contains("HTTP 302") && preview.contains("BUILD FAILURE"));
+        assert!(preview.contains("原文读取: ") && preview.contains("不是独立子步骤状态"));
+        let text = without_receipt_metadata("before<!-- 结构化元数据: one -->after<!-- 结构化元数据: two -->ERROR");
+        assert_eq!(text, "beforeafterERROR");
+        assert!(without_receipt_metadata("text<!-- 结构化元数据: incomplete").contains("未闭合元数据注释"));
+        assert!(pipeline_receipt_snippet("", "empty").contains("\"limit\":1"));
+    }
+
+    #[tokio::test]
+    async fn pipeline_review_keeps_later_results_and_exact_unicode_read_locations() {
+        let root = std::env::temp_dir().join(format!("pipeline-proof-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = crate::db::DbState(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::db::init_db(&root.join("test.db")).unwrap(),
+        )));
+        let start = Utc::now() - chrono::Duration::seconds(1);
+        let raw = format!("\n[Step 1 Result]: {{\"message\":\"临时文件写入成功\",\"data\":\"{}\"}}\n<!-- 结构化元数据: PRIVATE_WRITER -->\n[Step 2 Result]: ℹ️ [进程正常退出] (exit_code: 0)\n$ curl http://localhost/audit\n{}\n--- STDOUT ---\nHTTP/1.1 302 Found\nLocation: /login\n<!-- 结构化元数据: PRIVATE_SHELL -->\n[Step 3 Result]: ℹ️ [进程正常退出] (exit_code: 0)\n$ mvn package; echo done\n--- STDOUT ---\nBUILD FAILURE\n--- STDERR ---\ncompiler failed\n<!-- 结构化元数据: PRIVATE_END -->\n流水线附加错误: LAST_ERROR", "中文🙂".repeat(1500), "# 长脚本\n".repeat(100));
+        let id = put(&db, "s", 41, &Utc::now().to_rfc3339(), Some("pipeline"), "succeeded", &raw);
+        let digest = collect_execution_evidence_digest(&db, "s", start).unwrap();
+        assert!(digest.contains("HTTP/1.1 302 Found") && digest.contains("Location: /login"), "{digest}");
+        assert!(digest.contains("BUILD FAILURE") && digest.contains("compiler failed"));
+        assert!(digest.contains("LAST_ERROR"), "metadata projection must not erase following error text");
+        assert!(digest.contains("status=succeeded") && digest.contains("exit_code: 0"), "do not reinterpret persisted process outcome");
+        assert!(!digest.contains("PRIVATE_WRITER") && !digest.contains("PRIVATE_SHELL"));
+        let mut read_count = 0;
+        for line in digest.lines().filter_map(|line| line.strip_prefix("原文读取: ")) {
+            let request: serde_json::Value = serde_json::from_str(line).unwrap();
+            let response: serde_json::Value = serde_json::from_str(&read_review_step_output(&db, "s", &request, start).unwrap()).unwrap();
+            let offset = request["offset"].as_u64().unwrap() as usize;
+            let limit = request["limit"].as_u64().unwrap() as usize;
+            let expected: String = raw.chars().skip(offset).take(limit).collect();
+            assert_eq!(response["content"], expected);
+            assert_eq!(request["output_id"], id);
+            assert!(read_review_step_output(&db, "other", &request, start).is_err());
+            read_count += 1;
+        }
+        assert_eq!(read_count, 3);
+        assert_eq!(crate::agent::run_trace::get_step_output(&db, "s", &id).unwrap(), raw);
+        // 长任务的早期 pipeline 只能保留元数据，不把旧正文自动灌入摘要。
+        for step in 42..=65 {
+            put(&db, "s", step, &(Utc::now() + chrono::Duration::seconds(step)).to_rfc3339(), Some("local_file"), "succeeded", "new receipt");
+        }
+        let later = collect_execution_evidence_digest(&db, "s", start).unwrap();
+        assert!(later.contains(&id) && later.contains("tool=pipeline"));
+        assert!(!later.contains("HTTP/1.1 302 Found"));
         drop(db);
         std::fs::remove_dir_all(root).unwrap();
     }

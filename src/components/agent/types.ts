@@ -209,6 +209,9 @@ export interface WriteToolView {
 
 export interface TerminalToolView {
     kind: "terminal";
+    exit_scope?: "shell_process";
+    verification_status?: "not_assessed";
+    status_note?: string;
     command: string;
     cwd?: string;
     exit_code: number;

@@ -1860,7 +1860,8 @@ async fn run_agent_main_loop_in_workspace_inner(
             .await
             {
                 Ok(()) => {
-                    let _ = save_checkpoint(state.inner(), &mut checkpoint);
+                    save_checkpoint(state.inner(), &mut checkpoint)
+                        .map_err(|error| format!("阶段审查已派发但父状态保存失败；正在停止本轮：{error}"))?;
                     let _ = app.emit(
                         &format!("agent-log-{}", final_session_id),
                         format!("📋 阶段审查已派发（{}）", reason),

@@ -172,8 +172,8 @@ pub(crate) fn take_pending_interrupt(rx: &mut mpsc::Receiver<HumanControl>) -> O
     }
 }
 
-pub(crate) async fn finish_interrupted_run(
-    app: &AppHandle,
+pub(crate) async fn finish_interrupted_run<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     db: &DbState,
     session_id: &str,
     run_id: &str,

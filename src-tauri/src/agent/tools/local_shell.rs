@@ -25,6 +25,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+const PROCESS_EXIT_NOTE: &str = "仅报告外层进程退出状态；未判定编译、测试或业务目标是否通过。管道、分号、|| true 和后台启动可掩盖前序失败；关键检查应单独执行，或显式保留其退出码。";
+
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
 const MAX_TIMEOUT_SECS: u64 = 300;
 const MAX_OUTPUT_BYTES: usize = 50 * 1024; // 50KB 输出上限
@@ -675,6 +677,8 @@ fn spawn_background_shell(
         let result = json!({
             "exit_code": status.ok().and_then(|s| s.code()),
             "exit_scope": "shell_process",
+            "verification_status": "not_assessed",
+            "status_note": PROCESS_EXIT_NOTE,
             "pid": child_pid,
             "log_path": log_path_w.display().to_string(),
             "tail": tail,
@@ -963,6 +967,8 @@ fn promote_timed_out_shell(
                 let result = json!({
                     "exit_code": status.as_ref().ok().and_then(|s| s.code()),
                     "exit_scope": "shell_process",
+                    "verification_status": "not_assessed",
+                    "status_note": PROCESS_EXIT_NOTE,
                     "pid": child_pid,
                     "log_path": log_path_w.display().to_string(),
                     "tail": tail,
@@ -1246,7 +1252,7 @@ fn execute_command_blocking(
                 && !search_no_match
                 && is_shell_parse_error(&stderr_trimmed);
             let (kind, retryable, safe_to_retry, recommended_action) = if success {
-                ("success", false, true, "done")
+                ("success", false, true, "inspect_output_and_verify_goal")
             } else if search_no_match {
                 ("no_matches", false, false, "no_match_means_absent")
             } else if shell_syntax_error {
@@ -1256,7 +1262,7 @@ fn execute_command_blocking(
             };
 
             let status_badge = if success {
-                format!("✅ [进程正常退出] (exit_code: 0, 耗时: {}ms)", duration_ms)
+                format!("ℹ️ [进程正常退出] (exit_code: 0, 耗时: {}ms)\n{}", duration_ms, PROCESS_EXIT_NOTE)
             } else if search_no_match {
                 format!(
                     "🔍 [无匹配] (exit_code: 1 — 检索命令的 1 是'没有命中'不是执行失败，\
@@ -1312,6 +1318,8 @@ fn execute_command_blocking(
                 "cwd": cwd.display().to_string(),
                 "exit_code": exit_code,
                 "exit_scope": "shell_process",
+                "verification_status": "not_assessed",
+                "status_note": PROCESS_EXIT_NOTE,
                 "duration_ms": duration_ms,
                 "success": success,
                 "kind": kind,
@@ -1357,6 +1365,8 @@ fn execute_command_blocking(
                 "cwd": cwd.display().to_string(),
                 "exit_code": exit_code,
                 "exit_scope": "shell_process",
+                "verification_status": "not_assessed",
+                "status_note": PROCESS_EXIT_NOTE,
                 "duration_ms": duration_ms,
                 "truncated": is_truncated,
                 "output_tail": output_tail,
@@ -1822,6 +1832,38 @@ mod tests {
         assert!(preserved.stdout.contains("\"exit_scope\":\"shell_process\""));
     }
 
+    /// 事故同形：构建失败被 OR-list 吞掉，最后的端口探针返回 0。
+    /// 不解析日志猜业务结果，也不静默改写用户脚本；必须明确披露状态边界。
+    #[cfg(unix)]
+    #[test]
+    fn shell_masked_build_failure_is_not_a_verification_pass() {
+        let temp = TempDirGuard::new();
+        let db = test_db();
+        for command in [
+            "(printf 'BUILD FAILURE\n'; exit 7) && printf restart || true; printf port-probe",
+            "printf 'ERROR is fixture text\n'",
+            "false; true",
+        ] {
+            let result = dispatch(&db, "masked-build", "exec", &json!({"command":command}), Some(temp.path()));
+            assert!(result.success, "外层 0 不能改判内部失败: {}", result.stderr);
+            assert!(result.stdout.contains(PROCESS_EXIT_NOTE));
+            assert!(result.stdout.contains("\"verification_status\":\"not_assessed\""));
+            assert!(!result.stdout.contains("✅ [进程正常退出]"));
+            let view = result.view.as_ref().unwrap();
+            assert_eq!(view["exit_code"], 0);
+            assert_eq!(view["verification_status"], "not_assessed");
+            assert_eq!(view["status_note"], PROCESS_EXIT_NOTE);
+        }
+        // 拆开的关键检查真实失败，且不能执行后面的重启步骤。
+        let result = dispatch(&db, "masked-build", "exec", &json!({
+            "command":"(printf 'BUILD FAILURE\n'; exit 7) && touch restarted"
+        }), Some(temp.path()));
+        assert!(!result.success);
+        assert!(result.stderr.contains("BUILD FAILURE"));
+        assert!(!temp.path().join("restarted").exists());
+        assert!(result.stdout.contains("exit_code: 7"));
+    }
+
     #[test]
     fn test_local_shell_with_args_array() {
         let temp = TempDirGuard::new();
@@ -1835,7 +1877,7 @@ mod tests {
         let res = dispatch(&test_db(), "test_sess", "exec", &params, Some(ws));
         assert!(res.success);
         assert!(res.stdout.contains("antigravity_arg1 antigravity_arg2 with space"));
-        assert!(res.stdout.contains("\"recommended_action\":\"done\""));
+        assert!(res.stdout.contains("\"recommended_action\":\"inspect_output_and_verify_goal\""));
     }
 
     #[test]
@@ -2056,6 +2098,8 @@ mod tests {
         assert_eq!(status, "succeeded", "后台任务应以 succeeded 收官: {}", result_json);
         assert!(result_json.contains("\"exit_code\":0"), "result_json: {}", result_json);
         assert!(result_json.contains("\"exit_scope\":\"shell_process\""));
+        assert!(result_json.contains("\"verification_status\":\"not_assessed\""));
+        assert!(result_json.contains(PROCESS_EXIT_NOTE));
         assert!(marker.exists(), "产物文件应由后台进程写出");
         let duration: i64 = db.0.lock().unwrap().query_row(
             "SELECT duration_ms FROM agent_background_jobs WHERE id=?1",

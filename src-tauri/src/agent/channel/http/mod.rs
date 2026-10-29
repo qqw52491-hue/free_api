@@ -19,8 +19,8 @@ pub(crate) use run_control::*;
 pub(crate) use views::*;
 pub(crate) use upload::*;
 pub(crate) use router::*;
-fn db_conn<'a>(
-    app: &'a AppHandle,
+fn db_conn<'a, R: tauri::Runtime>(
+    app: &'a AppHandle<R>,
 ) -> Result<std::sync::MutexGuard<'a, rusqlite::Connection>, (StatusCode, Json<Value>)> {
     let state: tauri::State<'a, DbState> = app.state::<DbState>();
     let db: &'a DbState = state.inner();

@@ -79,7 +79,7 @@
     }
 
     #[test]
-    fn save_checkpoint_conflict_retry_does_not_relock_self() {
+    fn save_checkpoint_conflict_does_not_relock_or_overwrite() {
         // 回归：09-07 pro 实弹全局冻结案。save_checkpoint 曾在持有 db.0 锁的 scope 内
         // 调 load_checkpoint（同线程二次加锁 std Mutex）→ 永久自死锁，全进程 DB 使用者
         // 排队冻结。本测试走乐观锁冲突重试路径：修复前悬挂，修复后应正常保存。
@@ -106,13 +106,15 @@
             .unwrap();
         }
 
-        // 本方仍持内存 version=1 → UPDATE WHERE version=1 不命中 → 冲突 → 锁外重试。
-        save_checkpoint(&db, &mut checkpoint).unwrap();
+        // 旧整包不允许借新版本号重交；错误返回后仍可再次读取，不持锁递归。
+        let before = serde_json::to_value(&checkpoint).unwrap();
+        assert!(save_checkpoint(&db, &mut checkpoint).unwrap_err().contains("另一保存者"));
+        assert_eq!(serde_json::to_value(&checkpoint).unwrap(), before);
 
         let reloaded = load_checkpoint(&db, "run-conflict")
             .unwrap()
             .expect("checkpoint 应存在");
-        assert_eq!(reloaded.version, 6, "合并后应基于库中 v5 再写 v6");
+        assert_eq!(reloaded.version, 5, "冲突不改变最新数据库版本");
     }
 
     #[test]
@@ -1390,9 +1392,8 @@
     }
 
     #[test]
-    fn consume_commit_conflict_retries_and_marks_land_once() {
-        // 乐观锁冲突路径：库中 version 被顶高 → 首次 UPDATE 不命中 →
-        // 合并重试 → 成功提交时 applied_at 才随之落账（不重复、不抢先）。
+    fn consume_commit_conflict_leaves_receipt_until_explicit_reload() {
+        // 冲突不自动重交旧快照；显式重载后重新消费时 applied_at 才落账。
         let (_base, db) = mk_db("consume-conflict");
         let ctx = SandwichContext::new("sys".to_string(), "goal".to_string());
         let mut cp = AgentCheckpoint::new("run-cr".to_string(), &ctx);
@@ -1403,23 +1404,200 @@
             "UPDATE agent_checkpoints SET version = 5 WHERE run_id = 'run-cr'", [],
         ).unwrap();
 
+        let before = serde_json::to_value(&cp).unwrap();
+        assert!(save_checkpoint_and_consume(
+            &db, &mut cp, &ctx, &[AppliedReceipt { run_id: rid.clone(), verdict: None }],
+        ).unwrap_err().contains("另一保存者"));
+        assert_eq!(serde_json::to_value(&cp).unwrap(), before);
+        let applied: Option<String> = db.0.lock().unwrap().query_row(
+            "SELECT applied_at FROM agent_child_runs WHERE id=?1", [&rid], |row| row.get(0),
+        ).unwrap();
+        assert!(applied.is_none());
+        // 调用方显式重载，再基于最新上下文重新消费，不能隐式合并旧整包。
+        cp = load_checkpoint(&db, &cp.run_id).unwrap().unwrap();
+        let mut latest_context = SandwichContext::new("sys".into(), "goal".into());
+        cp.restore_context(&mut latest_context);
         save_checkpoint_and_consume(
-            &db,
-            &mut cp,
-            &ctx,
-            &[AppliedReceipt { run_id: rid.clone(), verdict: None }],
-        )
-        .unwrap();
-
+            &db, &mut cp, &latest_context, &[AppliedReceipt { run_id: rid.clone(), verdict: None }],
+        ).unwrap();
         let conn = db.0.lock().unwrap();
         let applied: Option<String> = conn
             .query_row("SELECT applied_at FROM agent_child_runs WHERE id=?1", rusqlite::params![rid], |r| r.get(0))
             .unwrap();
-        assert!(applied.is_some(), "冲突重试成功后标记随最终提交落账");
+        assert!(applied.is_some(), "显式重载重放后标记随最终提交落账");
         let version: i64 = conn
             .query_row("SELECT version FROM agent_checkpoints WHERE run_id='run-cr'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 6, "应合并到最新 version 后 +1");
+        assert_eq!(version, 6, "应显式基于最新 version 保存 +1");
         drop(conn);
         let _ = std::fs::remove_dir_all(_base);
+    }
+
+    // Regression tests for stale snapshot and failed writes.
+    fn state_regression_db() -> DbState {
+        DbState(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::db::init_db(&std::path::PathBuf::from(":memory:")).unwrap(),
+        )))
+    }
+
+    #[test]
+    fn state_regression_conflict_must_preserve_other_writers_decision() {
+        let db = state_regression_db();
+        let ctx = SandwichContext::new("system".into(), "goal".into());
+        let mut base = AgentCheckpoint::new("audit-session".into(), &ctx);
+        save_checkpoint(&db, &mut base).unwrap();
+        let mut stale = load_checkpoint(&db, &base.run_id).unwrap().unwrap();
+        let mut latest = stale.clone();
+        latest.human_waivers.push("USER_DECISION_NEW".into());
+        latest.stage_review_batch_id = Some("batch-new".into());
+        save_checkpoint(&db, &mut latest).unwrap();
+        stale.data.progress_summary = "unrelated progress update".into();
+        let error = save_checkpoint(&db, &mut stale).unwrap_err();
+        assert!(error.contains("另一保存者"));
+        let actual = load_checkpoint(&db, &base.run_id).unwrap().unwrap();
+        eprintln!("AUDIT writer-conflict version={} human_waivers={:?} stage_batch={:?} progress={}", actual.version, actual.human_waivers, actual.stage_review_batch_id, actual.data.progress_summary);
+        assert_eq!(actual.human_waivers, latest.human_waivers, "unrelated stale save must not lose an independently saved decision");
+        assert_eq!(actual.stage_review_batch_id, latest.stage_review_batch_id);
+    }
+
+    #[test]
+    fn state_regression_stale_writer_must_not_replace_a_new_task() {
+        let db = state_regression_db();
+        let old_ctx = SandwichContext::new("system".into(), "OLD_GOAL".into());
+        let mut cp = AgentCheckpoint::new("audit-session".into(), &old_ctx);
+        save_checkpoint(&db, &mut cp).unwrap();
+        let mut stale = cp.clone();
+        let new_ctx = SandwichContext::new("system".into(), "NEW_GOAL".into());
+        let new_id = new_ctx.history_task_id.clone();
+        cp.refresh_context(&new_ctx);
+        save_checkpoint(&db, &mut cp).unwrap();
+        stale.data.progress_summary = "late old progress".into();
+        let error = save_checkpoint(&db, &mut stale).unwrap_err();
+        assert!(error.contains("另一保存者"));
+        let actual = load_checkpoint(&db, &cp.run_id).unwrap().unwrap();
+        eprintln!("AUDIT task-conflict expected_task={} actual_task={} goal={}", new_id, actual.data.history_task_id, actual.data.current_goal);
+        assert_eq!(actual.data.history_task_id, new_id, "a stale task must not replace the current task identity");
+        assert_eq!(actual.data.current_goal, "NEW_GOAL");
+    }
+
+    #[test]
+    fn state_regression_stale_save_must_not_regress_committed_terminal_phase() {
+        let db = state_regression_db();
+        let ctx = SandwichContext::new("system".into(), "goal".into());
+        let mut cp = AgentCheckpoint::new("audit-session".into(), &ctx);
+        save_checkpoint(&db, &mut cp).unwrap();
+        let mut stale = cp.clone();
+        cp.mark_done(&ctx);
+        save_checkpoint(&db, &mut cp).unwrap();
+        stale.data.progress_summary = "late progress".into();
+        let error = save_checkpoint(&db, &mut stale).unwrap_err();
+        assert!(error.contains("另一保存者"));
+        let actual = load_checkpoint(&db, &cp.run_id).unwrap().unwrap();
+        eprintln!("AUDIT terminal-conflict expected=done actual={}", actual.phase.as_str());
+        assert_eq!(actual.phase, AgentPhase::Done, "a stale save is not an explicit resume and must not reopen a completed task");
+    }
+
+    #[test]
+    fn state_regression_failed_insert_must_not_advance_memory_revision() {
+        let db = state_regression_db();
+        let ctx = SandwichContext::new("system".into(), "goal".into());
+        let mut cp = AgentCheckpoint::new("audit-session".into(), &ctx);
+        db.0.lock().unwrap().execute_batch("CREATE TEMP TRIGGER audit_deny_insert BEFORE INSERT ON agent_checkpoints BEGIN SELECT RAISE(ABORT,'AUDIT simulated write failure'); END;").unwrap();
+        let error = save_checkpoint(&db, &mut cp).unwrap_err();
+        let saved = load_checkpoint(&db, &cp.run_id).unwrap();
+        eprintln!("AUDIT failed-insert error={} memory_version={} stored={}", error, cp.version, saved.is_some());
+        assert!(saved.is_none());
+        assert_eq!(cp.version, 0, "a failed INSERT must not leave the caller holding a committed-looking revision");
+        db.0.lock().unwrap().execute_batch("DROP TRIGGER audit_deny_insert;").unwrap();
+        save_checkpoint(&db, &mut cp).unwrap();
+        assert_eq!(cp.version, 1);
+    }
+
+    #[test]
+    fn state_regression_failed_update_must_not_advance_memory_revision() {
+        let db = state_regression_db();
+        let ctx = SandwichContext::new("system".into(), "goal".into());
+        let mut cp = AgentCheckpoint::new("audit-session".into(), &ctx);
+        save_checkpoint(&db, &mut cp).unwrap();
+        let old_version = cp.version;
+        db.0.lock().unwrap().execute_batch("CREATE TEMP TRIGGER audit_deny_update BEFORE UPDATE ON agent_checkpoints BEGIN SELECT RAISE(ABORT,'AUDIT simulated write failure'); END;").unwrap();
+        let error = save_checkpoint(&db, &mut cp).unwrap_err();
+        let saved = load_checkpoint(&db, &cp.run_id).unwrap().unwrap();
+        eprintln!("AUDIT failed-update error={} memory_version={} database_version={}", error, cp.version, saved.version);
+        assert_eq!(saved.version, old_version);
+        assert_eq!(cp.version, old_version, "a SQL error must restore the in-memory optimistic revision");
+        db.0.lock().unwrap().execute_batch("DROP TRIGGER audit_deny_update;").unwrap();
+        save_checkpoint(&db, &mut cp).unwrap();
+        assert_eq!(cp.version, old_version + 1);
+    }
+
+    #[test]
+    fn state_regression_independent_exclusion_is_merged_without_version_bump() {
+        let db = state_regression_db();
+        let ctx = SandwichContext::new("system".into(), "goal".into());
+        let mut cp = AgentCheckpoint::new("audit-session".into(), &ctx);
+        save_checkpoint(&db, &mut cp).unwrap();
+        let mut stale = cp.clone();
+        // 人工停止审查是独立控制增量，正式 stop_member 同样只改此字段、不推进执行版本。
+        db.0.lock().unwrap().execute(
+            "UPDATE agent_checkpoints SET snapshot_json=json_set(snapshot_json,'$.excluded_review_models',json(?2)) WHERE run_id=?1",
+            rusqlite::params![cp.run_id, "[\"stopped-model\"]"],
+        ).unwrap();
+        save_checkpoint(&db, &mut stale).unwrap();
+        let actual = load_checkpoint(&db, &cp.run_id).unwrap().unwrap();
+        assert!(actual.excluded_review_models.contains("stopped-model"));
+    }
+
+    #[test]
+    fn state_regression_receipt_sql_error_rolls_back_snapshot_and_memory() {
+        let (base, db) = mk_db("receipt-rollback");
+        let ctx = SandwichContext::new("sys".into(), "goal".into());
+        let mut cp = AgentCheckpoint::new("receipt-rollback-session".into(), &ctx);
+        save_checkpoint(&db, &mut cp).unwrap();
+        let rid = ledger_run(&db, &cp.run_id, "b", "plan_review", "succeeded", true);
+        let before = serde_json::to_value(&cp).unwrap();
+        db.0.lock().unwrap().execute_batch("CREATE TEMP TRIGGER fail_applied BEFORE UPDATE OF applied_at ON agent_child_runs BEGIN SELECT RAISE(ABORT,'receipt update failure'); END;").unwrap();
+        assert!(save_checkpoint_and_consume(&db, &mut cp, &ctx, &[AppliedReceipt {run_id:rid.clone(),verdict:None}]).is_err());
+        assert_eq!(serde_json::to_value(&cp).unwrap(), before);
+        let persisted = load_checkpoint(&db, &cp.run_id).unwrap().unwrap();
+        assert_eq!(serde_json::to_value(persisted).unwrap(), before);
+        let applied: Option<String> = db.0.lock().unwrap().query_row("SELECT applied_at FROM agent_child_runs WHERE id=?1", [&rid], |r| r.get(0)).unwrap();
+        assert!(applied.is_none());
+        db.0.lock().unwrap().execute_batch("DROP TRIGGER fail_applied;").unwrap();
+        save_checkpoint_and_consume(&db, &mut cp, &ctx, &[AppliedReceipt {run_id:rid.clone(),verdict:None}]).unwrap();
+        assert_eq!(cp.version, 2);
+        drop(db);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn state_regression_commit_failure_does_not_publish_candidate_revision() {
+        let (base, db) = mk_db("commit-rollback");
+        let ctx = SandwichContext::new("sys".into(), "goal".into());
+        let mut cp = AgentCheckpoint::new("commit-rollback-session".into(), &ctx);
+        save_checkpoint(&db, &mut cp).unwrap();
+        let rid = ledger_run(&db, &cp.run_id, "b", "plan_review", "succeeded", true);
+        let before = serde_json::to_value(&cp).unwrap();
+        db.0.lock().unwrap().execute_batch("PRAGMA foreign_keys=ON;
+            CREATE TABLE audit_parent(id INTEGER PRIMARY KEY);
+            CREATE TABLE audit_child(id INTEGER REFERENCES audit_parent(id) DEFERRABLE INITIALLY DEFERRED);
+            CREATE TEMP TRIGGER fail_commit AFTER UPDATE ON agent_checkpoints BEGIN INSERT INTO audit_child VALUES(999); END;").unwrap();
+        assert!(save_checkpoint_and_consume(&db, &mut cp, &ctx, &[AppliedReceipt {run_id:rid.clone(),verdict:None}]).is_err());
+        assert_eq!(serde_json::to_value(&cp).unwrap(), before);
+        assert_eq!(serde_json::to_value(load_checkpoint(&db, &cp.run_id).unwrap().unwrap()).unwrap(), before);
+        let applied: Option<String> = db.0.lock().unwrap().query_row("SELECT applied_at FROM agent_child_runs WHERE id=?1", [&rid], |r| r.get(0)).unwrap();
+        assert!(applied.is_none());
+        drop(db);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn state_regression_deleted_snapshot_is_not_recreated_by_stale_save() {
+        let db = state_regression_db();
+        let ctx = SandwichContext::new("sys".into(), "goal".into());
+        let mut cp = AgentCheckpoint::new("deleted-session".into(), &ctx);
+        save_checkpoint(&db, &mut cp).unwrap();
+        db.0.lock().unwrap().execute("DELETE FROM agent_checkpoints WHERE run_id=?1", [&cp.run_id]).unwrap();
+        assert!(save_checkpoint(&db, &mut cp).is_err());
+        assert!(load_checkpoint(&db, &cp.run_id).unwrap().is_none());
     }

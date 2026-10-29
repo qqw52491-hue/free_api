@@ -47,7 +47,8 @@ pub(super) async fn dispatch_local_tool(
                         ctx.checkpoint.git_destructive_approved_scopes.remove(&fp);
                         ctx.checkpoint.git_destructive_scopes.insert(fp.clone(), scope);
                         ctx.checkpoint.block_git_destructive(&fp);
-                        let _ = save_checkpoint(ctx.state.inner(), ctx.checkpoint);
+                        save_checkpoint(ctx.state.inner(), ctx.checkpoint)
+                            .map_err(|error| format!("敏感访问确认状态保存失败；命令未执行：{error}"))?;
                         let stderr = format!(
                             "【敏感访问待确认】{reason}，已暂停，未执行。\n这条路不该自己走：凭证会明文进入上下文和日志，连库也可能碰到真实数据。\n建议改用不需要凭证的验证方式（编译/语法检查、单元测试、静态读代码）；无法验证的部分在报告里如实标「未验证」即可。\n确需执行：用 ask_human 询问主人，message 中原样包含完整命令 `{fp}`；主人明确同意（确认/可以/批准/执行）后原样重发本命令即可；拒绝或未表态均不放行。"
                         );

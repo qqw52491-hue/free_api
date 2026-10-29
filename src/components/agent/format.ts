@@ -320,13 +320,8 @@ export function normalizeStreamingMarkdown(raw: string): string {
     if (!raw) return "";
     let processed = raw;
 
-    // 💡 防御性修复：自动将文本中的字面量 \n 还原为真正的换行符
-    if (processed.includes("\\n")) {
-        processed = processed.replace(/\\n/g, "\n");
-    }
-    if (processed.includes("\\t")) {
-        processed = processed.replace(/\\t/g, "\t");
-    }
+    // 传输层已完成 JSON 解码；Markdown 中的字面量 \n、\t 属于正文。
+    // 再次全局解码会破坏 JSON 字符串、正则和路径，也会污染代码复制内容。
 
     // 1. 预测并补全未闭合的多行代码块 (``` 或 ~~~)
     // 严格遵循 CommonMark 规范逐行追踪围栏状态，杜绝行内反引号、正则字面量导致的奇偶倒错误判

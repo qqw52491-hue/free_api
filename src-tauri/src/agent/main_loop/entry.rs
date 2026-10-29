@@ -36,8 +36,8 @@ use crate::agent::workspace_lock::{acquire_workspace_lock, ChildWorkspaceGuard};
 
 /// 推进后端运行状态，并向前端发送独立于旧进度事件的权威状态快照。
 /// 旧的 agent-progress-* 事件保持不变，以便前端逐步迁移。
-pub fn advance_run_state(
-    app: &AppHandle,
+pub fn advance_run_state<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     session_id: &str,
     machine: &mut AgentRunMachine,
     event: AgentRunEvent,
