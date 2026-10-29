@@ -1453,7 +1453,7 @@
                                 type="button"
                                 class="msg-copy-btn"
                                 :class="{ copied: copiedMessageId === `comp-hdr-${entry.id}` }"
-                                :title="copiedMessageId === `comp-hdr-${entry.id}` ? '已复制到剪贴板' : '复制最终回答 (Markdown)'"
+                                :title="copiedMessageId === `comp-hdr-${entry.id}` ? '已复制到剪贴板' : (entry.failed ? '复制完整状态信息' : '复制最终回答 (Markdown)')"
                                 @click.stop="copyMessageContent(`comp-hdr-${entry.id}`, entry.summary || entry.title)"
                             >
                                 <svg v-if="copiedMessageId === `comp-hdr-${entry.id}`" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -1467,7 +1467,14 @@
                             </button>
                         </div>
                     </div>
+                    <AgentOutcomeNotice
+                        v-if="entry.failed"
+                        :kind="entry.outcome === 'cancelled' ? 'cancelled' : 'failed'"
+                        :content="entry.summary || entry.title"
+                        @open-preview="$emit('open-preview', $event)"
+                    />
                     <div
+                        v-else
                         class="summary-rich"
                         v-deferred-history="historyEntryIds.has(entry.id) && !isStreamingCompletion(entry)"
                         :class="{ 'is-streaming-text': isStreamingCompletion(entry) }"
@@ -1534,6 +1541,7 @@ import type { AgentArtifactInput, ArtifactDescriptor } from "../../types/artifac
 import { formatClock, formatDurationSeconds, formatMilliseconds, getToolIcon, shortText } from "./format";
 import RichContentRenderer from "../charts/RichContentRenderer.vue";
 import AgentHumanInterventionCard from "./AgentHumanInterventionCard.vue";
+import AgentOutcomeNotice from "./AgentOutcomeNotice.vue";
 import { toolViewComponents } from "./views";
 import ArtifactList from "../artifacts/ArtifactList.vue";
 import FileIcon from "./FileIcon.vue";
@@ -1822,7 +1830,7 @@ type TimelineEntry =
     | { id: string; type: "review"; timestamp: number }
     | { id: string; type: "user"; timestamp: number; content: string }
     | { id: string; type: "message"; timestamp: number; role: string; content: string; isHuman: boolean; anchorId?: string; question?: string; stepId?: string }
-    | { id: string; type: "completion"; timestamp: number; title: string; summary: string; artifacts: AgentArtifactInput[]; failed: boolean }
+    | { id: string; type: "completion"; timestamp: number; title: string; summary: string; artifacts: AgentArtifactInput[]; failed: boolean; outcome?: 'succeeded' | 'cancelled' | 'failed' }
     | { id: "active-thought"; type: "active-thought"; timestamp: number };
 
 const props = withDefaults(
@@ -2241,7 +2249,8 @@ function getCompletionDisplayText(entry: { id: string; summary?: string; title?:
     return typewriterTexts[entry.id] || fullText.slice(0, 1);
 }
 
-function isStreamingCompletion(entry: { id: string; summary?: string; title?: string }): boolean {
+function isStreamingCompletion(entry: { id: string; summary?: string; title?: string; failed?: boolean }): boolean {
+    if (entry.failed) return false;
     if (typewriterDoneIds.has(entry.id)) return false;
     const target = typewriterTargets.get(entry.id) || entry.summary || entry.title || '';
     const current = typewriterTexts[entry.id] || '';
@@ -3948,6 +3957,7 @@ const historyTimelineEntries = computed<TimelineEntry[]>(() => {
                 summary: turn.summary,
                 artifacts: completionArtifacts(turn.artifacts),
                 failed,
+                outcome: isCancelled ? 'cancelled' : (failed ? 'failed' : 'succeeded'),
             });
         }
     }
@@ -3997,7 +4007,7 @@ function currentTimeline(): TimelineEntry[] {
     }
     // 仅完成/失败通知可以发布终态正文。停止运行、流式草稿和产物存在均不代表交付。
     if (props.completionMessage) {
-        timeline.push({ id: "live-completion", type: "completion", timestamp: Date.now(), title: props.completionMessage, summary: props.finalSummary || props.completionMessage, artifacts: props.finalArtifacts, failed: props.hasError || props.runState === "failed" || props.runState === "cancelled" });
+        timeline.push({ id: "live-completion", type: "completion", timestamp: Date.now(), title: props.completionMessage, summary: props.finalSummary || props.completionMessage, artifacts: props.finalArtifacts, failed: props.hasError || props.runState === "failed" || props.runState === "cancelled", outcome: props.runState === 'cancelled' ? 'cancelled' : (props.hasError || props.runState === 'failed' ? 'failed' : 'succeeded') });
     }
     return timeline;
 }

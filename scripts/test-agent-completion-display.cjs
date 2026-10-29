@@ -54,7 +54,7 @@ async function start() {
     await emit('channel-run-started', {session_id:'existing-session', goal:'final answer regression'});
     return s;
 }
-function draft(text) { progress({type:'summary_stream', content:text}); }
+function draft(text, done = false) { progress({type:'summary_stream', content:text, done}); }
 async function main() {
     const fixtures = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../test/fixtures/finish-summary-fragments.json'), 'utf8'));
     for (const fixture of fixtures) {
@@ -84,7 +84,8 @@ async function main() {
         assert.equal(s.finalSummary.value, '', 'unaccepted draft must not become a final summary');
         assert.equal(entries().length, 0, 'no final response while generating a summary');
     }
-    draft(long);
+    // The UI coalesces streaming chunks; the real final chunk flushes the batch.
+    draft(long, true);
     assert.equal(s.completionPending.value, true);
     assert.equal(pendingView(s).type, pendingNode.tag);
     assert(viewText(pendingView(s)).includes('尚未正式交付'));
@@ -129,6 +130,7 @@ async function main() {
     assert.equal(entries().length,1);
     assert.equal(entries()[0].summary,'审查通道失败，任务未完成');
     assert.equal(entries()[0].failed,true);
+    assert.equal(entries()[0].outcome,'failed');
 
     s = await start(); entries = timeline(s); draft(long);
     await s.requestStop();
@@ -137,6 +139,7 @@ async function main() {
     assert.equal(s.completionPending.value,false);
     assert.equal(entries().length,1);
     assert.equal(entries()[0].failed,true,'manual stop is not successful delivery');
+    assert.equal(entries()[0].outcome,'cancelled','manual stop keeps its own presentation state');
     assert(!entries()[0].summary.includes(long));
     progress({type:'complete',success:true,finish:{summary:long}});
     assert.equal(s.finalSummary.value,'','late completion cannot revive a cancelled draft');

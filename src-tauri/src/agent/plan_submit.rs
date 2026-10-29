@@ -248,7 +248,7 @@ pub async fn handle_submit_plan(
     {
         return reject(err, "plan_liveness:submit_plan_invalid");
     }
-    // 任务入口分流判决简报并入 custom_inputs（verified_facts/hard_constraints 保留键升格一级小节）
+    // 入口分流作为 triage_reference 附给子任务，不认证为事实或禁止事项
     let custom_inputs = match checkpoint.triage_verdict.as_ref() {
         Some(v) => crate::agent::triage::merge_brief_into_inputs(Some(&custom_inputs), v),
         None => custom_inputs,

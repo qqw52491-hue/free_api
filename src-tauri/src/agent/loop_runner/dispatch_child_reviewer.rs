@@ -165,7 +165,7 @@ pub(super) async fn dispatch_child_reviewer(
                             dispatch_input_incomplete = true;
                             continue;
                         }
-                        // 任务入口分流判决简报并入 custom_inputs（verified_facts/hard_constraints 保留键升格一级小节）
+                        // 入口分流作为 triage_reference 附给子任务，不认证为事实或禁止事项
                         let merged_inputs = ctx.checkpoint
                             .triage_verdict
                             .as_ref()

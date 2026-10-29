@@ -270,9 +270,8 @@ impl TriageVerdict {
     }
 }
 
-/// 把任务入口分流判决合并进子任务派发的 custom_inputs（纯函数，可单测）：
-/// verified_facts / hard_constraints 是渲染层保留键，会被升格为独立一级小节；
-/// 模型自填的同名键不覆盖、改为数组合并（自填在前、判决生成在后）。
+/// 把任务入口模型的初步判断作为参考附给子任务，不认证为事实或升级为禁止事项。
+/// 调用方已有的事实、约束与完成定义原样保留；当前有效审批/权限由执行入口处理。
 pub fn merge_brief_into_inputs(
     inputs: Option<&serde_json::Value>,
     verdict: &TriageVerdict,
@@ -296,27 +295,31 @@ pub fn merge_brief_into_inputs(
         obj.insert(key.to_string(), serde_json::Value::Array(items));
     };
 
-    let mut facts = Vec::new();
+    let mut reference = Vec::new();
     if !verdict.route.trim().is_empty() {
         let reason = verdict.reason.trim();
-        facts.push(if reason.is_empty() {
-            format!("任务入口分流判决 route={}", verdict.route)
+        reference.push(if reason.is_empty() {
+            format!("入口初步分流 route={}；可依据用户目标与后续证据重新评估", verdict.route)
         } else {
-            format!("任务入口分流判决 route={}（{}）", verdict.route, reason)
+            format!("入口初步分流 route={}（{}）；可依据用户目标与后续证据重新评估", verdict.route, reason)
         });
     }
     if !verdict.evidence_policy.trim().is_empty() {
-        facts.push(format!("证据要求 evidence_policy={}", verdict.evidence_policy));
+        reference.push(format!("入口证据策略 evidence_policy={}；结合当前有效审查要求核对", verdict.evidence_policy));
     }
-    append_items(&mut obj, "verified_facts", facts);
-
-    let triggers: Vec<String> = verdict
+    reference.extend(verdict
         .escalation_triggers
         .iter()
-        .map(|t| t.trim().to_string())
+        .map(|t| t.trim())
         .filter(|t| !t.is_empty())
-        .collect();
-    append_items(&mut obj, "hard_constraints", triggers);
+        .map(|t| format!("建议重新评估或进入方案审查的情形：{}（升级条件，不是禁止事项）", t)));
+    if let Some(reason) = verdict.fallback.as_deref() {
+        reference.push(format!("分流失败后的保守回退：{}；不代表已核实任务复杂度", reason));
+    }
+    if !reference.is_empty() {
+        reference.push("以上参考不替代用户目标，也不直接变更当前有效的审批、权限或审查状态。".to_string());
+    }
+    append_items(&mut obj, "triage_reference", reference);
 
     if let Some(brief) = verdict.investigation_brief_text() {
         append_items(&mut obj, "investigation_reference", vec![brief]);
@@ -860,33 +863,34 @@ mod tests {
         }"#,
         );
 
-        // 无 inputs：判决生成 verified_facts 与 hard_constraints
+        // 模型分流只能附作参考，不认证为事实，也不把升级条件变成禁止事项。
         let merged = merge_brief_into_inputs(None, &verdict);
-        let facts = merged["verified_facts"].as_array().unwrap();
-        assert!(facts.iter().any(|f| f.as_str().unwrap().contains("route=technical_plan")));
-        assert!(facts.iter().any(|f| f.as_str().unwrap().contains("evidence_policy=code_refs")));
-        let constraints = merged["hard_constraints"].as_array().unwrap();
-        assert_eq!(constraints.len(), 2);
-        assert!(constraints.iter().any(|c| c.as_str().unwrap().contains("鉴权改动")));
+        assert!(merged.get("verified_facts").is_none());
+        assert!(merged.get("hard_constraints").is_none());
+        let reference = merged["triage_reference"].as_array().unwrap();
+        assert!(reference.iter().any(|f| f.as_str().unwrap().contains("route=technical_plan")));
+        assert!(reference.iter().any(|f| f.as_str().unwrap().contains("evidence_policy=code_refs")));
+        assert!(reference.iter().any(|f| f.as_str().unwrap().contains("鉴权改动（升级条件，不是禁止事项）")));
 
         // 非 object inputs：按空对象处理，普通键与判决键共存
         let merged = merge_brief_into_inputs(Some(&json!("junk")), &verdict);
-        assert!(merged["verified_facts"].is_array());
+        assert!(merged["triage_reference"].is_array());
+        assert!(merged.get("verified_facts").is_none());
 
-        // 模型自填同键不覆盖：自填在前、判决在后
+        // 调用方的事实线索、约束和完成定义原样保留，不混入初判或升级条件。
         let inputs = json!({
             "plan_summary": "方案A",
             "verified_facts": ["模型自填事实"],
-            "hard_constraints": "禁止删除文件"
+            "hard_constraints": "用户明确禁止删除文件",
+            "definition_of_done": ["完成迁移并验证同步链路"],
+            "triage_reference": "调用方提供的旧分流背景"
         });
         let merged = merge_brief_into_inputs(Some(&inputs), &verdict);
         assert_eq!(merged["plan_summary"], "方案A");
-        let facts = merged["verified_facts"].as_array().unwrap();
-        assert_eq!(facts[0], "模型自填事实", "模型自填的必须在前");
-        assert!(facts.len() > 1, "判决事实应追加在后");
-        let constraints = merged["hard_constraints"].as_array().unwrap();
-        assert_eq!(constraints[0], "禁止删除文件");
-        assert_eq!(constraints.len(), 3);
+        assert_eq!(merged["verified_facts"], inputs["verified_facts"]);
+        assert_eq!(merged["hard_constraints"], inputs["hard_constraints"]);
+        assert_eq!(merged["definition_of_done"], inputs["definition_of_done"]);
+        assert_eq!(merged["triage_reference"][0], "调用方提供的旧分流背景");
     }
 
     #[test]
@@ -905,6 +909,52 @@ mod tests {
         let merged = merge_brief_into_inputs(Some(&json!({"a": 1})), &verdict);
         assert!(merged.get("hard_constraints").is_none());
         assert_eq!(merged["a"], 1);
+        assert!(merged["triage_reference"].as_array().unwrap().iter()
+            .any(|v| v.as_str().unwrap().contains("不代表已核实任务复杂度")));
+
+        verdict.route.clear();
+        verdict.evidence_policy.clear();
+        verdict.fallback = None;
+        let merged = merge_brief_into_inputs(None, &verdict);
+        assert_eq!(merged,json!({}),"没有参考内容时不生成空提示或约束");
+    }
+
+    #[tokio::test]
+    async fn migration_escalation_is_rendered_as_reference_and_preserves_actual_constraints() {
+        // 复现实际事故：入口判为只读，但主任务需要补齐迁移并已提出补写方案。
+        let verdict = parse(r#"{
+            "route":"direct",
+            "reason":"只读代码排查与原理解释任务",
+            "evidence_policy":"code_refs",
+            "escalation_triggers":["排查后确认需要修改或新增跨库抽取定时任务代码","涉及调度框架配置或多模块结构性代码调整"]
+        }"#);
+        let inputs = json!({
+            "user_goal":"把审计系统完整迁移到 JFinal，补齐数据抽取",
+            "plan_summary":"补充 PG 连接、抽取服务与 Cron4j 调度，并验证同步",
+            "verified_facts":["用户报告对话后管理端没有数据，需核对落库链路"],
+            "hard_constraints":["用户要求保留原有数据，不得清空数据库"],
+            "definition_of_done":["实际验证 PG 到 MySQL 的数据抽取链路"]
+        });
+        let merged = merge_brief_into_inputs(Some(&inputs), &verdict);
+        for key in ["user_goal","plan_summary","verified_facts","hard_constraints","definition_of_done"] {
+            assert_eq!(merged[key],inputs[key],"入口初判不得覆盖 {}",key);
+        }
+        let rendered = crate::agent::context_collector::assemble_focus_context(
+            &[],std::path::Path::new("."),None,Some(&merged)).await.unwrap();
+        let (before_reference, reference) = rendered.split_once("【🧭 入口分流参考").unwrap();
+        assert!(before_reference.contains("不得清空数据库"));
+        assert!(!before_reference.contains("route=direct"));
+        assert!(!before_reference.contains("需要修改或新增跨库抽取"));
+        assert!(reference.contains("route=direct") && reference.contains("只读代码排查"));
+        assert!(reference.contains("可依据用户目标与后续证据重新评估"));
+        assert!(reference.contains("升级条件，不是禁止事项"));
+        assert!(reference.contains("不直接变更当前有效的审批、权限或审查状态"));
+        assert!(reference.contains("补充 PG 连接、抽取服务与 Cron4j 调度"));
+        assert!(!rendered.contains("已由系统担保为真") && !rendered.contains("禁止重新推导或质疑"));
+        // 提供分流参考不改变真实写入升级规则。
+        let context = SandwichContext::new("migration".into(),"迁移".into());
+        let inst: AgentInstruction = serde_json::from_value(json!({"tool":"local_file","action":"delete","command":{"path":"src/old.java"}})).unwrap();
+        assert_eq!(write_floor_violation(&inst,&context,"migration"),Some("destructive_action"));
     }
 }
 

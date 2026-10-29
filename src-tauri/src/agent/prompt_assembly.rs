@@ -104,14 +104,14 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         name: "child_reviewer",
         summary: "受限只读子调查：审查父证据包，回交带 ID/严重级别/物理行号的结构化 findings 与 routing（certain/needs_alignment/blocked）；收到结果后必须先分诊再行动：逐条判定接受/反驳(须附证据)/需澄清，不要直接照改，也不要直接忽略；不会调用工具或写入文件；支持单发或 dispatches 批量并发派发多个专家会审",
         actions: &[
-            "investigate(question: string, role?: string [挂载专精角色卡标识], evidence_refs?: string[] [去重后合计 <=16384 字符，含分隔；无固定条数或单条长度限制], evidence_excerpt?: string <=6000 chars, resource_ids?: string[] <=2 [仅当前项目会话的受管资源；不得传路径] 【⚠️证据三选一必填：refs/excerpt/resource_ids 至少供给一项（通常为你刚读过的文件路径列表），本次调用未提供三者中的任一项会被拒】, custom_inputs?: object [专项业务参数；角色卡声明必填项必须供给；保留键 verified_facts/hard_constraints/definition_of_done 会升格为一级小节优先呈现；注意 plan_summary 不算证据], dispatches?: Array<{question, role?, evidence_refs|evidence_excerpt|resource_ids 三选一必填, ...}> [一步批量并发派发多个审查员会审])",
+            "investigate(question: string, role?: string [挂载专精角色卡标识], evidence_refs?: string[] [去重后合计 <=16384 字符，含分隔；无固定条数或单条长度限制], evidence_excerpt?: string <=6000 chars, resource_ids?: string[] <=2 [仅当前项目会话的受管资源；不得传路径] 【⚠️证据三选一必填：refs/excerpt/resource_ids 至少供给一项（通常为你刚读过的文件路径列表），本次调用未提供三者中的任一项会被拒】, custom_inputs?: object [专项业务参数；角色卡声明必填项必须供给；verified_facts/hard_constraints/definition_of_done 分节呈现，字段名不认证来源；入口分流另以可修正的 triage_reference 附带；注意 plan_summary 不算证据], dispatches?: Array<{question, role?, evidence_refs|evidence_excerpt|resource_ids 三选一必填, ...}> [一步批量并发派发多个审查员会审])",
         ],
     },
     BuiltinToolSpec {
         name: "child_writer",
         summary: "L3 隔离写入 worker：宿主把工作区复制成私有副本，worker 在副本内修改代码并自行运行你指定的测试命令，回交逐文件 diff 与测试证据；你审阅后可调用 apply 让宿主把补丁原样机械合入真实工作区（任一文件指纹冲突即整体拒绝，绝不覆盖），也可自行用常规写工具落实；支持单发或 dispatches 批量派发",
         actions: &[
-            "dispatch(task: string, test_command: string [单条，如 npm test], focus_paths?: string[] <=5, role?: string, context_excerpts?: {background?: string, todo_slice?: string[], file_hints?: string[], prior_findings?: string[]}, custom_inputs?: object [专项业务参数；保留键 verified_facts/hard_constraints/definition_of_done 升格一级小节], dispatches?: Array<{task, test_command, ...}> [一步批量派发多个 writer])",
+            "dispatch(task: string, test_command: string [单条，如 npm test], focus_paths?: string[] <=5, role?: string, context_excerpts?: {background?: string, todo_slice?: string[], file_hints?: string[], prior_findings?: string[]}, custom_inputs?: object [专项业务参数；verified_facts/hard_constraints/definition_of_done 分节呈现，字段名不认证来源；入口分流另以可修正的 triage_reference 附带], dispatches?: Array<{task, test_command, ...}> [一步批量派发多个 writer])",
             "apply(child_run_id: string) [审阅 diff 后机械合入：宿主逐文件现算冲突指纹，全部干净才搬运，任何冲突整体拒绝；副本已回收时自动退化到补丁工件合入]",
         ],
     },
@@ -119,7 +119,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         name: "child_worker",
         summary: "L2 只读侦察 worker：独立上下文中自行读文件/列目录/执行只读命令完成侦察，回交结构化结论；异步返回 job_id，结果经 wait_jobs 或信箱回收。批量派发直接用 {\"tool\":\"child_worker\",\"dispatches\":[{\"task\":\"调查模块A的调用方\",\"focus_paths\":[\"src/a\"]},{\"task\":\"调查模块B的输入来源\",\"focus_paths\":[\"src/b\"]}]}，替换为实际自包含任务；不要放进同步 parallel 执行树。何时用：互不依赖的多路径调查适合一步批量派发；侦察兵默认使用 Flash 档，主 Agent 负责核对证据与决策",
         actions: &[
-            "dispatch(task: string [自包含侦察任务], focus_paths?: string[] <=3 [工作区内路径], role?: string, context_excerpts?: {background?: string, todo_slice?: string[], file_hints?: string[], prior_findings?: string[]}, custom_inputs?: object [专项业务参数；保留键 verified_facts/hard_constraints/definition_of_done 升格一级小节], dispatches?: Array<{task, focus_paths?, role?, ...}> [一步批量派发多个 worker])",
+            "dispatch(task: string [自包含侦察任务], focus_paths?: string[] <=3 [工作区内路径], role?: string, context_excerpts?: {background?: string, todo_slice?: string[], file_hints?: string[], prior_findings?: string[]}, custom_inputs?: object [专项业务参数；verified_facts/hard_constraints/definition_of_done 分节呈现，字段名不认证来源；入口分流另以可修正的 triage_reference 附带], dispatches?: Array<{task, focus_paths?, role?, ...}> [一步批量派发多个 worker])",
         ],
     },
     BuiltinToolSpec {

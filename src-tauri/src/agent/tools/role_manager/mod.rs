@@ -671,8 +671,8 @@ pub fn build_role_cards_menu_filtered(db: &DbState, disabled_names: &[String]) -
     out.push_str("> 2. 目标：要产出什么（清晰可验收的标准）；\n");
     out.push_str("> 3. 相关材料：涉及的文件路径/既有结论/约束。\n");
     out.push_str("> 建议在派发参数中携带可选的 context_excerpts（包含 background、todo_slice、file_hints、prior_findings），避免模糊派发。\n");
-    out.push_str("> custom_inputs 支持三个渲染保留键：`verified_facts`（宿主已核实事实）、`hard_constraints`（判定边界）、`definition_of_done`（完成定义），\n");
-    out.push_str("> 它们会被升格为独立一级小节优先呈现给子 Agent；派发审查/写作类子任务时建议主动填写，钉死事实与验收标准。\n");
+    out.push_str("> custom_inputs 可按需提供 `verified_facts`（附来源的事实线索）、`hard_constraints`（有用户要求或权限依据的约束）、`definition_of_done`（完成定义），分节呈现给子 Agent。字段名不代表宿主认证，模型推断不能冒充已核实事实。\n");
+    out.push_str("> 宿主另附 `triage_reference` 传递可修正的入口分流参考；升级条件表示需要重新评估或进入审查，不是禁止事项。\n");
     out.push_str("> 若角色卡声明了 input_schema 必填入参，custom_inputs 必须实际供给，否则派发会被系统拒绝。\n");
     Ok(out)
 }
