@@ -90,6 +90,11 @@ pub(crate) fn update_project(project: &str, directories: &[ProjectDirectory]) {
         entry.directories = directories.to_vec();
     }
 }
+pub(crate) fn project_sessions(project: &str) -> Vec<(String, PathBuf)> {
+    SESSIONS.read().unwrap_or_else(|e| e.into_inner()).iter()
+        .filter(|(_, entry)| entry.project_id.as_deref() == Some(project))
+        .map(|(session, entry)| (session.clone(), entry.primary.clone())).collect()
+}
 pub(crate) fn revoke_project(project: &str) {
     // 保留运行中会话的主目录边界，只撤销附加权限。
     update_project(project, &[]);

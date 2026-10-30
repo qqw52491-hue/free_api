@@ -81,7 +81,7 @@ impl Scenario {
     async fn evaluate(&mut self, rx: &mut watch::Receiver<u64>) -> CompletionEvaluation {
         let app = tauri::test::mock_app();
         let instruction: AgentInstruction = serde_json::from_value(json!({"tool":"finish",
-            "command":{"summary":"运行状态诊断报告"}}))
+            "command":{"summary":"运行状态诊断报告", "files":["runtime/status.json"]}}))
         .unwrap();
         evaluate_completion(
             app.handle(),
@@ -152,11 +152,11 @@ async fn material_changes_are_reviewed_and_real_blockers_are_preserved() {
             .iter()
             .any(|s| s.contains("runtime/status.json")));
         if !blocking {
-            let current = scenario.baseline.collect_review_snapshot(
-                &scenario.workspace,
-                &scenario.context,
-                scenario.start,
-            );
+            let current = crate::agent::reviewer_gatekeeper::task_review_snapshot(
+                &scenario.mock.db, &scenario.session, &scenario.workspace,
+                &scenario.context, &scenario.baseline, scenario.start,
+                &["runtime/status.json".into()],
+            ).0;
             assert_eq!(evaluation.receipt.diff_hash, current.hash);
             scenario.checkpoint.pending_finalization = Some(evaluation.receipt);
             let cached = scenario.evaluate(&mut rx).await;
@@ -185,11 +185,11 @@ async fn continuously_changing_material_is_disclosed_without_an_endless_review_l
         .material_notices
         .iter()
         .any(|s| s.contains("未取得独立审查结论")));
-    let current = scenario.baseline.collect_review_snapshot(
-        &scenario.workspace,
-        &scenario.context,
-        scenario.start,
-    );
+    let current = crate::agent::reviewer_gatekeeper::task_review_snapshot(
+        &scenario.mock.db, &scenario.session, &scenario.workspace,
+        &scenario.context, &scenario.baseline, scenario.start,
+        &["runtime/status.json".into()],
+    ).0;
     assert!(
         !evaluation
             .receipt
@@ -207,7 +207,7 @@ async fn continuously_changing_material_is_disclosed_without_an_endless_review_l
 }
 
 #[tokio::test]
-async fn ignored_runtime_output_in_clean_git_fallback_has_exact_change_paths() {
+async fn explicitly_delivered_ignored_runtime_output_has_exact_change_paths() {
     let mut scenario = Scenario::new(vec![pass()], false, None).await;
     std::fs::write(scenario.workspace.join(".gitignore"), "runtime/\n").unwrap();
     for args in [

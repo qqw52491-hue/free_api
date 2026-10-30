@@ -31,10 +31,13 @@ pub struct ReviewObligation {
     #[serde(default)]
     pub waived_reason: Option<String>,
     /// 当前义务使用的可执行验证命令；路径、环境或实现变化时允许显式修订。
-    /// 退出码 0 = 该义务客观成立；非 0 = 收尾门禁 blocker。None = 纯主观义务。
+    /// 退出码 0 只表示此 Shell 命令正常结束；覆盖性由审查核验，非 0 进入现有阻塞。
+    /// None 表示此义务没有绑定可执行命令。
     #[serde(default)]
     pub verify_command: Option<String>,
-    /// 当前申报的验证脚本内容。执行此快照以明确实际运行版本，允许后续显式修订。
+    /// 可选验证脚本正文；verify_command 用 "$FREE_API_VERIFY_SCRIPT" 引用宿主快照。
+    /// 普通验证命令无需提供此字段；显式空字符串撤下快照，局部更新的 null/缺失保持旧值。
+    /// 解释器、参数与方法允许显式修订。
     #[serde(default)]
     pub verify_script: Option<String>,
     /// 当前脚本内容的 SHA-256（执行前核验副本完整性）。
@@ -100,6 +103,10 @@ impl ReviewContract {
                     if item.verify_sha256.is_none() && !command_changed && !script_changed {
                         item.verify_sha256 = e.verify_sha256.clone();
                     }
+                }
+                if item.verify_script.as_deref().is_some_and(|s| s.trim().is_empty()) {
+                    item.verify_script = None;
+                    item.verify_sha256 = None;
                 }
                 if item.closure_form.is_none() {
                     item.closure_form = e.closure_form.clone();
@@ -522,6 +529,24 @@ mod claim_merge_tests {
         let t = c.closure_template().unwrap();
         assert!(!t.contains("正常登录"));
         assert!(!t.contains("scope_statement") && !t.contains("verify_command"));
+    }
+
+    #[test]
+    fn explicit_empty_script_removes_snapshot_and_hash_but_partial_updates_preserve_them() {
+        let mut c = current();
+        c.obligations[0].verify_command = Some("sh verify.sh".into());
+        c.obligations[0].verify_script = Some("exit 9".into());
+        c.obligations[0].verify_sha256 = Some("old-hash".into());
+        c.apply_update(contract(json!({"obligations":[{
+            "id":"a", "status":"open", "verify_script":null
+        }]}))).unwrap();
+        assert_eq!(c.obligations[0].verify_script.as_deref(), Some("exit 9"));
+        c.apply_update(contract(json!({"obligations":[{
+            "id":"a", "status":"open", "verify_script":""
+        }]}))).unwrap();
+        assert!(c.obligations[0].verify_script.is_none());
+        assert!(c.obligations[0].verify_sha256.is_none());
+        assert_eq!(c.obligations[0].verify_command.as_deref(), Some("sh verify.sh"));
     }
 
     #[test]

@@ -102,9 +102,9 @@ pub enum ReceiptVerification {
     Failed { details: String },
     /// 本轮没有需要宿主验证的新写入。
     NotRequired,
-    /// 宿主已执行契约义务命令与自适应验证，全部通过。
+    /// 已有验证申报或宿主执行回执；证据来源见 evidence，充分性仍由终审核验。
     Verified { evidence: String },
-    /// 交付被系统豁免（纯静态资源 / 无可推断验证命令）。
+    /// 本轮未追加验证或显式豁免；原因须在交付中披露，不代表测试通过。
     Waived { reason: String },
 }
 
@@ -153,6 +153,9 @@ impl ReceiptReview {
 /// 复用必须核对运行、验收契约、产物材料和执行副作用；旧回执本身不是新 PASS。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FrozenVerificationRun {
+    /// 宿主执行语义版本；旧版脚本绑定存在缺陷，其通过回执不作为新执行事实复用。
+    #[serde(default)]
+    pub executor_version: u32,
     pub run_id: String,
     pub workspace_root: String,
     pub material_fingerprint: String,

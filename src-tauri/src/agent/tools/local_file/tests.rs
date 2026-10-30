@@ -14,6 +14,43 @@ fn mock_db() -> DbState {
 }
 
 #[test]
+fn multi_directory_receipts_and_review_index_keep_the_resolved_file() {
+    use crate::agent::workspace_access::{self, DirectoryAccess, ProjectDirectory};
+    let ws = temp_dir();
+    let extra = temp_dir();
+    let target = extra.join("other project");
+    std::fs::create_dir_all(&target).unwrap();
+    let target = target.canonicalize().unwrap();
+    let file = target.join("same.txt");
+    std::fs::write(ws.join("same.txt"), "SOURCE_UNCHANGED").unwrap();
+    let sid = format!("file-location-{}", uuid::Uuid::new_v4());
+    workspace_access::bind_conversation(&sid, &ws, vec![ProjectDirectory {
+        path: target.to_string_lossy().into_owned(), access: DirectoryAccess::ReadWrite,
+    }]);
+    let db = mock_db();
+    let written = dispatch(&db, &sid, "write", &json!({"path":file,"content":"TARGET_BEFORE"}), Some(&ws));
+    assert!(written.success, "{}", written.stderr);
+    let edited = dispatch(&db, &sid, "edit", &json!({"path":file,"target_content":"TARGET_BEFORE","replacement_content":"TARGET_AFTER"}), Some(&ws));
+    assert!(edited.success, "{}", edited.stderr);
+    for result in [&written, &edited] {
+        let value: serde_json::Value = serde_json::from_str(&result.stdout).unwrap();
+        assert_eq!(value["resolved_path"], json!(file));
+        assert_eq!(result.view.as_ref().unwrap()["resolved_path"], json!(file));
+        assert!(crate::agent::reviewer_gatekeeper::step_trace_snippet(&result.stdout).contains(file.to_str().unwrap()));
+    }
+    let read = dispatch(&db, &sid, "read", &json!({"path":file}), Some(&ws));
+    assert!(read.success && read.stdout.contains("TARGET_AFTER"));
+    assert!(read.stdout.contains(&format!("实际路径: {}", file.display())));
+    let listed = dispatch(&db, &sid, "list", &json!({"path":target}), Some(&ws));
+    assert!(listed.success, "{}", listed.stderr);
+    assert!(crate::agent::reviewer_gatekeeper::step_trace_snippet(&listed.stdout).contains(target.to_str().unwrap()));
+    assert_eq!(std::fs::read_to_string(ws.join("same.txt")).unwrap(), "SOURCE_UNCHANGED");
+    workspace_access::revoke_session(&sid);
+    let _ = std::fs::remove_dir_all(ws);
+    let _ = std::fs::remove_dir_all(extra);
+}
+
+#[test]
 fn test_local_file_write_and_read() {
     let ws = temp_dir();
     let db = mock_db();

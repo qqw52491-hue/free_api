@@ -241,11 +241,6 @@ async fn run_agent_main_loop_in_workspace_inner(
     }
     // 自由会话（未选项目）的 workspace_dir 是会话产物目录而非真实工程——
     // 证据域缺失 → 降级为非 git 基线，审查改靠副作用台账/产物链。
-    let captured_git_baseline = if is_explicit_workspace || auto_pilot {
-        crate::agent::reviewer_gatekeeper::GitBaseline::capture_at_run_start(&workspace_dir)
-    } else {
-        crate::agent::reviewer_gatekeeper::GitBaseline::non_git()
-    };
     // 续跑时优先恢复原任务基线，稍后在 checkpoint 选择后登记。
     // 项目会话进入前先拿工作区软锁（独占该目录直到本次 run 结束）
     let _workspace_run_lock = if is_project_session {
@@ -618,10 +613,21 @@ async fn run_agent_main_loop_in_workspace_inner(
                     crate::agent::reviewer_gatekeeper::GitBaseline::capture(&workspace_dir)
                 })
         } else {
-            captured_git_baseline
+            if is_explicit_workspace || auto_pilot {
+                crate::agent::reviewer_gatekeeper::GitBaseline::capture_at_run_start(&workspace_dir)
+            } else {
+                crate::agent::reviewer_gatekeeper::GitBaseline::non_git()
+            }
         }
     });
     checkpoint.task_git_baseline = Some(git_baseline.clone());
+    if !is_resuming_existing {
+        checkpoint.task_additional_git_baselines =
+            crate::agent::reviewer_gatekeeper::GitBaseline::capture_additional_git_baselines(
+                &final_session_id,
+                &workspace_dir,
+            );
+    }
     if !is_resuming_existing && !git_baseline.pre_dirty.is_empty() {
         context.add_error_feedback(&git_baseline.origin_notice(&workspace_dir));
     }

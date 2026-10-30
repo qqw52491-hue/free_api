@@ -17,7 +17,7 @@ use tokio::sync::watch;
 
 
 // 验收语义变更时升版：旧裁决不能在新规则下继续复用；Git 基线保持原样。
-const FINISH_REVIEW_RULES_VERSION: &str = "review-search-v12-advisory-workflow";
+const FINISH_REVIEW_RULES_VERSION: &str = "review-search-v13-task-directory-baselines";
 const MAX_FINISH_FORMAT_RETRIES: u32 = 5;
 const MAX_FINISH_REQUEST_RETRIES: u32 = 5;
 
@@ -149,12 +149,13 @@ fn append_contract_claims(
 
 // 人数只决定已需要的审查如何派发，不能把免审任务升级成模型会审。
 // 与单人路径共用原有机械边界；不按提问关键词或回答长短猜测复杂度。
-fn finish_review_bypass(
+pub(super) fn finish_review_bypass(
     context: &SandwichContext,
-    session_id: &str,
-    run_started_at: chrono::DateTime<chrono::Utc>,
+    _session_id: &str,
+    _run_started_at: chrono::DateTime<chrono::Utc>,
     triage: Option<&crate::agent::triage::TriageVerdict>,
     mechanical_anomalies: &[String],
+    has_task_files: bool,
 ) -> Option<ReviewResult> {
     if !mechanical_anomalies.is_empty() {
         return None;
@@ -165,7 +166,7 @@ fn finish_review_bypass(
         ));
     }
     if context.side_effects.len() == context.inherited_side_effects_count
-        && collect_session_tmp_material(session_id, run_started_at).is_none()
+        && !has_task_files
     {
         return Some(ReviewResult::mechanical_pass(
             "本轮未登记新增写入，且未发现本轮会话产物，已跳过终审；工作区未提交差异的写入归属未确认，不据此认定为本轮交付",
@@ -201,15 +202,17 @@ pub async fn evaluate_finish_diff<R: tauri::Runtime>(
     _plan_mode: Option<crate::agent::checkpoint::PlanExecutionMode>,
     // 调用方已组装 summary + details 的完整交付正文，参与审查与复用指纹。
     finish_summary: Option<&str>,
+    delivery_paths: &[String],
 ) -> ReviewResult {
     if model_routing.stage_review_committee {
-        let anomalies = sniff_session_tmp_anomalies(session_id);
-        if let Some(result) = finish_review_bypass(context, session_id, run_started_at, triage, &anomalies) {
+        let (_, selected) = task_review_snapshot(db, session_id, workspace, context, baseline, run_started_at, delivery_paths);
+        let anomalies = sniff_task_file_anomalies(&selected.paths);
+        if let Some(result) = finish_review_bypass(context, session_id, run_started_at, triage, &anomalies, !selected.paths.is_empty() || !delivery_paths.is_empty()) {
             return result;
         }
-        return super::finish_committee::evaluate_committee(app, db, context, model_routing, step_id, workspace, baseline, run_started_at, session_id, interrupt_rx, last_reviewed_hash, last_review_result, stage_carry_over, host_verification, human_waivers, gate_notices, approved_target_files, triage, _plan_mode, finish_summary).await;
+        return super::finish_committee::evaluate_committee(app, db, context, model_routing, step_id, workspace, baseline, run_started_at, session_id, interrupt_rx, last_reviewed_hash, last_review_result, stage_carry_over, host_verification, human_waivers, gate_notices, approved_target_files, triage, _plan_mode, finish_summary, delivery_paths).await;
     }
-    evaluate_finish_diff_single(app, db, context, model_routing, step_id, workspace, baseline, run_started_at, session_id, interrupt_rx, last_reviewed_hash, last_review_result, stage_carry_over, host_verification, human_waivers, gate_notices, approved_target_files, triage, _plan_mode, finish_summary, "finish-review", None).await
+    evaluate_finish_diff_single(app, db, context, model_routing, step_id, workspace, baseline, run_started_at, session_id, interrupt_rx, last_reviewed_hash, last_review_result, stage_carry_over, host_verification, human_waivers, gate_notices, approved_target_files, triage, _plan_mode, finish_summary, delivery_paths, "finish-review", None).await
 }
 
 pub(super) async fn evaluate_finish_diff_single<R: tauri::Runtime>(
@@ -238,11 +241,12 @@ pub(super) async fn evaluate_finish_diff_single<R: tauri::Runtime>(
     _plan_mode: Option<crate::agent::checkpoint::PlanExecutionMode>,
     // 调用方已组装 summary + details 的完整交付正文，参与审查与复用指纹。
     finish_summary: Option<&str>,
+    delivery_paths: &[String],
     log_suffix: &str,
     verification_lock: Option<std::sync::Arc<tokio::sync::Mutex<()>>>,
 ) -> ReviewResult {
     let interrupt_generation = *interrupt_rx.borrow();
-    let result = evaluate_finish_diff_once(app, db, context, model_routing, step_id, workspace, baseline, run_started_at, session_id, interrupt_rx, last_reviewed_hash, last_review_result, stage_carry_over, host_verification, human_waivers, gate_notices, approved_target_files, triage, _plan_mode, finish_summary, None, log_suffix, verification_lock.as_ref()).await;
+    let result = evaluate_finish_diff_once(app, db, context, model_routing, step_id, workspace, baseline, run_started_at, session_id, interrupt_rx, last_reviewed_hash, last_review_result, stage_carry_over, host_verification, human_waivers, gate_notices, approved_target_files, triage, _plan_mode, finish_summary, delivery_paths, None, log_suffix, verification_lock.as_ref()).await;
     if !result.is_service_failure() || result.verdict == "cancelled" || *interrupt_rx.borrow() != interrupt_generation
         || crate::agent::review_control::ensure_allowed(db, session_id, &result.model_id).is_err() { return result; }
     let backup = match db.0.lock() {
@@ -253,7 +257,7 @@ pub(super) async fn evaluate_finish_diff_single<R: tauri::Runtime>(
         Ok(Some((id, name))) => {
             if crate::agent::review_control::ensure_allowed(db, session_id, &id).is_err() { return result; }
             let _ = app.emit(&format!("agent-log-{session_id}"), format!("终审通道失败；仅尝试用户配置的备用 {name}，不放行交付。"));
-            evaluate_finish_diff_once(app, db, context, model_routing, step_id, workspace, baseline, run_started_at, session_id, interrupt_rx, None, None, stage_carry_over, host_verification, human_waivers, gate_notices, approved_target_files, triage, _plan_mode, finish_summary, Some(&id), log_suffix, verification_lock.as_ref()).await
+            evaluate_finish_diff_once(app, db, context, model_routing, step_id, workspace, baseline, run_started_at, session_id, interrupt_rx, None, None, stage_carry_over, host_verification, human_waivers, gate_notices, approved_target_files, triage, _plan_mode, finish_summary, delivery_paths, Some(&id), log_suffix, verification_lock.as_ref()).await
         }
         Ok(None) => result,
         Err(e) => ReviewResult::failed_open(&format!("{}；备用不可用：{e}", result.summary), &result.model_id, &result.diff_hash),
@@ -288,6 +292,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     // 里而非 diff——终审必须能看到它，且它参与复用指纹（否则摘要改进永远
     // 撞在「Diff 未变」缓存上，实弹死循环）。
     finish_summary: Option<&str>,
+    delivery_paths: &[String],
     model_override: Option<&str>,
     log_suffix: &str,
     verification_lock: Option<&std::sync::Arc<tokio::sync::Mutex<()>>>,
@@ -301,29 +306,13 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     // （不直接判死：伪格式可能任务授权，审查者取证后裁量）。
     // 嗅探对所有分流模式都跑：code_review/artifact_quality 的产物异常
     // 同样注入材料作预警（此前只 mechanical_only 用，其他模式只能碰运气）。
-    let mechanical_anomalies: Vec<String> = sniff_session_tmp_anomalies(session_id);
-    if let Some(result) = finish_review_bypass(context, session_id, run_started_at, triage, &mechanical_anomalies) {
+    let (snapshot, selected) = task_review_snapshot(db, session_id, workspace, context, baseline, run_started_at, delivery_paths);
+    let mechanical_anomalies = sniff_task_file_anomalies(&selected.paths);
+    if let Some(result) = finish_review_bypass(context, session_id, run_started_at, triage, &mechanical_anomalies,
+        !selected.paths.is_empty() || !delivery_paths.is_empty()) {
         return result;
     }
-
-    // 1. 提取审查材料（Git Diff 或 非 Git 修改文件/产物清单）；
-    //    无台账副作用时兜底扫描会话 tmp 实物——tmp/ 写入不入台账、不进工作区 diff，
-    //    纯产物任务（PPT/HTML/报告）缺了这一步终审永远盲放行。
-    let (mut review_material, diff_hash) =
-        match baseline.collect_review_material(workspace, context, run_started_at) {
-            Some(mut material) => {
-                // 有 diff 时 tmp 产物不在兜底扫描内——补一条紧凑清单，
-                // 审查者无需 list_dir 即可点名核查（实测为此白烧过取证步数）。
-                if let Some(manifest) = collect_session_tmp_manifest(session_id, run_started_at) {
-                    material.0.push_str(&manifest);
-                }
-                material
-            }
-            None => match collect_session_tmp_material(session_id, run_started_at) {
-                Some(material) => material,
-                None => (String::new(), String::new()),
-            },
-        };
+    let (mut review_material, diff_hash) = (snapshot.material, snapshot.hash);
 
     // 当前提交正文独立于工作区差异/辅助证据，原样传入，不从历史缩略文本重建。
     let delivery_text = finish_summary.map(str::trim).filter(|s| !s.is_empty());
@@ -644,6 +633,9 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
 
     // 动态拼接目标块的 Checklist、Scope 边界与执行者自述
     let mut block_sections = Vec::new();
+    block_sections.push(crate::agent::review_tools::scope_description(
+        workspace, &crate::agent::path_guard::get_session_tmp_dir(session_id), session_id,
+    ));
     if let Some(block) = context.active_target_block() {
         if !block.checklist.is_empty() {
             let items = block
@@ -940,6 +932,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
                     match crate::agent::review_tools::execute(
                         workspace,
                         Some(&session_tmp_root),
+                        Some(session_id),
                         &tool_name,
                         &req,
                     ) {
@@ -1014,9 +1007,9 @@ mod contract_handoff_tests {
         let mut triage = crate::agent::triage::TriageVerdict::fallback("fixture");
         triage.final_review_mode = "mechanical_only".into();
         assert!(finish_review_bypass(&context, "anomaly-fixture", chrono::Utc::now(),
-            Some(&triage), &["产物魔数不符".into()]).is_none());
+            Some(&triage), &["产物魔数不符".into()], true).is_none());
         assert!(finish_review_bypass(&context, "anomaly-fixture", chrono::Utc::now(),
-            None, &["产物为零字节".into()]).is_none());
+            None, &["产物为零字节".into()], true).is_none());
     }
 
     #[test]
@@ -1107,6 +1100,49 @@ mod request_retry_policy_tests {
 mod finish_review_regression_tests {
     use super::*;
     use crate::agent::child_reviewer::retirement_tests::MockReviewer;
+
+    #[tokio::test]
+    async fn finish_reviewer_reads_additional_project_without_rebinding_main_workspace() {
+        use crate::agent::workspace_access::{self, DirectoryAccess, ProjectDirectory};
+        let extra = std::env::temp_dir().join(format!("finish extra {}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&extra).unwrap();
+        let extra = extra.canonicalize().unwrap();
+        let file = extra.join("same.txt");
+        std::fs::write(&file, "TARGET_FINISH_EVIDENCE").unwrap();
+        let mock = MockReviewer::new(vec![
+            json!({"tool":"read_file","path":file}),
+            json!({"verdict":"passed","score":90,"summary":"已读取附加工程","blocking_issues":[],"nit_issues":[]}),
+        ]).await;
+        let workspace = mock.root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("same.txt"), "SOURCE_FINISH_OTHER_FILE").unwrap();
+        let sid = format!("finish-multi-dir-{}", uuid::Uuid::new_v4());
+        workspace_access::bind_conversation(&sid, &workspace, vec![ProjectDirectory {
+            path: extra.to_string_lossy().into_owned(), access: DirectoryAccess::ReadOnly,
+        }]);
+        let baseline = GitBaseline::capture(&workspace);
+        let mut context = SandwichContext::new("sys".into(), "审查附加工程中的证据".into());
+        context.record_side_effect(1, "edit_file".into(), "合成改动，用于进入审查链".into());
+        let app = tauri::test::mock_app();
+        let (_tx, mut rx) = watch::channel(0u64);
+        let result = evaluate_finish_diff_once(
+            app.handle(), &mock.db, &context, &ModelRoutingConfig::default(), 1,
+            &workspace, &baseline, chrono::Utc::now() - chrono::Duration::seconds(1), &sid, &mut rx,
+            None, None, &[], None, None, &[], None, None, None,
+            Some("核对附加工程文件"), &[], Some("mock"), "finish-review", None,
+        ).await;
+        assert!(result.is_passed(), "{result:?}");
+        let requests = mock.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let initial = requests[0]["messages"][1]["content"].as_str().unwrap();
+        assert!(initial.contains(workspace.to_str().unwrap()) && initial.contains(extra.to_str().unwrap()));
+        assert!(initial.contains("git_diff/git_log 仅针对默认工作区"));
+        let observation = requests[1]["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap();
+        assert!(observation.contains("TARGET_FINISH_EVIDENCE") && observation.contains(file.to_str().unwrap()));
+        assert!(!observation.contains("SOURCE_FINISH_OTHER_FILE"));
+        workspace_access::revoke_session(&sid);
+        let _ = std::fs::remove_dir_all(extra);
+    }
 
     async fn run_finish(mock: &MockReviewer) -> (ReviewResult, String) {
         run_finish_with_cache(mock, None).await
@@ -1233,9 +1269,8 @@ mod finish_review_regression_tests {
                 crate::agent::retrieval::index_step_fts(&conn,id,&session_id,1,tool,"test",outcome,body).unwrap();
             }
         }
-        let (_, diff_hash) = baseline
-            .collect_review_material(&workspace, &context, run_started_at)
-            .unwrap();
+        let diff_hash = task_review_snapshot(&mock.db, &session_id, &workspace, &context,
+            &baseline, run_started_at, &[]).0.hash;
         let fingerprint = compose_review_fingerprint(
             &diff_hash,
             Some(summary),
@@ -1266,6 +1301,7 @@ mod finish_review_regression_tests {
             triage,
             None,
             Some(summary),
+            &[],
             Some("mock"),
             "finish-review",
             None,

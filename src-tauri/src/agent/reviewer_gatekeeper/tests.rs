@@ -188,7 +188,8 @@ index 789..abc 100644
         // 未知扩展名 → 跳过
         std::fs::write(tmp.join("data.weird"), b"\x00\x01\x02").unwrap();
 
-        let anomalies = sniff_session_tmp_anomalies(&sid);
+        let files: Vec<_> = std::fs::read_dir(&tmp).unwrap().flatten().map(|e| e.path()).collect();
+        let anomalies = sniff_task_file_anomalies(&files);
         let joined = anomalies.join("\n");
         assert!(joined.contains("empty.csv"), "0 字节应被抓: {}", joined);
         assert!(joined.contains("fake.xlsx"), "文本冒充 xlsx 应被抓: {}", joined);
@@ -203,10 +204,10 @@ index 789..abc 100644
         let tmp2 = crate::agent::path_guard::get_session_tmp_dir(&sid2);
         std::fs::create_dir_all(&tmp2).unwrap();
         std::fs::write(tmp2.join("ok.md"), b"# hello").unwrap();
-        assert!(sniff_session_tmp_anomalies(&sid2).is_empty());
+        assert!(sniff_task_file_anomalies(&[tmp2.join("ok.md")]).is_empty());
 
         // 不存在的会话 tmp 目录 → 无异常
-        assert!(sniff_session_tmp_anomalies("nonexistent-session-xyz").is_empty());
+        assert!(sniff_task_file_anomalies(&[]).is_empty());
 
         let _ = std::fs::remove_dir_all(&tmp);
         let _ = std::fs::remove_dir_all(&tmp2);

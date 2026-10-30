@@ -54,7 +54,7 @@ pub(crate) fn acceptance_fingerprint(
 ) -> String {
     use sha2::{Digest, Sha256};
     let raw = json!({
-        "version": 4,
+        "version": 6,
         "current_goal": context.effective_goal(),
         "effects": context.side_effects,
         "inherited": context.inherited_side_effects_count,
@@ -72,6 +72,7 @@ pub(crate) fn acceptance_fingerprint(
         "active_scope": context.active_target_block().map(|b| (&b.id, &b.scope)),
         "summary": finish_payload.get("summary"),
         "details": finish_payload.get("details"),
+        "delivery_files": (["artifacts", "files", "created_files", "paths"].map(|key| finish_payload.get(key))),
     });
     format!("{:x}", Sha256::digest(raw.to_string().as_bytes()))
 }
@@ -104,7 +105,8 @@ fn reusable_frozen_verification<'a>(
     let required: Vec<_> = obligations.iter().filter(|o| {
         o.verify_command.as_deref().is_some_and(|c| !c.trim().is_empty())
     }).collect();
-    if required.is_empty() || required.len() != prior.results.len()
+    if prior.executor_version != crate::agent::host_verify::OBLIGATION_EXECUTOR_VERSION
+        || required.is_empty() || required.len() != prior.results.len()
         || current_material.is_empty() || prior.material_fingerprint != current_material
         || prior.run_id != run_id
         || prior.workspace_root != workspace.canonicalize().ok()?.to_string_lossy()
@@ -150,6 +152,7 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
     let generation = *interrupt_rx.borrow();
     let request_payload = delivery_payload(instruction);
     let body = delivery_body(&request_payload);
+    let delivery_paths = crate::agent::reviewer_gatekeeper::delivery_file_paths(db, session_id, &request_payload);
     let (mut blockers, mut notices, diff_context) = collect_checks(
         db,
         context,
@@ -164,10 +167,8 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
         contract_started,
     )
     .await;
-    let initial_hash = baseline
-        .collect_review_material(workspace, context, run_started_at)
-        .map(|(_, h)| h)
-        .unwrap_or_default();
+    let initial_hash = crate::agent::reviewer_gatekeeper::task_review_snapshot(
+        db, session_id, workspace, context, baseline, run_started_at, &delivery_paths).0.hash;
     let registered_evidence = crate::agent::evidence_store::review_digest(db, session_id, run_started_at);
     let state_fp = acceptance_fingerprint(context, checkpoint, &request_payload);
     let review_policy_fingerprint = crate::agent::review_team::policy_fingerprint(db, model_routing);
@@ -263,6 +264,7 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
             // 捕获真实执行事实；material_fingerprint 在全部宿主验证结束后落定，
             // 避免命令本身产生构建产物导致误判为工作区发生了新的人工修改。
             frozen_verification_run = Some(FrozenVerificationRun {
+                executor_version: crate::agent::host_verify::OBLIGATION_EXECUTOR_VERSION,
                 run_id: run_id.to_owned(),
                 workspace_root: workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf())
                     .to_string_lossy().into_owned(),
@@ -307,7 +309,7 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
         }
     }
     // 测试允许生成构建产物；冻结评审前的材料，而非执行测试前的目录快照。
-    let mut review_snapshot = baseline.collect_review_snapshot(workspace, context, run_started_at);
+    let mut review_snapshot = crate::agent::reviewer_gatekeeper::task_review_snapshot(db, session_id, workspace, context, baseline, run_started_at, &delivery_paths).0;
     let review_hash = review_snapshot.hash.clone();
     let mut receipt_hash = review_hash.clone();
     let mut material_notices = Vec::new();
@@ -352,9 +354,10 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
                 checkpoint.triage_verdict.as_ref(),
                 Some(checkpoint.plan_mode),
                 body.as_deref(),
+                &delivery_paths,
             )
             .await;
-            let after_review = baseline.collect_review_snapshot(workspace, context, run_started_at);
+            let after_review = crate::agent::reviewer_gatekeeper::task_review_snapshot(db, session_id, workspace, context, baseline, run_started_at, &delivery_paths).0;
             if review_snapshot.hash != after_review.hash {
                 let paths = after_review.changed_paths_since(&review_snapshot);
                 // 已有具体 blocking 或宿主复验失败继续按原路径处理，不能借材料变化
@@ -579,9 +582,12 @@ async fn collect_checks(
         .side_effects
         .len()
         .saturating_sub(context.inherited_side_effects_count);
-    let diff_context = if side_effect_count > 0 {
-        let affected_paths = context.new_affected_paths();
-        let raw_diff = git_baseline.collect_git_diff(workspace).map(|(d, _)| d);
+    let (task_snapshot, task_files) = crate::agent::reviewer_gatekeeper::task_review_snapshot(
+        db, session_id, workspace, context, git_baseline, run_started_at, &[]);
+    let diff_context = if side_effect_count > 0 || !task_files.paths.is_empty() {
+        let mut affected_paths = context.new_affected_paths();
+        affected_paths.extend(task_files.paths.iter().map(|p| p.to_string_lossy().into_owned()));
+        let raw_diff = (!task_snapshot.material.is_empty()).then_some(task_snapshot.material);
         Some(
             crate::agent::finish_guard::DiffContext::from_diff_and_paths(
                 raw_diff.as_deref(),

@@ -67,7 +67,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "get_step_output",
-        summary: "分页取回已有工具输出的原文",
+        summary: "分页取回宿主已保存的工具回执；上游未返回、截断或采集失败而未保存的内容无法恢复。归档摘要是历史线索，具体事实可按 output_id 回查核实，不保证所有历史无损还原",
         actions: &["get_step_output(output_id: string, branch_id?: string [批量回执中的原始分支 ID，选中后 offset 在分支内计数], offset?: number, limit?: number, raw?: boolean)"],
     },
     BuiltinToolSpec {

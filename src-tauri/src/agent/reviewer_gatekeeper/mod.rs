@@ -23,6 +23,8 @@ pub(crate) fn review_retry_allowed() -> bool {
 
 mod baseline;
 mod evidence;
+mod task_files;
+mod task_baselines;
 mod review_types;
 mod git_utils;
 mod finish_diff;
@@ -32,6 +34,8 @@ mod verdict_parse;
 
 pub(crate) use baseline::*;
 pub(crate) use evidence::*;
+pub(crate) use task_files::*;
+pub(crate) use task_baselines::*;
 pub(crate) use review_types::*;
 pub(crate) use git_utils::*;
 pub(crate) use finish_diff::*;
@@ -74,3 +78,6 @@ mod tests;
 
 #[cfg(test)]
 mod runtime_log_tests;
+
+#[cfg(test)]
+mod task_files_tests;

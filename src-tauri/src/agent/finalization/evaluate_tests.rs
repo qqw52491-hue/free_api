@@ -242,7 +242,7 @@ async fn rejected_review_reuses_real_frozen_execution_but_changed_artifact_runs_
     std::fs::write(workspace.join("artifact.txt"), b"version-one").unwrap();
     let command = "printf x >> frozen-count; test -s artifact.txt";
     let mut c = context();
-    c.record_side_effect(1, "local_file".into(), "artifact.txt".into());
+    c.record_side_effect_with_paths(1, "local_file".into(), "artifact.txt".into(), vec!["artifact.txt".into()]);
     c.change_verification = Some(ChangeVerification {
         status:"verified".into(), evidence_refs:vec!["step_1".into()], waived_reason:None,
     });
@@ -772,4 +772,38 @@ mod advisory_workflow_tests {
         assert!(notices.join("\n").contains("early-name.xlsx"));
         assert!(notices.join("\n").contains("不证明未完成"));
     }
+}
+
+#[tokio::test]
+async fn snapshot_executor_version_prevents_reusing_old_success_but_keeps_current_receipts() {
+    let workspace = std::env::temp_dir().join(format!("verify-version-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&workspace).unwrap();
+    let c = context();
+    let command = "sh \"$FREE_API_VERIFY_SCRIPT\"";
+    let obligations: Vec<crate::agent::review_contract::ReviewObligation> = serde_json::from_value(json!([
+        {"id":"v", "question":"verify", "verify_command":command, "verify_script":"exit 0"}
+    ])).unwrap();
+    let results = crate::agent::host_verify::run_obligation_verifications(&workspace, &obligations).await;
+    assert!(results[0].passed);
+    let frozen = FrozenVerificationRun {
+        executor_version: crate::agent::host_verify::OBLIGATION_EXECUTOR_VERSION,
+        run_id:"run".into(), workspace_root:workspace.canonicalize().unwrap().to_string_lossy().into_owned(),
+        material_fingerprint:"material".into(), contract_fingerprint:"contract".into(),
+        scope_revision:c.resource_scope.revision, effects_fingerprint:verification_effects_fingerprint(&c),
+        executed_at:Utc::now().to_rfc3339(), executed_step_id:1, results,
+    };
+    let mut prior: FinalizationReceipt = serde_json::from_value(json!({
+        "receipt_id":"prior", "diff_hash":"material", "scope_revision":c.resource_scope.revision,
+        "contract_fingerprint":"contract", "step_id":1, "verification":{"status":"pending"},
+        "review":{"status":"pending"}, "blockers":[], "risk_flags":[], "finish_payload":{},
+        "created_at":Utc::now().to_rfc3339(), "frozen_verification_run":frozen
+    })).unwrap();
+    assert!(reusable_frozen_verification(Some(&prior), &c, "run", &workspace,
+        "material", "contract", &obligations).is_some());
+    let mut legacy = serde_json::to_value(prior.frozen_verification_run.as_ref().unwrap()).unwrap();
+    legacy.as_object_mut().unwrap().remove("executor_version");
+    prior.frozen_verification_run = Some(serde_json::from_value(legacy).unwrap());
+    assert!(reusable_frozen_verification(Some(&prior), &c, "run", &workspace,
+        "material", "contract", &obligations).is_none(), "旧错误执行器的成功不能沿用");
+    std::fs::remove_dir_all(workspace).unwrap();
 }

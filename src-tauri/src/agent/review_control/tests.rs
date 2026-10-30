@@ -262,7 +262,7 @@ async fn real_silent_finish_stops_independently_and_is_not_redispatched_to_backu
     let mut triage = crate::agent::triage::TriageVerdict::fallback("fixture");
     triage.final_review_mode = "artifact_quality".into();
     let review = evaluate_finish_diff(app.handle(), &mock.db, &context, &routing, 1, &mock.root, &baseline,
-        chrono::Utc::now(), &session, &mut rx, None, None, &[], None, None, &[], None, Some(&triage), None, Some("本轮报告"));
+        chrono::Utc::now(), &session, &mut rx, None, None, &[], None, None, &[], None, Some(&triage), None, Some("本轮报告"), &[]);
     let cancel = async {
         loop {
             let id = active().lock().unwrap().iter().find(|(_, entry)| entry.session == session && !entry.child).map(|(id, _)| id.clone());
@@ -279,7 +279,7 @@ async fn real_silent_finish_stops_independently_and_is_not_redispatched_to_backu
     assert_eq!(mock.requests.lock().unwrap().len(), 1, "人工停止不触发备用重派");
     assert!(events.lock().unwrap().iter().any(|event| event["phase"] == "cancelled"));
     let again = evaluate_finish_diff(app.handle(), &mock.db, &context, &routing, 2, &mock.root, &baseline,
-        chrono::Utc::now(), &session, &mut rx, None, None, &[], None, None, &[], None, Some(&triage), None, Some("再次核对报告")).await;
+        chrono::Utc::now(), &session, &mut rx, None, None, &[], None, None, &[], None, Some(&triage), None, Some("再次核对报告"), &[]).await;
     assert_eq!(again.verdict, "cancelled");
     assert_eq!(mock.requests.lock().unwrap().len(), 1, "再次终审不调用已排除的模型");
 }

@@ -20,9 +20,18 @@ pub(crate) struct ShellExecutionGuard {
     pre_dirty: Vec<String>,
     pre_dirty_hashes: std::collections::HashMap<String, String>,
     baseline_root: PathBuf,
+    primary_git_root: Option<PathBuf>,
     baseline_head: Option<String>,
+    additional_baselines: std::collections::BTreeMap<String, crate::agent::reviewer_gatekeeper::GitBaseline>,
     confirmed: std::collections::BTreeMap<String, String>,
     pending: Mutex<std::collections::BTreeMap<String, String>>,
+}
+
+struct RepoTaskBaseline {
+    paths_root: PathBuf,
+    pre_dirty: Vec<String>,
+    pre_dirty_hashes: std::collections::HashMap<String, String>,
+    base_head: Option<String>,
 }
 
 impl ShellExecutionGuard {
@@ -56,18 +65,57 @@ impl ShellExecutionGuard {
             baseline_root: workspace
                 .canonicalize()
                 .unwrap_or_else(|_| workspace.to_path_buf()),
+            primary_git_root: git_root(workspace),
+            baseline_head: checkpoint.task_git_baseline.as_ref().and_then(|b| b.base_head.clone()),
+            additional_baselines: checkpoint.task_additional_git_baselines.clone(),
             pre_dirty_hashes: checkpoint
                 .task_git_baseline
                 .as_ref()
                 .map(|b| b.pre_dirty.clone())
                 .unwrap_or_default(),
             confirmed: checkpoint.git_destructive_approved_scopes.clone(),
-            baseline_head: checkpoint
-                .task_git_baseline
-                .as_ref()
-                .and_then(|b| b.base_head.clone()),
             pending: Mutex::new(Default::default()),
         }
+    }
+
+    fn baseline_for_repo(&self, repo_root: &Path, cwd: &Path) -> Result<RepoTaskBaseline, String> {
+        let additional = self.additional_baselines.iter()
+            .filter(|(scope, baseline)| baseline.is_git && cwd.starts_with(Path::new(scope))
+                && git_root(Path::new(scope)).as_deref() == Some(repo_root))
+            .max_by_key(|(scope, _)| Path::new(scope).components().count());
+        if let Some((scope, baseline)) = additional {
+            return Ok(RepoTaskBaseline {
+                paths_root: PathBuf::from(scope),
+                pre_dirty: baseline.pre_dirty.keys().cloned().collect(),
+                pre_dirty_hashes: baseline.pre_dirty.clone(),
+                base_head: baseline.base_head.clone(),
+            });
+        }
+        if self.primary_git_root.as_deref() == Some(repo_root) && cwd.starts_with(&self.baseline_root) {
+            return Ok(RepoTaskBaseline {
+                paths_root: self.baseline_root.clone(),
+                pre_dirty: self.pre_dirty.clone(),
+                pre_dirty_hashes: self.pre_dirty_hashes.clone(),
+                base_head: self.baseline_head.clone(),
+            });
+        }
+        let key = repo_root.to_string_lossy().into_owned();
+        let baseline = self.additional_baselines.get(&key)
+            .filter(|baseline| baseline.is_git)
+            .ok_or_else(|| format!(
+                "附加 Git 仓库没有保存独立任务起点：{}；为避免误清理用户原有修改，本次破坏性 Git 操作需要人工确认。旧检查点不会用当前状态补拍起点。",
+                repo_root.display()
+            ))?;
+        let pre_dirty = baseline.pre_dirty.iter().flat_map(|(path, hash)| {
+            let decoded = (hash == "<missing>").then(|| decode_legacy_git_path(path)).flatten();
+            std::iter::once(path.clone()).chain(decoded)
+        }).collect();
+        Ok(RepoTaskBaseline {
+            paths_root: repo_root.to_path_buf(),
+            pre_dirty,
+            pre_dirty_hashes: baseline.pre_dirty.clone(),
+            base_head: baseline.base_head.clone(),
+        })
     }
 
     pub(crate) fn record_pending(&self, checkpoint: &mut AgentCheckpoint) -> bool {
@@ -109,39 +157,47 @@ impl ShellExecutionGuard {
             workspace.join(cwd)
         };
         let cwd = cwd.canonicalize().unwrap_or(cwd);
-        let reason = split_shell_segments(&command)
-            .into_iter()
-            .find_map(|segment| {
-                match git_destructive_review(segment) {
-                    GitDestructiveVerdict::NotDestructive | GitDestructiveVerdict::SideEffect => {
-                        None
-                    }
-                    GitDestructiveVerdict::Pathless => {
-                        Some("无显式路径目标，影响面无法按台账界定（整树/历史/远端）".to_string())
-                    }
+        let segments: Vec<String> = split_shell_segments(&command).into_iter().map(str::to_owned).collect();
+        let ambiguous_git_context = has_ambiguous_git_context(&segments);
+        let destructive_git_present = segments.iter().any(|segment| segment_has_destructive_git_verb(segment));
+        let env_override_with_git = has_git_environment_override(&segments) && destructive_git_present;
+        let reason = if env_override_with_git {
+            Some("命令通过 GIT_DIR/GIT_WORK_TREE 环境变量改变了仓库定位，无法可靠绑定任务起点；请改用授权目录作为 local_shell.cwd，并使用普通 git 命令，或由主人明确确认。".to_string())
+        } else if ambiguous_git_context && destructive_git_present {
+            Some("命令包含 cd/pushd/popd、git -C、--git-dir 或 --work-tree，实际仓库位置无法由工具 cwd 可靠确定；请改用 local_shell.cwd 指定授权仓库目录，或由主人明确确认。".to_string())
+        } else {
+            segments.into_iter().find_map(|segment| {
+                match git_destructive_review(&segment) {
+                    GitDestructiveVerdict::NotDestructive | GitDestructiveVerdict::SideEffect => None,
+                    GitDestructiveVerdict::Pathless => Some(
+                        "无显式路径目标，影响面无法按台账界定（整树/历史/远端）".to_string()
+                    ),
                     GitDestructiveVerdict::Targets { paths, dirty_gated } => {
-                        let restores_baseline = self
-                            .baseline_head
-                            .as_ref()
-                            .is_some_and(|base| restores_task_baseline(segment, base));
-                        match self.foreign_targets(
-                            &paths,
-                            dirty_gated,
-                            &cwd,
-                            workspace,
-                            restores_baseline,
-                        ) {
+                        if ambiguous_git_context {
+                            return Some("命令包含 cd/pushd/popd、git -C、--git-dir 或 --work-tree，实际仓库位置无法由工具 cwd 可靠确定；请改用 local_shell.cwd 指定授权仓库目录，或由主人明确确认。".into());
+                        }
+                        let repo_root = match git_root(&cwd) {
+                            Some(root) => root,
+                            None => return Some("无法取得当前 Git 仓库根目录，未执行破坏性操作。".into()),
+                        };
+                        let baseline = match self.baseline_for_repo(&repo_root, &cwd) {
+                            Ok(baseline) => baseline,
+                            Err(error) => return Some(error),
+                        };
+                        let restores_baseline = baseline.base_head.as_ref()
+                            .is_some_and(|base| restores_task_baseline(&segment, base));
+                        match self.foreign_targets(&paths, dirty_gated, &cwd, workspace, &baseline, restores_baseline) {
                             Ok(foreign) if foreign.is_empty() => None,
                             Ok(foreign) => Some(format!(
                                 "目标包含任务开始前已有修改或不在本会话写入台账/计划核准集：{}",
                                 foreign.join(", ")
                             )),
-                            // Git 无法解析时移交原有人工确认通道，不把未知状态说成干净。
                             Err(error) => Some(error),
                         }
                     }
                 }
-            })?;
+            })
+        }?;
         let scope = git_operation_scope(&command, &cwd)
             .unwrap_or_else(|_| format!("unresolved:{}", uuid::Uuid::new_v4()));
         if self.confirmed.get(&fp) == Some(&scope) {
@@ -149,9 +205,13 @@ impl ShellExecutionGuard {
         }
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         pending.insert(fp.clone(), scope);
+        let baseline_reference = git_root(&cwd)
+            .and_then(|root| self.baseline_for_repo(&root, &cwd).ok())
+            .and_then(|baseline| baseline.base_head)
+            .unwrap_or_else(|| "未保存可用的独立仓库起点".into());
         Some(DispatchResult {
             view: None, success: false, stdout: String::new(),
-            stderr: format!("【git 破坏命令待人工确认】`{fp}` —— {reason}。本条命令尚未执行。\n任务起点引用：{}。若只撤销本轮修改，请先对照起点和当前文件，保留任务前已有内容；git checkout -- 会恢复暂存区版本，不等于任务起点。确需执行上述命令：用 ask_human 询问主人，message 中原样包含完整命令 `{fp}`；回复由主模型正常下一轮判断。否则使用局部修改或备份后处理。", self.baseline_head.as_deref().unwrap_or("未保存可用引用")),
+            stderr: format!("【git 破坏命令待人工确认】`{fp}` —— {reason}。本条命令尚未执行。\n当前仓库任务起点引用：{}。若只撤销本轮修改，请先对照起点和当前文件，保留任务前已有内容；git checkout -- 会恢复暂存区版本，不等于任务起点。确需执行上述命令：用 ask_human 询问主人，message 中原样包含完整命令 `{fp}`；回复由主模型正常下一轮判断。否则使用局部修改或备份后处理。", baseline_reference),
             route: "git_destructive_needs_confirm".into(),
         })
     }
@@ -162,6 +222,7 @@ impl ShellExecutionGuard {
         dirty_gated: bool,
         cwd: &Path,
         workspace: &Path,
+        baseline: &RepoTaskBaseline,
         restores_baseline: bool,
     ) -> Result<Vec<String>, String> {
         let root = git_root(cwd).ok_or("无法取得 Git 根目录，未确认还原目标是否包含已有修改")?;
@@ -170,10 +231,10 @@ impl ShellExecutionGuard {
             .iter()
             .map(|p| normalize(p, workspace))
             .collect();
-        let pre_dirty: HashSet<_> = self
+        let pre_dirty: HashSet<_> = baseline
             .pre_dirty
             .iter()
-            .map(|p| normalize(p, &self.baseline_root))
+            .map(|p| normalize(p, &baseline.paths_root))
             .collect();
         // 让 Git 自己解释目录、通配符、:(top)/:(literal) 等 pathspec；-z 保留空格/Unicode/换行。
         // 暂存删除的文件已不在 index，仍可被 checkout HEAD/restore --source=HEAD 还原。
@@ -212,22 +273,22 @@ impl ShellExecutionGuard {
             .filter(|p| {
                 let absolute = normalize(p, cwd);
                 (!dirty_gated || dirty.contains(&absolute))
-                    && ((pre_dirty.contains(&absolute)
+                    && (!absolute.starts_with(&baseline.paths_root) || (pre_dirty.contains(&absolute)
                         && !(restores_baseline
-                            && self.baseline_preserves_original(&absolute, &root)))
+                            && Self::baseline_preserves_original(&absolute, &root, baseline)))
                         || !allowed.contains(&absolute))
             })
             .collect())
     }
 
-    fn baseline_preserves_original(&self, target: &Path, repo_root: &Path) -> bool {
+    fn baseline_preserves_original(target: &Path, repo_root: &Path, baseline: &RepoTaskBaseline) -> bool {
         use sha2::{Digest, Sha256};
-        let Some((_, expected)) = self.pre_dirty_hashes.iter().find(|(path, hash)| {
-            hash.as_str() != "<missing>" && normalize(path, &self.baseline_root) == target
+        let Some((_, expected)) = baseline.pre_dirty_hashes.iter().find(|(path, hash)| {
+            hash.as_str() != "<missing>" && normalize(path, &baseline.paths_root) == target
         }) else {
             return false;
         };
-        let Some(base) = &self.baseline_head else {
+        let Some(base) = &baseline.base_head else {
             return false;
         };
         let Some(relative) = target.strip_prefix(repo_root).ok() else {
@@ -467,10 +528,51 @@ fn git_root(cwd: &Path) -> Option<PathBuf> {
         .current_dir(cwd)
         .output()
         .ok()?;
-    output
-        .status
-        .success()
-        .then(|| PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()))
+    if !output.status.success() { return None; }
+    PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
+        .canonicalize()
+        .ok()
+}
+
+fn segment_has_destructive_git_verb(segment: &str) -> bool {
+    let tokens = super::shell_tokens(segment);
+    let Some(git_index) = tokens.iter().position(|token| {
+        Path::new(token).file_name().and_then(|name| name.to_str()) == Some("git")
+    }) else { return false; };
+    let args = &tokens[git_index + 1..];
+    for (index, token) in args.iter().enumerate() {
+        match token.as_str() {
+            "checkout" | "restore" | "clean" | "reset" => return true,
+            "stash" => return !matches!(args.get(index + 1).map(String::as_str), Some("list" | "show")),
+            _ => {}
+        }
+    }
+    false
+}
+
+fn has_ambiguous_git_context(segments: &[String]) -> bool {
+    segments.iter().any(|segment| {
+        let tokens = super::shell_tokens(segment);
+        if matches!(tokens.first().map(String::as_str), Some("cd" | "pushd" | "popd")) {
+            return true;
+        }
+        let Some(git_index) = tokens.iter().position(|token| {
+            Path::new(token).file_name().and_then(|name| name.to_str()) == Some("git")
+        }) else { return false; };
+        tokens[git_index + 1..].iter().any(|token| {
+            token == "-C" || token.starts_with("-C")
+                || token == "--git-dir" || token.starts_with("--git-dir=")
+                || token == "--work-tree" || token.starts_with("--work-tree=")
+        })
+    })
+}
+
+fn has_git_environment_override(segments: &[String]) -> bool {
+    segments.iter().any(|segment| {
+        super::shell_tokens(segment).iter().any(|token| {
+            token.starts_with("GIT_DIR=") || token.starts_with("GIT_WORK_TREE=")
+        })
+    })
 }
 
 fn git_paths<S: AsRef<str>>(cwd: &Path, args: &[S]) -> Result<Vec<String>, String> {

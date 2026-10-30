@@ -17,97 +17,8 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::watch;
 
 
-/// 会话 tmp 实物审查材料扫描：tmp/ 写入不入副作用台账、不进工作区 git diff——
-/// 纯产物任务（PPT/HTML/报告写进会话沙箱）若无本扫描，终审永远 skipped_empty 盲放行。
-/// 文本文件给 ≤2000 字符预览+相对 tmp/ 路径；二进制列文件名+大小+扩展名；
-/// 总量截断 MAX_DIFF_CHARS。无本轮新文件时返回 None。
-pub(crate) fn collect_session_tmp_material(
-    session_id: &str,
-    run_started_at: chrono::DateTime<chrono::Utc>,
-) -> Option<(String, String)> {
-    let tmp_dir = crate::agent::path_guard::get_session_tmp_dir(session_id);
-    if !tmp_dir.is_dir() {
-        return None;
-    }
-    let since_sys = std::time::UNIX_EPOCH
-        + std::time::Duration::from_millis(run_started_at.timestamp_millis().max(0) as u64);
-    let mut files = Vec::new();
-    GitBaseline::scan_modified_files(&tmp_dir, 0, since_sys, &mut files);
-    if files.is_empty() {
-        return None;
-    }
-
-    let mut sections = Vec::new();
-    for path in &files {
-        let rel = path
-            .strip_prefix(&tmp_dir)
-            .map(|r| r.to_string_lossy().to_string())
-            .unwrap_or_else(|_| path.to_string_lossy().to_string());
-        if is_noise_path(&rel) {
-            continue;
-        }
-        let display = format!("tmp/{}", rel);
-        if is_binary_file(&rel) {
-            let ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("bin")
-                .to_string();
-            let size_str = path
-                .metadata()
-                .map(|m| format!("{} KB", m.len() / 1024))
-                .unwrap_or_else(|_| "未知".to_string());
-            // 办公/数据类二进制（xlsx/docx/pdf 等）抽内容预览——否则审查者只见文件名+大小，
-            // "整列空/映射丢字段"这类语义缺陷对终审天然不可见。失败则退回元数据行。
-            let preview = extract_office_preview(path);
-            if let Some(preview) = preview {
-                sections.push(format!(
-                    "--- 会话产物: {} (类型: {}, 大小: {}) ---\n{}",
-                    display, ext, size_str, preview
-                ));
-            } else {
-                sections.push(format!(
-                    "【会话产物·二进制】文件: {} (类型: {}, 大小: {})",
-                    display, ext, size_str
-                ));
-            }
-        } else if let Ok(content) = std::fs::read_to_string(path) {
-            let sample = if content.chars().count() > 2000 {
-                format!(
-                    "{}...\n[文件过长截断]",
-                    content.chars().take(2000).collect::<String>()
-                )
-            } else {
-                content
-            };
-            sections.push(format!("--- 会话产物: {} ---\n{}", display, sample));
-        }
-    }
-    let combined = sections.join("\n\n").trim().to_string();
-    if combined.is_empty() {
-        return None;
-    }
-
-    let mut hasher = Sha256::new();
-    hasher.update(combined.as_bytes());
-    let hash_hex = format!("{:x}", hasher.finalize());
-
-    let final_text = if combined.chars().count() > MAX_DIFF_CHARS {
-        format!(
-            "{}\n\n... [会话产物材料过长，已安全截断前 {} 字符进行审查]",
-            combined.chars().take(MAX_DIFF_CHARS).collect::<String>(),
-            MAX_DIFF_CHARS
-        )
-    } else {
-        combined
-    };
-    Some((final_text, hash_hex))
-}
-
-/// 紧凑产物清单：diff 存在时 tmp 材料不走兜底扫描（collect_session_tmp_material
-/// 仅在无台账路径调用），审查者只能靠自述提示猜产物存在性、再烧一步 list_dir
-/// 确认。此处总是列出本轮 tmp 产物的路径+大小（不含内容预览），让取证请求
-/// 直接点名文件。阶段审查复用（中途产物同样可见）。无本轮新产物返回 None。
+/// 阶段审查辅助清单；不决定终态的产物异常检查或免审条件。
+/// 终态使用 task_review_snapshot，从任务范围和明确交付路径获取对象。
 pub(crate) fn collect_session_tmp_manifest(
     session_id: &str,
     run_started_at: chrono::DateTime<chrono::Utc>,
@@ -160,26 +71,15 @@ pub(crate) fn collect_session_tmp_manifest(
 /// 机械层管（硬编码必误伤——复杂 Excel 首行留白合法），留给审查者用
 /// 取证工具裁量。发现异常也不直接判死：伪格式可能被任务授权（fakefmt
 /// 实测即如此），升级为 LLM 审查并把异常注入材料供其裁决。
-pub(crate) fn sniff_session_tmp_anomalies(session_id: &str) -> Vec<String> {
+pub(crate) fn sniff_task_file_anomalies(files: &[std::path::PathBuf]) -> Vec<String> {
     use std::io::Read;
-    let tmp_dir = crate::agent::path_guard::get_session_tmp_dir(session_id);
-    if !tmp_dir.is_dir() {
-        return Vec::new();
-    }
-    let mut files = Vec::new();
-    GitBaseline::scan_modified_files(&tmp_dir, 0, std::time::UNIX_EPOCH, &mut files);
     let mut anomalies = Vec::new();
     for path in files {
-        let rel = path
-            .strip_prefix(&tmp_dir)
-            .map(|r| r.to_string_lossy().to_string())
-            .unwrap_or_else(|_| path.to_string_lossy().to_string());
-        if is_noise_path(&rel) {
-            continue;
-        }
+        let rel = path.to_string_lossy().to_string();
         let Ok(meta) = path.metadata() else { continue };
+        if !meta.is_file() { continue; }
         if meta.len() == 0 {
-            anomalies.push(format!("tmp/{}：0 字节空文件", rel));
+            anomalies.push(format!("{}：0 字节空文件（是否符合任务用途交审查判断）", rel));
             continue;
         }
         let ext = path
@@ -225,7 +125,7 @@ pub(crate) fn sniff_session_tmp_anomalies(session_id: &str) -> Vec<String> {
             _ => None,
         };
         if let Some(expect) = violation {
-            anomalies.push(format!("tmp/{}：扩展名 .{} 与内容魔数不符（{}）", rel, ext, expect));
+            anomalies.push(format!("{}：扩展名 .{} 与内容魔数不符（{}）", rel, ext, expect));
         }
     }
     anomalies
@@ -445,6 +345,7 @@ pub(crate) fn read_review_step_output(
     let mut result = json!({"output_id":output_id,"offset":offset,"next_offset":end_offset,
         "total_chars":total_chars,"has_more":end_offset<total_chars,"content":content});
     result["source"] = review_output_source(db, session_id, output_id, task_started_at)?;
+    result["scope_notice"] = json!(crate::agent::run_trace::SAVED_OUTPUT_SCOPE_NOTICE);
     if let Some(selection) = selection { result["selection"] = selection; }
     Ok(result.to_string())
 }
@@ -479,7 +380,7 @@ pub(crate) fn search_review_step_output(
     value["search_complete"] = json!(true);
     value["search_scope"] = json!(if value.get("selection").is_some() { "selected_branch" } else if value["projected"] == true { "model_projection" } else { "persisted_output" });
     value["source"] = crate::agent::run_trace::source_for_task(value["source"].take(), task_started_at);
-    value["scope_notice"] = json!("仅检索该工具已保存的输出；上游命令过滤、tail 或输出截断未保留的日志不在搜索范围。");
+    value["scope_notice"] = json!(crate::agent::run_trace::SAVED_OUTPUT_SCOPE_NOTICE);
     Ok(value.to_string())
 }
 
@@ -587,14 +488,23 @@ fn without_receipt_metadata(mut raw: &str) -> String {
 /// 单步输出的摘要提取：JSON 回执抓关键字段，shell 输出抓状态行+命令回显。
 pub(crate) fn step_trace_snippet(raw: &str) -> String {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
-        for key in ["message", "command", "path", "summary", "error"] {
+        // 路径事实单独保留，不能被 message 抢占或因无匹配而从搜索回执消失。
+        let locations = ["cwd", "resolved_path", "resolved_root"].iter()
+            .filter_map(|key| v.get(key).and_then(|value| value.as_str())
+                .map(|path| format!("{key}={path}")))
+            .collect::<Vec<_>>().join("; ");
+        let location = if locations.is_empty() { String::new() } else {
+            format!("[{}] ", receipt_excerpt(&locations, 600))
+        };
+        for key in ["message", "command", "path", "summary", "error", "query"] {
             if let Some(s) = v.get(key).and_then(|x| x.as_str()) {
                 let s = s.trim();
                 if !s.is_empty() {
-                    return s.chars().take(120).collect();
+                    return format!("{}{}", location, s.chars().take(120).collect::<String>());
                 }
             }
         }
+        if !location.is_empty() { return location; }
     }
     raw.lines()
         .filter(|l| !l.trim().is_empty())
@@ -930,7 +840,7 @@ pub(crate) fn render_ref_excerpt(
 }
 
 /// 把方案的 evidence_refs（文件路径，可带 `:起-止` 行号）由宿主展开为原文片段。
-/// 只读工作区与会话 tmp 内的文件；非文本/过大文件（图片、视频等）只给元信息。路径之外的引用（UUID、step_N 等）忽略。
+/// 复用审查工具的会话读取边界；非文本/过大文件只给元信息。非路径引用（UUID、step_N 等）忽略。
 pub(crate) fn resolve_evidence_refs(
     workspace: &Path,
     session_id: &str,
@@ -938,35 +848,20 @@ pub(crate) fn resolve_evidence_refs(
     anchors: &[String],
     budget_chars: usize,
 ) -> Option<String> {
-    let ws = workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf());
     let tmp_root = crate::agent::path_guard::get_session_tmp_dir(session_id);
-    let tmp_canon = tmp_root.canonicalize().ok();
     let mut blocks: Vec<String> = Vec::new();
     let mut used = 0usize;
     for r in refs {
         let (path_str, range) = parse_ref_range(r);
         if path_str.is_empty()
             || !(path_str.contains('/') || path_str.contains('.'))
-            || path_str.chars().any(char::is_whitespace)
         {
             continue;
         }
-        let joined = if let Some(rest) = path_str.strip_prefix("tmp/") {
-            tmp_root.join(rest)
-        } else {
-            let p = Path::new(path_str);
-            if p.is_absolute() {
-                p.to_path_buf()
-            } else {
-                workspace.join(p)
-            }
-        };
-        let Ok(canon) = joined.canonicalize() else {
+        let Some(canon) = crate::agent::review_tools::resolve_read_path(workspace, Some(&tmp_root), session_id, Path::new(path_str)) else {
             continue;
         };
-        let inside = canon.starts_with(&ws)
-            || tmp_canon.as_ref().map_or(false, |t| canon.starts_with(t));
-        if !inside || !canon.is_file() {
+        if !canon.is_file() {
             continue;
         }
         let size = canon.metadata().map(|m| m.len()).unwrap_or(0);
@@ -981,7 +876,7 @@ pub(crate) fn resolve_evidence_refs(
                 if ex.trim().is_empty() {
                     continue;
                 }
-                format!("- {}\n```\n{}```", r.trim(), ex)
+                format!("- {}（实际路径：{}）\n```\n{}```", r.trim(), canon.display(), ex)
             }
             None => format!(
                 "- {}（{} 字节，非文本或过大，未摘录；审查员可用工具按需查看）",
@@ -1052,6 +947,30 @@ mod evidence_ref_tests {
 mod review_material_regressions {
     use super::*;
     use crate::agent::child_reviewer::retirement_tests::MockReviewer;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn empty_shell_result_reaches_pipeline_review_excerpt() {
+        let mock = MockReviewer::new(vec![]).await;
+        let db = mock.db.clone();
+        let root = mock.root.clone();
+        let result = tokio::task::spawn_blocking(move || crate::agent::tools::local_shell::dispatch(&db, "scope", "exec",
+            &json!({"command":"printf 'not-the-target' | grep absent | head -n 1"}), Some(&root))).await.unwrap();
+        assert!(result.success, "外层管道退出码保持原样");
+        let raw = format!("[Step 1 Result]: {{\"message\":\"写入临时文件\"}}\n[Step 2 Result]: {}", result.stdout);
+        let excerpt = pipeline_receipt_snippet(&raw, "observation-output-id");
+        assert!(excerpt.contains(mock.root.to_str().unwrap()), "流水线节选应保留实际启动目录：{excerpt}");
+        assert!(excerpt.contains("stdout：无输出；stderr：无输出"), "{excerpt}");
+        assert!(excerpt.contains("原文读取"));
+    }
+
+    #[test]
+    fn empty_search_review_excerpt_keeps_the_actual_search_root() {
+        let root = "/second project/reference";
+        let raw = json!({"query":"absent_symbol","hits":[],"total_hits":0,"resolved_root":root}).to_string();
+        let preview = step_trace_snippet(&raw);
+        assert!(preview.contains(root) && preview.contains("absent_symbol"));
+    }
 
     fn put(
         db: &DbState,

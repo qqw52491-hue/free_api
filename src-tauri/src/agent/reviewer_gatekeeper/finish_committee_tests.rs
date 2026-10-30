@@ -83,6 +83,7 @@ async fn review_task(
         Some(&triage),
         None,
         Some("这是需要核对的完整分析报告"),
+        &[],
     )
     .await;
     let recorded = events.lock().unwrap().clone();

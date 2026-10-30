@@ -62,6 +62,7 @@ fn config_row(conn: &Connection, session: &str) -> Result<SessionDirectoryConfig
 fn refresh(conn: &Connection, session: &str) -> Result<Vec<ProjectDirectory>, String> {
     let dirs = read_session_directories(conn, session)?;
     let primary = session_workspace(session);
+    crate::agent::reviewer_gatekeeper::capture_new_writable_directories_on(conn, session, &primary, &dirs)?;
     workspace_access::bind_conversation(session, &primary, dirs.clone());
     Ok(dirs)
 }

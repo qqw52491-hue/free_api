@@ -366,8 +366,8 @@ fn execute_read(
     }
 
     let mut output = format!(
-        "📄 文件: {} | 共 {} 行 | 显示第 {} 至 {} 行\n---\n",
-        resolved.display_path, total_lines, start_line, slice_end
+        "📄 文件: {} | 共 {} 行 | 显示第 {} 至 {} 行\n实际路径: {}\n---\n",
+        resolved.display_path, total_lines, start_line, slice_end, resolved.canonical_path.display()
     );
 
     // 导航提示：窗口式读取时提示"可整读"，引导模型一次性建立文件全貌而非碎片化重读。
@@ -538,6 +538,7 @@ fn execute_write(
 
     let payload = json!({
         "path": resolved.display_path,
+        "resolved_path": resolved.canonical_path.to_string_lossy(),
         "is_tmp": resolved.is_session_tmp,
         "size_bytes": content.len(),
         "message": format!("✅ 已成功写入 \"{}\"（共 {} 字节）", resolved.display_path, content.len())
@@ -546,6 +547,7 @@ fn execute_write(
     let view = json!({
         "kind": "write",
         "path": resolved.display_path,
+        "resolved_path": resolved.canonical_path.to_string_lossy(),
         "size_bytes": content.len(),
         "is_tmp": resolved.is_session_tmp,
     });
@@ -730,6 +732,7 @@ fn execute_edit(
 
     let payload = json!({
         "path": resolved.display_path,
+        "resolved_path": resolved.canonical_path.to_string_lossy(),
         "is_tmp": resolved.is_session_tmp,
         "start_line": start_line,
         "end_line": end_line,
@@ -748,6 +751,7 @@ fn execute_edit(
     let view = json!({
         "kind": "diff",
         "path": resolved.display_path,
+        "resolved_path": resolved.canonical_path.to_string_lossy(),
         "start_line": start_line,
         "end_line": end_line,
         "removed_lines": removed.iter().take(DIFF_VIEW_MAX_LINES).collect::<Vec<_>>(),
@@ -835,6 +839,7 @@ fn execute_list(
 
     let payload = json!({
         "dir": resolved.display_path,
+        "resolved_path": resolved.canonical_path.to_string_lossy(),
         "is_tmp": resolved.is_session_tmp,
         "total_items": entries.len(),
         "entries": entries,

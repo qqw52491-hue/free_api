@@ -406,6 +406,9 @@ pub(crate) fn resolve_raw_output(raw: &str) -> Option<String> {
     Some(raw.to_string())
 }
 
+/// 回查范围只覆盖保存的工具回执，不承诺还原上游未返回、截断或采集失败的内容。
+pub(crate) const SAVED_OUTPUT_SCOPE_NOTICE: &str = "仅覆盖该 output_id 已保存的工具回执；上游命令过滤、工具截断或采集失败而未保存的内容无法由此恢复。has_more/total_chars 只描述本次选中回执或投影的分页范围，不证明完整覆盖原始日志、对话或任务事实。";
+
 pub fn get_step_output(db: &DbState, session_id: &str, output_id: &str) -> Result<String, String> {
     // 先通过 SQLite 校验 output_id 归属，再读取可能的溢出文件，避免跨 session 工件泄露。
     let raw: Option<String> = {

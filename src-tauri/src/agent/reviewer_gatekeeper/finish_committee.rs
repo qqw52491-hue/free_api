@@ -27,6 +27,7 @@ pub(super) async fn evaluate_committee<R: tauri::Runtime>(
     _plan_mode: Option<crate::agent::checkpoint::PlanExecutionMode>,
     // 调用方已组装 summary + details 的完整交付正文，参与审查与复用指纹。
     finish_summary: Option<&str>,
+    delivery_paths: &[String],
 ) -> ReviewResult {
     let primary = triage
         .and_then(|v| v.final_review_roles.iter().find(|r| !r.trim().is_empty()))
@@ -70,6 +71,7 @@ pub(super) async fn evaluate_committee<R: tauri::Runtime>(
             triage,
             _plan_mode,
             finish_summary,
+            delivery_paths,
             "finish-review",
             None,
         )
@@ -117,6 +119,7 @@ pub(super) async fn evaluate_committee<R: tauri::Runtime>(
                 Some(&member_triage),
                 _plan_mode,
                 finish_summary,
+            delivery_paths,
                 &suffix,
                 Some(verification_lock),
             )

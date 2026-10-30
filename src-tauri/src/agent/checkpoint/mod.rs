@@ -39,6 +39,9 @@ pub struct AgentCheckpoint {
     pub phase: AgentPhase,
     #[serde(default)]
     pub task_git_baseline: Option<crate::agent::reviewer_gatekeeper::GitBaseline>,
+    /// 附加可写目录各自的任务起点，键为物理目录（兼容旧版仓库根键）；同任务只追加。
+    #[serde(default)]
+    pub task_additional_git_baselines: std::collections::BTreeMap<String, crate::agent::reviewer_gatekeeper::GitBaseline>,
     #[serde(default)]
     pub task_started_at: Option<chrono::DateTime<chrono::Utc>>,
     pub data: DurableAgentContext,
@@ -375,6 +378,7 @@ impl AgentCheckpoint {
             run_id,
             phase: AgentPhase::CallLlm,
             task_git_baseline: None,
+            task_additional_git_baselines: Default::default(),
             task_started_at: None,
             data: DurableAgentContext::capture(context),
             pending: None,
@@ -634,6 +638,7 @@ fn write_checkpoint_on(
     checkpoint: &mut AgentCheckpoint,
 ) -> Result<WriteOutcome, String> {
     crate::agent::review_control::merge_exclusions_on(conn, checkpoint)?;
+    crate::agent::reviewer_gatekeeper::merge_task_baselines_on(conn, checkpoint)?;
     if checkpoint.version == 0 {
         // snapshot JSON 与表中 revision 必须一致；否则第一次恢复会错误地再次 INSERT。
         checkpoint.version = 1;

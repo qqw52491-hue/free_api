@@ -140,6 +140,7 @@ pub fn dispatch_in_workspace(
             let mut payload = json!({
                 "output_id": output_id,
                 "source": source,
+                "scope_notice": crate::agent::run_trace::SAVED_OUTPUT_SCOPE_NOTICE,
                 "offset": offset,
                 "next_offset": offset.saturating_add(returned_chars),
                 "requested_limit": requested_limit,
@@ -213,6 +214,7 @@ pub fn dispatch_in_workspace(
             let mut payload = json!({
                 "output_id": output_id,
                 "source": source,
+                "scope_notice": crate::agent::run_trace::SAVED_OUTPUT_SCOPE_NOTICE,
                 "pattern": pattern,
                 "total_matches": total_match_count,
                 "returned_matches": matches.len(),
@@ -807,6 +809,38 @@ mod tests {
     use super::*;
     use rusqlite::Connection;
     use std::sync::{Arc, Mutex};
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_output_pages_do_not_claim_to_restore_upstream_truncated_logs() {
+        let db = memory_db_with_step_logs();
+        let root = std::env::temp_dir().join(format!("saved-scope-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("produce.sh"), "printf '%022000dMIDDLE_UNSAVED_MARKER%038000d' 0 0\n").unwrap();
+        let result = crate::agent::tools::local_shell::dispatch(&db, "scope", "exec",
+            &json!({"command":"sh produce.sh"}), Some(&root));
+        assert!(result.success);
+        assert!(!result.stdout.contains("MIDDLE_UNSAVED_MARKER"), "上游工具已截断的中段不在保存回执里");
+        let id = crate::agent::run_trace::save_step_output_with_meta(&db, "scope", 1,
+            "local_shell", "exec", "succeeded", &result.stdout).unwrap();
+        let mut offset = 0;
+        let mut restored = String::new();
+        loop {
+            let response = dispatch(&db, "scope", "get_step_output", &json!({"output_id":id,"offset":offset,"limit":16000}));
+            assert!(response.success);
+            let page: Value = serde_json::from_str(&response.stdout).unwrap();
+            assert!(page["scope_notice"].as_str().unwrap().contains("不证明完整覆盖原始日志"));
+            restored.push_str(page["raw_output"].as_str().unwrap());
+            if page["has_more"] == false { break; }
+            offset = page["next_offset"].as_u64().unwrap();
+        }
+        assert_eq!(restored, result.stdout, "分页完整还原已保存回执，而不是未保存的原始输出");
+        let search = dispatch(&db, "scope", "search_step_output", &json!({"output_id":id,"pattern":"MIDDLE_UNSAVED_MARKER"}));
+        let found: Value = serde_json::from_str(&search.stdout).unwrap();
+        assert_eq!(found["total_matches"], 0);
+        assert!(found["scope_notice"].as_str().unwrap().contains("上游命令过滤"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn memory_db() -> DbState {
         let conn = Connection::open_in_memory().unwrap();

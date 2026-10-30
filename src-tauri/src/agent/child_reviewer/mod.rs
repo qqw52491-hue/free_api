@@ -220,7 +220,7 @@ pub async fn spawn_child_reviewer(
 {}",
         persona,
         if reviewer_tool_steps > 0 {
-            format!("【只读取证工具（预算 {} 步，用尽后必须收敛）】当证据包不足以核实某个疑点时，输出且仅输出一个 JSON 对象请求取证：{{\"tool\":\"read_file\",\"path\":\"src/foo.rs\"}} / {{\"tool\":\"read_file\",\"path\":\"tmp/产物.xlsx\"}}（tmp/ 前缀对 read_file/list_dir/grep_search 有效，直达会话产物区；办公/数据文件自动返回内容预览；read_file 大文件用 \"start_line\":221 翻页，单次最多 220 行）/ {{\"tool\":\"grep_search\",\"pattern\":\"函数名\",\"path\":\"src/\"}}（不区分大小写的字面量搜索；path 可指定文件/目录或 tmp/ 路径，省略时覆盖工作区与会话产物区；返回 search_complete、has_more 与未读项，has_more=null 表示是否还有匹配未知） / {{\"tool\":\"git_diff\"}}（仅任务起点以来的改动；不在变更材料里、却在 git status/diff 可见的文件属用户自己的改动，不得据此下缺陷） / {{\"tool\":\"git_log\",\"n\":10}} / {{\"tool\":\"list_dir\",\"path\":\"src/\"}} / {{\"tool\":\"run_command\",\"command\":\"cat \\\"$SESSION_TMP/data.csv\\\" | head -20\"}}（仅 ls/cat/grep/rg/jq/stat/diff 等只读命令；工作目录=工作区，$SESSION_TMP 为会话产物物理根——路径含空格必须加引号；命令内路径参数限工作区与会话 tmp 内）/ {{\"tool\":\"python\",\"code\":\"import os,openpyxl; wb=openpyxl.load_workbook(os.environ['SESSION_TMP']+'/xx.xlsx'); ...\"}}（只读 python：文件写删/进程派生/网络访问均被宿主护栏拦截；宿主家目录不可读，系统区与两根内文件可读；SESSION_TMP 未设置说明本会话无产物区）。宿主会返回取证结果供你继续研判。规则：先取证再下结论，finding 的 location 必须是可复核的真实路径:行号，禁止臆测；方案中关于代码现状的可核实断言（函数/字段存在性、路由覆盖、『已存在/已实现/已验证』类声明）应优先用工具交叉验证而非直接采信——断言与实测事实冲突本身即构成 finding；所有取证请求完成后输出最终审查 JSON（含 findings 键）。", reviewer_tool_steps)
+            format!("【只读取证工具（预算 {} 步，用尽后必须收敛）】当证据包不足以核实某个疑点时，输出且仅输出一个 JSON 对象请求取证：{{\"tool\":\"read_file\",\"path\":\"src/foo.rs\"}} / {{\"tool\":\"read_file\",\"path\":\"tmp/产物.xlsx\"}}（tmp/ 前缀对 read_file/list_dir/grep_search 有效，直达会话产物区；办公/数据文件自动返回内容预览；read_file 大文件用 \"start_line\":221 翻页，单次最多 220 行）/ {{\"tool\":\"grep_search\",\"pattern\":\"函数名\",\"path\":\"src/\"}}（不区分大小写的字面量搜索；path 可指定文件/目录或 tmp/ 路径，附加目录用绝对路径；省略时覆盖工作区与会话产物区；返回 search_complete、has_more 与未读项，has_more=null 表示是否还有匹配未知） / {{\"tool\":\"git_diff\"}}（仅任务起点以来的改动；不在变更材料里、却在 git status/diff 可见的文件属用户自己的改动，不得据此下缺陷） / {{\"tool\":\"git_log\",\"n\":10}} / {{\"tool\":\"list_dir\",\"path\":\"src/\"}} / {{\"tool\":\"run_command\",\"command\":\"cat \\\"$SESSION_TMP/data.csv\\\" | head -20\"}}（仅 ls/cat/grep/rg/jq/stat/diff 等只读命令；工作目录=工作区，$SESSION_TMP 为会话产物物理根——路径含空格必须加引号；命令内路径参数限工作区、会话 tmp 与当前已授权附加目录）/ {{\"tool\":\"python\",\"code\":\"import os,openpyxl; wb=openpyxl.load_workbook(os.environ['SESSION_TMP']+'/xx.xlsx'); ...\"}}（只读 python：文件写删/进程派生/网络访问均被宿主护栏拦截；宿主家目录不可读，系统区与当前允许根内文件可读；SESSION_TMP 未设置说明本会话无产物区）。宿主会返回取证结果供你继续研判。规则：先取证再下结论，finding 的 location 必须是可复核的真实路径:行号，禁止臆测；方案中关于代码现状的可核实断言（函数/字段存在性、路由覆盖、『已存在/已实现/已验证』类声明）应优先用工具交叉验证而非直接采信——断言与实测事实冲突本身即构成 finding；所有取证请求完成后输出最终审查 JSON（含 findings 键）。", reviewer_tool_steps)
         } else {
             "不得调用任何工具：只评估证据包内的事实，证据不足时在 missing_evidence 说明。".to_string()
         }
@@ -243,7 +243,10 @@ pub async fn spawn_child_reviewer(
         json!({
             "role": "user",
             "content": format!(
-                "审查问题：{}\n\n{}{}{}\n\n父 Agent 明确提供的证据引用：{}\n\n证据摘录（可能为空；不得假定摘录外事实）：{}",
+                "{}\n\n审查问题：{}\n\n{}{}{}\n\n父 Agent 明确提供的证据引用：{}\n\n证据摘录（可能为空；不得假定摘录外事实）：{}",
+                crate::agent::review_tools::scope_description(
+                    workspace_root, &crate::agent::path_guard::get_session_tmp_dir(parent_session_id), parent_session_id,
+                ),
                 request.question,
                 contract_verify_hint,
                 // plan_review 时附题面原文：审查员核对「根因能否解释症状」需要
@@ -706,6 +709,7 @@ pub async fn spawn_child_reviewer(
                         None => match crate::agent::review_tools::execute(
                             &workspace_root_owned,
                             Some(&session_tmp_owned),
+                            Some(&session_id_clone),
                             &tool_name,
                             &req,
                         ) {

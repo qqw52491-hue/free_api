@@ -338,7 +338,7 @@ pub(crate) fn dehydrate_historical_turn(msg: &ChatMessage) -> ChatMessage {
             return ChatMessage {
                 role: "user".to_string(),
                 content: json!(format!(
-                    "【历史工具回执（节选）】\noutput_id: {}\n{}\n{}\n原文节选:\n{}\n(完整详细数据已安全持久化至 SQLite，可通过 output_id={} 精准检索)",
+                    "【历史工具回执（节选）】\noutput_id: {}\n{}\n{}\n原文节选:\n{}\n(可通过 output_id={} 回查宿主已保存的工具回执；上游过滤、截断或采集失败而未保存的内容无法恢复，回查不代表覆盖全部历史事实)",
                     output_id, first_line, receipt_lines.join("\n"), excerpt, output_id
                 )),
             };

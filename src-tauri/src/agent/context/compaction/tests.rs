@@ -47,7 +47,7 @@ fn test_low_watermark_dehydration_fires_below_high_watermark() {
     // 保护区外老输出已定型为 output_id 存根
     let head_text = ctx.turns_history[1].content.as_str().unwrap().to_string();
     assert!(
-        head_text.contains("完整详细数据已安全持久化至 SQLite"),
+        head_text.contains("已保存的工具回执"),
         "保护区外老输出必须脱水为句柄，实际头部: {}",
         head_text.chars().take(80).collect::<String>()
     );
@@ -223,7 +223,7 @@ fn test_compaction_drain_aligns_and_reduces_tokens() {
 
     // 保护区外的旧输出已定型为证据句柄（存根），原文不再驻留上下文
     let full_text = serde_json::to_string(&ctx.turns_history).unwrap();
-    assert!(full_text.contains("完整详细数据已安全持久化至 SQLite"));
+    assert!(full_text.contains("已保存的工具回执") || full_text.contains("回查已保存回执"));
 }
 
 #[test]

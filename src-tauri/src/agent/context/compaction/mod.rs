@@ -33,7 +33,9 @@ impl Summarizer for RuleBasedSummarizer {
                 // 规则降级也保留有界原文首尾；不能复制完整回执使归档反而膨胀。
                 let preview: String = if content_str.starts_with("【历史工具回执（节选）】") {
                     let excerpt = content_str.split_once("原文节选:\n")
-                        .map(|(_, body)| body.split("\n(完整详细数据").next().unwrap_or(body))
+                        .map(|(_, body)| body.rsplit_once("\n(")
+                            .filter(|(_, footer)| footer.starts_with("可通过 output_id=") || footer.starts_with("完整详细数据"))
+                            .map(|(excerpt, _)| excerpt).unwrap_or(body))
                         .unwrap_or(first_line);
                     let head: String = excerpt.chars().take(60).collect();
                     let tail: String = excerpt.chars().rev().take(80).collect::<String>().chars().rev().collect();
@@ -95,7 +97,7 @@ pub async fn generate_llm_summary(
     msgs.extend(history_slice.iter().cloned());
     msgs.push(ChatMessage {
         role: "user".to_string(),
-        content: json!("【上下文压缩指令】以上是本 Agent 执行长程任务的完整历史（含步骤计划、工具调用、执行输出与报错）。\n\
+        content: json!("【上下文压缩指令】以上是本 Agent 的历史材料（可能含归档摘要和输出节选，不保证覆盖完整原始记录）。\n\
         请提取并生成一份高度凝练的【阶段性任务继续摘要】，严格包含以下 4 个结构化板块：\n\n\
         ## 1. 已完成事项与关键产物\n\
         - 简明列出已成功完成的阶段、生成的文件路径、创建的数据表等\n\n\
@@ -105,7 +107,7 @@ pub async fn generate_llm_summary(
         - 列出失败过的操作、错误的参数/action、服务端报错及后续如何纠正的（避免后续步骤重蹈覆辙）\n\n\
         ## 4. 未完成事项与下一步建议\n\
         - 基于前面的进展，明确指出当前尚未完成的工作点与建议方向\n\n\
-        ⚠️ 注意：禁止流水账重复，只保留具有决策指导意义的硬事实与结论；如有 output_id 引用、文件路径或行号请准确保留。"),
+        ⚠️ 注意：禁止流水账重复，保留可追溯观察及其来源，区分模型自述、已验证结果与尚未核实事项，不把未验证写成通过；如有 output_id 引用、文件路径或行号请准确保留。"),
     });
 
     // provider 归一化与真实请求同口径（严格交替路由合并连续同角色），
@@ -242,7 +244,7 @@ impl<'a> Summarizer for HybridSummarizer<'a> {
 
         if let Some(llm_summary) = llm_summary_opt {
             Ok(format!(
-                "### 🤖 AI 任务推进与状态摘要\n{}\n\n### 📋 关键事实索引（完整原文可通过 output_id 从 SQLite 查询）\n{}",
+                "### 🤖 AI 任务推进与状态摘要\n{}\n\n### 📋 历史线索索引（工具回执按 output_id 回查；摘要不是已核实事实）\n{}",
                 llm_summary.trim(),
                 rule_index.trim()
             ))
@@ -503,7 +505,7 @@ impl SandwichContext {
             let compact_card = ChatMessage {
                 role: "user".to_string(),
                 content: json!(format!(
-                    "【历史早期执行归档卡片 #{}（双层压缩：完整原文可通过 output_id 精准查询）】\n{}\n（已归档 {} 条历史消息，当前窗口: {} tokens）",
+                    "【历史早期执行归档卡片 #{}（双层压缩：已保存工具回执可按 output_id 回查，不保证历史信息无损）】\n{}\n（已归档 {} 条历史消息，当前窗口: {} tokens）",
                     card_index,
                     archive_text,
                     to_compact.len(),
@@ -535,7 +537,7 @@ impl SandwichContext {
                         let id = text[pos + 11..].lines().next().unwrap_or("").trim();
                         if !id.is_empty() && text.len() > 300 {
                             msg.content = json!(format!(
-                                "【执行输出精简句柄】\noutput_id: {}\n[结果未保留，不能据此判断成功或失败；完整详细数据已安全持久化至 SQLite，调用 search_step_output / get_step_output(output_id={}) 获取]",
+                                "【执行输出精简句柄】\noutput_id: {}\n[结果未保留，不能据此判断成功或失败；可调用 search_step_output / get_step_output(output_id={}) 回查已保存回执；未保存的上游内容无法恢复]",
                                 id, id
                             ));
                             degraded_any = true;

@@ -142,6 +142,43 @@ fn verdict(blocking: bool) -> Value {
 }
 
 #[tokio::test]
+async fn plan_reviewer_receives_directory_scope_and_reads_the_additional_project() {
+    use crate::agent::workspace_access::{self, DirectoryAccess, ProjectDirectory};
+    let extra = std::env::temp_dir().join(format!("extra review {}", Uuid::new_v4()));
+    std::fs::create_dir_all(&extra).unwrap();
+    let extra = extra.canonicalize().unwrap();
+    let file = extra.join("same.txt");
+    std::fs::write(&file, "TARGET_PROJECT_EVIDENCE").unwrap();
+    let mut good = verdict(false);
+    good["root_cause_verdict"] = json!("na");
+    let mock = MockReviewer::new(vec![json!({"tool":"read_file","path":file}), good]).await;
+    std::fs::write(mock.root.join("same.txt"), "SOURCE_PROJECT_OTHER_FILE").unwrap();
+    let sid = format!("stage-multi-dir-{}", Uuid::new_v4());
+    workspace_access::bind_conversation(&sid, &mock.root, vec![ProjectDirectory {
+        path: extra.to_string_lossy().into_owned(), access: DirectoryAccess::ReadOnly,
+    }]);
+    let refs = crate::agent::reviewer_gatekeeper::resolve_evidence_refs(
+        &mock.root, &sid, &[format!("{}:1", file.display())], &[], 3000,
+    ).unwrap();
+    assert!(refs.contains("TARGET_PROJECT_EVIDENCE") && refs.contains(file.to_str().unwrap()));
+    let snapshot = PlanReviewerDispatchSnapshot::new("mock", "flash", "auto", "审查者",
+        json!({"question":"核对附加工程的同名文件", "evidence_excerpt":refs, "plan_review":true}));
+    let (_tx, rx) = watch::channel(0u64);
+    let id = snapshot.spawn(None, &mock.db, "parent", &sid, &mock.root, rx, None).await.unwrap();
+    let result = mock.wait_child(&id).await;
+    assert_eq!(result["root_cause_verdict"], "na");
+    let requests = mock.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let first = requests[0]["messages"][1]["content"].as_str().unwrap();
+    assert!(first.contains("默认工作区") && first.contains(extra.to_str().unwrap()) && first.contains("只读"));
+    let observation = requests[1]["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap();
+    assert!(observation.contains("TARGET_PROJECT_EVIDENCE") && observation.contains(file.to_str().unwrap()));
+    assert!(!observation.contains("SOURCE_PROJECT_OTHER_FILE"));
+    workspace_access::revoke_session(&sid);
+    let _ = std::fs::remove_dir_all(extra);
+}
+
+#[tokio::test]
 async fn wide_references_reach_async_reviewer_and_storage_without_losing_blockers() {
     let refs: Vec<String> = (0..12).map(|i| format!(
         "src/{}/file_{i}.rs:10-20", "nested_module/".repeat(18)

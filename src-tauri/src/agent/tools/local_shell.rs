@@ -285,15 +285,17 @@ fn emit_shell_stream(
 async fn drain_pipe<R: tokio::io::AsyncRead + Unpin>(
     reader: Option<R>,
     live_tail: Arc<Mutex<String>>,
-) -> Vec<u8> {
+) -> (Vec<u8>, bool) {
     use tokio::io::AsyncReadExt;
     let mut buf = Vec::new();
+    let mut complete = reader.is_some();
     if let Some(mut r) = reader {
         let mut chunk = [0u8; 4096];
         let mut pending = Vec::new();
         loop {
             match r.read(&mut chunk).await {
-                Ok(0) | Err(_) => break,
+                Ok(0) => break,
+                Err(_) => { complete = false; break; }
                 Ok(n) => {
                     buf.extend_from_slice(&chunk[..n]);
                     push_live_chunk(&live_tail, &mut pending, &chunk[..n]);
@@ -301,16 +303,16 @@ async fn drain_pipe<R: tokio::io::AsyncRead + Unpin>(
             }
         }
     }
-    buf
+    (buf, complete)
 }
 
 /// 主进程退出/被杀后，有界收集 stdout/stderr 排空任务的残余输出。
 /// 超过 grace 仍未等到 EOF（孙进程持管不退）则放弃——排空任务随运行时回收。
 async fn join_drains(
-    stdout_task: tokio::task::JoinHandle<Vec<u8>>,
-    stderr_task: tokio::task::JoinHandle<Vec<u8>>,
+    stdout_task: tokio::task::JoinHandle<(Vec<u8>, bool)>,
+    stderr_task: tokio::task::JoinHandle<(Vec<u8>, bool)>,
     grace: Duration,
-) -> (Vec<u8>, Vec<u8>) {
+) -> ((Vec<u8>, bool), (Vec<u8>, bool)) {
     tokio::time::timeout(grace, async move {
         let out = stdout_task.await.unwrap_or_default();
         let err = stderr_task.await.unwrap_or_default();
@@ -318,6 +320,13 @@ async fn join_drains(
     })
     .await
     .unwrap_or_default()
+}
+
+fn output_observation(bytes: &[u8], complete: bool) -> &'static str {
+    if !complete { "采集不完整，无法判断完整输出" }
+    else if bytes.is_empty() { "无输出" }
+    else if String::from_utf8_lossy(bytes).trim().is_empty() { "仅空白字符" }
+    else { "有非空内容" }
 }
 
 fn failure_diagnostics(stdout: &str, stderr: &str) -> String {
@@ -869,14 +878,14 @@ fn lex_normalize(p: &Path) -> PathBuf {
 enum ExecWaitOutcome {
     Finished(
         Result<
-            (std::process::ExitStatus, Vec<u8>, Vec<u8>),
+            (std::process::ExitStatus, (Vec<u8>, bool), (Vec<u8>, bool)),
             (String, bool, bool, String, String),
         >,
     ),
     Promoted {
         child: tokio::process::Child,
-        drain_stdout: tokio::task::JoinHandle<Vec<u8>>,
-        drain_stderr: tokio::task::JoinHandle<Vec<u8>>,
+        drain_stdout: tokio::task::JoinHandle<(Vec<u8>, bool)>,
+        drain_stderr: tokio::task::JoinHandle<(Vec<u8>, bool)>,
         ticker: tokio::task::JoinHandle<()>,
         live_tail: Arc<Mutex<String>>,
         stream_started: Instant,
@@ -895,8 +904,8 @@ fn promote_timed_out_shell(
     run_id: &str,
     rt: tokio::runtime::Runtime,
     mut child: tokio::process::Child,
-    drain_stdout: tokio::task::JoinHandle<Vec<u8>>,
-    drain_stderr: tokio::task::JoinHandle<Vec<u8>>,
+    drain_stdout: tokio::task::JoinHandle<(Vec<u8>, bool)>,
+    drain_stderr: tokio::task::JoinHandle<(Vec<u8>, bool)>,
     ticker: tokio::task::JoinHandle<()>,
     live_tail: Arc<Mutex<String>>,
     stream_started: Instant,
@@ -940,7 +949,7 @@ fn promote_timed_out_shell(
     std::thread::spawn(move || {
         rt.block_on(async move {
             let status = child.wait().await;
-            let (o, e) = join_drains(drain_stdout, drain_stderr, Duration::from_secs(3)).await;
+            let ((o, out_complete), (e, err_complete)) = join_drains(drain_stdout, drain_stderr, Duration::from_secs(3)).await;
             ticker.abort();
             let tail_now = live_tail.lock().map(|g| g.clone()).unwrap_or_default();
             if !tail_now.is_empty() {
@@ -973,6 +982,7 @@ fn promote_timed_out_shell(
                     "log_path": log_path_w.display().to_string(),
                     "tail": tail,
                     "promoted_from": "sync_timeout",
+                    "output_capture_complete": out_complete && err_complete,
                 });
                 let _ = crate::agent::job_engine::finish_job(
                     &db_state,
@@ -1228,7 +1238,7 @@ fn execute_command_blocking(
     let duration_ms = start_time.elapsed().as_millis();
 
     match result {
-        Ok((status, stdout_bytes, stderr_bytes)) => {
+        Ok((status, (stdout_bytes, stdout_complete), (stderr_bytes, stderr_complete))) => {
             let exit_code = status.code().unwrap_or(-1);
             let success = status.success();
 
@@ -1282,7 +1292,11 @@ fn execute_command_blocking(
                 )
             };
 
-            let mut formatted_stdout = format!("{}\n$ {}\n", status_badge, cmd_str);
+            // 采集超时/读取出错不能冒充进程没有输出；只报告采集事实。
+            let stdout_observation = output_observation(&stdout_bytes, stdout_complete);
+            let stderr_observation = output_observation(&stderr_bytes, stderr_complete);
+            let observation_line = format!("[输出观察] stdout：{}；stderr：{}。只描述采集结果，不判断业务是否通过。", stdout_observation, stderr_observation);
+            let mut formatted_stdout = format!("[进程启动目录 cwd：{}]\n{}\n$ {}\n{}\n", cwd.display(), status_badge, cmd_str, observation_line);
 
             if !stdout_trimmed.is_empty() {
                 formatted_stdout.push_str(&format!("\n--- STDOUT ---\n{}", stdout_trimmed));
@@ -1320,6 +1334,8 @@ fn execute_command_blocking(
                 "exit_scope": "shell_process",
                 "verification_status": "not_assessed",
                 "status_note": PROCESS_EXIT_NOTE,
+                "stdout_observation": stdout_observation,
+                "stderr_observation": stderr_observation,
                 "duration_ms": duration_ms,
                 "success": success,
                 "kind": kind,
@@ -1332,7 +1348,9 @@ fn execute_command_blocking(
             // UI 结构化视图：命令/退出码/耗时 + 输出尾巴（合并 stdout+stderr 末 48 行
             // 且限 8KB——要够溢出 190px 卡片视窗才滚得动，8 行时代内容从未超过容器、
             // 滚动条形同虚设；完整输出仍在 stdout 与 step 日志）。
-            let mut combined = String::new();
+            let mut combined = if stdout_trimmed.is_empty() || stderr_trimmed.is_empty() || !stdout_complete || !stderr_complete {
+                format!("{}\n", observation_line)
+            } else { String::new() };
             if !stdout_trimmed.is_empty() {
                 combined.push_str(&stdout_trimmed);
             }
@@ -1367,6 +1385,8 @@ fn execute_command_blocking(
                 "exit_scope": "shell_process",
                 "verification_status": "not_assessed",
                 "status_note": PROCESS_EXIT_NOTE,
+                "stdout_observation": stdout_observation,
+                "stderr_observation": stderr_observation,
                 "duration_ms": duration_ms,
                 "truncated": is_truncated,
                 "output_tail": output_tail,
@@ -1403,6 +1423,9 @@ fn execute_command_blocking(
                     ));
                 }
                 msg
+            };
+            let stderr_field = if success { stderr_field } else {
+                format!("[进程启动目录 cwd：{}]\n{}\n{}", cwd.display(), stderr_field, observation_line)
             };
             DispatchResult {
                 view: Some(view),
@@ -1606,6 +1629,51 @@ fn truncate_output(s: &str, max_bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn output_observation_reports_empty_whitespace_and_content_without_changing_exit() {
+        let temp = TempDirGuard::new();
+        let db = test_db();
+        for (command, expected_out, expected_err, success) in [
+            ("printf 'not-the-target' | grep absent | head -n 1", "无输出", "无输出", true),
+            ("printf ' \\n\\t'; printf '  ' >&2", "仅空白字符", "仅空白字符", true),
+            ("printf result; printf warning >&2", "有非空内容", "有非空内容", true),
+            ("printf problem >&2; exit 7", "无输出", "有非空内容", false),
+            ("true", "无输出", "无输出", true),
+        ] {
+            let result = dispatch(&db, "output-observation", "exec", &json!({"command":command}), Some(temp.path()));
+            assert_eq!(result.success, success, "{command}");
+            let view = result.view.as_ref().unwrap();
+            assert_eq!(view["stdout_observation"], expected_out, "{command}");
+            assert_eq!(view["stderr_observation"], expected_err, "{command}");
+            assert!(result.stdout.contains(&format!("stdout：{expected_out}；stderr：{expected_err}")));
+            assert_eq!(view["verification_status"], "not_assessed");
+            if !success { assert!(result.stderr.contains("[输出观察]")); }
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_output_capture_is_not_reported_as_empty() {
+        let stdout = tokio::spawn(async { (b"partial".to_vec(), true) });
+        let stderr = tokio::spawn(async { std::future::pending::<(Vec<u8>, bool)>().await });
+        let ((out, out_complete), (err, err_complete)) = join_drains(stdout, stderr, Duration::from_millis(10)).await;
+        assert!(out.is_empty() && err.is_empty());
+        assert!(!out_complete && !err_complete, "超时回退的数据不得当成已采集空输出");
+        assert_eq!(output_observation(&out, out_complete), "采集不完整，无法判断完整输出");
+        let eof = tokio::spawn(drain_pipe(Some(tokio::io::empty()), Arc::new(Mutex::new(String::new()))));
+        let (data, complete) = eof.await.unwrap();
+        assert!(data.is_empty() && complete, "完整读到 EOF 的空输出与超时不同");
+        struct BrokenReader;
+        impl tokio::io::AsyncRead for BrokenReader {
+            fn poll_read(self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>, _: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Ready(Err(std::io::Error::other("模拟读取失败")))
+            }
+        }
+        let (data, complete) = drain_pipe(Some(BrokenReader), Arc::new(Mutex::new(String::new()))).await;
+        assert!(data.is_empty() && !complete, "读取失败不能冒充完整空输出");
+        assert_eq!(output_observation(&data, complete), "采集不完整，无法判断完整输出");
+    }
+
     #[test]
     fn video_run_shell_failure_keeps_both_diagnostic_streams() {
         let temp = TempDirGuard::new();
@@ -1955,6 +2023,7 @@ mod tests {
         assert!(res.stdout.contains("exit_code: 42"));
         assert!(res.stdout.contains("\"kind\":\"non_zero_exit\""));
         assert!(res.stdout.contains("\"retryable\":true"));
+        assert!(res.stderr.contains(ws.canonicalize().unwrap().to_str().unwrap()), "重试链路也应收到实际启动目录：{}", res.stderr);
     }
 
     #[test]

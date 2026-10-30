@@ -33,7 +33,7 @@ fn repository(root: &Path) -> GitBaseline {
 }
 
 #[test]
-fn runtime_logs_do_not_change_fallback_material_or_fingerprint() {
+fn runtime_logs_do_not_trigger_fallback_scanning_or_change_material() {
     for git in [false, true] {
         let root = std::env::temp_dir().join(format!("review-runtime-{}", uuid::Uuid::new_v4()));
         write(&root, ".gitignore", "agent_logs/\n");
@@ -45,17 +45,13 @@ fn runtime_logs_do_not_change_fallback_material_or_fingerprint() {
         let mut context = SandwichContext::new(String::new(), "只读调查".into());
         context.record_side_effect(41, "local_shell".into(), "SQLite SELECT 查询".into());
         let start = chrono::Utc::now() - chrono::Duration::seconds(2);
-        let before = baseline
-            .collect_review_material(&root, &context, start)
-            .unwrap();
+        let before = baseline.collect_review_material(&root, &context, start);
+        assert!(before.is_none(), "无任务文件变化时，不用副作用描述触发全目录扫描");
         for path in ["agent_logs/review.json", "src-tauri/agent_logs/review.json"] {
             write(&root, path, r#"[{"content":"旧代码和审查记录"}]"#);
         }
-        let after = baseline
-            .collect_review_material(&root, &context, start)
-            .unwrap();
+        let after = baseline.collect_review_material(&root, &context, start);
         assert_eq!(before, after, "运行日志不能进入材料或收据指纹，git={git}");
-        assert!(!after.0.contains("agent_logs/"));
         for path in ["agent_logs/review.json", "src-tauri/agent_logs/review.json"] {
             write(&root, path, r#"[{"content":"终审通过并追加新的运行记录"}]"#);
         }
@@ -63,7 +59,6 @@ fn runtime_logs_do_not_change_fallback_material_or_fingerprint() {
             after,
             baseline
                 .collect_review_material(&root, &context, start)
-                .unwrap()
         );
         std::fs::remove_dir_all(root).unwrap();
     }

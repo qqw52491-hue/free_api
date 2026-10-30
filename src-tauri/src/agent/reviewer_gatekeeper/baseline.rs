@@ -9,11 +9,45 @@ use crate::llm::{self, ModelConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::path::Path;
-use std::process::Command;
+use std::{
+    fs::File,
+    io::Read,
+    path::Path,
+    process::Command,
+};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::watch;
+
+const FILE_HASH_CHUNK_BYTES: usize = 64 * 1024;
+const FILE_PREVIEW_PREFIX_BYTES: usize = 64 * 1024;
+
+/// 完整文件流式计算 SHA-256；只保留有限前缀用于预览，避免终审把大文件整体载入内存。
+fn stream_file_sha256(path: &Path, prefix_limit: usize) -> std::io::Result<(String, Vec<u8>, u64)> {
+    let prefix_limit = prefix_limit.min(FILE_PREVIEW_PREFIX_BYTES);
+    // Git 跟踪的是链接目标文本；取材不沿链接读取范围外正文。
+    if std::fs::symlink_metadata(path)?.file_type().is_symlink() {
+        let target = std::fs::read_link(path)?;
+        let bytes = target.to_string_lossy().as_bytes().to_vec();
+        return Ok((format!("{:x}", Sha256::digest(&bytes)), bytes.iter().take(prefix_limit).copied().collect(), bytes.len() as u64));
+    }
+    let mut file = File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut prefix = Vec::with_capacity(prefix_limit);
+    let mut buffer = [0u8; FILE_HASH_CHUNK_BYTES];
+    let mut total = 0u64;
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 { break; }
+        hasher.update(&buffer[..read]);
+        let remaining = prefix_limit.saturating_sub(prefix.len());
+        if remaining > 0 {
+            prefix.extend_from_slice(&buffer[..read.min(remaining)]);
+        }
+        total = total.saturating_add(read as u64);
+    }
+    Ok((format!("{:x}", hasher.finalize()), prefix, total))
+}
 
 /// 仅在一次审查内保存材料与路径指纹，供变化复核定位；不新增持久化状态或门禁。
 pub(crate) struct ReviewMaterialSnapshot {
@@ -23,6 +57,45 @@ pub(crate) struct ReviewMaterialSnapshot {
 }
 
 impl ReviewMaterialSnapshot {
+    pub(crate) fn empty() -> Self {
+        Self { material: String::new(), hash: String::new(), files: Default::default() }
+    }
+
+    pub(crate) fn append_task_files(&mut self, selected: &TaskReviewFiles) {
+        if selected.paths.is_empty() && selected.notices.is_empty() { return; }
+        let mut hasher = Sha256::new();
+        hasher.update(self.hash.as_bytes());
+        for notice in &selected.notices {
+            hasher.update(notice.as_bytes());
+        }
+        let notices = selected.notices.iter().map(|n| format!("【检查范围说明】{n}\n")).collect::<String>();
+        self.material = format!("{notices}{}", self.material);
+        for path in &selected.paths {
+            let display = path.to_string_lossy().into_owned();
+            let (fingerprint, preview) = match stream_file_sha256(path, FILE_PREVIEW_PREFIX_BYTES) {
+                Ok((hash, prefix, size)) => {
+                    let preview = if is_binary_file(&display) {
+                        extract_office_preview(path).unwrap_or_else(|| format!("二进制文件，{} 字节", size))
+                    } else {
+                        String::from_utf8_lossy(&prefix).chars().take(2000).collect()
+                    };
+                    (hash, preview)
+                }
+                Err(e) => ("<unreadable>".into(), format!("未能读取：{e}；未完成文件核验")),
+            };
+            hasher.update((display.len() as u64).to_le_bytes());
+            hasher.update(display.as_bytes());
+            hasher.update(fingerprint.as_bytes());
+            self.files.insert(display.clone(), fingerprint);
+            self.material.push_str(&format!("\n\n--- 当前任务文件候选/明确交付对象：{display} ---\n{preview}"));
+        }
+        self.hash = format!("{:x}", hasher.finalize());
+        if self.material.chars().count() > MAX_DIFF_CHARS {
+            self.material = format!("{}\n[材料节选已截断；文件完整内容已参与指纹，可按路径取证]",
+                self.material.chars().take(MAX_DIFF_CHARS).collect::<String>());
+        }
+    }
+
     pub(crate) fn changed_paths_since(&self, previous: &Self) -> Vec<String> {
         previous
             .files
@@ -77,8 +150,8 @@ impl GitBaseline {
             if self.unchanged_since_baseline(workspace, path) { "任务开始前已有修改；当前内容仍与起点一致" }
             else { "任务开始前已有修改；当前内容与起点不同，需对照本轮增量" }
         )).collect::<Vec<_>>().join("\n");
-        format!("【任务起点与已有修改（宿主记录）】\n起点引用：{}；任务前已有未提交文件 {} 个，下面显示 {} 个。\n{}\n普通 git diff 的比较对象由命令参数决定；git checkout --/默认 git restore 会回到暂存区，不等于任务起点。若只撤销本轮修改，应先对照此起点，只撤销目标文件的本轮增量，保留任务前已有内容；后续叠加修改须先比较，不能整目录清空。已确认目标属于本轮修改且要整文件恢复起点时，可用 git restore --source=<上述起点引用> --worktree -- <精确目标路径>，不修改暂存区；不要用于覆盖后来叠加的其他修改。专用 git_diff 按任务起点提供差异。起点引用可能是快照提交，也可能仅为 HEAD，不能据此承诺所有未跟踪文件均有内容备份。\n",
-            self.base_head.as_deref().unwrap_or("未保存可用引用"), paths.len(), paths.len().min(32), rows)
+        format!("【任务起点与已有修改（宿主记录）】\n适用工作区：{}（不覆盖其他仓库）。\n起点引用：{}；任务前已有未提交文件 {} 个，下面显示 {} 个。\n{}\n普通 git diff 的比较对象由命令参数决定；git checkout --/默认 git restore 会回到暂存区，不等于任务起点。若只撤销本轮修改，应先对照此起点，只撤销目标文件的本轮增量，保留任务前已有内容；后续叠加修改须先比较，不能整目录清空。已确认目标属于本轮修改且要整文件恢复起点时，可用 git restore --source=<上述起点引用> --worktree -- <精确目标路径>，不修改暂存区；不要用于覆盖后来叠加的其他修改。专用 git_diff 按任务起点提供差异。起点引用可能是快照提交，也可能仅为 HEAD，不能据此承诺所有未跟踪文件均有内容备份。\n",
+            workspace.display(), self.base_head.as_deref().unwrap_or("未保存可用引用"), paths.len(), paths.len().min(32), rows)
     }
 
     pub(crate) fn collect_review_snapshot(
@@ -89,26 +162,7 @@ impl GitBaseline {
     ) -> ReviewMaterialSnapshot {
         let material = self.collect_review_material(workspace, context, run_started_at);
         let files = if material.is_some() {
-            let mut paths = self.collect_changed_file_paths(workspace, run_started_at);
-            if paths.is_empty() {
-                // 干净 Git 仓库也可能走补扫，材料中包含被 Git 忽略的运行产物。
-                // 此时不能只用 Git 的空清单报告“没有文件变化”。
-                let since = std::time::UNIX_EPOCH
-                    + std::time::Duration::from_millis(
-                        run_started_at.timestamp_millis().max(0) as u64
-                    );
-                let mut scanned = Vec::new();
-                Self::scan_modified_files(workspace, 0, since, &mut scanned);
-                paths = scanned
-                    .into_iter()
-                    .filter_map(|path| {
-                        path.strip_prefix(workspace)
-                            .ok()
-                            .map(|p| p.to_string_lossy().into_owned())
-                    })
-                    .filter(|path| !is_noise_path(path))
-                    .collect();
-            }
+            let paths = self.collect_changed_file_paths(workspace, run_started_at);
             paths
                 .into_iter()
                 .map(|path| {
@@ -125,6 +179,25 @@ impl GitBaseline {
             hash,
             files,
         }
+    }
+
+    /// 从授权附加可写目录中，按物理覆盖范围分别捕获任务起点。
+    /// 只在新任务入口调用；旧检查点续跑不补拍当前状态，避免把任务期间的修改伪装成起点。
+    pub(crate) fn capture_additional_git_baselines(
+        session_id: &str,
+        primary_workspace: &Path,
+    ) -> std::collections::BTreeMap<String, GitBaseline> {
+        use crate::agent::workspace_access::DirectoryAccess;
+        let mut baselines = std::collections::BTreeMap::new();
+        for directory in crate::agent::workspace_access::directories(Some(session_id), primary_workspace) {
+            if directory.access != DirectoryAccess::ReadWrite { continue; }
+            let configured = Path::new(&directory.path);
+            // 配置保存的是物理目录；不能跟随后来替换的链接转移权限或拍摄范围。
+            if configured.canonicalize().ok().as_deref() != Some(configured) { continue; }
+            let key = configured.to_string_lossy().into_owned();
+            baselines.entry(key).or_insert_with(|| GitBaseline::capture_at_run_start(configured));
+        }
+        baselines
     }
 
     /// 任务启动时捕获当前工作区 Git 状态基准
@@ -166,6 +239,14 @@ impl GitBaseline {
                     }
                 }
             }
+            if b.base_head.is_none() {
+                if let Ok(output) = git_command(workspace).args(["ls-files", "--cached", "-z", "--", "."]).output() {
+                    if output.status.success() {
+                        names.extend(output.stdout.split(|b| *b == 0).filter(|b| !b.is_empty())
+                            .filter_map(|b| String::from_utf8(b.to_vec()).ok()));
+                    }
+                }
+            }
             for n in names.into_iter().filter(|n| !n.is_empty()) {
                 let h = Self::file_content_hash(workspace, &n);
                 b.pre_dirty.insert(n, h);
@@ -184,13 +265,9 @@ impl GitBaseline {
         b
     }
 
-    fn file_content_hash(workspace: &Path, rel: &str) -> String {
-        match std::fs::read(workspace.join(rel)) {
-            Ok(bytes) => {
-                let mut hasher = Sha256::new();
-                hasher.update(&bytes);
-                format!("{:x}", hasher.finalize())
-            }
+    pub(crate) fn file_content_hash(workspace: &Path, rel: &str) -> String {
+        match stream_file_sha256(&workspace.join(rel), 0) {
+            Ok((hash, _, _)) => hash,
             Err(_) => "<missing>".to_string(),
         }
     }
@@ -215,76 +292,54 @@ impl GitBaseline {
 
     /// 提取相对起点的审查材料：
     /// 1. 有 Git 仓库：提取 Git Diff（并结合未跟踪新文件）
-    /// 2. 无 Git 仓库 / 临时目录：扫描任务启动后新增/修改的文本文件与二进制产物元数据（若无改动则 0ms 免检）
+    /// 2. 无可用起点：不补扫目录，交付入口核对已登记/明确交付路径并披露覆盖缺口。
     pub fn collect_review_material(
         &self,
         workspace: &Path,
         context: &SandwichContext,
         run_started_at: chrono::DateTime<chrono::Utc>,
     ) -> Option<(String, String)> {
-        // 若本轮为纯对话/只读任务（未产生任何新增写入副作用），直接 0ms 跳过代码评审
-        if context.side_effects.len() == context.inherited_side_effects_count {
-            return None;
-        }
-
         if self.is_git {
-            if let Some(res) = self.collect_git_diff(workspace) {
-                return Some(res);
-            }
-            // Git 模式下若无任何 Diff，且无新增外部副作用台账，判定为无文件变更任务（0ms 跳过）
-            if context.side_effects.len() == context.inherited_side_effects_count {
-                return None;
-            }
+            // 起点比较独立于命令分类/修改登记；干净时也不再补扫忽略文件。
+            return self.collect_git_diff(workspace);
         }
-
-        // --- Non-Git 目录或无 Git 跟踪变更的 Fallback 收集 ---
-        Self::collect_fallback_workspace_changes(workspace, context, run_started_at)
+        let _ = (context, run_started_at);
+        None
     }
 
     /// 提取工作区差异路径（用于与计划范围比对，不证明写入归属）。
     pub fn collect_changed_file_paths(
         &self,
         workspace: &Path,
-        run_started_at: chrono::DateTime<chrono::Utc>,
+        _run_started_at: chrono::DateTime<chrono::Utc>,
     ) -> Vec<String> {
         let mut paths = Vec::new();
         if self.is_git {
-            let diff_args = if let Some(ref base) = self.base_head {
-                vec!["diff", "--name-only", base.as_str()]
-            } else {
-                vec!["diff", "--name-only", "HEAD"]
-            };
-            if let Some(text) = git_cmd(workspace, &diff_args) {
-                for line in text.lines() {
-                    let l = line.trim();
-                    if !l.is_empty() && !is_noise_path(l) {
-                        paths.push(l.to_string());
+            let base = self.base_head.as_deref().unwrap_or("HEAD");
+            for args in [vec!["diff", "--name-only", "--relative", "--no-renames", "-z", base, "--", "."],
+                vec!["ls-files", "--others", "--exclude-standard", "-z", "--", "."]] {
+                if let Ok(output) = git_command(workspace).args(args).output() {
+                    if output.status.success() {
+                        paths.extend(output.stdout.split(|b| *b == 0).filter(|b| !b.is_empty())
+                            .filter_map(|b| String::from_utf8(b.to_vec()).ok())
+                            .filter(|p| !is_noise_path(p)));
                     }
                 }
             }
-            if let Some(untracked) = git_cmd(workspace, &["ls-files", "--others", "--exclude-standard"]) {
-                for line in untracked.lines() {
-                    let l = line.trim();
-                    if !l.is_empty() && !is_noise_path(l) {
-                        paths.push(l.to_string());
+            if self.base_head.is_none() {
+                if let Ok(output) = git_command(workspace).args(["ls-files", "--cached", "-z", "--", "."]).output() {
+                    if output.status.success() {
+                        paths.extend(output.stdout.split(|b| *b == 0).filter(|b| !b.is_empty())
+                            .filter_map(|b| String::from_utf8(b.to_vec()).ok()).filter(|p| !is_noise_path(p)));
                     }
                 }
             }
-        } else {
-            let since_sys = std::time::UNIX_EPOCH
-                + std::time::Duration::from_millis(run_started_at.timestamp_millis().max(0) as u64);
-            let mut modified_files = Vec::new();
-            Self::scan_modified_files(workspace, 0, since_sys, &mut modified_files);
-            for p in modified_files {
-                if let Ok(rel) = p.strip_prefix(workspace) {
-                    let s = rel.to_string_lossy().to_string();
-                    if !is_noise_path(&s) {
-                        paths.push(s);
-                    }
-                }
-            }
+            // 起点未跟踪文件后来被删除时，Git diff 本身看不到，指纹对照仍能发现。
+            paths.extend(self.pre_dirty.keys().filter(|p| !self.unchanged_since_baseline(workspace, p)).cloned());
         }
         paths.retain(|p| !self.unchanged_since_baseline(workspace, p));
+        paths.sort();
+        paths.dedup();
         paths
     }
 
@@ -298,7 +353,10 @@ impl GitBaseline {
         // 1. 获取 Git Diff 文本
         let mut diff_args: Vec<String> = vec![
             "diff".to_string(),
+            "--relative".to_string(),
             self.base_head.clone().unwrap_or_else(|| "HEAD".to_string()),
+            "--".to_string(),
+            ".".to_string(),
         ];
         // 排除任务启动时就脐、且本次没碰过的文件（用户原有的未提交改动）
         let skip: Vec<&String> = self
@@ -307,8 +365,6 @@ impl GitBaseline {
             .filter(|p| self.unchanged_since_baseline(workspace, p))
             .collect();
         if !skip.is_empty() {
-            diff_args.push("--".to_string());
-            diff_args.push(".".to_string());
             for p in &skip {
                 diff_args.push(format!(":(exclude,literal){}", p));
             }
@@ -317,8 +373,7 @@ impl GitBaseline {
         let raw_diff = git_cmd(workspace, &diff_refs).unwrap_or_default();
 
         // 2. 补足未暂存的 untracked 新文件摘要
-        let untracked_files = git_cmd(workspace, &["ls-files", "--others", "--exclude-standard"])
-            .unwrap_or_default();
+        let changed_paths = self.collect_changed_file_paths(workspace, chrono::Utc::now());
 
         let mut combined_diff = String::new();
         if !raw_diff.trim().is_empty() {
@@ -328,10 +383,10 @@ impl GitBaseline {
             }
         }
 
-        if !untracked_files.trim().is_empty() {
+        if !changed_paths.is_empty() {
             let mut untracked_chunks = Vec::new();
-            for file_rel in untracked_files.lines() {
-                let file_rel = file_rel.trim();
+            for file_rel in &changed_paths {
+                let file_rel = file_rel.as_str();
                 if file_rel.is_empty()
                     || is_noise_path(file_rel)
                     || self.unchanged_since_baseline(workspace, file_rel)
@@ -343,21 +398,24 @@ impl GitBaseline {
                     if is_binary_file(file_rel) {
                         let size_str = full_path.metadata().map(|m| format!("{} KB", m.len() / 1024)).unwrap_or_else(|_| "未知".to_string());
                         untracked_chunks.push(format!("【新增二进制产物】文件: {} (大小: {})", file_rel, size_str));
-                    } else if let Ok(content) = std::fs::read_to_string(&full_path) {
+                    } else if let Ok((_, prefix, _)) = stream_file_sha256(&full_path, FILE_PREVIEW_PREFIX_BYTES) {
+                        let content = String::from_utf8_lossy(&prefix);
                         let sample = if content.chars().count() > 2000 {
                             format!("{}...\n[文件过长截断]", content.chars().take(2000).collect::<String>())
                         } else {
-                            content
+                            content.into_owned()
                         };
                         untracked_chunks.push(format!("--- 新增文件: {} ---\n{}", file_rel, sample));
                     }
+                } else {
+                    untracked_chunks.push(format!("--- 当前不存在/已删除: {file_rel} ---"));
                 }
             }
             if !untracked_chunks.is_empty() {
                 if !combined_diff.is_empty() {
                     combined_diff.push_str("\n\n");
                 }
-                combined_diff.push_str("【新增未跟踪文件】:\n");
+                combined_diff.push_str("【相对任务起点变化的文件节选】:\n");
                 combined_diff.push_str(&untracked_chunks.join("\n\n"));
             }
         }

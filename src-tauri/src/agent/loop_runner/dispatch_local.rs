@@ -28,6 +28,10 @@ pub(super) async fn dispatch_local_tool(
 ) -> Result<ArmOutcome, String> {
     // 用户可能在 LLM 请求等待期间更新目录授权，执行前刷新作用域而不改审查状态。
     crate::agent::workspace_access::sync_context(ctx.final_session_id, ctx.workspace_dir, ctx.context);
+    {
+        let conn = ctx.state.0.lock().map_err(|e| e.to_string())?;
+        crate::agent::reviewer_gatekeeper::merge_task_baselines_on(&conn, ctx.checkpoint)?;
+    }
     Ok(ArmOutcome::Done({
         let is_write_tool = is_write_or_side_effect_tool(inst);
 

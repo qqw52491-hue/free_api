@@ -76,6 +76,9 @@ fn refresh_project_directories(
     project_id: &str,
 ) -> Result<Vec<ProjectDirectory>, String> {
     let dirs = list_project_directories_row(conn, project_id)?;
+    for (session, primary) in crate::agent::workspace_access::project_sessions(project_id) {
+        crate::agent::reviewer_gatekeeper::capture_new_writable_directories_on(conn, &session, &primary, &dirs)?;
+    }
     crate::agent::workspace_access::update_project(project_id, &dirs);
     Ok(dirs)
 }
