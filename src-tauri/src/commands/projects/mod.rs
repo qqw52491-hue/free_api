@@ -373,6 +373,9 @@ pub(crate) fn project_for_session(
     conn: &Connection,
     session_id: &str,
 ) -> Result<Option<AgentProject>, String> {
+    // 仅运行期由宿主绑定的完整子任务沿用父项目；任务参数不能指定此关联。
+    let delegated_parent = crate::agent::child_task::parent_session(session_id);
+    let session_id = delegated_parent.as_deref().unwrap_or(session_id);
     conn.query_row(
         "SELECT p.id, p.name, p.root_path, p.created_at, p.updated_at
          FROM agent_projects p INNER JOIN agent_project_sessions ps ON ps.project_id=p.id

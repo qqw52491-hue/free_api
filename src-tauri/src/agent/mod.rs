@@ -7,6 +7,8 @@ pub mod channel;
 pub mod child_receipt;
 pub mod child_reviewer;
 pub mod child_worker;
+pub(crate) mod child_task;
+pub(crate) mod agent_mailbox;
 pub mod child_writer;
 pub mod checkpoint;
 pub mod context;

@@ -141,6 +141,7 @@ use super::runtime::*;
                 id TEXT PRIMARY KEY, title TEXT NOT NULL, model_id TEXT NOT NULL,
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                 message_count INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE agent_child_runs (id TEXT PRIMARY KEY, kind TEXT NOT NULL);
             CREATE TABLE agent_projects (
                 id TEXT PRIMARY KEY, name TEXT NOT NULL, root_path TEXT NOT NULL);
             CREATE TABLE agent_project_sessions (

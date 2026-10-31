@@ -116,6 +116,21 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         ],
     },
     BuiltinToolSpec {
+        name: "child_task",
+        summary: "派发完整子目标，独立执行主 Agent 的调查、实施、验证、审查。立即返回任务 ID，父 Agent 可查进度和定向补充；共享工作区变更串行。支持同一任务树内父子及 worker/writer 互传文本、JSON 数据和证据引用；消息不是人工授权。通用任务仅一层，专用 Agent 原契约保留",
+        actions: &[
+            "dispatch(task: string, context?: string [task+context <=65536 字符]) — 返回 child_run_id；需要结论用 wait，收到请求信息时可先 send 回复",
+            "status(child_run_id: string) / list() — 查真实状态、当前步骤、活动时间、待人工请求、排队消息；不预测完成百分比",
+            "send(target: string [任务ID或parent], message?: string, data?: any JSON, refs?: string[], idempotency_key?: string) — 至少一种内容，合计<=65536字符；保存后返回 message_id；父子和同树工兵可互发，其他任务不可访问",
+            "inbox(child_run_id?: string, offset?: number, limit?: number [1..16]) — 省略 ID 收取自己的消息；指定已授权子任务/前次任务 ID 只分页查看其未投递材料，不核销对方信箱",
+            "receipt(message_id: string) — 查自己的收发消息或宿主绑定前次任务的消息原文/投递状态；不代表模型理解或完成",
+            "wait(child_run_id?: string, timeout_secs?: number [1..600，默认180]) — 挂起等目标结束或收到消息，无目标等自己的信箱；有真实人工请求时保持挂起直到回答/消息/停止，不消耗模型轮次；普通窗口结束不代表失败",
+            "result(child_run_id: string, output_id?: string [可分页读该子任务原始回执]) — 查交接与验收结果；最终用户交付仍由父 Agent 负责",
+            "resume(child_run_id: string, message: string) — 对已结束任务追问，新建带原交接与来源的独立后续尝试；运行中补充用 send",
+            "cancel(child_run_id: string) — 仅向自己派发的通用任务请求取消；实际终态随后查询",
+        ],
+    },
+    BuiltinToolSpec {
         name: "child_worker",
         summary: "L2 只读侦察 worker：独立上下文中自行读文件/列目录/执行只读命令完成侦察，回交结构化结论；异步返回 job_id，结果经 wait_jobs 或信箱回收。批量派发直接用 {\"tool\":\"child_worker\",\"dispatches\":[{\"task\":\"调查模块A的调用方\",\"focus_paths\":[\"src/a\"]},{\"task\":\"调查模块B的输入来源\",\"focus_paths\":[\"src/b\"]}]}，替换为实际自包含任务；不要放进同步 parallel 执行树。何时用：互不依赖的多路径调查适合一步批量派发；侦察兵默认使用 Flash 档，主 Agent 负责核对证据与决策",
         actions: &[

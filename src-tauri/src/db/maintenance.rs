@@ -71,6 +71,7 @@ impl SessionKey {
 /// 本表由 `session_scoped_registry_covers_schema` 反射测试兜底，漏登记 = 测试红。
 /// 顺序约束：桥接子表必须先于桥表（by_session 谓词在桥表行还在时求值）。
 const SESSION_SCOPED_TABLES: &[(&str, SessionKey)] = &[
+    ("agent_messages", SessionKey::SessionId),
     ("agent_verification_evidence", SessionKey::SessionId),
     ("agent_task_records", SessionKey::ViaTaskResources),
     ("agent_task_resources", SessionKey::SessionId),
@@ -135,6 +136,15 @@ pub fn delete_session_completely(
     if id.is_empty() {
         return Ok(());
     }
+
+    // 完整子任务拥有独立的会话账本，其物理工作区仍属于父任务，清理只走既有会话数据路径。
+    let task_sessions = {
+        let mut stmt = conn.prepare("SELECT s.id FROM chat_sessions s JOIN agent_child_runs c ON s.id='task-' || c.id WHERE c.parent_session_id=?1 AND c.kind='task' AND s.id!=?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([id], |r| r.get::<_,String>(0)).map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())?
+    };
+    for child in task_sessions { delete_session_completely(conn,&child,app_data_dir)?; }
 
     // 1. 清理该会话溢出落盘到本地 outputs/ 的 .log 大文本文件；
     //    cas_blob 是跨会话共享的内容寻址证据，先记下哈希，待本会话行删除后

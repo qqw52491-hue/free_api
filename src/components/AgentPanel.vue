@@ -137,6 +137,7 @@
                         @fork="handleFork"
                     />
                 </div>
+                <AgentDelegatedTasks :session-id="session.activeSessionId.value" :active="session.isRunning.value" />
                 <AgentComposer
                     ref="composerRef"
                     :draft="composerDraft"
@@ -265,6 +266,7 @@ import { computed, nextTick, onMounted, provide, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import AgentChatStream from "./agent/AgentChatStream.vue";
 import AgentComposer from "./agent/AgentComposer.vue";
+import AgentDelegatedTasks from "./agent/AgentDelegatedTasks.vue";
 import AgentProgressDeck from "./agent/AgentProgressDeck.vue";
 import AgentInspector from "./agent/AgentInspector.vue";
 import AgentRecordPreview from "./agent/AgentRecordPreview.vue";

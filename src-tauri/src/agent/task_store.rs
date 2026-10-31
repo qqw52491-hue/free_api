@@ -107,8 +107,18 @@ pub fn dispatch_in_workspace(
             let output_id = optional_string(params_value, "output_id")
                 .or_else(|| optional_string(params_value, "id"))
                 .ok_or_else(|| "task_store 参数缺少 'output_id'。\n💡 正确示例: {\"action\": \"get_step_output\", \"params\": {\"output_id\": \"out-xxx\"}}".to_string())?;
-            let persisted = crate::agent::run_trace::get_step_output(db, session_id, &output_id)?;
-            let source = crate::agent::run_trace::saved_output_source(db, session_id, &output_id)?;
+            let (persisted, source_session) = match crate::agent::run_trace::get_step_output(db, session_id, &output_id) {
+                Ok(raw) => (raw, session_id.to_owned()),
+                Err(error) => match crate::agent::child_task::parent_session(session_id) {
+                    Some(parent) => (crate::agent::run_trace::get_step_output(db, &parent, &output_id)?, parent),
+                    None => return Err(error),
+                },
+            };
+            let mut source = crate::agent::run_trace::saved_output_source(db, &source_session, &output_id)?;
+            if source_session != session_id {
+                source["delegated_parent_reference"] = json!(true);
+                source["session_id"] = json!(source_session);
+            }
             let branch = crate::agent::plan_tree::output::select_branch(&persisted, params_value)?;
             let selection = branch.as_ref().map(|branch| branch.selection.clone());
             let persisted = branch.map(|branch| branch.text).unwrap_or(persisted);

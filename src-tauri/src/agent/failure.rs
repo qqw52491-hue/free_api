@@ -61,6 +61,7 @@ pub(crate) fn persist_failed_run(
 /// 先中断真实请求，再收停台账/后台进程/监听；所有失败来源共用。
 pub(crate) async fn stop_run_runtime(db: &DbState, session_id: &str, run_id: &str) -> Vec<String> {
     crate::agent::control::notify_stream_interrupt(session_id).await;
+    crate::agent::child_task::stop_children(run_id).await;
     let mut warnings = Vec::new();
     if let Err(e) = crate::agent::child_reviewer::cancel_running_child_runs(db, run_id) {
         warnings.push(format!("子任务收停失败：{e}"));

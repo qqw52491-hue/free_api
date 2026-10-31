@@ -56,6 +56,16 @@ async fn run_tool_phase_guarded(
     rx: &mut mpsc::Receiver<HumanControl>,
     interrupt_rx: &mut watch::Receiver<u64>,
 ) -> Result<DispatchResult, String> {
+    // 通用委派包含完整的多步运行；每个子步骤仍受同一工具看门狗约束。
+    // 不能再把整个子任务当成一条短工具调用，超时丢弃其 Future 会留下共享工作区工具。
+    if inst.get_tool().eq_ignore_ascii_case("child_task") || inst.get_action().eq_ignore_ascii_case("child_task") {
+        let group = crate::agent::work_history::WorkGroup::capture(final_session_id, context, step_id);
+        crate::agent::work_history::prepare_group(state.inner(), group.as_ref());
+        return crate::agent::work_history::in_group(group, run_tool_phase(
+            app, state, registry_state, model_routing, run_id, workspace_dir, final_session_id,
+            step_id, inst, context, checkpoint, run_machine, rx, interrupt_rx,
+        )).await;
+    }
     let secs = tool_watchdog_secs();
     let group = crate::agent::work_history::WorkGroup::capture(final_session_id, context, step_id);
     crate::agent::work_history::prepare_group(state.inner(), group.as_ref());

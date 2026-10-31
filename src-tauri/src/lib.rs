@@ -219,6 +219,7 @@ pub fn run() {
             agent::dispatch_agent_step,
             agent::get_agent_checkpoint,
             agent::send_human_intervention,
+            agent::child_task::control_child_task,
             agent::replace_agent_goal,
             agent::cancel_agent_run,
             agent::review_control::stop_review_member,

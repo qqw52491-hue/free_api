@@ -96,7 +96,9 @@ pub(super) async fn dispatch_resume_child(
                                         .and_then(|f| f.as_array())
                                         .is_some_and(|a| !a.is_empty())
                             });
-                    if status != "succeeded" && !invalid_review_with_findings {
+                    if kind == "task" {
+                        DispatchResult {view:None,success:false,stdout:String::new(),stderr:"resume_child 仅用于既有专用子 Agent。通用任务可用 child_task(action=result, child_run_id) 回查；需要继续时请以已有交接为上下文派发新的完整目标。".into(),route:"resume_child:general_task".into()}
+                    } else if status != "succeeded" && !invalid_review_with_findings {
                         DispatchResult { view: None,
                             stdout: String::new(),
                             stderr: format!("❌ 仅能追问已成功的子任务（该任务当前状态为「{}」）；如需继续请直接派发新任务。", status),

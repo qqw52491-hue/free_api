@@ -139,6 +139,20 @@ pub(crate) fn validate_native(tool: &str, action: &str, params: &Value) -> Resul
                 ).map_err(|error| format!("{error}\nartifact_manager 省略 action 时默认 create_document；若需登记已有文件，请显式指定 action='register_file' 并提供 path。本次参数预检拒绝，未创建或登记产物。"))?;
             }
         }
+        "child_task" => {
+            let effective=crate::agent::child_task::request_action(act,params);
+            match effective.as_str(){
+                "send"=>crate::agent::agent_mailbox::validate_payload(params)?,
+                "result"|"status"|"cancel"=>{text(&tool,params,&["child_run_id"],false)?;optional(&tool,params,"output_id","string")?;},
+                "resume"=>{text(&tool,params,&["child_run_id"],false)?;text(&tool,params,&["message"],false)?;if params["message"].as_str().unwrap().chars().count()>65_536{return Err("追问超过 65536 字符，未执行。".into())}},
+                "receipt"=>text(&tool,params,&["message_id"],false)?,
+                "list"=>{},
+                "inbox"=>{optional(&tool,params,"child_run_id","string")?;optional(&tool,params,"offset","非负整数")?;optional(&tool,params,"limit","非负整数")?;},
+                "wait"=>{optional(&tool,params,"child_run_id","string")?;optional(&tool,params,"timeout_secs","非负整数")?;},
+                "dispatch"=>{text(&tool,params,&["task"],false)?;optional(&tool,params,"context","string")?;let size=params["task"].as_str().unwrap().chars().count()+params.get("context").and_then(Value::as_str).unwrap_or_default().chars().count();if size>65_536{return Err("child_task 的 task + context 超过 65536 字符；本次未执行。请用已有引用。".into())}},
+                _=>return Err(format!("未知 child_task action='{effective}'；允许 dispatch/result/resume/status/list/send/inbox/receipt/wait/cancel；本次未执行。")),
+            }
+        }
         "wait_jobs" => {
             optional(&tool, params, "job_ids", "string[]")?;
             optional(&tool, params, "timeout_secs", "非负整数")?;
@@ -209,7 +223,8 @@ pub(crate) fn instruction_rejection(
     let tool = if raw_tool == "core"
         && matches!(
             action_lc.as_str(),
-            "wait_jobs"
+            "child_task"
+                | "wait_jobs"
                 | "watch_stop"
                 | "job_cancel"
                 | "child_writer"

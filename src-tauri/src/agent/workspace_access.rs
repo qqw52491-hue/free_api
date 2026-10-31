@@ -35,6 +35,25 @@ struct SessionAccess {
     primary: PathBuf,
     directories: Vec<ProjectDirectory>,
 }
+static DELEGATES: LazyLock<RwLock<HashMap<String, String>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// 运行期引用父会话的当前授权，撤权立即生效，不复制可过期的权限快照。
+pub(crate) fn bind_delegate(child: &str, parent: &str) {
+    DELEGATES.write().unwrap_or_else(|e| e.into_inner()).insert(child.into(), parent.into());
+}
+pub(crate) fn unbind_delegate(child: &str) {
+    DELEGATES.write().unwrap_or_else(|e| e.into_inner()).remove(child);
+}
+pub(crate) fn delegate_sessions(parent: &str) -> Vec<String> {
+    DELEGATES.read().unwrap_or_else(|e| e.into_inner()).iter()
+        .filter(|(_, owner)| owner.as_str() == parent).map(|(child, _)| child.clone()).collect()
+}
+fn authority_session(session: &str) -> String {
+    DELEGATES.read().unwrap_or_else(|e| e.into_inner()).get(session).cloned()
+        .unwrap_or_else(|| session.into())
+}
+
 static SESSIONS: LazyLock<RwLock<HashMap<String, SessionAccess>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
@@ -72,7 +91,7 @@ pub(crate) fn session_primary(session: &str) -> Option<PathBuf> {
     SESSIONS
         .read()
         .unwrap_or_else(|e| e.into_inner())
-        .get(session)
+        .get(&authority_session(session))
         .map(|entry| entry.primary.clone())
 }
 pub(crate) fn revoke_session(session: &str) {
@@ -107,7 +126,7 @@ pub(crate) fn directories(session: Option<&str>, primary: &Path) -> Vec<ProjectD
     SESSIONS
         .read()
         .unwrap_or_else(|e| e.into_inner())
-        .get(session)
+        .get(&authority_session(session))
         .filter(|entry| entry.primary == primary)
         .map(|entry| entry.directories.clone())
         .unwrap_or_default()
@@ -117,7 +136,7 @@ pub(crate) fn is_session_bound(session: &str, primary: &Path) -> bool {
     SESSIONS
         .read()
         .unwrap_or_else(|e| e.into_inner())
-        .get(session)
+        .get(&authority_session(session))
         .is_some_and(|entry| entry.primary == primary)
 }
 

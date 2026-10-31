@@ -130,6 +130,7 @@ pub(super) async fn dispatch_wait_jobs(
                         )
                         .await;
                         stage_refund_pending |= effects.stage_refund_pending;
+                        if effects.application_deferred { ctx.context.add_host_feedback(&effects.model_text); continue; }
                         applied_receipts.push(crate::agent::checkpoint::AppliedReceipt {
                             run_id: job.job_id.clone(),
                             verdict: effects

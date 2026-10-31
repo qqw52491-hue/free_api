@@ -45,7 +45,7 @@ impl BackgroundJobResult {
     /// 其余原样保留（reducer 对未知类型只做投影、不做状态变更）。
     pub fn to_delivery_receipt(&self) -> crate::agent::protocol::DeliveryReceipt {
         let payload = serde_json::from_str::<serde_json::Value>(&self.result_json).ok();
-        let kind = if self.job_type.contains("writer") {
+        let kind = if self.job_type=="child_task" {"task".to_string()} else if self.job_type.contains("writer") {
             "writer".to_string()
         } else if self.job_type.contains("worker") {
             "worker".to_string()
@@ -379,6 +379,7 @@ fn collect_completed_child_results(
                 let (job_type, default_title) = match receipt.kind.as_str() {
                     "writer" => ("child_writer".to_string(), "✍️ 隔离沙箱写入工兵".to_string()),
                     "worker" => ("child_worker".to_string(), "🔍 独立只读侦察专员".to_string()),
+                    "task" => ("child_task".to_string(), "通用任务".to_string()),
                     _ => ("child_reviewer".to_string(), "🛡️ 跨模型综合审查官".to_string()),
                 };
                 let title = role_label.unwrap_or(default_title);
@@ -448,6 +449,7 @@ pub(crate) fn empty_wait_message(
     targets: Option<&[String]>,
     waited_secs: u64,
 ) -> Result<String, String> {
+    if crate::agent::agent_mailbox::has_pending(db,parent_run_id) {return Ok("收到协作消息，等待已提前返回；原后台任务继续运行，消息将在当前安全边界注入。".into())}
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare(
         "SELECT id, status, consumed, 1 FROM agent_background_jobs WHERE parent_run_id = ?1
@@ -563,7 +565,7 @@ pub async fn wait_for_jobs(
         Some(targets) => !has_running_targets(db, parent_run_id, targets),
     };
 
-    if found_target(&collected) || no_pending() {
+    if crate::agent::agent_mailbox::has_pending(db,parent_run_id) || found_target(&collected) || no_pending() {
         enrich_and_refresh_collected_results(db, &mut collected).await;
         return Ok(collected);
     }
@@ -598,7 +600,7 @@ pub async fn wait_for_jobs(
                     &mut seen_job_ids,
                     collect_completed_child_results(db, parent_run_id, target_job_ids),
                 );
-                if found_target(&collected) || no_pending() {
+                if crate::agent::agent_mailbox::has_pending(db,parent_run_id) || found_target(&collected) || no_pending() {
                     enrich_and_refresh_collected_results(db, &mut collected).await;
                     return Ok(collected);
                 }

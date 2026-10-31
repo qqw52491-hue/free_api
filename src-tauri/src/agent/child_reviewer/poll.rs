@@ -25,7 +25,7 @@ pub fn poll_completed_child_runs_filtered(
     let mut stmt = conn
         .prepare(
             "SELECT id, result_json, kind, COALESCE(task_id, id), COALESCE(attempt_id, 1) FROM agent_child_runs
-             WHERE parent_run_id = ?1
+             WHERE parent_run_id = ?1 AND kind != 'task'
                AND status IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted', 'invalid_output')
                AND result_json IS NOT NULL
                AND (applied_at IS NULL OR applied_at = '')",
@@ -96,7 +96,14 @@ pub fn poll_completed_delivery_receipts(
     targets: Option<&[String]>,
 ) -> Result<Vec<crate::agent::protocol::DeliveryReceipt>, String> {
     let raw = poll_completed_child_runs_filtered(db, parent_run_id, targets)?;
-    Ok(raw.into_iter().map(Into::into).collect())
+    let mut receipts:Vec<crate::agent::protocol::DeliveryReceipt>=raw.into_iter().map(Into::into).collect();
+    let conn=db.0.lock().map_err(|e|e.to_string())?;
+    let mut stmt=conn.prepare("SELECT id,COALESCE(task_id,id),attempt_id,status,duration_ms,result_json FROM agent_child_runs WHERE parent_run_id=?1 AND kind='task' AND status!='running' AND result_json IS NOT NULL AND (applied_at IS NULL OR applied_at='') ORDER BY started_at").map_err(|e|e.to_string())?;
+    let rows=stmt.query_map([parent_run_id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,u32>(2)?,r.get::<_,String>(3)?,r.get::<_,Option<u64>>(4)?,r.get::<_,String>(5)?))).map_err(|e|e.to_string())?;
+    for row in rows {let(id,task,attempt,status,duration,raw)=row.map_err(|e|e.to_string())?;if targets.is_some_and(|ids|!ids.contains(&id)){continue}
+        receipts.push(crate::agent::protocol::DeliveryReceipt{child_run_id:id,task_id:task,attempt_id:attempt,kind:"task".into(),status,duration_ms:duration.unwrap_or(0),completion_tokens:0,prompt_tokens:0,error_kind:None,payload:serde_json::from_str(&raw).ok(),raw_text:Some(raw)});
+    }
+    Ok(receipts)
 }
 
 
@@ -138,6 +145,8 @@ pub fn reap_stale_child_runs(db: &DbState, parent_run_id: &str) -> usize {
     };
     let mut reaped = 0usize;
     for (child_run_id, kind, started_at, last_activity_at) in rows {
+        // 通用任务由完整主循环的看门狗与取消路径管理，不套短审查预算。
+        if kind.as_deref() == Some("task") { continue; }
         let budget_secs: i64 = match kind.as_deref() {
             Some("writer") => 1200,
             Some("worker") => 900,

@@ -84,6 +84,7 @@ use crate::agent::plan_submit::handle_submit_plan;
 mod dispatch_ask_human;
 mod dispatch_child_reviewer;
 mod dispatch_child_worker;
+mod dispatch_child_task;
 mod dispatch_child_writer;
 mod dispatch_jobs;
 mod dispatch_local;
@@ -184,6 +185,12 @@ pub async fn run_tool_phase(
         }
     }
 
+    crate::agent::agent_mailbox::deliver_main(state.inner(),&crate::agent::agent_mailbox::Actor::new(parent_run_id,final_session_id),context,checkpoint)?;
+    let occupied=crate::agent::child_task::runtime::active(parent_run_id);
+    let coordination=inst.get_tool().eq_ignore_ascii_case("child_task") || inst.get_action().eq_ignore_ascii_case("child_task") || matches!(inst.get_tool().as_str(),"wait_jobs"|"wait_job"|"ask_human");
+    if !occupied.is_empty() && !coordination && (is_write_or_side_effect_tool(inst) || crate::agent::context::AuditLedger::is_mutating_side_effect_with_action(&inst.get_tool(),&inst.get_action(),&inst.get_params())) {
+        return Ok(DispatchResult{view:None,success:false,stdout:String::new(),stderr:format!("共享工作区当前由通用子任务 {} 使用，本次变更未执行。可用 child_task.send/status/wait/cancel 协调；等待其退出后再修改。",occupied.join(",")),route:"workspace:delegated_task".into()});
+    }
     record_dispatch_advice(context, inst, workspace_dir);
 
     app.emit(
@@ -535,7 +542,11 @@ pub async fn run_tool_phase(
         interrupt_rx,
     };
 
-    let dispatch_result = if inst.get_tool().eq_ignore_ascii_case("child_reviewer") {
+    let dispatch_result = if inst.get_tool().eq_ignore_ascii_case("child_task")
+        || inst.get_action().eq_ignore_ascii_case("child_task")
+    {
+        dispatch_child_task::dispatch_child_task(&mut ctx, inst).await?
+    } else if inst.get_tool().eq_ignore_ascii_case("child_reviewer") {
         match dispatch_child_reviewer::dispatch_child_reviewer(&mut ctx, inst).await? {
             ArmOutcome::Early(r) => return Ok(r),
             ArmOutcome::Done(r) => r,

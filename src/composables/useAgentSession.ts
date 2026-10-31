@@ -140,7 +140,7 @@ function normalizeState(value: unknown): AgentRunState {
 function sourceFrom(route: unknown, name: string): "内部" | "MCP" {
     return /mcp/i.test(`${toText(route)} ${name}`) ? "MCP" : "内部";
 }
-function normalizeHumanForm(raw: unknown, fallbackTitle: string): AgentHumanForm | null {
+export function normalizeHumanForm(raw: unknown, fallbackTitle: string): AgentHumanForm | null {
     const data = asRecord(raw);
     const rawKind = toText(data.kind).toLowerCase();
     const aliases: Record<string, AgentHumanFormKind> = {
@@ -1508,6 +1508,14 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             };
             llmParseErrors.value.push(errItem);
             appendLog(`[⚠️ 模型格式异常·尝试${errItem.tryIndex}] ${errItem.error}`);
+            return;
+        }
+
+        if (eventType === "child_task_progress") {
+            const child = toText(payload.child_run_id);
+            const event = asRecord(payload.event);
+            const detail = toText(event.description || event.message || event.execution_status || event.type);
+            appendLog(`↳ 子任务 ${child}: ${detail}`);
             return;
         }
 

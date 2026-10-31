@@ -58,6 +58,7 @@ impl AuditLedger {
     ) -> bool {
         let lower_tool = tool.to_lowercase();
         let action_name = lower_tool.split('/').last().unwrap_or(&lower_tool);
+        if lower_tool == "child_task" { return false; } // 实际写入由子检查点的带来源台账导入。
         if lower_tool == "model_manager" {
             let effective_action = if action.is_empty() {
                 params.get("action").and_then(|v| v.as_str()).unwrap_or("list_specs")

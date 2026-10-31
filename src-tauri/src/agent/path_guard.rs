@@ -10,6 +10,11 @@ use std::path::{Path, PathBuf};
 
 /// 获取会话专属临时目录根路径
 pub fn get_session_tmp_dir(session_id: &str) -> PathBuf {
+    // 通用子任务的产物放在父 tmp 的独立子目录，父任务可沿既有权限直接读取和集成。
+    // 只认宿主运行期绑定，不按任务参数或 session 名称猜父身份。
+    if let Some(parent) = crate::agent::child_task::parent_session(session_id) {
+        return get_session_tmp_dir(&parent).join("delegated").join(session_id);
+    }
     let base = dirs_next::data_dir().unwrap_or_else(|| PathBuf::from("."));
     base.join("free-api-chat").join("tmp").join(session_id)
 }
@@ -375,7 +380,7 @@ fn resolve_configured_read(raw: &str, primary: &Path, session: Option<&str>) -> 
         is_session_tmp: false, newly_created_dir: None })
 }
 
-/// 只读场景的路径校验：在工作区/会话 tmp 白名单基础上，额外允许读应用技能目录。
+/// 只读路径校验：复用原有边界，并允许读取宿主绑定的父会话证据、项目上传和技能目录。
 /// 写/编辑仍用 ensure_allowed_path；只读附加目录及技能目录不可写。
 pub fn ensure_readable_path(
     raw: &str,
@@ -393,7 +398,10 @@ pub fn ensure_readable_path(
                         .unwrap_or_else(|| PathBuf::from(raw.trim())) };
                 resolve_under_root(&target.to_string_lossy(), &root)
             });
-            uploaded.or_else(|| resolve_configured_read(raw, workspace_root, session_id))
+            // 子任务可读取父任务已授权的会话证据；父 tmp 不成为子任务的可写目录。
+            let parent_evidence = session_id.and_then(crate::agent::child_task::parent_session)
+                .and_then(|parent| resolve_under_root(raw, &get_session_tmp_dir(&parent)));
+            uploaded.or(parent_evidence).or_else(|| resolve_configured_read(raw, workspace_root, session_id))
             .or_else(|| skills_root().and_then(|root| resolve_under_root(raw, &root)))
             .ok_or(e)
         },

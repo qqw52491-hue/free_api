@@ -172,7 +172,8 @@ pub(crate) fn list_channel_sessions(
         .map_err(|e| e.to_string())?;
 
     let where_clause = "(:pid IS NULL OR aps.project_id = :pid) \
-                        AND (:scratch = 0 OR aps.project_id IS NULL OR aps.project_id = :scratch_pid)";
+                        AND (:scratch = 0 OR aps.project_id IS NULL OR aps.project_id = :scratch_pid) \
+                        AND NOT EXISTS (SELECT 1 FROM agent_child_runs c WHERE c.kind='task' AND s.id='task-' || c.id)";
     let sql = format!(
         "SELECT s.id, s.title, s.model_id, s.created_at, s.updated_at, s.message_count,
                 aps.project_id, p.name AS project_name, p.root_path,

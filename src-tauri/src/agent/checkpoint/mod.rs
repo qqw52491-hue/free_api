@@ -836,3 +836,25 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests;
+
+/// 消息注入与投递回执同事务保存；失败时不发布候选上下文，不把排队冒充已读。
+pub(crate) fn save_checkpoint_and_messages(
+    db: &DbState, checkpoint: &mut AgentCheckpoint,
+    context: &crate::agent::context::SandwichContext, run: &str, ids: &[String],
+) -> Result<(), String> {
+    let mut candidate=checkpoint.clone();
+    candidate.refresh_context(context);
+    candidate.updated_at=Utc::now().to_rfc3339();
+    let mut conn=db.0.lock().map_err(|e|e.to_string())?;
+    let tx=conn.transaction().map_err(|e|e.to_string())?;
+    match write_checkpoint_on(&tx,&mut candidate)? {
+        WriteOutcome::Conflict=>return Err("消息尚未核销：检查点版本冲突，请重新加载。".into()),
+        WriteOutcome::Saved=>for id in ids {
+            tx.execute("UPDATE agent_messages SET delivered_at=?1 WHERE id=?2 AND target_run_id=?3 AND target_session_id=?4 AND delivered_at IS NULL",
+                params![candidate.updated_at,id,run,checkpoint.run_id]).map_err(|e|e.to_string())?;
+        }
+    }
+    tx.commit().map_err(|e|e.to_string())?;
+    *checkpoint=candidate;
+    Ok(())
+}

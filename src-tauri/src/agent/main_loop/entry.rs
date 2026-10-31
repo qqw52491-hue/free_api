@@ -146,6 +146,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
         plan_mode,
         run_budget,
         task_start_mode,
+        None,
     )
     .await;
 

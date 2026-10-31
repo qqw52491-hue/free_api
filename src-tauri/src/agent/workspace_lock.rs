@@ -68,7 +68,7 @@ pub(crate) async fn acquire_workspace_lock(
                     if should_cancel {
                         sent_cancel = true;
                     }
-                    if attempt >= 30 {
+                    if attempt >= 30 && crate::agent::child_task::runtime::active(&entry.run_id).is_empty() {
                         locks.remove(&key);
                         locks.insert(
                             key.clone(),
@@ -196,4 +196,14 @@ impl<'a> Drop for ChildWorkspaceGuard<'a> {
     fn drop(&mut self) {
         crate::agent::child_writer::cleanup_child_workspaces(self.db, self.run_id);
     }
+}
+
+/// 子任务运行期间父执行器停在委派臂；项目锁仍由父 run 持有，不能尝试抢占/取消父任务。
+/// 非项目入口没有现有锁时，补持相同物理目录的锁至本次委派返回。
+pub(crate) async fn acquire_delegation_lock(workspace: &std::path::Path, parent_session: &str, parent_run: &str) -> Result<Option<WorkspaceRunGuard>, String> {
+    let key = workspace.canonicalize().map_err(|e| e.to_string())?.to_string_lossy().into_owned();
+    let owned = workspace_locks().lock().map_err(|e| e.to_string())?.get(&key)
+        .is_some_and(|entry| entry.run_id == parent_run && entry.session_id == parent_session);
+    if owned { return Ok(None); }
+    acquire_workspace_lock(workspace,parent_session,parent_run,"通用子任务串行委派").await.map(Some)
 }

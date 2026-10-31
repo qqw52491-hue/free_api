@@ -54,6 +54,10 @@ pub(crate) fn capture_new_writable_directories_on(
     primary: &Path,
     next: &[ProjectDirectory],
 ) -> Result<(), String> {
+    // 先为正在共享该授权的完整子任务记录同一次授权起点，再发布父级权限。
+    for child in workspace_access::delegate_sessions(session) {
+        capture_new_writable_directories_on(conn, &child, primary, next)?;
+    }
     let Some(mut cp) = saved_on(conn, session)? else {
         return Ok(());
     };

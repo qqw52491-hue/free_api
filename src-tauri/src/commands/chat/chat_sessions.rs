@@ -17,7 +17,7 @@ use super::*;
 pub async fn get_sessions(state: State<'_, DbState>) -> Result<Vec<ChatSession>, String> {
     let conn = state.reader()?;
     let mut stmt = conn.prepare(
-        "SELECT id, title, model_id, created_at, updated_at, message_count FROM chat_sessions ORDER BY updated_at DESC LIMIT 1000"
+        "SELECT id, title, model_id, created_at, updated_at, message_count FROM chat_sessions s WHERE NOT EXISTS (SELECT 1 FROM agent_child_runs c WHERE c.kind='task' AND s.id='task-' || c.id) ORDER BY updated_at DESC LIMIT 1000"
     ).map_err(|e| e.to_string())?;
     let list = stmt
         .query_map([], |row| {

@@ -171,6 +171,20 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             contract_id TEXT,
             contract_schema TEXT
         );
+        CREATE TABLE IF NOT EXISTS agent_messages (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            root_run_id TEXT NOT NULL,
+            sender_run_id TEXT NOT NULL,
+            sender_session_id TEXT NOT NULL,
+            sender_kind TEXT NOT NULL,
+            target_run_id TEXT NOT NULL,
+            target_session_id TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            delivered_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_messages_target ON agent_messages(target_run_id, delivered_at, created_at);
         CREATE TABLE IF NOT EXISTS agent_stage_marks (
             session_id TEXT PRIMARY KEY,
             stage TEXT NOT NULL,

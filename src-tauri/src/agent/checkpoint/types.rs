@@ -154,6 +154,10 @@ pub fn recovery_policy_for(instruction: &AgentInstruction) -> RecoveryPolicy {
     let action = instruction.get_action().to_ascii_lowercase();
     let tool = instruction.get_tool().to_ascii_lowercase();
 
+    if tool=="child_task" || (tool=="core" && action=="child_task") {
+        // 宿主派发键/消息键绑定当前逻辑任务和步骤；重放认养已有记录，子执行器保留自身恢复规则。
+        return RecoveryPolicy::Idempotent;
+    }
     if tool == "task_store" {
         return match action.as_str() {
             "list_resources" | "get_resource" | "list_records" | "get_record"

@@ -30,6 +30,7 @@ pub(crate) struct ReceiptEnv<'a> {
 /// reducer 输出：checkpoint 状态变更已就地完成，这里只承载外部可见效果。
 #[derive(Debug, Default)]
 pub(crate) struct ReceiptEffects {
+    pub application_deferred: bool,
     /// 给模型看的完整注入块（含标题横幅，投影已按类型收敛）
     pub model_text: String,
     /// 触发了审查者故障转移重派（新子任务 run_id）——旧回执结论已被取代
@@ -96,6 +97,12 @@ pub(crate) async fn reduce_child_receipt(
     context: &mut SandwichContext,
     receipt: &DeliveryReceipt,
 ) -> ReceiptEffects {
+    if receipt.kind=="task" {
+        return match crate::agent::child_task::result(env.db,env.session_id,&receipt.child_run_id).and_then(|body| crate::agent::child_task::import_effects(env.db,&receipt.child_run_id,checkpoint.step_id,context).map(|_|body)) {
+            Ok(body)=>ReceiptEffects{model_text:format!("【通用子任务交接 {}】{}",receipt.child_run_id,crate::agent::child_task::projection(&body)),..Default::default()},
+            Err(error)=>ReceiptEffects{model_text:format!("子任务 {} 的实际副作用导入失败：{error}；回执尚未核销。",receipt.child_run_id),application_deferred:true,..Default::default()},
+        }
+    }
     // ── 交付契约运行时校验（所有种类统一）：违规转 invalid_output ──
     let mut receipt_owned = receipt.clone();
     enforce_delivery_contract(env.db, &mut receipt_owned);
