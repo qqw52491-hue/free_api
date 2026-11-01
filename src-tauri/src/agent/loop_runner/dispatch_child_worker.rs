@@ -93,9 +93,6 @@ pub(super) async fn dispatch_child_worker(
                         if !card.model_id.is_empty() {
                             scout_model = card.model_id.clone();
                         }
-                        if !card.hard_scope.is_empty() {
-                            effective_worker_params["hard_scope"] = json!(card.hard_scope);
-                        }
                         if card.max_concurrency > 0 {
                             effective_worker_params["max_concurrency"] = json!(card.max_concurrency.min(crate::agent::child_reviewer::MAX_TOTAL_CHILDREN_PER_RUN as i64));
                         }

@@ -152,7 +152,6 @@ fn explicit_tech_lead_choice_is_not_bypassed() {
             scope_hints: "src/components, src/assets".into(),
             default_test_command: "npm run build".into(),
             allowed_kinds: "writer".into(),
-            hard_scope: "src/components, src/assets".into(),
             max_concurrency: 1,
             enabled: true,
         is_system: false,
@@ -165,7 +164,7 @@ fn explicit_tech_lead_choice_is_not_bypassed() {
         // 模型未提供默认值时补齐
         let merged = merge_writer_defaults(&card, &json!({"task": "打磨 UI"}));
         assert_eq!(merged["test_command"], "npm run build");
-        assert_eq!(merged["focus_paths"][0], "src/components");
+        assert!(merged.get("focus_paths").is_none(), "role hints must not become project paths");
         // 模型显式提供时不覆盖
         let merged = merge_writer_defaults(&card, &json!({"task": "x", "test_command": "cargo test", "focus_paths": ["src/a.rs"]}));
         assert_eq!(merged["test_command"], "cargo test");
@@ -192,10 +191,9 @@ fn explicit_tech_lead_choice_is_not_bypassed() {
     }
 
     #[test]
-    fn role_card_v2_allows_kind_and_hard_scope() {
+    fn role_card_restricts_attachment_kind() {
         let card = RoleCard {
             allowed_kinds: "writer, worker".into(),
-            hard_scope: "src/components, src/assets, package.json".into(),
             ..Default::default()
         };
         // kind 检查
@@ -203,17 +201,44 @@ fn explicit_tech_lead_choice_is_not_bypassed() {
         assert!(card.allows_kind("worker"));
         assert!(!card.allows_kind("reviewer"));
 
-        // hard_scope 检查
-        assert!(card.allows_path(Path::new("src/components/Button.vue")));
-        assert!(card.allows_path(Path::new("src/assets/logo.png")));
-        assert!(card.allows_path(Path::new("package.json")));
-        assert!(!card.allows_path(Path::new("src-tauri/src/main.rs")));
-        assert!(!card.allows_path(Path::new("Cargo.toml")));
-
         // 默认空卡全放行
         let empty_card = RoleCard::default();
         assert!(empty_card.allows_kind("reviewer"));
-        assert!(empty_card.allows_path(Path::new("any/path/you/want.rs")));
+    }
+
+    #[test]
+    fn legacy_role_paths_are_ignored_without_losing_other_attributes() {
+        let db = setup_db();
+        let input = json!({
+            "name":"portable_writer", "label":"跨项目写入", "model_id":"chosen-model",
+            "persona_prompt":"按当前项目结构实施", "scope_hints":"src/old-project, packages/web",
+            "allowed_kinds":"writer", "max_concurrency":2,
+            "default_test_command":"npm test", "allowed_skills":"project-skill",
+            "allowed_mcp":"legacy-plugin"
+        });
+        upsert_card(&db, &input).unwrap();
+        db.0.lock().unwrap().execute(
+            "UPDATE agent_role_cards SET hard_scope='nonexistent/old-project' WHERE name='portable_writer'", []
+        ).unwrap();
+        let mut stale_client = input.clone();
+        stale_client["hard_scope"] = json!("another/obsolete/path");
+        let card = upsert_card(&db, &stale_client).unwrap();
+        assert!(serde_json::to_value(&card).unwrap().get("hard_scope").is_none());
+        assert_eq!(card.model_id, "chosen-model");
+        assert_eq!(card.max_concurrency, 2);
+        assert_eq!(card.allowed_skills, "project-skill");
+        assert_eq!(card.allowed_mcp, "legacy-plugin");
+        assert_eq!(card.default_test_command, "npm test");
+        assert!(card.allows_kind("writer"));
+        assert!(!card.allows_kind("worker"));
+        let merged = merge_writer_defaults(&card, &json!({"task":"适配当前项目"}));
+        assert!(merged.get("hard_scope").is_none());
+        assert!(merged.get("focus_paths").is_none(), "hints are not path bindings");
+        assert_eq!(merged["test_command"], "npm test");
+        let legacy: String = db.0.lock().unwrap().query_row(
+            "SELECT hard_scope FROM agent_role_cards WHERE name='portable_writer'", [], |r| r.get(0)
+        ).unwrap();
+        assert_eq!(legacy, "nonexistent/old-project", "retired data needs no destructive migration");
     }
 
     #[test]
@@ -413,7 +438,7 @@ fn skills_block_whitelist_injects_listed_docs_only() {
             id: "x".into(), name: "n".into(), label: "l".into(),
             model_id: String::new(), persona_prompt: String::new(),
             scope_hints: String::new(), default_test_command: String::new(),
-            allowed_kinds: String::new(), hard_scope: String::new(),
+            allowed_kinds: String::new(),
             max_concurrency: 0, enabled: true,
         is_system: false,
             custom_schema: String::new(), focus_domains: String::new(),
@@ -442,7 +467,7 @@ fn skills_block_whitelist_injects_listed_docs_only() {
         id: "y".into(), name: "n2".into(), label: "l".into(),
         model_id: String::new(), persona_prompt: String::new(),
         scope_hints: String::new(), default_test_command: String::new(),
-        allowed_kinds: String::new(), hard_scope: String::new(),
+        allowed_kinds: String::new(),
         max_concurrency: 0, enabled: true,
         is_system: false,
         custom_schema: String::new(), focus_domains: String::new(),

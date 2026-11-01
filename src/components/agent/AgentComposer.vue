@@ -438,7 +438,7 @@
                                                         'is-active': !isCardHibernatedForSlot(card.name, 'writer'),
                                                         'is-hibernated': isCardHibernatedForSlot(card.name, 'writer'),
                                                     }"
-                                                    :title="`${card.label || card.name} (${card.name})\n${card.persona_prompt || card.scope_hints || '通用改码写入角色卡'}\n${card.hard_scope ? '围栏: ' + card.hard_scope : ''}\n${card.is_system ? '系统基础卡常驻，不可休眠' : '点击切换改码出战/排除'}`" @click="toggleSessionCardForSlot(card.name, 'writer')"
+                                                    :title="`${card.label || card.name} (${card.name})\n${card.persona_prompt || card.scope_hints || '通用改码写入角色卡'}\n${card.is_system ? '系统基础卡常驻，不可休眠' : '点击切换改码出战/排除'}`" @click="toggleSessionCardForSlot(card.name, 'writer')"
                                                 >
                                                     <div class="member-card-header">
                                                         <div class="member-identity">
@@ -471,9 +471,6 @@
                                                             <span class="model-icon">🎯</span>
                                                             <span class="model-text">{{ card.model_id ? getCardModelName(card.model_id) : '跟随算力' }}</span>
                                                         </div>
-                                                        <span v-if="card.hard_scope" class="scope-fence-badge" :title="`物理写入围栏: ${card.hard_scope}`">
-                                                            🚧 {{ card.hard_scope }}
-                                                        </span>
                                                         <span v-if="card.default_test_command" class="scope-fence-badge" :title="`默认测试命令: ${card.default_test_command}`">
                                                             🧪 {{ card.default_test_command }}
                                                         </span>
@@ -887,7 +884,7 @@
                                                         'is-active': !isCardHibernatedForSlot(card.name, 'worker'),
                                                         'is-hibernated': isCardHibernatedForSlot(card.name, 'worker'),
                                                     }"
-                                                    :title="`${card.label || card.name} (${card.name})\n${card.persona_prompt || card.scope_hints || '通用调研探针角色卡'}\n${card.hard_scope ? '围栏: ' + card.hard_scope : ''}\n${card.is_system ? '系统基础卡常驻，不可休眠' : '点击切换探针出战/排除'}`" @click="toggleSessionCardForSlot(card.name, 'worker')"
+                                                    :title="`${card.label || card.name} (${card.name})\n${card.persona_prompt || card.scope_hints || '通用调研探针角色卡'}\n${card.is_system ? '系统基础卡常驻，不可休眠' : '点击切换探针出战/排除'}`" @click="toggleSessionCardForSlot(card.name, 'worker')"
                                                 >
                                                     <div class="member-card-header">
                                                         <div class="member-identity">
@@ -920,9 +917,6 @@
                                                             <span class="model-icon">🎯</span>
                                                             <span class="model-text">{{ card.model_id ? getCardModelName(card.model_id) : '跟随算力' }}</span>
                                                         </div>
-                                                        <span v-if="card.hard_scope" class="scope-fence-badge" :title="`探索围栏: ${card.hard_scope}`">
-                                                            🚧 {{ card.hard_scope }}
-                                                        </span>
                                                     </div>
                                                 </div>
                                             </div>

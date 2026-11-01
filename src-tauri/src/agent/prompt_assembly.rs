@@ -111,7 +111,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         name: "child_writer",
         summary: "L3 隔离写入 worker：宿主把工作区复制成私有副本，worker 在副本内修改代码并自行运行你指定的测试命令，回交逐文件 diff 与测试证据；你审阅后可调用 apply 让宿主把补丁原样机械合入真实工作区（任一文件指纹冲突即整体拒绝，绝不覆盖），也可自行用常规写工具落实；支持单发或 dispatches 批量派发",
         actions: &[
-            "dispatch(task: string, test_command: string [单条，如 npm test], focus_paths?: string[] <=5, role?: string, context_excerpts?: {background?: string, todo_slice?: string[], file_hints?: string[], prior_findings?: string[]}, custom_inputs?: object [专项业务参数；verified_facts/hard_constraints/definition_of_done 分节呈现，字段名不认证来源；入口分流另以可修正的 triage_reference 附带], dispatches?: Array<{task, test_command, ...}> [一步批量派发多个 writer])",
+            "dispatch(task: string, test_command?: string [可选单条命令；指定后须执行，未指定按实际任务选择验证], focus_paths?: string[] <=5, role?: string, context_excerpts?: {background?: string, todo_slice?: string[], file_hints?: string[], prior_findings?: string[]}, custom_inputs?: object [专项业务参数；verified_facts/hard_constraints/definition_of_done 分节呈现，字段名不认证来源；入口分流另以可修正的 triage_reference 附带], dispatches?: Array<{task, test_command?, ...}> [一步批量派发多个 writer])",
             "apply(child_run_id: string) [审阅 diff 后机械合入：宿主逐文件现算冲突指纹，全部干净才搬运，任何冲突整体拒绝；副本已回收时自动退化到补丁工件合入]",
         ],
     },
@@ -122,6 +122,8 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
             "dispatch(task: string, context?: string [task+context <=65536 字符]) — 返回 child_run_id；需要结论用 wait，收到请求信息时可先 send 回复",
             "status(child_run_id: string) / list() — 查真实状态、当前步骤、活动时间、待人工请求、排队消息；不预测完成百分比",
             "send(target: string [任务ID或parent], message?: string, data?: any JSON, refs?: string[], idempotency_key?: string) — 至少一种内容，合计<=65536字符；保存后返回 message_id；父子和同树工兵可互发，其他任务不可访问",
+            "ask(target: string [同树已成功结束的成员ID], message?: string, data?: JSON, refs?: string[], idempotency_key?: string) — 明确受理一次只读答复，返回 request_id/reply_run_id；后台通知负责人，结果送回自己的信箱；用 wait() 等信，不自动修改原成果，不复活已关闭的主任务",
+            "read_agent_result(child_run_id: string, view?: string [result或history], offset?: number, limit?: number [最多8192字符]) — 同树成员历史结果/原历史分页；可查看只读答复，不授予权限",
             "inbox(child_run_id?: string, offset?: number, limit?: number [1..16]) — 省略 ID 收取自己的消息；指定已授权子任务/前次任务 ID 只分页查看其未投递材料，不核销对方信箱",
             "receipt(message_id: string) — 查自己的收发消息或宿主绑定前次任务的消息原文/投递状态；不代表模型理解或完成",
             "wait(child_run_id?: string, timeout_secs?: number [1..600，默认180]) — 挂起等目标结束或收到消息，无目标等自己的信箱；有真实人工请求时保持挂起直到回答/消息/停止，不消耗模型轮次；普通窗口结束不代表失败",

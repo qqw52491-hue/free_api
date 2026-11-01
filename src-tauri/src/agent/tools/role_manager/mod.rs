@@ -2,7 +2,6 @@ use crate::db::DbState;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::path::Path;
 use uuid::Uuid;
 
 /// 角色池上限：每张卡的清单都会注入主 Agent 上下文，超池会稀释注意力与预算。
@@ -37,8 +36,6 @@ pub struct RoleCard {
     pub default_test_command: String,
     #[serde(default)]
     pub allowed_kinds: String,      // 逗号分隔: writer,worker,reviewer；空=不限
-    #[serde(default)]
-    pub hard_scope: String,         // 逗号分隔路径前缀；空=不限制
     #[serde(default)]
     pub max_concurrency: i64,       // 0=跟随全局默认
     pub enabled: bool,
@@ -103,26 +100,7 @@ impl RoleCard {
             .any(|k| k == kind.to_ascii_lowercase())
     }
 
-    /// 检查相对路径是否命中 hard_scope 物理围栏（空=全放行；非空=必须命中至少一个前缀）
-    pub fn allows_path(&self, relative_path: &Path) -> bool {
-        let hard = self.hard_scope.trim();
-        if hard.is_empty() {
-            return true;
-        }
-        let rel_str = relative_path.to_string_lossy().replace('\\', "/");
-        let rel_clean = rel_str.trim_start_matches("./");
 
-        hard.split(|c| c == ',' || c == '；' || c == '\n')
-            .map(|p| p.trim().replace('\\', "/"))
-            .filter(|p| !p.is_empty())
-            .any(|prefix| {
-                let prefix_clean = prefix.trim_start_matches("./").trim_end_matches('/');
-                if prefix_clean.is_empty() {
-                    return true;
-                }
-                rel_clean == prefix_clean || rel_clean.starts_with(&format!("{}/", prefix_clean))
-            })
-    }
 }
 
 fn map_card(row: &rusqlite::Row<'_>) -> rusqlite::Result<RoleCard> {
@@ -136,19 +114,18 @@ fn map_card(row: &rusqlite::Row<'_>) -> rusqlite::Result<RoleCard> {
         scope_hints: row.get(5)?,
         default_test_command: row.get(6)?,
         allowed_kinds: row.get(7)?,
-        hard_scope: row.get(8)?,
-        max_concurrency: row.get(9)?,
-        enabled: row.get::<_, i64>(10)? != 0,
-        custom_schema: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
-        focus_domains: row.get::<_, Option<String>>(12)?.unwrap_or_else(|| "[]".to_string()),
-        input_schema: row.get::<_, Option<String>>(13)?.unwrap_or_default(),
-        allowed_skills: row.get::<_, Option<String>>(14).ok().flatten().unwrap_or_default(),
-        allowed_mcp: row.get::<_, Option<String>>(15).ok().flatten().unwrap_or_default(),
+        max_concurrency: row.get(8)?,
+        enabled: row.get::<_, i64>(9)? != 0,
+        custom_schema: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
+        focus_domains: row.get::<_, Option<String>>(11)?.unwrap_or_else(|| "[]".to_string()),
+        input_schema: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
+        allowed_skills: row.get::<_, Option<String>>(13).ok().flatten().unwrap_or_default(),
+        allowed_mcp: row.get::<_, Option<String>>(14).ok().flatten().unwrap_or_default(),
     })
 }
 
 const CARD_COLUMNS: &str =
-    "id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, enabled, custom_schema, focus_domains, input_schema, allowed_skills, allowed_mcp";
+    "id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, max_concurrency, enabled, custom_schema, focus_domains, input_schema, allowed_skills, allowed_mcp";
 
 
 pub fn list_cards(db: &DbState, include_disabled: bool) -> Result<Vec<RoleCard>, String> {
@@ -189,7 +166,7 @@ use rusqlite::OptionalExtension;
 
 fn validate_card_input(
     params: &Value,
-) -> Result<(String, String, String, String, String, String, String, String, i64, String, String, String, String, String), String> {
+) -> Result<(String, String, String, String, String, String, String, i64, String, String, String, String, String), String> {
     let name = params
         .get("name")
         .and_then(|v| v.as_str())
@@ -216,7 +193,6 @@ fn validate_card_input(
     let scope_hints = take("scope_hints", MAX_SCOPE_CHARS, "");
     let default_test_command = take("default_test_command", MAX_TEST_COMMAND_CHARS, "");
     let allowed_kinds = take("allowed_kinds", 100, "");
-    let hard_scope = take("hard_scope", 500, "");
     let max_concurrency = params
         .get("max_concurrency")
         .and_then(|v| v.as_i64())
@@ -323,7 +299,6 @@ fn validate_card_input(
         scope_hints,
         default_test_command,
         allowed_kinds,
-        hard_scope,
         max_concurrency,
         custom_schema,
         focus_domains,
@@ -360,7 +335,6 @@ pub fn upsert_card(db: &DbState, params: &Value) -> Result<RoleCard, String> {
         scope_hints,
         default_test_command,
         allowed_kinds,
-        hard_scope,
         max_concurrency,
         custom_schema,
         focus_domains,
@@ -386,19 +360,19 @@ pub fn upsert_card(db: &DbState, params: &Value) -> Result<RoleCard, String> {
     }
     let id = existing.unwrap_or_else(|| Uuid::new_v4().to_string());
     conn.execute(
-        "INSERT INTO agent_role_cards (id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, enabled, custom_schema, focus_domains, input_schema, allowed_skills, allowed_mcp, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12, ?13, ?14, ?15, ?16, ?16)
+        "INSERT INTO agent_role_cards (id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, max_concurrency, enabled, custom_schema, focus_domains, input_schema, allowed_skills, allowed_mcp, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10, ?11, ?12, ?13, ?14, ?15, ?15)
          ON CONFLICT(name) DO UPDATE SET
             label=excluded.label, model_id=excluded.model_id, persona_prompt=excluded.persona_prompt,
             scope_hints=excluded.scope_hints, default_test_command=excluded.default_test_command,
-            allowed_kinds=excluded.allowed_kinds, hard_scope=excluded.hard_scope, max_concurrency=excluded.max_concurrency,
+            allowed_kinds=excluded.allowed_kinds, max_concurrency=excluded.max_concurrency,
             custom_schema=excluded.custom_schema,
             focus_domains=excluded.focus_domains,
             input_schema=excluded.input_schema,
             allowed_skills=excluded.allowed_skills,
             allowed_mcp=excluded.allowed_mcp,
             enabled=1, updated_at=excluded.updated_at",
-        params![id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, custom_schema, focus_domains, input_schema, allowed_skills, allowed_mcp, now],
+        params![id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, max_concurrency, custom_schema, focus_domains, input_schema, allowed_skills, allowed_mcp, now],
     )
     .map_err(|e| e.to_string())?;
     drop(conn);
@@ -556,8 +530,8 @@ pub fn ensure_default_role_cards(conn: &rusqlite::Connection) -> Result<(), Stri
         (SYSTEM_REVIEWER, "reviewer", "基础综合审查员", "根据任务要求与证据独立审查，给出可定位的结论，区分缺陷、证据缺口与通道故障，按 reviewer 原生交付协议回报。"),
     ] {
         conn.execute(
-            "INSERT INTO agent_role_cards (id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, hard_scope, max_concurrency, enabled, custom_schema, focus_domains, input_schema, created_at, updated_at)
-             VALUES (?1, ?2, ?3, '', ?4, '', '', ?5, '', 0, 1, '', '[]', '', ?6, ?6)
+            "INSERT INTO agent_role_cards (id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, max_concurrency, enabled, custom_schema, focus_domains, input_schema, created_at, updated_at)
+             VALUES (?1, ?2, ?3, '', ?4, '', '', ?5, 0, 1, '', '[]', '', ?6, ?6)
              ON CONFLICT(name) DO UPDATE SET enabled = 1, allowed_kinds = excluded.allowed_kinds",
             params![format!("default-role-{name}"), name, label, persona, kind, now],
         ).map_err(|e| format!("初始化基础角色 {name} 失败: {e}"))?;
@@ -629,7 +603,7 @@ pub fn build_role_cards_menu_filtered(db: &DbState, disabled_names: &[String]) -
         let scope_note = if card.scope_hints.is_empty() {
             String::new()
         } else {
-            format!("；作用域: {}", card.scope_hints)
+            format!("；适用场景: {}", card.scope_hints)
         };
         let schema_note = if let Some(schema) = card.parse_custom_schema() {
             if !schema.is_empty() {
@@ -682,28 +656,12 @@ pub fn build_role_cards_menu(db: &DbState) -> Result<String, String> {
 }
 
 /// 把角色卡默认值合并进 child_writer 派发参数（纯函数，可单测）：
-/// 模型未提供 test_command 时用卡的默认命令；focus_paths 为空时用卡的作用域提示。
+/// 模型未提供 test_command 时用卡的默认命令；文件路径仅来自本次派发。
 pub fn merge_writer_defaults(card: &RoleCard, params: &Value) -> Value {
     let mut merged = params.clone();
     let has_test = merged.get("test_command").and_then(|v| v.as_str()).map(|v| !v.trim().is_empty()).unwrap_or(false);
     if !has_test && !card.default_test_command.is_empty() {
         merged["test_command"] = json!(card.default_test_command);
-    }
-    let has_focus = merged
-        .get("focus_paths")
-        .and_then(|v| v.as_array())
-        .map(|a| !a.is_empty())
-        .unwrap_or(false);
-    if !has_focus && !card.scope_hints.is_empty() {
-        let paths: Vec<String> = card
-            .scope_hints
-            .split(|c| c == ',' || c == '\n' || c == '；')
-            .map(|p| p.trim().to_string())
-            .filter(|p| !p.is_empty())
-            .collect();
-        if !paths.is_empty() {
-            merged["focus_paths"] = json!(paths);
-        }
     }
     merged
 }
@@ -716,7 +674,7 @@ pub fn persona_block(card: &RoleCard) -> String {
     format!("\n\n【专精角色人设：{}】{}", card.label, card.persona_prompt)
 }
 
-/// 逗号分隔白名单解析（allowed_skills / allowed_mcp / hard_scope 同构）
+/// 逗号分隔白名单解析（allowed_skills / allowed_mcp）
 fn parse_csv_list(raw: &str) -> Vec<String> {
     raw.split(|c| c == ',' || c == '；' || c == ' ' || c == '\n')
         .map(|s| s.trim().to_string())

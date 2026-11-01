@@ -398,6 +398,10 @@ fn commit_terminal_inner(
     let now = Utc::now().to_rfc3339();
     let tx = conn.transaction().map_err(|error| error.to_string())?;
 
+    if status == "succeeded" && crate::agent::agent_mailbox::replies::pending_on(&tx,run_id)? {
+        return Err(crate::agent::agent_mailbox::replies::PENDING_REPLY.into());
+    }
+
     // 与普通 checkpoint 保存同口径：终审等待时人工停止可独立追加排除，
     // 必须在本次事务内合并，既不丢用户决定，也不覆盖其他执行者的版本。
     crate::agent::review_control::merge_exclusions_on(&tx, checkpoint)?;

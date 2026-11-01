@@ -404,7 +404,7 @@ async fn real_worker_loop_receives_peer_data_and_sends_a_structured_reply() {
     let (_tx, rx) = tokio::sync::watch::channel(0);
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        crate::agent::child_worker::run_worker_loop(
+        crate::agent::child_worker::run_worker(
             f.db.clone(),
             None,
             task.session.clone(),

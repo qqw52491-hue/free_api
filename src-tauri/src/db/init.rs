@@ -630,7 +630,7 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         "ALTER TABLE agent_child_runs ADD COLUMN result_json TEXT;",
         [],
     );
-    // 角色卡 v2 字段（P3）：allowed_kinds / hard_scope / max_concurrency
+    // 角色卡旧格式兼容：hard_scope 列仅保留存储兼容，不再作为角色属性读取或执行。
     let _ = conn.execute(
         "ALTER TABLE agent_role_cards ADD COLUMN allowed_kinds TEXT NOT NULL DEFAULT '';",
         [],

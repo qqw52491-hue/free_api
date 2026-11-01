@@ -148,16 +148,25 @@ pub(crate) async fn run_resumed_review(
     session_id: String,
     config: ModelConfig,
     effort: String,
-    mut messages: Vec<Value>,
+    messages: Vec<Value>,
     schema: Option<crate::agent::protocol::ContractSchema>,
     can_finalize: Option<bool>,
     mut interrupt_rx: watch::Receiver<u64>,
     progress: Option<ResumeProgressSink>,
 ) {
-    let registration = match crate::agent::review_control::register(&db, &session_id, &child_id, &config.model_id, true, interrupt_rx.clone()) {
+    let registration = match crate::agent::review_control::register(
+        &db,
+        &session_id,
+        &child_id,
+        &config.model_id,
+        true,
+        interrupt_rx.clone(),
+    ) {
         Ok(registration) => registration,
         Err(_) => {
-            if let Ok(conn) = db.0.lock() { let _ = crate::agent::review_control::cancel_child_on(&conn, &child_id); }
+            if let Ok(conn) = db.0.lock() {
+                let _ = crate::agent::review_control::cancel_child_on(&conn, &child_id);
+            }
             crate::agent::job_engine::notify_job_state_changed();
             return;
         }
@@ -167,9 +176,19 @@ pub(crate) async fn run_resumed_review(
     let started = std::time::Instant::now();
     let log_suffix = format!("child-{child_id}");
     let stage = format!("child:{child_id}");
-    let mut completion_tokens = 0;
-    let mut prompt_tokens = 0;
-    for attempt in 1..=MAX_REVIEW_OUTPUT_ATTEMPTS {
+    let completion_tokens = 0;
+    let prompt_tokens = 0;
+    let db = &db;
+    let child_id = &child_id;
+    let session_id = &session_id;
+    let config = &config;
+    let effort = &effort;
+    let schema = &schema;
+    let progress = &progress;
+    let stage = &stage;
+    let log_suffix = &log_suffix;
+    let _ = crate::agent::execution::run((messages, interrupt_rx, completion_tokens, prompt_tokens, 1u32),
+        move |(mut messages, mut interrupt_rx, mut completion_tokens, mut prompt_tokens, attempt)| async move {
         crate::agent::control::mark_stage(&stage, &format!("child_task:llm_call:{attempt}"));
         if let Some(sink) = &progress {
             sink(json!({"type":"child_reviewer_action", "child_run_id":child_id,
@@ -240,7 +259,7 @@ pub(crate) async fn run_resumed_review(
                     )),
                     serde_json::to_string(&messages).ok().as_deref(),
                 );
-                return;
+                return Ok(std::ops::ControlFlow::Break(()));
             }
         };
         if let Some(usage) = response.usage {
@@ -317,7 +336,7 @@ pub(crate) async fn run_resumed_review(
                     serde_json::to_string(&value).ok().as_deref(),
                     serde_json::to_string(&messages).ok().as_deref(),
                 );
-                return;
+                return Ok(std::ops::ControlFlow::Break(()));
             }
             Err(error) => {
                 if attempt == MAX_REVIEW_OUTPUT_ATTEMPTS {
@@ -339,11 +358,12 @@ pub(crate) async fn run_resumed_review(
                         )),
                         serde_json::to_string(&messages).ok().as_deref(),
                     );
-                    return;
+                    return Ok(std::ops::ControlFlow::Break(()));
                 }
                 messages.push(json!({"role":"user", "content":
                     review_output_rejection_feedback(&error, attempt, MAX_REVIEW_OUTPUT_ATTEMPTS)}));
             }
         }
-    }
+        Ok::<_, std::convert::Infallible>(std::ops::ControlFlow::Continue((messages, interrupt_rx, completion_tokens, prompt_tokens, attempt + 1)))
+    }).await;
 }

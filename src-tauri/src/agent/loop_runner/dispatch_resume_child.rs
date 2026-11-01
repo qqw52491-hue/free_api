@@ -299,7 +299,7 @@ pub(super) async fn dispatch_resume_child(
                                     };
                                     let max_steps = crate::agent::child_writer::MAX_WRITER_STEPS / 2;
                                     let parent_root = PathBuf::from(&root_str);
-                                    tokio::spawn(crate::agent::child_writer::run_writer_loop(
+                                    tokio::spawn(crate::agent::child_writer::run_writer(
                                         DbState(ctx.state.0.clone()),
                                         Some(ctx.app.clone()),
                                         ctx.final_session_id.to_string(),
@@ -332,7 +332,7 @@ pub(super) async fn dispatch_resume_child(
                                         hard_scope: String::new(),
                                     };
                                     let max_steps = crate::agent::child_worker::MAX_WORKER_STEPS / 2;
-                                    tokio::spawn(crate::agent::child_worker::run_worker_loop(
+                                    tokio::spawn(crate::agent::child_worker::run_worker(
                                         DbState(ctx.state.0.clone()),
                                         Some(ctx.app.clone()),
                                         ctx.final_session_id.to_string(),

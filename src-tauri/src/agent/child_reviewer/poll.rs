@@ -118,7 +118,7 @@ pub fn reap_stale_child_runs(db: &DbState, parent_run_id: &str) -> usize {
         let mut stmt = match conn.prepare(
             "SELECT c.id, c.kind, c.started_at, s.updated_at FROM agent_child_runs c \
              LEFT JOIN agent_stage_marks s ON s.session_id = 'child:' || c.id \
-             WHERE c.parent_run_id = ?1 AND c.status = 'running'",
+             WHERE c.parent_run_id = ?1 AND c.status IN ('queued','running')",
         ) {
             Ok(stmt) => stmt,
             Err(_) => return 0,
@@ -171,7 +171,7 @@ pub fn reap_stale_child_runs(db: &DbState, parent_run_id: &str) -> usize {
             continue;
         }
         let _ = conn.execute(
-            "UPDATE agent_child_runs SET status='timed_out', finished_at=?2, error_kind='reaped_stale', result_json=?3 WHERE id=?1 AND status='running'",
+            "UPDATE agent_child_runs SET status='timed_out', finished_at=?2, error_kind='reaped_stale', result_json=?3 WHERE id=?1 AND status IN ('queued','running')",
             params![
                 child_run_id,
                 now.to_rfc3339(),
@@ -234,7 +234,7 @@ pub fn has_running_child_runs(db: &DbState, parent_run_id: &str) -> bool {
     let Ok(conn) = db.0.lock() else { return false; };
     let count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM agent_child_runs WHERE parent_run_id = ?1 AND status = 'running'",
+            "SELECT COUNT(*) FROM agent_child_runs WHERE parent_run_id = ?1 AND status IN ('queued','running')",
             params![parent_run_id],
             |row| row.get(0),
         )
@@ -271,7 +271,7 @@ pub fn cancel_running_child_runs(db: &DbState, parent_run_id: &str) -> Result<us
         .execute(
             "UPDATE agent_child_runs
              SET status = 'cancelled', finished_at = ?2, error_kind = 'cancelled'
-             WHERE parent_run_id = ?1 AND status = 'running'",
+             WHERE parent_run_id = ?1 AND status IN ('queued','running')",
             params![parent_run_id, now],
         )
         .map_err(|error| error.to_string())?;
@@ -295,7 +295,7 @@ pub fn recover_orphaned_child_runs_on_session_start(
         let mut stmt = conn
             .prepare(
                 "SELECT id FROM agent_child_runs
-                 WHERE parent_session_id = ?1 AND status = 'running'",
+                 WHERE parent_session_id = ?1 AND status IN ('queued','running')",
             )
             .map_err(|error| error.to_string())?;
         let rows = stmt

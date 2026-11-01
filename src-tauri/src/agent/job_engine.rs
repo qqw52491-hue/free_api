@@ -330,7 +330,7 @@ fn has_running_targets(db: &DbState, parent_run_id: &str, targets: &[String]) ->
         .join(",");
     for table in ["agent_background_jobs", "agent_child_runs"] {
         let sql = format!(
-            "SELECT COUNT(*) FROM {} WHERE parent_run_id = ? AND status = 'running' AND id IN ({})",
+            "SELECT COUNT(*) FROM {} WHERE parent_run_id = ? AND status IN ('queued','running') AND id IN ({})",
             table, marks
         );
         let params_vec: Vec<&dyn rusqlite::ToSql> = std::iter::once(&parent_run_id as &dyn rusqlite::ToSql)
@@ -470,7 +470,7 @@ pub(crate) fn empty_wait_message(
         let (id, status, consumed, has_result) = row.map_err(|e| e.to_string())?;
         if targets.is_some_and(|ids| !ids.contains(&id)) { continue; }
         matched.insert(id);
-        if status == "running" {
+        if matches!(status.as_str(), "queued" | "running") {
             running += 1;
         } else if !consumed {
             if has_result && matches!(status.as_str(), "succeeded" | "failed" | "cancelled" | "timed_out" | "interrupted" | "invalid_output") {

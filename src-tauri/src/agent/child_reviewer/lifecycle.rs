@@ -117,7 +117,7 @@ pub(crate) fn live_attempt_for_task(
         "SELECT id FROM agent_child_runs
          WHERE parent_run_id = ?1 AND task_id = ?2 AND id != ?3
            AND COALESCE(attempt_id, 1) > ?4
-           AND (status = 'running' OR applied_at IS NULL OR applied_at = '')
+           AND (status IN ('queued','running') OR applied_at IS NULL OR applied_at = '')
          ORDER BY COALESCE(attempt_id, 1) DESC LIMIT 1",
         params![parent_run_id, task_id, exclude_run_id, exclude_attempt],
         |row| row.get::<_, String>(0),
@@ -172,7 +172,7 @@ pub(crate) fn begin_child_run_extended(
     // 第一道看门：全局瞬时并发看门（所有正在 running 的子任务数，上限 MAX_TOTAL_CHILDREN_PER_RUN = 6）
     let running_children: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM agent_child_runs WHERE parent_run_id=?1 AND status='running'",
+            "SELECT COUNT(*) FROM agent_child_runs WHERE parent_run_id=?1 AND status IN ('queued','running')",
             params![parent_run_id],
             |row| row.get(0),
         )
@@ -192,7 +192,7 @@ pub(crate) fn begin_child_run_extended(
 
     let running_kind_children: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM agent_child_runs WHERE parent_run_id=?1 AND kind=?2 AND status='running'",
+            "SELECT COUNT(*) FROM agent_child_runs WHERE parent_run_id=?1 AND kind=?2 AND status IN ('queued','running')",
             params![parent_run_id, kind],
             |row| row.get(0),
         )
@@ -320,7 +320,7 @@ pub(crate) fn finish_child_run_with_history(
         // 单向迁移：running -> 终态；例外——被 reap 标记为 reaped_stale 的行仍允许
         // 迟到结果落库（真实结论覆盖收割占位结果），归档元数据与会话同寿命保留，
         // 复盘可查"曾超时"与"实际结论"双重事实；cancelled/interrupted 依旧拒绝覆盖。
-        "UPDATE agent_child_runs SET status=?2, finished_at=?3, duration_ms=?4, completion_tokens=?5, prompt_tokens=?9, error_kind=?6, result_json=?7, message_history_json=?8 WHERE id=?1 AND (status='running' OR (status='timed_out' AND error_kind='reaped_stale'))",
+        "UPDATE agent_child_runs SET status=?2, finished_at=?3, duration_ms=?4, completion_tokens=?5, prompt_tokens=?9, error_kind=?6, result_json=?7, message_history_json=?8 WHERE id=?1 AND (status IN ('queued','running') OR (status='timed_out' AND error_kind='reaped_stale'))",
         params![
             child_run_id,
             status,

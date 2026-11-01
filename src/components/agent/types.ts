@@ -415,7 +415,6 @@ export interface RoleCard {
     scope_hints: string;
     default_test_command: string;
     allowed_kinds: string;
-    hard_scope: string;
     max_concurrency: number;
     enabled: boolean;
     is_system?: boolean;

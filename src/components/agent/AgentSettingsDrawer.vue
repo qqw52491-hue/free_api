@@ -111,7 +111,7 @@
                             />
                         </div>
                         <label>人设提示词*<textarea v-model="roleForm.persona_prompt" rows="4" placeholder="专精 Tailwind、暗黑玻璃拟态、微交互与响应式排版……"></textarea></label>
-                        <label>作用域提示（逗号分隔，可选）<input v-model="roleForm.scope_hints" placeholder="src/components, src/assets" /></label>
+                        <label>适用场景提示（可选）<input v-model="roleForm.scope_hints" placeholder="例如：前端交互、响应式布局和组件样式调整" /></label>
                         <label>默认测试命令（可选）<input v-model="roleForm.default_test_command" placeholder="npm run build" /></label>
                         <p v-if="roleFormError" class="mcp-error">{{ roleFormError }}</p>
                         <div class="role-form-actions">

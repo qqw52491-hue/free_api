@@ -142,7 +142,8 @@ pub(crate) fn validate_native(tool: &str, action: &str, params: &Value) -> Resul
         "child_task" => {
             let effective=crate::agent::child_task::request_action(act,params);
             match effective.as_str(){
-                "send"=>crate::agent::agent_mailbox::validate_payload(params)?,
+                "send"|"ask"=>crate::agent::agent_mailbox::validate_payload(params)?,
+                "read_agent_result"=>{text(&tool,params,&["child_run_id"],false)?;optional(&tool,params,"view","string")?;optional(&tool,params,"offset","非负整数")?;optional(&tool,params,"limit","非负整数")?;},
                 "result"|"status"|"cancel"=>{text(&tool,params,&["child_run_id"],false)?;optional(&tool,params,"output_id","string")?;},
                 "resume"=>{text(&tool,params,&["child_run_id"],false)?;text(&tool,params,&["message"],false)?;if params["message"].as_str().unwrap().chars().count()>65_536{return Err("追问超过 65536 字符，未执行。".into())}},
                 "receipt"=>text(&tool,params,&["message_id"],false)?,
@@ -150,7 +151,7 @@ pub(crate) fn validate_native(tool: &str, action: &str, params: &Value) -> Resul
                 "inbox"=>{optional(&tool,params,"child_run_id","string")?;optional(&tool,params,"offset","非负整数")?;optional(&tool,params,"limit","非负整数")?;},
                 "wait"=>{optional(&tool,params,"child_run_id","string")?;optional(&tool,params,"timeout_secs","非负整数")?;},
                 "dispatch"=>{text(&tool,params,&["task"],false)?;optional(&tool,params,"context","string")?;let size=params["task"].as_str().unwrap().chars().count()+params.get("context").and_then(Value::as_str).unwrap_or_default().chars().count();if size>65_536{return Err("child_task 的 task + context 超过 65536 字符；本次未执行。请用已有引用。".into())}},
-                _=>return Err(format!("未知 child_task action='{effective}'；允许 dispatch/result/resume/status/list/send/inbox/receipt/wait/cancel；本次未执行。")),
+                _=>return Err(format!("未知 child_task action='{effective}'；允许 dispatch/result/resume/status/list/send/ask/read_agent_result/inbox/receipt/wait/cancel；本次未执行。")),
             }
         }
         "wait_jobs" => {
@@ -387,11 +388,13 @@ mod tests {
 
     #[test]
     fn writer_request_and_apply_are_validated_before_dispatch() {
-        for p in [json!({}), json!({"task":"fix"})] {
+        for p in [json!({}), json!({"task":"fix","test_command":false})] {
             let inst: AgentInstruction =
                 serde_json::from_value(json!({"tool":"child_writer","command":p})).unwrap();
             assert!(instruction_rejection(&empty_db(), &inst).is_some());
         }
+        let optional: AgentInstruction = serde_json::from_value(json!({"tool":"child_writer","command":{"task":"fix"}})).unwrap();
+        assert!(instruction_rejection(&empty_db(), &optional).is_none());
         assert!(native_rejection("child_writer", "apply_diff", &json!({})).is_some());
         assert!(validate_native("child_writer", "apply", &json!({"child_run_id":"id"})).is_ok());
     }
@@ -400,7 +403,7 @@ mod tests {
     fn mixed_child_batch_keeps_existing_partial_success_semantics() {
         let inst: AgentInstruction =
             serde_json::from_value(json!({"tool":"child_writer","dispatches":[
-                {"task":"fix","test_command":"cargo check"}, {"task":"fix"}
+                {"task":"fix","test_command":"cargo check"}, {"task":"fix","test_command":false}
             ]}))
             .unwrap();
         assert!(instruction_rejection(&empty_db(), &inst).is_none());

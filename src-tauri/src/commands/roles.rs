@@ -33,7 +33,6 @@ pub struct GeneratedRoleResponse {
     pub name: String,
     pub label: String,
     pub allowed_kinds: Vec<String>,
-    pub hard_scope: String,
     pub scope_hints: String,
     pub default_test_command: String,
     pub persona_prompt: String,
@@ -163,7 +162,6 @@ fn parse_generated_role_from_value(parsed: &Value) -> GeneratedRoleResponse {
         vec!["reviewer".to_string()]
     };
 
-    let hard_scope = parsed.get("hard_scope").and_then(Value::as_str).unwrap_or("").trim().to_string();
     let scope_hints = parsed.get("scope_hints").and_then(Value::as_str).unwrap_or("").trim().to_string();
     let default_test_command = parsed.get("default_test_command").and_then(Value::as_str).unwrap_or("").trim().to_string();
     let persona_prompt = parsed.get("persona_prompt").and_then(Value::as_str).unwrap_or("").trim().to_string();
@@ -225,7 +223,6 @@ fn parse_generated_role_from_value(parsed: &Value) -> GeneratedRoleResponse {
         name,
         label,
         allowed_kinds,
-        hard_scope,
         scope_hints,
         default_test_command,
         persona_prompt,
@@ -262,33 +259,33 @@ pub async fn chat_iterate_role_card_ai(
     let sys_prompt = r#"你是一位顶级 AI Agent 架构专家与对话式角色设计顾问。用户正在与你共同【多轮迭代设计与微调一个专精的角色卡 (Role Card)】。
 
 【交互机制】：
-1. 用户会给出初始需求，或在后续多轮对话中提出任意微调要求（例如：“把测试命令改成 npm test”、“硬围栏再加上 package.json”、“人设里再强调一下暗色模式对比度”、“加一个叫 bug_count 的交付契约”）。
+1. 用户会给出初始需求，或在后续多轮对话中提出任意微调要求（例如：“把测试命令改成 npm test”、“人设里再强调一下暗色模式对比度”、“加一个叫 bug_count 的交付契约”）。
 2. 若传入了【当前已有角色卡草案 (current_card)】，你必须在此草案基础上进行【增量修改与强化】，保留既有合理的配置，只根据用户最新的指令修改、扩充或调整相关字段。
 3. 若是第一轮对话，则根据用户需求全新创建全套配置。
 4. 你必须返回两个部分：
    - reply: 简短、亲切、专业的一两句话对话回复（说明你做了哪些具体修改，或者增加了什么能力，并提示用户还可以怎样继续微调）。
    - card: 完整的最新角色卡配置对象。
 
+角色卡应跨项目复用，不生成固定目录围栏；具体文件由本次任务提供。
+
 【角色卡各字段规范】：
 1. name: 唯一标识 slug，全小写字母加下划线（如 vue_tailwind_reviewer, rust_concurrency_guard）。
 2. label: 中文展示名称，以最符合身份的 1 个 Emoji 开头（如 "🎨 Vue 样式审查专家"）。
 3. allowed_kinds: 挂载类型数组，可选 ["writer"](改码)、["reviewer"](审查)、["worker"](调研探针)。
-4. hard_scope: 强制物理围栏路径前缀（逗号分隔，如 "src/, package.json"；不限制填 ""）。
-5. scope_hints: 调度唤醒提示词（1~2 句话，说明主 Agent 在何种业务场景下派发此专家）。
-6. default_test_command: 基线验证命令（如 "npm test", "cargo test", "npm run build" 或 ""）。
-7. persona_prompt: 详实专业的人设提示词（300~500字）。涵盖：专家身份、核心检查/执行标准（至少3项明确指标）、绝不允许犯的红线禁忌、打分评价维度。
-8. focus_domains: 系统自动装配材料白名单（数组），可选 "git_diff", "changed_files", "last_verify_log"。
-9. input_fields: 专家特化自定义入参数组（name, field_type, required, description, allowed_values_str）。
-10. schema_fields: 专家特化交付契约字段数组（name, field_type, required, description, allowed_values_str；无需重复 findings 和 confidence）。
+4. scope_hints: 调度唤醒提示词（1~2 句话，说明主 Agent 在何种业务场景下派发此专家）。
+5. default_test_command: 基线验证命令（如 "npm test", "cargo test", "npm run build" 或 ""）。
+6. persona_prompt: 详实专业的人设提示词（300~500字）。涵盖：专家身份、核心检查/执行标准（至少3项明确指标）、绝不允许犯的红线禁忌、打分评价维度。
+7. focus_domains: 系统自动装配材料白名单（数组），可选 "git_diff", "changed_files", "last_verify_log"。
+8. input_fields: 专家特化自定义入参数组（name, field_type, required, description, allowed_values_str）。
+9. schema_fields: 专家特化交付契约字段数组（name, field_type, required, description, allowed_values_str；无需重复 findings 和 confidence）。
 
 【必须输出的合法 JSON 格式】：
 {
-  "reply": "已为您将测试命令修改为 npm test，并将 package.json 纳入了硬围栏范围。...",
+  "reply": "已为您将测试命令修改为 npm test，并补充了适用场景说明。...",
   "card": {
     "name": "...",
     "label": "...",
     "allowed_kinds": ["..."],
-    "hard_scope": "...",
     "scope_hints": "...",
     "default_test_command": "...",
     "persona_prompt": "...",

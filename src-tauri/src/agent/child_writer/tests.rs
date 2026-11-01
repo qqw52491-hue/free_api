@@ -18,11 +18,13 @@
     }
 
     #[test]
-    fn parse_writer_request_requires_test_command() {
+    fn parse_writer_request_accepts_optional_test_command() {
         let ok = parse_writer_request(&json!({"task": "修复 sum", "test_command": "npm test"})).unwrap();
         assert_eq!(ok.test_command, "npm test");
         assert!(ok.context_excerpts.is_none());
-        assert!(parse_writer_request(&json!({"task": "修复 sum"})).is_err());
+        assert!(parse_writer_request(&json!({"task": "修复 sum"})).unwrap().test_command.is_empty());
+        assert!(parse_writer_request(&json!({"task":"x", "test_command":42})).is_err());
+        assert!(parse_writer_request(&json!({"task":"x", "test_command":null})).is_err());
         assert!(parse_writer_request(&json!({"task": "x", "test_command": "a; b"})).is_err());
         assert!(parse_writer_request(&json!({"task": "x", "test_command": "npm test", "focus_paths": ["1","2","3","4","5","6"]})).is_err());
 

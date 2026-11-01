@@ -149,9 +149,6 @@ pub(super) async fn dispatch_child_writer(
                         if let Some(obj) = effective_params.as_object_mut() {
                             obj.remove("max_concurrency");
                         }
-                        if !card.hard_scope.is_empty() {
-                            effective_params["hard_scope"] = json!(card.hard_scope);
-                        }
                         if card.max_concurrency > 0 {
                             effective_params["max_concurrency"] = json!(card.max_concurrency.min(crate::agent::child_reviewer::MAX_TOTAL_CHILDREN_PER_RUN as i64));
                         }

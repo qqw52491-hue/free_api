@@ -740,6 +740,14 @@ async fn collect_checks(
             }
         }
     }
+    {
+        let conn=db.0.lock().map_err(|e|e.to_string());
+        match conn.and_then(|conn|crate::agent::agent_mailbox::replies::pending_on(&conn,run_id)) {
+            Ok(true)=>open_todos.push("已有只读追问尚未结束或结果尚未回收；请等待并回收后再交付。".into()),
+            Err(error)=>open_todos.push(format!("只读追问状态读取失败：{error}")),
+            Ok(false)=>{}
+        }
+    }
     match crate::agent::job_engine::running_job_finish_blockers(db, run_id) {
         Ok(blockers) => open_todos.extend(blockers),
         Err(error) => open_todos.push(format!(

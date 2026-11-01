@@ -25,7 +25,7 @@
           </div>
           <h3 class="ai-heading">自然语言智能孵化角色</h3>
           <p class="ai-subheading">
-            描述你想要的专家职能或点击下方方向建议，大模型自动推演专业人设、物理围栏、验证命令与交付契约
+            描述你想要的专家职能或点击下方方向建议，大模型自动推演专业人设、适用场景、验证命令与交付契约
           </p>
         </div>
         <div class="ai-head-actions">
@@ -137,7 +137,7 @@
           v-model="aiPrompt"
           rows="2"
           class="ai-prompt-textarea"
-          :placeholder="aiChatHistory.length ? '继续对 AI 说明微调意见（如『把测试命令改成 npm test』或『硬围栏加上 package.json』，按 Enter 发送）...' : '例如: 帮我定制一个专精 Vue3 + Tailwind CSS 的样式审查员，重点把关组件规范与移动端响应式，构建命令用 npm run build...'"
+          :placeholder="aiChatHistory.length ? '继续对 AI 说明微调意见（如『把测试命令改成 npm test』或『强化移动端响应式检查』，按 Enter 发送）...' : '例如: 帮我定制一个专精 Vue3 + Tailwind CSS 的样式审查员，重点把关组件规范与移动端响应式，构建命令用 npm run build...'"
           :disabled="aiGenerating"
           @keydown.enter.ctrl.prevent="generateWithAi"
         ></textarea>
@@ -270,15 +270,6 @@
           </button>
         </div>
       </div>
-
-      <label class="field wide">
-        <span class="field-label">强制物理围栏 (Hard Scope) <span class="field-hint">（超出此范围的写入/读取将被 Rust 宿主层硬拦截，例如: src/, package.json；留空不限）</span></span>
-        <input
-          v-model="form.hard_scope"
-          type="text"
-          placeholder="例如: src/, package.json"
-        />
-      </label>
 
       <label class="field wide">
         <span class="field-label">适用范围提示 (Scope Hints)</span>
@@ -610,9 +601,6 @@
             🎯 {{ card.scope_hints }}
           </p>
 
-          <p v-if="card.hard_scope" class="role-hard-scope" :title="`强制物理围栏: ${card.hard_scope}`">
-            🚧 围栏: {{ card.hard_scope }}
-          </p>
 
           <div class="role-prompt-preview">
             <span class="preview-label">Persona 核心指引:</span>
@@ -654,7 +642,6 @@ interface RoleCard {
   scope_hints: string;
   default_test_command: string;
   allowed_kinds: string;
-  hard_scope: string;
   max_concurrency: number;
   enabled: boolean;
   is_system?: boolean;
@@ -734,7 +721,6 @@ function clearAiKindHints() {
 const quickTweakOptions = [
   { label: '🧪 改为 npm test', prompt: '把默认验证测试命令修改为 npm test' },
   { label: '🧪 改为 cargo test', prompt: '把默认验证测试命令修改为 cargo test' },
-  { label: '🚧 围栏加上 package.json', prompt: '在强制物理围栏 (hard_scope) 中加上 package.json' },
   { label: '🛡️ 增加风险评级契约', prompt: '在交付契约中增加 risk_level 字段，可选值为 low, medium, high, critical' },
   { label: '🔥 人设要求更严苛挑刺', prompt: '在 Persona 人设中提出更严苛的审查挑刺标准，绝不允许带病通过' },
   { label: '📱 强化移动端响应式', prompt: '在 Persona 人设中重点强化移动端断点、触摸目标与弹性布局的审查维度' },
@@ -753,25 +739,25 @@ function resetAiChat() {
 const aiSuggestionGroups = [
   {
     category: '✍️ 改码专精 (Writer)',
-    desc: '专精特定语言、框架或目录的代码实现与重构',
+    desc: '专精特定语言、框架或业务领域的代码实现与重构',
     items: [
       {
         icon: '🎨',
         title: 'Vue3 / Tailwind 响应式改造专家',
         kind: 'writer',
-        prompt: '专精 Vue3 组合式 API 与 Tailwind CSS，重点优化组件结构、代码优雅性与多端响应式排版。硬围栏限制在 src/ 目录，构建验证 npm run build',
+        prompt: '专精 Vue3 组合式 API 与 Tailwind CSS，重点优化组件结构、代码优雅性与多端响应式排版。构建验证 npm run build',
       },
       {
         icon: '🦀',
         title: 'Rust 异步高并发加固专家',
         kind: 'writer',
-        prompt: '专精 Tokio 异步运行时、通道并发安全、无锁结构与错误传播规范，代码稳健且高效。硬围栏限制在 src-tauri/ 目录，验证命令 cargo check',
+        prompt: '专精 Tokio 异步运行时、通道并发安全、无锁结构与错误传播规范，代码稳健且高效。验证命令 cargo check',
       },
       {
         icon: '📝',
         title: '技术文档与 API 契约编撰官',
         kind: 'writer',
-        prompt: '专精撰写结构优雅的技术架构说明、API 接口文档与 Mermaid 架构时序图，格式清晰专业。硬围栏限制在 docs/ 目录',
+        prompt: '专精撰写结构优雅的技术架构说明、API 接口文档与 Mermaid 架构时序图，格式清晰专业',
       },
     ],
   },
@@ -833,7 +819,6 @@ const form = reactive({
   scope_hints: '',
   default_test_command: '',
   allowed_kinds: [] as string[],
-  hard_scope: '',
   max_concurrency: 0,
   enabled: true,
   focus_domains: [] as string[],
@@ -850,7 +835,6 @@ const presetTemplates = [
     persona_prompt: '你是一位资深前端 UI/UX 架构师。请从视觉美观度、配色和谐度、响应式适配度、组件内聚性及微交互流畅度等维度进行严谨审查。评估并输出质量得分与具体可执行的修改建议。',
     default_test_command: 'npm run build',
     allowed_kinds: 'reviewer',
-    hard_scope: '',
     max_concurrency: 0,
     focus_domains: ['git_diff', 'changed_files'],
     input_fields: [
@@ -887,7 +871,6 @@ const presetTemplates = [
     persona_prompt: '你是一位资深系统架构与安全评审专家。重点审查核心逻辑的边界条件、状态一致性、死锁与竞态条件风险、错误处理完整度以及 SQL 注入等安全漏洞。给出严密的诊断打分与加固清单。',
     default_test_command: 'cargo test',
     allowed_kinds: 'reviewer',
-    hard_scope: '',
     max_concurrency: 0,
     focus_domains: ['git_diff', 'changed_files', 'last_verify_log'],
     input_fields: [
@@ -924,7 +907,6 @@ const presetTemplates = [
     persona_prompt: '你是一个高效率代码调研探针。在只读约束下，使用搜索与检索工具迅速定位关键接口、定义处及所有调用方，提炼关键上下文，为后续开发提供精准线索。',
     default_test_command: '',
     allowed_kinds: 'worker',
-    hard_scope: '',
     max_concurrency: 0,
     focus_domains: ['changed_files'],
     input_fields: [
@@ -946,7 +928,6 @@ const presetTemplates = [
     persona_prompt: '你是一位专业的技术写作专家。善于使用清晰易懂的 Markdown 结构、表格、时序图与警示块（Alerts），将复杂的代码逻辑与交付成果梳理为极其优雅专业的技术文档。',
     default_test_command: '',
     allowed_kinds: 'writer',
-    hard_scope: 'docs/',
     max_concurrency: 0,
     focus_domains: ['changed_files', 'git_diff'],
     input_fields: [] as SchemaFieldFormItem[],
@@ -1092,7 +1073,6 @@ function startCreate() {
     scope_hints: '',
     default_test_command: '',
     allowed_kinds: [],
-    hard_scope: '',
     max_concurrency: 0,
     enabled: true,
     focus_domains: [],
@@ -1117,7 +1097,6 @@ function applyPreset(tpl: typeof presetTemplates[0]) {
   form.persona_prompt = tpl.persona_prompt;
   form.default_test_command = tpl.default_test_command;
   form.allowed_kinds = tpl.allowed_kinds ? tpl.allowed_kinds.split(',').map((s) => s.trim()).filter(Boolean) : [];
-  form.hard_scope = tpl.hard_scope || '';
   form.max_concurrency = tpl.max_concurrency || 0;
   form.enabled = true;
   form.focus_domains = tpl.focus_domains ? [...tpl.focus_domains] : [];
@@ -1198,7 +1177,6 @@ function editCard(card: RoleCard) {
     scope_hints: card.scope_hints || '',
     default_test_command: card.default_test_command || '',
     allowed_kinds: card.allowed_kinds ? card.allowed_kinds.split(',').map((s) => s.trim()).filter(Boolean) : [],
-    hard_scope: card.hard_scope || '',
     max_concurrency: card.max_concurrency || 0,
     enabled: card.enabled,
     focus_domains: parsedDomains,
@@ -1255,7 +1233,6 @@ async function generateWithAi() {
     name: form.name,
     label: form.label,
     allowed_kinds: form.allowed_kinds.join(','),
-    hard_scope: form.hard_scope,
     scope_hints: form.scope_hints,
     default_test_command: form.default_test_command,
     persona_prompt: form.persona_prompt,
@@ -1312,7 +1289,6 @@ async function generateWithAi() {
     if ('scope_hints' in roleData) form.scope_hints = roleData.scope_hints ?? '';
     if ('default_test_command' in roleData) form.default_test_command = roleData.default_test_command ?? '';
     if (Array.isArray(roleData.allowed_kinds)) form.allowed_kinds = [...roleData.allowed_kinds];
-    if ('hard_scope' in roleData) form.hard_scope = roleData.hard_scope ?? '';
     if (!wasEditing) {
       form.max_concurrency = 0;
       form.enabled = true;
@@ -1480,7 +1456,6 @@ async function saveRoleCard() {
         scope_hints: form.scope_hints.trim(),
         default_test_command: form.default_test_command.trim(),
         allowed_kinds: form.allowed_kinds.join(','),
-        hard_scope: form.hard_scope.trim(),
         max_concurrency: Number(form.max_concurrency) || 0,
         enabled: form.enabled,
         custom_schema,
@@ -2489,16 +2464,6 @@ textarea {
   color: var(--theme-status-warning, #eab308);
 }
 
-.role-hard-scope {
-  font-size: 11px;
-  color: var(--theme-status-warning, #f59e0b);
-  margin: 6px 0 0 0;
-  line-height: 1.4;
-  background: rgba(245, 158, 11, 0.08);
-  border: 1px dashed rgba(245, 158, 11, 0.25);
-  padding: 4px 8px;
-  border-radius: 6px;
-}
 
 /* 📋 交付契约与入参约束 (Contract & Input Schema) */
 .contract-section {

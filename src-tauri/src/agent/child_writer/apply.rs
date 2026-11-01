@@ -168,14 +168,7 @@ pub async fn apply_writer_result(
                 .collect::<Vec<_>>()
                 .join("\n")
         );
-        if wr.test_status != "passed" {
-            report.push_str(&format!(
-                "\n⚠️ writer 测试状态: {}——合入后请在真实工作区自行运行 test_command 完成最终验证。",
-                wr.test_status
-            ));
-        } else {
-            report.push_str("\n⚠️ writer 的测试证据来自隔离副本；合入后请仍在真实工作区重跑 test_command 做最终验证。");
-        }
+        report.push_str(&verification_handoff(&wr));
         return Ok(report);
     }
 
@@ -233,7 +226,7 @@ pub async fn apply_writer_result(
     let _ = std::fs::remove_file(&tmp_patch);
     match applied {
         Ok(out) if out.status.success() => Ok(format!(
-            "✅ 机械合入完成：已通过补丁工件把 writer {} 的 {} 个变更应用到真实工作区{}。\n已合入：\n{}\n⚠️ 请在真实工作区重跑 test_command 做最终验证。",
+            "✅ 机械合入完成：已通过补丁工件把 writer {} 的 {} 个变更应用到真实工作区{}。\n已合入：\n{}{}",
             child_run_id,
             clean.len(),
             if already > 0 {
@@ -244,7 +237,8 @@ pub async fn apply_writer_result(
             clean.iter()
                 .map(|f| format!("- {}", f.path))
                 .collect::<Vec<_>>()
-                .join("\n")
+                .join("\n"),
+            verification_handoff(&wr)
         )),
         Ok(out) => Err(format!(
             "git apply 执行失败：\n{}\n请按回执 diff 手动落实。",
@@ -267,4 +261,14 @@ pub fn extract_file_diff(full_diff: &str, relative_path: &str) -> Option<String>
         return Some(after_marker[..end].trim_end().to_string());
     }
     None
+}
+
+
+fn verification_handoff(result: &WriterResult) -> String {
+    match result.test_status.as_str() {
+        "passed" => "\n验证在隔离副本中通过；合入后核对证据是否覆盖实际版本，适用时复用，有差异或具体缺口时补验。".into(),
+        "failed" => "\n⚠️ 隔离副本中的验证失败；失败证据保留，父任务须处理并完成适用验证。".into(),
+        _ if result.test_command.is_empty() => "\n未配置验证命令，未声明测试通过；父任务按实际目标判断适用验证和审查。".into(),
+        _ => format!("\n⚠️ 已指定验证命令但尚未通过（{}）；父任务须处理未完成验证。", result.test_status),
+    }
 }

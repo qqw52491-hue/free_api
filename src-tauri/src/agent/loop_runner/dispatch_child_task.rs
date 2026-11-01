@@ -58,6 +58,11 @@ async fn dispatch_inner(
     let actor = crate::agent::agent_mailbox::Actor::new(ctx.parent_run_id, ctx.final_session_id);
     let effective = child_task::request_action(&action, &params);
     match effective.as_str() {
+        "ask" => {
+            let key=format!("{}:{}:{}",ctx.context.history_task_id,ctx.step_id,params);
+            return Ok(output(crate::agent::agent_mailbox::replies::ask(ctx.state.inner(),&actor,&params,&key,Some(ctx.app.clone()))?));
+        }
+        "read_agent_result" => return Ok(output(crate::agent::agent_mailbox::replies::read_result(ctx.state.inner(),&actor,&params)?)),
         "send" => {
             let key = format!("{}:{}:{}", ctx.context.history_task_id, ctx.step_id, params);
             return Ok(output(crate::agent::agent_mailbox::send(

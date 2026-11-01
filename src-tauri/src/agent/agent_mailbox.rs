@@ -3,6 +3,7 @@ use crate::db::DbState;
 pub(crate) const WAIT_INTERRUPTED: &str = "agent_message:interrupted";
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
+pub(crate) mod replies;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Actor {
@@ -178,7 +179,7 @@ pub(crate) fn send(
         .optional()
     }
     .map_err(|e| e.to_string())?;
-    if !matches!(status.as_deref(), Some("running" | "waiting_human")) {
+    if !matches!(status.as_deref(), Some("queued" | "running" | "waiting_human")) {
         return Err("接收方已结束或当前状态未知，消息未入队。通用任务请用 child_task.resume 追问；专用任务沿用 resume_child。".into());
     }
     let now = chrono::Utc::now().to_rfc3339();
@@ -318,12 +319,12 @@ pub(crate) fn deliver_specialist(
 pub(crate) fn receipt(db: &DbState, actor: &Actor, id: &str) -> Result<Value, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let (from,to,raw,at,delivered):(String,String,String,String,Option<String>)=conn.query_row(
-        "SELECT sender_run_id,target_run_id,payload_json,created_at,delivered_at FROM agent_messages WHERE id=?1 AND (sender_run_id=?2 OR target_run_id=?2 OR target_run_id=(SELECT resumed_from FROM agent_child_runs WHERE id=?2 AND kind='task'))",
+        "SELECT sender_run_id,target_run_id,payload_json,created_at,delivered_at FROM agent_messages WHERE id=?1 AND (sender_run_id=?2 OR target_run_id=?2 OR target_run_id=(SELECT resumed_from FROM agent_child_runs WHERE id=?2 AND (kind='task' OR purpose='readonly_reply')))",
         params![id,actor.run],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).map_err(|_|"消息不存在或不属于当前收发方/宿主绑定的前次任务。".to_string())?;
     let status:Option<String>=conn.query_row("SELECT status FROM agent_child_runs WHERE id=?1 UNION ALL SELECT status FROM agent_run_traces WHERE id=?1 LIMIT 1",[&to],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
     let delivery = if delivered.is_some() {
         "in_context"
-    } else if matches!(status.as_deref(), Some("running" | "waiting_human")) {
+    } else if matches!(status.as_deref(), Some("queued" | "running" | "waiting_human")) {
         "queued"
     } else {
         "not_delivered_target_ended"
@@ -372,7 +373,7 @@ pub(crate) async fn wait(
                 .optional()
             }
             .map_err(|e| e.to_string())?;
-            if !matches!(status.as_deref(), Some("running" | "waiting_human")) {
+            if !matches!(status.as_deref(), Some("queued" | "running" | "waiting_human")) {
                 return Ok(());
             }
         }
@@ -383,8 +384,8 @@ pub(crate) async fn wait(
 pub(crate) fn family_list(db: &DbState, actor: &Actor) -> Result<Vec<Value>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let owner = root(&conn, actor)?;
-    let mut stmt=conn.prepare("WITH RECURSIVE family(id) AS (SELECT ?1 UNION SELECT c.id FROM agent_child_runs c JOIN family f ON c.parent_run_id=f.id) SELECT c.id,c.kind,c.status,c.model_id,c.parent_run_id,c.started_at,c.finished_at FROM agent_child_runs c JOIN family f ON f.id=c.id ORDER BY (c.status='running') DESC,c.started_at DESC LIMIT 100").map_err(|e|e.to_string())?;
-    let rows=stmt.query_map([owner.run],|r|Ok(json!({"child_run_id":r.get::<_,String>(0)?,"kind":r.get::<_,String>(1)?,"execution_status":r.get::<_,String>(2)?,"model":r.get::<_,String>(3)?,"parent_run_id":r.get::<_,String>(4)?,"started_at":r.get::<_,String>(5)?,"finished_at":r.get::<_,Option<String>>(6)?}))).map_err(|e|e.to_string())?;
+    let mut stmt=conn.prepare("WITH RECURSIVE family(id) AS (SELECT ?1 UNION SELECT c.id FROM agent_child_runs c JOIN family f ON c.parent_run_id=f.id) SELECT c.id,c.kind,c.status,c.model_id,c.parent_run_id,c.started_at,c.finished_at,c.purpose,c.resumed_from FROM agent_child_runs c JOIN family f ON f.id=c.id ORDER BY (c.status='running') DESC,c.started_at DESC LIMIT 100").map_err(|e|e.to_string())?;
+    let rows=stmt.query_map([owner.run],|r|Ok(json!({"child_run_id":r.get::<_,String>(0)?,"kind":r.get::<_,String>(1)?,"execution_status":r.get::<_,String>(2)?,"model":r.get::<_,String>(3)?,"parent_run_id":r.get::<_,String>(4)?,"started_at":r.get::<_,String>(5)?,"finished_at":r.get::<_,Option<String>>(6)?,"purpose":r.get::<_,Option<String>>(7)?,"resumed_from":r.get::<_,Option<String>>(8)?}))).map_err(|e|e.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())
 }
@@ -405,10 +406,13 @@ pub(crate) async fn specialist_action(
     step: usize,
     interrupt: &mut tokio::sync::watch::Receiver<u64>,
     remaining_secs: u64,
+    app: Option<tauri::AppHandle>,
 ) -> Option<Result<String, String>> {
     let actor = Actor::new(run, &format!("child:{run}"));
     let mut wait_interrupt = interrupt.clone();
     match action {
+        "ask_agent" => Some(replies::ask(db, &actor, params, &format!("{step}:{params}"), app).map(|v|v.to_string())),
+        "read_agent_result" => Some(replies::read_result(db, &actor, params).map(|v|v.to_string())),
         "send_message" => Some(
             send(db, &actor, params, Some(&format!("{step}:{params}")), false)
                 .map(|v| v.to_string()),
