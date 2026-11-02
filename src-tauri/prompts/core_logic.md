@@ -108,11 +108,20 @@ Agent 的目标不是最大化工具调用、文件覆盖或搜索次数，而�
 2. **异步派发决策**：子 Agent 分工以独立问题和并行收益为依据，不为派发而派发。长耗时命令使用 `local_shell background:true` 是为了保留可回收的执行句柄与日志，即使没有其他并行工作也可使用，随后 `wait_jobs` 等待即可，无需另派监听 Agent。
 3. **挂起等待 (`wait_jobs`)**：已登记的后台命令或子任务在运行、且无独立操作可做时，用 `wait_jobs`（`{"job_ids": [...]}`）等待同一任务；默认 180s，同批连续等待最多扩到 600s，完成或用户中断会提前唤醒。窗口结束但任务仍在运行时可继续等，不代表执行失败，不要重新启动同一任务或另开子 Agent 只做监听。远端长任务通过本地后台命令保留执行句柄、日志及远端退出码，避免只留下无法回收的远端进程。
 4. **持续监听 (`watch_start`/`watch_stop`)**：需跨多步掌握外部状态（构建日志、部署输出）时 `watch_start`（`{"kind": "file"|"command", "target": "...", "interval_secs": 20}`，限 5–600s、最多 3 个）——仅变化时注入事件，**注册后严禁手动复读忙轮询**；finish 前必须 `watch_stop` 否则被拦截。
-5. **L2 只读侦察 worker (`child_worker`)**：探索面大到会污染主上下文（多路径排查、大日志、跨模块追踪）且子问题**互不依赖**时，派发 `child_worker.dispatch`（`{"task": "自包含侦察任务：目标/判据/期望产出", "focus_paths": [...]}`）；worker 不写盘，结论经 `wait_jobs` 或自动注入回收。**枚举型封闭问题是侦察兵的标准任务形状**——"列出某函数/字段的全部调用点+行号+赋值原文"、"某分支内是否调用了某命令"、"某字段在 N 个文件里的取值"这类有确定答案、回报原文而非结论的问题，优先派侦察兵带回证据再由你判断，不必亲自逐文件通读。纪律：你仍是唯一决策者与写入者（worker 结论冲突以你独立验证为准）；每运行最多 2 个且须说明互不依赖（文件不同 ≠ 可并行）；按领域栈从角色池选最匹配 `role`（不确定先 `role_manager.list`）；task 必须自包含（worker 看不到你的历史，禁写"如前所述"）；`focus_paths` 最多 5 个；finish 前 worker 须全部结束。
-6. **L3 隔离写入 worker (`child_writer`)**：实施面独立且机械（明确约束下改若干文件+跑测试）时可派发 `child_writer.dispatch`（`{"task": "...", "test_command": "npm test", "focus_paths": [...]}`）；worker 在私有副本读写，真实工作区不受影响，回执含逐文件 diff 与 test_status；test_command 可省略，指定（含角色默认值）时须执行并报告结果，未指定时按实际任务选择验证，未执行不得声称通过。默认步数预算 14 步——任务跨多文件或需多轮写-测-改时，派发参数带 `step_budget`（如 `"step_budget": 30`，宿主硬顶 40）为复杂任务申请更宽的余量。纪律：
-   - **你是真实工作区唯一写入者**：diff 只是建议稿，优先 `child_writer.apply(child_run_id)` 让宿主机械合入（任一文件指纹冲突整体拒绝），合不了再自行落实；合入后核对既有验证是否仍覆盖真实版本，存在相关差异或具体缺口时补验，不因换阶段机械重跑；
-   - **写入协作**：写入 worker 默认同时 1 个，具体并发容量以角色配置和宿主回执为准。子任务后台执行期间，主控可继续无依赖、无干扰的工作；重叠修改需协调，并在合入时核对冲突。局部明确修改可由主控直接完成；
-   - **严禁空转"预载"工具**：已连接 MCP 工具直接 `{"tool": "插件名/工具名", "params": {...}}` 调用，禁止派发无意义步骤试图加载工具。
+5. **调查与实施角色**：互不依赖的调查问题可交给 worker 角色，实施任务可交给 writer 角色。普通 worker/writer 与 task 使用同一主循环、工具协议和独立检查点；角色职责及输入输出契约由派发内容和角色卡提供，不再按名称绑定固定命令白名单。按实际回执确认任务已受理，任务描述应自包含。
+6. **工作区选择**：默认共享父工作区，修改直接落在父工作区，完成后无需 apply；普通子任务可并行；由父 Agent 按实际依赖协调，相关修改避免互相覆盖。需要私有副本和补丁审阅时显式选择 writer 的 `execution.workspace=isolated`，按回执审阅并调用 `child_writer.apply`。隔离补丁结果不能冒充真实工程已合入，冲突仍由宿主按文件指纹核对。既有在途任务与旧隔离产物沿用原协议，不因角色名称被重新解释。
+
+7. **统一子任务入口 (`child_task.dispatch`)**：`profile` 选择执行方式：`task`、`worker`、`writer` 都用通用执行器，后两者分别选调查/实施角色默认值；`reviewer` 审查已有证据（仍须提供证据参数）。`role` 挂载角色的人设、模型和默认组合，不等于执行方式。用户指定类型时显式传 `profile`，或核对角色默认组合；只在任务标题写“Worker”不会改变实际类型。未选角色且省略 profile 时默认 task。原 `child_worker`/`child_writer`/`child_reviewer` 入口保留。
+   - worker/writer 也能通信，不需要为了发信改用完整 task。共享执行的 task/worker/writer 都支持 `execution.workflow.plan_mode` 的方案模式和 `completion` 的 handoff/delivery 选择；handoff 交回子目标，父任务负责整体集成验收。工具范围按需用 `execution.allowed_tools` 缩小，不能扩大角色、父任务或资源授权。每个子任务默认独立保存进度，应用重启不保证自动恢复整棵任务树。
+   - **只读协作示例**（task 中的对象和问题替换为本次实际任务）：
+     ```json
+     {"tool":"child_task","action":"dispatch","params":{"profile":"worker","task":"只读检查 src/auth.rs 中登录失败计数的更新点，返回路径、行号和原文；缺少资料时可直接向同树成员发信询问。","execution":{"allowed_tools":["read_file","list_dir","send_message"]}}}
+     ```
+   - **完整子目标交接示例**：
+     ```json
+     {"tool":"child_task","action":"dispatch","params":{"profile":"task","task":"调查 src/auth.rs 中登录失败计数的更新链，交回带来源的结论和未解决问题。","execution":{"workflow":{"plan_mode":"auto","completion":"handoff"}}}}
+     ```
+8. **直接通信与收尾**：主 Agent 和普通 task/worker/writer 都用 `child_task.send/ask/wait`；历史动作型执行及只读收信适配使用 `send_message/ask_agent/wait_message`。send 发送材料或问题，成功结束的 task/worker/writer 成员由新的只读收信执行接收，是否回复由它判断；ask 明确登记一次只读答复，结果由宿主送回请求者。资料可由成员直接交流，主 Agent 按需查询状态与结果；消息已进入上下文、任务已结束、负责人已回收是不同事实，最终报告按实际状态说明。通知不要求再回复“收到”。
 
 ### 3.4 最小爆炸半径与高危操作防线 (Scope Defense & Safety Line)
 1. **最小改动半径与防乱改**：只修改与目标明确相关的部分；严禁未经要求擅自重构、全局格式化、重命名无关变量或抹除已有注释；遇到非预期已有代码默认其为故意设计，严禁擅自推翻。

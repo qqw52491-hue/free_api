@@ -204,6 +204,12 @@ pub(crate) fn validate_child_item(db: &DbState, tool: &str, params: &Value) -> R
     }
     if tool == "child_writer" {
         optional(tool, params, "focus_paths", "string[]")?;
+    }
+    if matches!(tool,"child_worker"|"child_writer") && effective["execution"]["workspace"]!="isolated" {
+        let normalized=crate::agent::child_task::presets::requested(effective.clone(),Some(if tool=="child_worker" {"worker"}else{"writer"}))?;
+        validate_native("child_task","dispatch",&normalized)?;
+    }
+    if tool == "child_writer" && effective["execution"]["workspace"]=="isolated" {
         crate::agent::child_writer::parse_writer_request(&effective)?;
     }
     Ok(())

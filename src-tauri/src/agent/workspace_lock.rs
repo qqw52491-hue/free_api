@@ -1,9 +1,10 @@
-//! 工作区软锁：同一项目目录同时只允许一个 run，防止两个任务并发写同一堆文件。
+//! 工作区软锁：跨父任务协调同一项目目录；同一父任务的子任务可共享持锁。
 //! 具备同会话自动协同打断、僵尸锁自动自愈、基于 run_id 的防踩踏释放机制。
 
 use crate::db::DbState;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
@@ -12,6 +13,9 @@ pub(crate) struct WorkspaceLockEntry {
     pub run_id: String,
     pub goal: String,
     pub acquired_at: Instant,
+    generation: u64,
+    holders: usize,
+    delegation_holders: usize,
 }
 
 fn workspace_locks() -> &'static Mutex<HashMap<String, WorkspaceLockEntry>> {
@@ -22,16 +26,30 @@ fn workspace_locks() -> &'static Mutex<HashMap<String, WorkspaceLockEntry>> {
 pub(crate) struct WorkspaceRunGuard {
     key: String,
     run_id: String,
+    generation: u64,
+    delegated: bool,
+}
+
+fn insert_lock(locks: &mut HashMap<String, WorkspaceLockEntry>, key: String, session_id: &str, run_id: &str, goal: &str, delegated: bool) -> WorkspaceRunGuard {
+    static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+    let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+    locks.insert(key.clone(), WorkspaceLockEntry {
+        session_id: session_id.to_string(), run_id: run_id.to_string(),
+        goal: goal.chars().take(60).collect(), acquired_at: Instant::now(),
+        generation, holders: 1, delegation_holders: usize::from(delegated),
+    });
+    WorkspaceRunGuard { key, run_id: run_id.to_string(), generation, delegated }
 }
 
 impl Drop for WorkspaceRunGuard {
     fn drop(&mut self) {
         if let Ok(mut locks) = workspace_locks().lock() {
-            // 核心安全保障：只有当前持锁者的 run_id 与本 guard 相同时才移除，
-            // 防止延迟 Drop 误把后序新任务的锁释放掉。
-            if let Some(entry) = locks.get(&self.key) {
-                if entry.run_id == self.run_id {
-                    locks.remove(&self.key);
+            // 同一父任务的每个持有者独立释放；旧代 guard 不得释放新锁。
+            if let Some(entry) = locks.get_mut(&self.key) {
+                if entry.run_id == self.run_id && entry.generation == self.generation {
+                    entry.holders -= 1;
+                    if self.delegated { entry.delegation_holders -= 1; }
+                    if entry.holders == 0 { locks.remove(&self.key); }
                 }
             }
         }
@@ -51,6 +69,12 @@ pub(crate) async fn acquire_workspace_lock(
     run_id: &str,
     goal: &str,
 ) -> Result<WorkspaceRunGuard, String> {
+    acquire_workspace_lock_inner(workspace_dir, session_id, run_id, goal, false).await
+}
+
+async fn acquire_workspace_lock_inner(
+    workspace_dir: &std::path::Path, session_id: &str, run_id: &str, goal: &str, delegated: bool,
+) -> Result<WorkspaceRunGuard, String> {
     let key = workspace_dir
         .canonicalize()
         .unwrap_or_else(|_| workspace_dir.to_path_buf())
@@ -62,27 +86,20 @@ pub(crate) async fn acquire_workspace_lock(
     for attempt in 0..60 {
         let (should_cancel_same_session, check_zombie_session, conflict_info) = {
             let mut locks = workspace_locks().lock().map_err(|e| e.to_string())?;
-            if let Some(entry) = locks.get(&key) {
+            if let Some(entry) = locks.get_mut(&key) {
+                // 委派等待竞争锁期间，同一父任务可能已经取得锁。复用而非取消父任务。
+                if delegated && entry.session_id == session_id && entry.run_id == run_id {
+                    entry.holders += 1;
+                    entry.delegation_holders += 1;
+                    return Ok(WorkspaceRunGuard { key, run_id: run_id.to_string(), generation: entry.generation, delegated: true });
+                }
                 if entry.session_id == session_id {
                     let should_cancel = !sent_cancel;
                     if should_cancel {
                         sent_cancel = true;
                     }
-                    if attempt >= 30 && crate::agent::child_task::runtime::active(&entry.run_id).is_empty() {
-                        locks.remove(&key);
-                        locks.insert(
-                            key.clone(),
-                            WorkspaceLockEntry {
-                                session_id: session_id.to_string(),
-                                run_id: run_id.to_string(),
-                                goal: goal.chars().take(60).collect(),
-                                acquired_at: Instant::now(),
-                            },
-                        );
-                        return Ok(WorkspaceRunGuard {
-                            key,
-                            run_id: run_id.to_string(),
-                        });
+                    if attempt >= 30 && entry.delegation_holders == 0 && crate::agent::child_task::runtime::active(&entry.run_id).is_empty() {
+                        return Ok(insert_lock(&mut locks, key, session_id, run_id, goal, delegated));
                     }
                     (should_cancel, None, Some((entry.goal.clone(), true)))
                 } else {
@@ -94,19 +111,7 @@ pub(crate) async fn acquire_workspace_lock(
                     (false, zombie_candidate, Some((entry.goal.clone(), false)))
                 }
             } else {
-                locks.insert(
-                    key.clone(),
-                    WorkspaceLockEntry {
-                        session_id: session_id.to_string(),
-                        run_id: run_id.to_string(),
-                        goal: goal.chars().take(60).collect(),
-                        acquired_at: Instant::now(),
-                    },
-                );
-                return Ok(WorkspaceRunGuard {
-                    key,
-                    run_id: run_id.to_string(),
-                });
+                return Ok(insert_lock(&mut locks, key, session_id, run_id, goal, delegated));
             }
         };
 
@@ -123,21 +128,8 @@ pub(crate) async fn acquire_workspace_lock(
             if !has_channel {
                 let mut locks = workspace_locks().lock().map_err(|e| e.to_string())?;
                 if let Some(entry) = locks.get(&key) {
-                    if entry.session_id == target_session {
-                        locks.remove(&key);
-                        locks.insert(
-                            key.clone(),
-                            WorkspaceLockEntry {
-                                session_id: session_id.to_string(),
-                                run_id: run_id.to_string(),
-                                goal: goal.chars().take(60).collect(),
-                                acquired_at: Instant::now(),
-                            },
-                        );
-                        return Ok(WorkspaceRunGuard {
-                            key,
-                            run_id: run_id.to_string(),
-                        });
+                    if entry.session_id == target_session && entry.delegation_holders == 0 && crate::agent::child_task::runtime::active(&entry.run_id).is_empty() {
+                        return Ok(insert_lock(&mut locks, key, session_id, run_id, goal, delegated));
                     }
                 }
             }
@@ -198,12 +190,21 @@ impl<'a> Drop for ChildWorkspaceGuard<'a> {
     }
 }
 
-/// 子任务运行期间父执行器停在委派臂；项目锁仍由父 run 持有，不能尝试抢占/取消父任务。
-/// 非项目入口没有现有锁时，补持相同物理目录的锁至本次委派返回。
+/// 同一父 run 的并发子任务各持有一个引用，最后一个持有者退出才释放项目锁。
+/// 不同父 run 的项目锁仍沿用原有跨任务协调规则。
 pub(crate) async fn acquire_delegation_lock(workspace: &std::path::Path, parent_session: &str, parent_run: &str) -> Result<Option<WorkspaceRunGuard>, String> {
     let key = workspace.canonicalize().map_err(|e| e.to_string())?.to_string_lossy().into_owned();
-    let owned = workspace_locks().lock().map_err(|e| e.to_string())?.get(&key)
-        .is_some_and(|entry| entry.run_id == parent_run && entry.session_id == parent_session);
-    if owned { return Ok(None); }
-    acquire_workspace_lock(workspace,parent_session,parent_run,"通用子任务串行委派").await.map(Some)
+    {
+        let mut locks = workspace_locks().lock().map_err(|e| e.to_string())?;
+        match locks.get_mut(&key) {
+            Some(entry) if entry.run_id == parent_run && entry.session_id == parent_session => {
+                entry.holders += 1;
+                entry.delegation_holders += 1;
+                return Ok(Some(WorkspaceRunGuard { key, run_id: parent_run.to_string(), generation: entry.generation, delegated: true }));
+            }
+            None => return Ok(Some(insert_lock(&mut locks, key, parent_session, parent_run, "通用子任务委派", true))),
+            Some(_) => {}
+        }
+    }
+    acquire_workspace_lock_inner(workspace, parent_session, parent_run, "通用子任务委派", true).await.map(Some)
 }

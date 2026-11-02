@@ -315,57 +315,104 @@ fn inherited_authority_tracks_revocation_and_parent_output_references_keep_sourc
 }
 
 #[tokio::test]
-async fn shared_workspace_keeps_parent_lock_and_does_not_hide_other_jobs() {
+async fn parallel_children_hold_shared_project_lock_until_last_exit() {
     let f = Fixture::new();
-    let lock = crate::agent::workspace_lock::acquire_workspace_lock(
-        &f.root,
-        &f.binding.parent_session,
-        &f.binding.parent_run,
-        "parent",
-    )
-    .await
-    .unwrap();
-    assert!(crate::agent::workspace_lock::acquire_delegation_lock(
-        &f.root,
-        &f.binding.parent_session,
-        &f.binding.parent_run
-    )
-    .await
-    .unwrap()
-    .is_none());
-    assert_eq!(
-        busy_jobs(&f.db, &f.binding.parent_run, None).unwrap(),
-        vec![f.binding.child_run.clone()]
+    let root = crate::agent::workspace_lock::acquire_workspace_lock(
+        &f.root, &f.binding.parent_session, &f.binding.parent_run, "parent",
+    ).await.unwrap();
+    let first = crate::agent::workspace_lock::acquire_delegation_lock(
+        &f.root, &f.binding.parent_session, &f.binding.parent_run,
+    ).await.unwrap().unwrap();
+    let second = crate::agent::workspace_lock::acquire_delegation_lock(
+        &f.root, &f.binding.parent_session, &f.binding.parent_run,
+    ).await.unwrap().unwrap();
+    drop(root);
+    drop(first);
+    let competing = crate::agent::workspace_lock::acquire_workspace_lock(
+        &f.root, "other-session", "other-run", "other",
     );
-    assert!(
-        busy_jobs(&f.db, &f.binding.parent_run, Some(&f.binding.child_run))
-            .unwrap()
-            .is_empty()
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(150), competing).await.is_err());
+    drop(second);
+    let replacement = crate::agent::workspace_lock::acquire_workspace_lock(
+        &f.root, "other-session", "other-run", "other",
+    ).await.unwrap();
+    drop(replacement);
+}
+
+#[tokio::test]
+async fn stale_child_lease_cannot_release_replaced_lock() {
+    let f = Fixture::new();
+    let stale = crate::agent::workspace_lock::acquire_delegation_lock(
+        &f.root, &f.binding.parent_session, &f.binding.parent_run,
+    ).await.unwrap().unwrap();
+    crate::agent::workspace_lock::force_release_workspace_lock(
+        Some(f.root.to_string_lossy().into_owned()), None,
+    ).await.unwrap();
+    let current = crate::agent::workspace_lock::acquire_delegation_lock(
+        &f.root, &f.binding.parent_session, &f.binding.parent_run,
+    ).await.unwrap().unwrap();
+    drop(stale);
+    let competing = crate::agent::workspace_lock::acquire_workspace_lock(
+        &f.root, "other-session", "other-run", "other",
     );
-    let other = crate::agent::child_reviewer::begin_child_run(
-        &f.db,
-        &f.binding.parent_run,
-        &f.binding.parent_session,
-        &f.root,
-        "model",
-        0,
-        "worker",
-        None,
-    )
-    .unwrap();
-    assert_eq!(
-        busy_jobs(&f.db, &f.binding.parent_run, Some(&f.binding.child_run)).unwrap(),
-        vec![other]
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(150), competing).await.is_err());
+    drop(current);
+    let replacement = crate::agent::workspace_lock::acquire_workspace_lock(
+        &f.root, "other-session", "other-run", "other",
+    ).await.unwrap();
+    drop(replacement);
+}
+
+#[tokio::test]
+async fn delegation_first_holds_lock_and_same_session_cannot_preempt_active_lease() {
+    let f = Fixture::new();
+    let (one, two) = tokio::join!(
+        crate::agent::workspace_lock::acquire_delegation_lock(&f.root, &f.binding.parent_session, &f.binding.parent_run),
+        crate::agent::workspace_lock::acquire_delegation_lock(&f.root, &f.binding.parent_session, &f.binding.parent_run),
     );
-    drop(lock);
-    assert!(crate::agent::workspace_lock::acquire_delegation_lock(
-        &f.root,
-        &f.binding.parent_session,
-        &f.binding.parent_run
-    )
-    .await
-    .unwrap()
-    .is_some());
+    let one = one.unwrap().unwrap();
+    let two = two.unwrap().unwrap();
+    drop(one);
+    let competing = crate::agent::workspace_lock::acquire_workspace_lock(
+        &f.root, &f.binding.parent_session, "new-parent-run", "replacement",
+    );
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(1750), competing).await.is_err());
+    drop(two);
+    let replacement = crate::agent::workspace_lock::acquire_workspace_lock(
+        &f.root, &f.binding.parent_session, "new-parent-run", "replacement",
+    ).await.unwrap();
+    drop(replacement);
+}
+
+#[test]
+fn general_children_still_obey_total_capacity() {
+    let f = Fixture::new();
+    for _ in 1..crate::agent::child_reviewer::MAX_TOTAL_CHILDREN_PER_RUN {
+        crate::agent::child_reviewer::begin_child_run(
+            &f.db, &f.binding.parent_run, &f.binding.parent_session, &f.root, "model", 0, "task",
+            Some(i64::from(crate::agent::child_reviewer::MAX_TOTAL_CHILDREN_PER_RUN)),
+        ).unwrap();
+    }
+    let rejected = crate::agent::child_reviewer::begin_child_run(
+        &f.db, &f.binding.parent_run, &f.binding.parent_session, &f.root, "model", 0, "task",
+        Some(i64::from(crate::agent::child_reviewer::MAX_TOTAL_CHILDREN_PER_RUN)),
+    );
+    assert!(rejected.is_err());
+}
+
+#[test]
+fn multiple_general_children_can_register_and_keep_separate_results() {
+    let f = Fixture::new();
+    let second = crate::agent::child_reviewer::begin_child_run(
+        &f.db, &f.binding.parent_run, &f.binding.parent_session, &f.root, "model", 0, "task",
+        Some(i64::from(crate::agent::child_reviewer::MAX_TOTAL_CHILDREN_PER_RUN)),
+    ).unwrap();
+    assert_ne!(second, f.binding.child_run);
+    assert_eq!(status(&f.db, &f.binding.parent_session, &f.binding.child_run).unwrap()["execution_status"], "running");
+    assert_eq!(status(&f.db, &f.binding.parent_session, &second).unwrap()["execution_status"], "running");
+    f.finish_readonly();
+    settle(&f.db, &f.binding, &Ok(()), 1).unwrap();
+    assert_eq!(status(&f.db, &f.binding.parent_session, &second).unwrap()["execution_status"], "running");
 }
 
 #[test]

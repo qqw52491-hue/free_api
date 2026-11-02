@@ -240,6 +240,73 @@ pub(crate) fn validate_review_delivery(
     Ok(value)
 }
 
+/// Host-owned review receipt conversion, independent of the model execution loop.
+/// The caller provides the actual execution identity and contract; model output
+/// never gets to overwrite these host facts.
+pub(crate) struct ReviewDeliveryContext<'a> {
+    pub child_run_id: &'a str,
+    pub allowed_refs: &'a [String],
+    pub schema: Option<&'a crate::agent::protocol::ContractSchema>,
+    /// None preserves legacy resumed-scorecard behavior.
+    pub has_verify_obligation: Option<bool>,
+    pub kind: Option<&'a str>,
+    pub duration_ms: u64,
+    pub completion_tokens: i64,
+    pub prompt_tokens: i64,
+    pub role: Option<&'a Value>,
+    pub role_label: Option<&'a Value>,
+    pub model: &'a str,
+    pub plan_review_can_finalize: Option<bool>,
+}
+
+pub(crate) fn build_review_delivery(
+    raw: &str,
+    context: ReviewDeliveryContext<'_>,
+) -> Result<Value, String> {
+    let (findings, confidence, evidence_refs, missing_evidence, routing,
+        scorecard, objection_verdicts, withdrawn_findings) =
+        parse_controlled_output(raw, context.allowed_refs)?;
+    let scorecard = scorecard.map(|mut sc| {
+        if context.has_verify_obligation == Some(false) {
+            sc.test_coverage = None;
+            if sc.null_reason.is_none() {
+                sc.null_reason = Some("任务契约未绑定可执行验证义务".to_string());
+            }
+        }
+        sc
+    });
+    let result = ChildReviewResult {
+        child_run_id: context.child_run_id.to_string(),
+        status: "succeeded".to_string(),
+        findings,
+        confidence,
+        evidence_refs,
+        missing_evidence,
+        duration_ms: context.duration_ms,
+        completion_tokens: context.completion_tokens,
+        prompt_tokens: context.prompt_tokens,
+        error_kind: None,
+        raw_result_json: None,
+        kind: context.kind.map(str::to_string),
+        routing: Some(routing),
+        withdrawn_findings,
+        objection_verdicts,
+        scorecard,
+        task_id: None,
+        attempt_id: None,
+    };
+    let mut result_val = merge_review_extensions(raw, &result);
+    if let Some(res_map) = result_val.as_object_mut() {
+        if let Some(role) = context.role { res_map.insert("role".to_string(), role.clone()); }
+        if let Some(label) = context.role_label { res_map.insert("role_label".to_string(), label.clone()); }
+        res_map.insert("model".to_string(), json!(context.model));
+    }
+    if let Some(can_finalize) = context.plan_review_can_finalize {
+        result_val["plan_review_can_finalize"] = json!(can_finalize);
+    }
+    validate_review_delivery(result_val, context.schema)
+}
+
 pub(crate) fn parse_controlled_output(
     raw: &str,
     allowed_refs: &[String],

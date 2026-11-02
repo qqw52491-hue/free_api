@@ -252,6 +252,7 @@
             max="20"
             placeholder="0 = 跟随全局默认"
           />
+          <span class="field-hint">共享子任务按同一父运行、同一角色计数；0 跟随总并发上限，当前最多 6 个。</span>
         </label>
       </div>
 
@@ -675,7 +676,7 @@ interface ModelItem {
 const kindOptions = [
   { value: 'task', label: '通用子任务 (Task)' },
   { value: 'writer', label: '✍️ 代码修改专家 (Writer)' },
-  { value: 'worker', label: '🔍 只读侦察探针 (Worker)' },
+  { value: 'worker', label: '🔍 调查助手 (Worker)' },
   { value: 'reviewer', label: '🛡️ 终态审查专家 (Reviewer)' },
 ];
 
@@ -1079,8 +1080,8 @@ function executionLabel(card: RoleCard) {
   if (!card.execution_defaults) return '';
   try {
     const value = JSON.parse(card.execution_defaults);
-    const names: Record<string, string> = { task: '通用任务', worker: '只读调查', writer: '隔离修改', reviewer: '专用审查' };
-    return `${names[value.profile] || value.profile} · ${value.execution?.workflow?.completion === 'handoff' || value.profile !== 'task' ? '结果交接' : '完整交付'}`;
+    const names: Record<string, string> = { task: '通用任务', worker: '调查助手', writer: '实施助手', reviewer: '专用审查' };
+    return `${names[value.profile] || value.profile} · ${value.execution?.workflow?.completion === 'handoff' || (!value.execution?.workflow?.completion && value.profile !== 'task') ? '结果交接' : '完整交付'}`;
   } catch { return '执行组合需修订'; }
 }
 

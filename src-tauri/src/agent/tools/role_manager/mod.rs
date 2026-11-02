@@ -51,11 +51,11 @@ pub struct RoleCard {
     #[serde(default)]
     pub input_schema: String,       // 角色自定义入参契约 (JSON 序列化的 ContractSchema)
     #[serde(default)]
-    pub allowed_skills: String,     // 逗号分隔 skill 名白名单；空=不注入技能手册
+    pub allowed_skills: String,     // 额外预载 skill 名称；不作为共享目录的排除范围
     #[serde(default)]
     pub execution_defaults: String,
     #[serde(default)]
-    pub allowed_mcp: String,        // 逗号分隔 MCP 插件名白名单；空=不授权 MCP（前向兼容字段）
+    pub allowed_mcp: String,        // 旧兼容字段；当前不用于过滤共享 MCP，未实现逐插件排除
 }
 
 impl RoleCard {
@@ -533,14 +533,14 @@ pub fn resolve_plan_reviewer_card(db: &DbState, disabled_names: &[String]) -> Re
 pub fn ensure_default_role_cards(conn: &rusqlite::Connection) -> Result<(), String> {
     let now = chrono::Utc::now().to_rfc3339();
     for (name, kind, label, persona) in [
-        (SYSTEM_WORKER, "worker", "基础只读侦察员", "根据任务与提供的证据进行只读调查，区分已核实事实与推测，按 worker 原生交付协议回报。"),
-        (SYSTEM_WRITER, "writer", "基础写入执行员", "按明确的任务、范围和验收标准完成修改，保留无关内容，按 writer 原生交付协议回报改动与验证结果。"),
+        (SYSTEM_WORKER, "worker", "基础只读侦察员", "根据任务与提供的证据进行只读调查，区分已核实事实与推测，使用通用 finish 交回结论、证据与未确认事项；角色职责不改变宿主工具授权。"),
+        (SYSTEM_WRITER, "writer", "基础写入执行员", "按明确的任务、范围和验收标准完成修改，保留无关内容，使用通用 finish 回报改动与验证结果；共享工作区修改直接生效，只有显式选择隔离补丁模式才使用 apply。"),
         (SYSTEM_REVIEWER, "reviewer", "基础综合审查员", "根据任务要求与证据独立审查，给出可定位的结论，区分缺陷、证据缺口与通道故障，按 reviewer 原生交付协议回报。"),
     ] {
         conn.execute(
             "INSERT INTO agent_role_cards (id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, max_concurrency, enabled, custom_schema, focus_domains, input_schema, created_at, updated_at)
              VALUES (?1, ?2, ?3, '', ?4, '', '', ?5, 0, 1, '', '[]', '', ?6, ?6)
-             ON CONFLICT(name) DO UPDATE SET enabled = 1, allowed_kinds = excluded.allowed_kinds",
+             ON CONFLICT(name) DO UPDATE SET enabled = 1, allowed_kinds = excluded.allowed_kinds, persona_prompt=excluded.persona_prompt, label=excluded.label",
             params![format!("default-role-{name}"), name, label, persona, kind, now],
         ).map_err(|e| format!("初始化基础角色 {name} 失败: {e}"))?;
     }
@@ -642,8 +642,16 @@ pub fn build_role_cards_menu_filtered(db: &DbState, disabled_names: &[String]) -
         } else {
             String::new()
         };
-        let execution_note=if card.execution_defaults.is_empty(){String::new()}else{
-            serde_json::from_str::<Value>(&card.execution_defaults).ok().map(|defaults|format!("；默认执行组合 {} / {} / {}，可用 child_task.dispatch(role={})",defaults["profile"].as_str().unwrap_or("未知"),defaults["execution"]["workflow"]["plan_mode"].as_str().unwrap_or("auto"),defaults["execution"]["workflow"]["completion"].as_str().unwrap_or("handoff"),card.name)).unwrap_or_else(||"；执行配置损坏，请先修订".into())
+        let execution_note = if card.execution_defaults.is_empty() {
+            String::new()
+        } else {
+            serde_json::from_str::<Value>(&card.execution_defaults).ok().map(|defaults| {
+                let profile = defaults["profile"].as_str().unwrap_or("未知");
+                let completion = defaults["execution"]["workflow"]["completion"]
+                    .as_str().unwrap_or(if profile == "task" { "delivery" } else { "handoff" });
+                format!("；默认执行组合 {} / {} / {}，可用 child_task.dispatch(role={})",
+                    profile, defaults["execution"]["workflow"]["plan_mode"].as_str().unwrap_or("auto"), completion, card.name)
+            }).unwrap_or_else(|| "；执行配置损坏，请先修订".into())
         };
         out.push_str(&format!(
             "- [{}] {}：{}（{}{}{}{}{}{}；可挂载: {}）\n",
@@ -731,10 +739,10 @@ pub fn skills_block(db: &crate::db::DbState, card: &RoleCard) -> String {
     if docs.is_empty() {
         return String::new();
     }
-    let mut block = format!("\n\n【角色授权技能手册（白名单 {} 本，按手册执行对应领域工作）】\n", docs.len());
+    let mut block = format!("\n\n【角色预载技能手册（{} 本，按任务需要使用）】\n", docs.len());
     block.push_str(&docs.join("\n\n"));
     if !missing.is_empty() {
-        block.push_str(&format!("\n\n⚠️ 白名单中以下 skill 不存在，配置可能有误：{}", missing.join(", ")));
+        block.push_str(&format!("\n\n⚠️ 预载列表中以下 skill 不存在，配置可能有误：{}", missing.join(", ")));
     }
     block
 }

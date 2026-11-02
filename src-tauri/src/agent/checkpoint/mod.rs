@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 
 mod durable;
+mod child_dispatch;
 mod inquiry_ops;
 mod plan_batch;
 mod plan_ops;
@@ -25,6 +26,7 @@ mod task_resume_tests;
 mod types;
 
 pub(crate) use durable::*;
+pub use child_dispatch::ChildDispatchBatch;
 pub(crate) use plan_batch::*;
 pub(crate) use types::*;
 pub(crate) use review_state::{ReviewDeliverySource, ReviewFindingTodo};
@@ -49,6 +51,8 @@ pub struct AgentCheckpoint {
     /// LLM 已返回且已确认的结构化决策；工具开始前也必须可恢复。
     #[serde(default)]
     pub prepared_instruction: Option<AgentInstruction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_dispatch_batch: Option<Box<ChildDispatchBatch>>,
     pub step_id: usize,
     pub retry_count: u32,
     /// 旧版质询标记（仅兼容历史快照）；是否允许交付由当前验收收据决定。
@@ -383,6 +387,7 @@ impl AgentCheckpoint {
             data: DurableAgentContext::capture(context),
             pending: None,
             prepared_instruction: None,
+            child_dispatch_batch: None,
             step_id: 0,
             retry_count: 0,
             finish_reviewed: false,
@@ -476,6 +481,7 @@ impl AgentCheckpoint {
         self.step_id = step_id;
         self.pending = None;
         self.prepared_instruction = None;
+        self.child_dispatch_batch = None;
         self.last_error = None;
         self.refresh_context(context);
     }
@@ -486,6 +492,7 @@ impl AgentCheckpoint {
         self.phase = AgentPhase::RunTool;
         self.pending = None;
         self.prepared_instruction = Some(instruction);
+        self.child_dispatch_batch = None;
         self.last_error = None;
         self.refresh_context(context);
     }
@@ -519,6 +526,7 @@ impl AgentCheckpoint {
         self.step_id = completed_step_id.saturating_add(1);
         self.pending = None;
         self.prepared_instruction = None;
+        self.child_dispatch_batch = None;
         self.last_error = None;
         // 成功提交一步 = 模型已行动（按拦截意见做了事），ask_human 冷却解除
         self.recent_gate_block_step = None;
@@ -529,6 +537,7 @@ impl AgentCheckpoint {
         self.phase = AgentPhase::CallLlm;
         self.pending = None;
         self.prepared_instruction = None;
+        self.child_dispatch_batch = None;
         self.retry_count += 1;
         self.last_error = Some(error);
         self.refresh_context(context);
@@ -546,6 +555,7 @@ impl AgentCheckpoint {
         self.phase = AgentPhase::Done;
         self.pending = None;
         self.prepared_instruction = None;
+        self.child_dispatch_batch = None;
         self.last_error = None;
         self.refresh_context(context);
     }

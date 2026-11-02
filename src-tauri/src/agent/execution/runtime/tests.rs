@@ -25,7 +25,7 @@ fn dynamic_configuration_is_typed_and_unsupported_workflows_are_explicit() {
     )
     .is_ok());
     assert!(ExecutionConfig::parse(
-        &json!({"execution":{"workflow":{"completion":"delivery"}}}),
+        &json!({"execution":{"workspace":"isolated","workflow":{"completion":"delivery"}}}),
         "writer"
     )
     .is_err());
@@ -242,4 +242,40 @@ fn configured_discussion_requires_actual_plan_approval_and_model_binding_keeps_r
     assert_eq!(routing.flash, "chosen");
     assert_eq!(routing.role_models["planner"], "chosen");
     assert_eq!(routing.role_models["reviewer"], "independent");
+}
+
+#[test]
+fn ordinary_presets_use_the_main_executor_and_specialised_modes_are_explicit() {
+    for profile in ["task","worker","writer"] {
+        assert!(uses_main_executor(profile,&json!({})).unwrap());
+        let config=ExecutionConfig::parse(&json!({"execution":{"workflow":{"plan_mode":"cross_review","completion":"delivery"}}}),profile).unwrap();
+        assert!(config.permits("my_mcp/tool"));
+        assert!(config.permits("run_command"));
+        assert!(config.permits("capability_search"));
+    }
+    assert!(!uses_main_executor("writer",&json!({"execution":{"workspace":"isolated"}})).unwrap());
+    assert!(!uses_main_executor("reviewer",&json!({})).unwrap());
+    assert!(uses_main_executor("worker",&json!({"execution":{"workspace":"isolated"}})).is_err());
+}
+
+#[test]
+fn shared_main_protocol_uses_the_same_explicit_action_permissions() {
+    let db=fixture();
+    db.0.lock().unwrap().execute("UPDATE agent_child_runs SET execution_config_json=?1 WHERE id='child'",[json!({"allowed_tools":["read_file","send_message"]}).to_string()]).unwrap();
+    assert!(authorize_call(&db,"child","local_file","read",&json!({})).is_ok());
+    assert!(authorize_call(&db,"child","child_task","send",&json!({})).is_ok());
+    assert!(authorize_call(&db,"child","local_file","write",&json!({})).is_err());
+    assert!(authorize_call(&db,"child","my_mcp/tool","",&json!({})).is_err());
+}
+
+#[test]
+fn explicit_dispatch_test_is_bound_to_the_existing_verification_contract() {
+    let db=fixture();
+    let mut snapshot=Snapshot::new("child","task",json!({"dispatch_input":{"params":{"test_command":"cargo test --lib"}}}));
+    snapshot.save(&db).unwrap();
+    let mut context=crate::agent::context::SandwichContext::new("system".into(),"goal".into());
+    bind_registered_requirements(&db,"child",&mut context).unwrap();
+    let contract=context.review_contract.unwrap();
+    assert_eq!(contract.obligations[0].verify_command.as_deref(),Some("cargo test --lib"));
+    assert!(contract.has_executable_verification());
 }

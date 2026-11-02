@@ -80,6 +80,9 @@ pub(super) async fn dispatch_child_writer(
                 ));
             }
         }
+        if inst.get_params()["execution"]["workspace"] != "isolated" {
+            return Box::pin(super::dispatch_child_task::dispatch_alias(ctx,inst,"writer")).await;
+        }
         let routing = crate::agent::router::AgentRouter::route_for_role(
             ctx.context,
             ctx.model_routing,

@@ -87,7 +87,9 @@ pub(crate) fn merge_execution_defaults(
         .unwrap_or(&defaults.profile);
     merged["profile"] = json!(profile);
     let mut base = serde_json::to_value(&defaults.execution).map_err(|e| e.to_string())?;
-    if profile != defaults.profile {
+    // Shared role presets have the same workflow capabilities. Preserve the
+    // configured plan/delivery defaults when selecting another ordinary preset.
+    if profile != defaults.profile && (fixed_profile.is_some() || profile=="reviewer" || defaults.profile=="reviewer" || defaults.execution.workspace.as_deref()==Some("isolated")) {
         base["workflow"] = json!({});
     }
     if let Some(explicit) = params.get("execution") {

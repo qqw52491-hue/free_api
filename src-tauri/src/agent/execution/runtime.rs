@@ -8,6 +8,9 @@ use serde_json::{json, Value};
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionConfig {
+    /// Shared execution is the default; isolated patch production is explicit.
+    #[serde(default)]
+    pub workspace: Option<String>,
     /// None keeps the host profile; [] permits no business tools. Control actions
     /// and result submission remain available so a restricted task can return.
     #[serde(default)]
@@ -27,6 +30,7 @@ pub struct Workflow {
 }
 impl ExecutionConfig {
     pub fn parse(params: &Value, profile: &str) -> Result<Self, String> {
+        if !matches!(profile,"task"|"worker"|"writer"|"reviewer"|"review"|"child_worker"|"child_writer"|"child_reviewer") {return Err("未知子任务 profile；允许 task/worker/writer/reviewer。".into());}
         let config: Self = match params.get("execution") {
             None => Self::default(),
             Some(value) => serde_json::from_value(value.clone())
@@ -57,11 +61,17 @@ impl ExecutionConfig {
         {
             return Err("execution.workflow.completion 仅允许 handoff/delivery。".into());
         }
-        if profile != "task"
+        if config.workspace.as_deref().is_some_and(|mode| !matches!(mode,"shared"|"isolated")) {
+            return Err("execution.workspace 仅允许 shared/isolated。".into());
+        }
+        if config.workspace.as_deref()==Some("isolated") && !matches!(profile,"writer"|"child_writer") {
+            return Err("隔离补丁模式使用 writer 角色；未启动执行。".into());
+        }
+        if (matches!(profile,"reviewer"|"review"|"child_reviewer") || config.workspace.as_deref()==Some("isolated"))
             && (config.workflow.plan_mode.is_some()
                 || config.workflow.completion.as_deref() == Some("delivery"))
         {
-            return Err("当前 profile 交回专用结果。需要方案讨论或完整目标交付时，请使用 child_task.dispatch(profile=task) 并传 execution.workflow；未启动执行。".into());
+            return Err("当前审查/隔离补丁适配交回专用结果；完整方案流程请使用共享工作区的通用执行方式。".into());
         }
         Ok(config)
     }
@@ -90,6 +100,9 @@ fn canonical_name(name: &str) -> &str {
         "local_file.write" => "write_file",
         "local_file.edit" => "edit_file",
         "local_shell.execute" => "run_command",
+        "child_task.send" => "send_message",
+        "child_task.ask" => "ask_agent",
+        "child_task.wait" => "wait_message",
         _ => name,
     }
 }
@@ -165,6 +178,29 @@ pub fn authorize_call(
     } else {
         Err(format!("执行配置未允许工具/动作 {name}；本次未执行。"))
     }
+}
+
+/// Role names select knowledge and contracts; only explicit specialised services
+/// use a different adapter. This is also used by the public dispatch entrance.
+pub fn uses_main_executor(profile: &str, params: &Value) -> Result<bool,String> {
+    let config=ExecutionConfig::parse(params,profile)?;
+    Ok(!matches!(profile,"reviewer"|"review"|"child_reviewer") && config.workspace.as_deref()!=Some("isolated"))
+}
+
+pub fn registered_test_command(db:&DbState,id:&str) -> Result<Option<String>,String> {
+    let conn=db.0.lock().map_err(|e|e.to_string())?;
+    let raw:Option<String>=conn.query_row("SELECT execution_checkpoint_json FROM agent_child_runs WHERE id=?1",[id],|r|r.get(0)).optional().map_err(|e|e.to_string())?.flatten();
+    let Some(raw)=raw else {return Ok(None)};
+    let snapshot:Value=serde_json::from_str(&raw).map_err(|e|format!("派发输入快照损坏：{e}"))?;
+    Ok(snapshot["state"]["dispatch_input"]["params"]["test_command"].as_str().map(str::to_owned).filter(|s|!s.trim().is_empty()))
+}
+
+pub fn bind_registered_requirements(db:&DbState,id:&str,context:&mut crate::agent::context::SandwichContext) -> Result<(),String> {
+    if let Some(command)=registered_test_command(db,id)? {
+        let contract=serde_json::from_value(json!({"scope_statement":"本次派发明确指定的验证","obligations":[{"id":"dispatch-test","question":"执行派发指定的验证并交回实际结果","status":"open","verify_command":command,"closure_form":"command"}]})).map_err(|e|e.to_string())?;
+        crate::agent::review_contract::apply_review_contract_update(&mut context.review_contract,contract)?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

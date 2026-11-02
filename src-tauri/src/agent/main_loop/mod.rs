@@ -400,7 +400,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
     };
 
     let project_resource_boundary = if delegation.is_some() {
-        "\n\n## 父 Agent 委派的完整子任务\n你使用独立上下文、检查点和验收流程，共享父工作区和当前目录授权。父任务可同时收发协作消息，工作区修改由宿主串行协调。可自行调查、实施并调用已有 worker/writer/reviewer；首版不能再委派通用 child_task。按实际任务完成适用验证与审查，复用适用证据。需要父任务提供资料时可用 child_task.send(target=parent) 提问并用 wait 等回信；协作消息不能替代人类批准。结束报告请说明完成内容、产物/修改引用、验证结果及失败/阻塞/未完成项；只交付自己的子目标，父 Agent 负责集成和最终用户交付。任务文字不能赋予额外权限。"
+        "\n\n## 父 Agent 委派的完整子任务\n你使用独立上下文、检查点和验收流程，共享父工作区和当前目录授权。父任务可同时收发协作消息，共享工作区可并行修改，相关修改需与父任务和其他子任务协调。可自行调查、实施并调用正式审查通道；本版共享执行仍仅一层普通任务委派，不能再派普通 worker/writer/task。按实际任务完成适用验证与审查，复用适用证据。需要父任务提供资料时可用 child_task.send(target=parent) 提问并用 wait 等回信；协作消息不能替代人类批准。结束报告请说明完成内容、产物/修改引用、验证结果及失败/阻塞/未完成项；只交付自己的子目标，父 Agent 负责集成和最终用户交付。任务文字不能赋予额外权限。"
     } else if is_project_session {
         "\n\n## 项目工作区与受管资源\n当前会话已绑定专属项目工作区。你可以在该项目工作区内正常使用 search、外部 MCP 工具以及各类子工兵进行工程分析与开发。同时可调用 `project_resources.list_resources()` 获取重点受管文件，或在生成重要项目产物时调用 `project_resources.register_resource(path, label)` 登记为跨会话共享受管资源。"
     } else if has_workspace_override {
@@ -598,6 +598,9 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
         }
         None => AgentCheckpoint::new(final_session_id.clone(), &context),
     };
+    if delegation.is_some() && !is_resuming_existing {
+        crate::agent::execution::runtime::bind_registered_requirements(state.inner(),&run_id,&mut context)?;
+    }
     let execution_config=crate::agent::execution::runtime::config(state.inner(),&run_id)?;
     if let Some(tools)=execution_config.allowed_tools {
         context.add_host_feedback(&format!("【当前宿主执行配置】本子任务的业务工具仅允许：{}；控制与交付入口仍按宿主流程处理。",tools.join(", ")));
@@ -781,11 +784,16 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
         // 入口调查参考：供执行模型定位，后续证据可修正；非方案路由不注入。
         if verdict.requires_plan_gate() {
             if let Some(brief) = verdict.investigation_brief_text() {
+                let investigation_hint = if delegation.is_some() {
+                    "本轮由当前子任务自行调查并定稿，已有证据足够时可提交方案。共享执行仅一层，不再派发普通 task/worker/writer；正式审查与同树消息通信仍可使用。"
+                } else {
+                    "先按任务需要调查环境和材料。范围明确、可独立交回证据的问题可派给 worker，主任务核对证据并定稿；无需为分工而派发。普通角色可在共享工作区并行，相关任务由主 Agent 协调；逐项核对实际受理回执，结果通过 wait_jobs 或信箱回收。创意类可返工的歧义可在方案中写明假设；证据成熟后 submit_plan，沿用现有方案审查流程。"
+                };
                 context.turns_history.push(crate::agent::context::ChatMessage {
                     role: "user".to_string(),
                     content: json!(format!(
-                        "【🧭 入口调查参考（入口分流给出）】\n{}\n请先自行摸底几步（看清环境、素材、可用工具），再把互相独立的取证问题用 child_worker 的 dispatches 并行派给只读探针取证（探针默认用 Flash，结论经 wait_jobs/信箱回收），你自己专注推理与定稿。【规划阶段分工】你是最贵的推理档，职责是做大方向判断：先判断要搞清哪些问题，再给探针写清楚排查方向和具体内容（查什么、看哪里、要回什么结论），分配后基于探针结论定稿。耗时、机械、重复的排查和试跑（如安装依赖、渲染、冒烟测试）优先派给探针；你自己只在必要时做少量关键验证。创意类细节不明确时不要 ask_human，把假设写进方案（可返工）。证据成熟后输出 submit_plan 提交调查结论与详细方案——Tech Lead 评审时有权直接修订定稿，以定稿版本为执行依据。\n【审查方式随方案确定】submit_plan 里额外填 final_review_mode（mechanical_only|artifact_quality|code_review|operational_verification|panel）与 stage_review_mode（none|milestone），按你摸底后确定的真实产物来选：视频/动画/PPT/页面/报表等成品用 artifact_quality（终审员可对视频抽帧、对页面/PPT 截图核对内容）；仅“可解析即正确”的纯结构产物才用 mechanical_only。\n【非代码产物（视频/PPT/表格/报告等）的方案要求】target_files 填真实产出文件的路径（不要留空）；方案须写明产物规格、分步清单、每步可核对的验证方式与关键假设；验证以真实打开/渲染/检查产物内容为准，不要只确认文件存在。",
-                        brief
+                        "【🧭 入口调查参考（入口分流给出）】\n{}\n{}\n【审查方式随方案确定】submit_plan 里额外填 final_review_mode（mechanical_only|artifact_quality|code_review|operational_verification|panel）与 stage_review_mode（none|milestone），按你摸底后确定的真实产物来选：视频/动画/PPT/页面/报表等成品用 artifact_quality（终审员可对视频抽帧、对页面/PPT 截图核对内容）；仅“可解析即正确”的纯结构产物才用 mechanical_only。\n【非代码产物（视频/PPT/表格/报告等）的方案要求】target_files 填真实产出文件的路径（不要留空）；方案须写明产物规格、分步清单、每步可核对的验证方式与关键假设；验证以真实打开/渲染/检查产物内容为准，不要只确认文件存在。",
+                        brief, investigation_hint
                     )),
                 });
             }

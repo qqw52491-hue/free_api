@@ -1699,3 +1699,39 @@ fn child_submission_reports_unknown_severity_and_empty_findings() {
         assert!(error.contains(field), "{error}");
     }
 }
+
+#[test]
+fn shared_review_receipt_preserves_extensions_and_host_facts() {
+    let refs = vec!["src/a.rs".to_string()];
+    let raw = json!({"findings":[],"confidence":"confirmed","evidence_refs":["src/a.rs"],
+        "missing_evidence":[],"root_cause_verdict":"explains",
+        "child_run_id":"forged","plan_review_can_finalize":true,
+        "scorecard":{"correctness":90,"risk":85,"style":90,"test_coverage":85}}).to_string();
+    let role = json!("reviewer");
+    let ctx = || ReviewDeliveryContext {
+        child_run_id: "host-id", allowed_refs: &refs, schema: None,
+        has_verify_obligation: Some(false), kind: None, duration_ms: 12, completion_tokens: 34,
+        prompt_tokens: 56, role: Some(&role), role_label: None, model: "host-model",
+        plan_review_can_finalize: Some(false),
+    };
+    let result = build_review_delivery(&raw, ctx()).unwrap();
+    assert_eq!(result["child_run_id"], "host-id");
+    assert_eq!(result["root_cause_verdict"], "explains");
+    assert_eq!(result["plan_review_can_finalize"], false);
+    assert_eq!(result["model"], "host-model");
+    assert!(result["scorecard"]["test_coverage"].is_null());
+    assert_eq!(result["prompt_tokens"], 56);
+    let mut resumed = ctx();
+    resumed.has_verify_obligation = None;
+    resumed.kind = Some("review");
+    resumed.plan_review_can_finalize = None;
+    let resumed = build_review_delivery(&raw, resumed).unwrap();
+    assert_eq!(resumed["kind"], "review");
+    assert_eq!(resumed["scorecard"]["test_coverage"], 85);
+    assert_eq!(resumed["plan_review_can_finalize"], true);
+    let invented = raw.replace("src/a.rs", "src/invented.rs");
+    assert!(build_review_delivery(&invented, ctx()).is_err());
+    let mut invalid = serde_json::from_str::<Value>(&raw).unwrap();
+    invalid["confidence"] = json!("high");
+    assert!(build_review_delivery(&invalid.to_string(), ctx()).is_err());
+}

@@ -280,45 +280,20 @@ pub(crate) async fn run_resumed_review(
         }
         let elapsed = started.elapsed().as_millis() as u64;
         let raw = &response.full_response;
-        let delivery = parse_controlled_output(raw, &[]).and_then(
-            |(
-                findings,
-                confidence,
-                evidence_refs,
-                missing_evidence,
-                routing,
-                scorecard,
-                objection_verdicts,
-                withdrawn_findings,
-            )| {
-                let result = ChildReviewResult {
-                    child_run_id: child_id.clone(),
-                    status: "succeeded".into(),
-                    findings,
-                    confidence,
-                    evidence_refs,
-                    missing_evidence,
-                    duration_ms: elapsed,
-                    completion_tokens,
-                    prompt_tokens,
-                    error_kind: None,
-                    raw_result_json: None,
-                    kind: Some("review".into()),
-                    routing: Some(routing),
-                    withdrawn_findings,
-                    objection_verdicts,
-                    scorecard,
-                    task_id: None,
-                    attempt_id: None,
-                };
-                let mut delivery = merge_review_extensions(raw, &result);
-                delivery["model"] = json!(config.model_name);
-                if let Some(allowed) = can_finalize {
-                    delivery["plan_review_can_finalize"] = json!(allowed);
-                }
-                validate_review_delivery(delivery, schema.as_ref())
-            },
-        );
+        let delivery = build_review_delivery(raw, ReviewDeliveryContext {
+            child_run_id: &child_id,
+            allowed_refs: &[],
+            schema: schema.as_ref(),
+            has_verify_obligation: None,
+            kind: Some("review"),
+            duration_ms: elapsed,
+            completion_tokens,
+            prompt_tokens,
+            role: None,
+            role_label: None,
+            model: &config.model_name,
+            plan_review_can_finalize: can_finalize,
+        });
         crate::agent::utils::llm_client::log_auxiliary_llm_exchange(
             &session_id,
             &log_suffix,

@@ -192,11 +192,6 @@ pub async fn run_tool_phase(
             return Ok(crate::agent::tools::input_validation::rejection(error));
         }
     }
-    let occupied=crate::agent::child_task::runtime::active(parent_run_id);
-    let coordination=inst.get_tool().eq_ignore_ascii_case("child_task") || inst.get_action().eq_ignore_ascii_case("child_task") || matches!(inst.get_tool().as_str(),"wait_jobs"|"wait_job"|"ask_human");
-    if !occupied.is_empty() && !coordination && (is_write_or_side_effect_tool(inst) || crate::agent::context::AuditLedger::is_mutating_side_effect_with_action(&inst.get_tool(),&inst.get_action(),&inst.get_params())) {
-        return Ok(DispatchResult{view:None,success:false,stdout:String::new(),stderr:format!("共享工作区当前由通用子任务 {} 使用，本次变更未执行。可用 child_task.send/status/wait/cancel 协调；等待其退出后再修改。",occupied.join(",")),route:"workspace:delegated_task".into()});
-    }
     record_dispatch_advice(context, inst, workspace_dir);
 
     app.emit(

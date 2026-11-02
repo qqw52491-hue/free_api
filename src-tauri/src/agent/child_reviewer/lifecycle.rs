@@ -225,6 +225,31 @@ pub(crate) fn begin_child_run_extended(
             effective_kind_cap, kind, effective_kind_cap
         ));
     }
+    // Ordinary presets all register as kind=task. Count the persisted role,
+    // across worker/writer/task presets, while holding the same DB lock as the
+    // insert so concurrent registrations cannot both take the last slot.
+    if kind == "task" {
+        let dispatch: Option<Value> = identity.dispatch_input.as_ref()
+            .map(|raw| serde_json::from_str(raw).map_err(|e| e.to_string())).transpose()?;
+        if let Some(role) = dispatch.as_ref().and_then(|v| v["params"]["role"].as_str()) {
+            use rusqlite::OptionalExtension;
+            let role_cap: Option<i64> = conn.query_row(
+                "SELECT max_concurrency FROM agent_role_cards WHERE name=?1 AND enabled=1",
+                [role], |row| row.get(0),
+            ).optional().map_err(|e| e.to_string())?;
+            if let Some(cap) = role_cap.filter(|cap| *cap > 0) {
+                let count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM agent_child_runs WHERE parent_run_id=?1 AND kind='task'
+                     AND status IN ('queued','running')
+                     AND json_extract(execution_checkpoint_json,'$.state.dispatch_input.params.role')=?2",
+                    params![parent_run_id, role], |row| row.get(0),
+                ).map_err(|e| e.to_string())?;
+                if count >= cap {
+                    return Err(format!("角色 {role} 的并发上限为 {cap}，当前已有 {count} 个在途任务；本次未派发。"));
+                }
+            }
+        }
+    }
     // attempt_id 按 (parent_run_id, task_id) 自动推导：同逻辑任务的已有
     // 最大 attempt + 1，调用方显式给的更大的值优先。重试/failover/resume
     // 只需继承 task_id，attempt 计数在这里自动正确，调用方想传错都难。

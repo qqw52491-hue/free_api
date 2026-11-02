@@ -672,64 +672,19 @@ pub async fn spawn_child_reviewer(
                     extract_json_object(&raw).and_then(|fragment| serde_json::from_str(fragment).ok())
                 })
                 .filter(|v| v.get("tool").is_some());
-            let parsed_output = parse_controlled_output(&raw, &allowed_refs).and_then(|parsed| {
-                let (
-                    findings,
-                    confidence,
-                    evidence_refs,
-                    missing_evidence,
-                    routing,
-                    scorecard,
-                    objection_verdicts,
-                    withdrawn_findings,
-                ) = parsed;
-
-                // 契约驱动机械判定：若任务契约未绑定自动化验证义务，机械置 test_coverage 为 None (N/A)
-                let scorecard = scorecard.map(|mut sc| {
-                    if !has_verify_obligation {
-                        sc.test_coverage = None;
-                        if sc.null_reason.is_none() {
-                            sc.null_reason = Some("任务契约未绑定可执行验证义务".to_string());
-                        }
-                    }
-                    sc
-                });
-
-                let result = ChildReviewResult {
-                    child_run_id: child_run_id_clone.clone(),
-                    status: "succeeded".to_string(),
-                    findings,
-                    confidence,
-                    evidence_refs,
-                    missing_evidence,
-                    duration_ms,
-                    completion_tokens,
-                    prompt_tokens,
-                    error_kind: None,
-                    raw_result_json: None,
-                    kind: None,
-                    routing: Some(routing),
-                    withdrawn_findings,
-                    objection_verdicts,
-                    scorecard,
-                    task_id: None,
-                    attempt_id: None,
-                };
-                let mut result_val = merge_review_extensions(&raw, &result);
-                if let Some(res_map) = result_val.as_object_mut() {
-                    if let Some(role) = param_role.as_ref() {
-                        res_map.insert("role".to_string(), role.clone());
-                    }
-                    if let Some(role_label) = param_role_label.as_ref() {
-                        res_map.insert("role_label".to_string(), role_label.clone());
-                    }
-                    res_map.insert("model".to_string(), json!(config.model_name));
-                }
-
-                if is_plan_review {
-                    result_val["plan_review_can_finalize"] = json!(can_finalize);
-                }
-                validate_review_delivery(result_val, custom_schema.as_ref())
+            let parsed_output = build_review_delivery(&raw, ReviewDeliveryContext {
+                child_run_id: &child_run_id_clone,
+                allowed_refs,
+                schema: custom_schema.as_ref(),
+                has_verify_obligation: Some(has_verify_obligation),
+                kind: None,
+                duration_ms,
+                completion_tokens,
+                prompt_tokens,
+                role: param_role.as_ref(),
+                role_label: param_role_label.as_ref(),
+                model: &config.model_name,
+                plan_review_can_finalize: if is_plan_review { Some(can_finalize) } else { None },
             });
 
             let submission_error = if tool_request.is_some() {

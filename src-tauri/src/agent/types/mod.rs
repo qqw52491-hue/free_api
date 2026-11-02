@@ -959,7 +959,7 @@ pub struct HistoryStep {
     pub output_summary: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DispatchResult {
     pub stdout: String,
     pub stderr: String,

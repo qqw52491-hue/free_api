@@ -1,6 +1,8 @@
 //! 完整任务委派的宿主边界。执行仍由 main_loop 承担；这里仅维护身份、授权引用和交接。
-//! 工作区变更按序，执行器独立运行；不复制主循环，不改变专用子 Agent 的结果契约。
+//! 共享工作区允许并行，执行器独立运行；不复制主循环，不改变专用子 Agent 的结果契约。
 pub(crate) mod runtime;
+pub(crate) mod presets;
+pub(crate) mod dispatch;
 use crate::db::DbState;
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
@@ -68,21 +70,6 @@ pub(crate) fn request_action(action: &str, params: &Value) -> String {
         action
     };
     effective.to_ascii_lowercase()
-}
-
-pub(crate) fn busy_jobs(
-    db: &DbState,
-    parent: &str,
-    resumed: Option<&str>,
-) -> Result<Vec<String>, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    let mut stmt = conn.prepare("SELECT id FROM agent_child_runs WHERE parent_run_id=?1 AND status IN ('queued','running') AND (?2 IS NULL OR id!=?2)
-        UNION ALL SELECT id FROM agent_background_jobs WHERE parent_run_id=?1 AND status IN ('queued','running')").map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map(params![parent, resumed], |r| r.get(0))
-        .map_err(|e| e.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())
 }
 
 pub(crate) fn recover_finished(

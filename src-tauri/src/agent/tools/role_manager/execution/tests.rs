@@ -24,6 +24,9 @@ fn page_defaults_round_trip_and_drive_effective_dispatch_values() {
         effective["execution"]["workflow"]["plan_mode"],
         "cross_review"
     );
+    let worker=merge_execution_defaults(&db,&json!({"role":"configured_agent","profile":"worker","task":"investigate"}),None).unwrap();
+    assert_eq!(worker["execution"]["workflow"]["plan_mode"],"cross_review");
+    assert_eq!(worker["execution"]["workflow"]["completion"],"delivery");
     let listed = list_cards(&db, true).unwrap();
     assert_eq!(
         listed
@@ -100,7 +103,7 @@ fn invalid_page_combinations_are_rejected_before_saving_and_leave_previous_value
     let db = db();
     let original = upsert_card(&db, &card()).unwrap();
     for invalid in [
-        json!({"profile":"writer","execution":{"workflow":{"plan_mode":"cross_review"}}}),
+        json!({"profile":"writer","execution":{"workspace":"isolated","workflow":{"plan_mode":"cross_review"}}}),
         json!({"profile":"task","execution":{"workflow":{"completion":"guess"}}}),
         json!({"profile":"task","execution":{"allowed_tools":"read_file"}}),
     ] {
@@ -147,4 +150,40 @@ fn generic_only_role_is_visible_in_the_same_catalog_used_for_dispatch() {
     assert!(menu.contains("configured_agent"));
     assert!(menu.contains("默认执行组合"));
     assert!(menu.contains("cross_review"));
+}
+
+#[test]
+fn role_menu_uses_the_actual_completion_default_for_each_profile() {
+    let db = db();
+    for profile in ["task", "worker"] {
+        let mut value = card();
+        value["name"] = json!(format!("default_{profile}"));
+        value["allowed_kinds"] = json!(profile);
+        value["execution_defaults"] = json!({"profile":profile});
+        upsert_card(&db, &value).unwrap();
+        let effective = merge_execution_defaults(&db, &json!({"role":value["name"],"task":"check"}), None).unwrap();
+        let config = ExecutionConfig::parse(&effective, profile).unwrap();
+        assert!(config.workflow.completion.is_none());
+    }
+    let menu = build_role_cards_menu_filtered(&db, &[]).unwrap();
+    assert!(menu.contains("默认执行组合 task / auto / delivery"));
+    assert!(menu.contains("默认执行组合 worker / auto / handoff"));
+}
+
+#[test]
+fn writer_alias_resolves_role_workspace_before_executor_selection() {
+    let db = db();
+    upsert_card(&db, &json!({"name":"isolated_writer", "allowed_kinds":"writer",
+        "execution_defaults":{"profile":"writer","execution":{"workspace":"isolated",
+            "workflow":{"completion":"handoff"}}}})).unwrap();
+    let request = crate::agent::child_task::presets::requested(
+        json!({"role":"isolated_writer","task":"implement"}), Some("writer")).unwrap();
+    let effective = merge_execution_defaults(&db, &request, None).unwrap();
+    assert_eq!(effective["execution"]["workspace"], "isolated");
+    assert!(!crate::agent::execution::runtime::uses_main_executor("writer", &effective).unwrap());
+    let shared = crate::agent::child_task::presets::requested(
+        json!({"role":"isolated_writer","task":"implement","execution":{"workspace":"shared"}}),
+        Some("writer")).unwrap();
+    let shared = merge_execution_defaults(&db, &shared, None).unwrap();
+    assert!(crate::agent::execution::runtime::uses_main_executor("writer", &shared).unwrap());
 }

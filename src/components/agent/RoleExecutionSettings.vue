@@ -12,16 +12,17 @@
     </div>
     <template v-if="enabled">
       <div class="controls">
-        <label>执行方式<select v-model="profile" @change="changeProfile"><option value="task">通用子任务</option><option value="worker">只读调查</option><option value="writer">隔离修改</option><option value="reviewer">专用审查</option></select></label>
-        <label>方案安排<select v-model="planMode" :disabled="profile !== 'task'" @change="publish()"><option value="auto">自动判断</option><option value="cross_review">先讨论并审查方案</option><option value="plan_approval">方案需要人工批准</option></select></label>
-        <label>结果如何结束<select v-model="completion" :disabled="profile !== 'task'" @change="publish()"><option value="delivery">完整交付，按任务验证和审查</option><option value="handoff">交回结果，由父任务集成验收</option></select></label>
+        <label>执行方式<select v-model="profile" @change="changeProfile"><option value="task">通用子任务</option><option value="worker">调查助手</option><option value="writer">实施助手</option><option value="reviewer">专用审查</option></select></label>
+        <label>方案安排<select v-model="planMode" :disabled="specialized" @change="publish()"><option value="auto">自动判断</option><option value="cross_review">先讨论并审查方案</option><option value="plan_approval">方案需要人工批准</option></select></label>
+        <label>结果如何结束<select v-model="completion" :disabled="specialized" @change="publish()"><option value="delivery">完整交付，按任务验证和审查</option><option value="handoff">交回结果，由父任务集成验收</option></select></label>
       </div>
-      <p class="hint">{{ profile === 'task' ? '自动模式仍会按任务需要安排方案流程。交回结果也会保留明确的验证要求和已有阻塞。' : '调查、隔离修改和专用审查按各自契约交回结果。需要方案讨论或完整目标交付时，选择通用子任务。' }}</p>
+      <p class="hint">{{ !specialized ? '普通角色使用同一通用执行器，共享可用 Skill、MCP 和工具；自动模式仍按任务需要安排方案。' : '正式审查或显式隔离补丁使用专用结果契约；完整流程选择共享工作区。' }}</p>
+      <label v-if="profile === 'writer'" class="tool-mode">工作区方式<select v-model="workspace" @change="changeProfile"><option value="shared">共享父工作区，直接实施</option><option value="isolated">隔离补丁，审阅后 apply</option></select></label>
       <details>
         <summary>工具权限</summary>
-        <label class="tool-mode">权限范围<select v-model="toolMode" @change="publish()"><option value="inherit">使用执行方式允许的工具</option><option value="allowlist">仅允许指定工具</option></select></label>
+        <label class="tool-mode">权限范围<select v-model="toolMode" @change="publish()"><option value="inherit">继承父任务可用工具</option><option value="allowlist">仅允许指定工具</option></select></label>
         <label v-if="toolMode === 'allowlist'" class="tool-list">允许的工具或动作<textarea v-model="toolsText" rows="3" placeholder="例如：read_file, list_dir, send_message&#10;通用任务也可填写 local_file.read" @input="publish()" /></label>
-        <p class="hint">使用逗号或换行分隔，填写小写名称。列表为空时禁用业务工具；交回结果、方案流程、人工求助和只读通信查询仍可用。派发参数可进一步缩小范围，原有资源授权和执行方式的权限上限始终生效。</p>
+        <p class="hint">使用逗号或换行分隔，填写小写名称。列表为空时禁用业务工具；交回结果、方案流程、人工求助和只读通信查询仍可用。派发参数可进一步缩小范围，父任务、角色工具上限与资源授权始终生效。</p>
       </details>
       <div class="summary" aria-live="polite">{{ summary }}</div>
       <p class="hint">每个子任务默认保存独立检查点，无需另行开启。流程可在派发时显式调整；工具权限按本配置限制。</p>
@@ -42,6 +43,8 @@ const enabled = ref(false);
 const profile = ref<Profile>('task');
 const planMode = ref<PlanMode>('auto');
 const completion = ref<Completion>('delivery');
+const workspace = ref<'shared' | 'isolated'>('shared');
+const specialized = computed(() => profile.value === 'reviewer' || workspace.value === 'isolated');
 const toolMode = ref<'inherit' | 'allowlist'>('inherit');
 const toolsText = ref('');
 const parseError = ref(false);
@@ -50,37 +53,38 @@ const presets: Preset[] = [
   { id: 'general', label: '通用执行', description: '自动安排方案，完成子目标交付', profile: 'task', planMode: 'auto', completion: 'delivery' },
   { id: 'discussion', label: '先讨论方案', description: '方案交叉审查后执行并交付', profile: 'task', planMode: 'cross_review', completion: 'delivery' },
   { id: 'handoff', label: '结果交接', description: '完成子目标材料，交父任务验收', profile: 'task', planMode: 'auto', completion: 'handoff' },
-  { id: 'investigate', label: '只读调查', description: '读取和检索材料，返回调查结论', profile: 'worker', planMode: 'auto', completion: 'handoff' },
-  { id: 'write', label: '隔离修改', description: '在隔离副本实施，交回补丁与验证', profile: 'writer', planMode: 'auto', completion: 'handoff' },
+  { id: 'investigate', label: '调查助手', description: '通用执行器，按调查职责返回证据', profile: 'worker', planMode: 'auto', completion: 'handoff' },
+  { id: 'write', label: '实施助手', description: '通用执行器，共享工作区实施与验证', profile: 'writer', planMode: 'auto', completion: 'handoff' },
   { id: 'review', label: '专用审查', description: '按审查契约返回裁决与发现', profile: 'reviewer', planMode: 'auto', completion: 'handoff' },
 ];
-const names: Record<Profile, string> = { task: '通用子任务', worker: '只读调查', writer: '隔离修改', reviewer: '专用审查' };
-const summary = computed(() => `${names[profile.value]} · ${profile.value === 'task' ? ({ auto: '自动安排方案', cross_review: '先审查方案', plan_approval: '方案人工批准' }[planMode.value]) + ' · ' : ''}${completion.value === 'delivery' ? '完整交付' : '结果交接'} · ${toolMode.value === 'inherit' ? '执行方式默认工具' : '限定工具范围'}`);
+const names: Record<Profile, string> = { task: '通用子任务', worker: '调查助手', writer: '实施助手', reviewer: '专用审查' };
+const summary = computed(() => `${names[profile.value]} · ${!specialized.value ? ({ auto: '自动安排方案', cross_review: '先审查方案', plan_approval: '方案人工批准' }[planMode.value]) + ' · ' : ''}${completion.value === 'delivery' ? '完整交付' : '结果交接'} · ${toolMode.value === 'inherit' ? '继承可用能力' : '限定工具范围'}`);
 function toolNames() { return [...new Set(toolsText.value.split(/[,，\n]/).map(s => s.trim()).filter(Boolean))]; }
 function publish(includeProfile = false) {
   parseError.value = false;
   if (!enabled.value) { lastEmitted = ''; emit('update:modelValue', ''); return; }
-  const workflow = profile.value === 'task' ? { plan_mode: planMode.value, completion: completion.value } : { completion: 'handoff' };
-  lastEmitted = JSON.stringify({ profile: profile.value, execution: { ...(toolMode.value === 'allowlist' ? { allowed_tools: toolNames() } : {}), workflow } });
+  const workflow = !specialized.value ? { plan_mode: planMode.value, completion: completion.value } : { completion: 'handoff' };
+  lastEmitted = JSON.stringify({ profile: profile.value, execution: { ...(workspace.value === 'isolated' ? { workspace: 'isolated' } : {}), ...(toolMode.value === 'allowlist' ? { allowed_tools: toolNames() } : {}), workflow } });
   emit('update:modelValue', lastEmitted);
   if (includeProfile) emit('profile-change', profile.value);
 }
 function changeProfile() {
-  if (profile.value !== 'task') { completion.value = 'handoff'; planMode.value = 'auto'; }
+  if (profile.value !== 'writer') workspace.value = 'shared';
+  if (specialized.value) { completion.value = 'handoff'; planMode.value = 'auto'; }
   publish(true);
 }
 function applyPreset(preset: Preset) {
-  enabled.value = true; profile.value = preset.profile; planMode.value = preset.planMode; completion.value = preset.completion;
+  enabled.value = true; workspace.value = 'shared'; profile.value = preset.profile; planMode.value = preset.planMode; completion.value = preset.completion;
   toolMode.value = preset.tools ? 'allowlist' : 'inherit'; toolsText.value = preset.tools?.join(', ') || ''; publish(true);
 }
-function matches(preset: Preset) { return enabled.value && profile.value === preset.profile && planMode.value === preset.planMode && completion.value === preset.completion && toolMode.value === 'inherit'; }
+function matches(preset: Preset) { return enabled.value && workspace.value === 'shared' && profile.value === preset.profile && planMode.value === preset.planMode && completion.value === preset.completion && toolMode.value === 'inherit'; }
 watch(() => props.modelValue, raw => {
   if (raw === lastEmitted) return;
   if (!raw) { enabled.value = false; parseError.value = false; return; }
   try {
     const value = JSON.parse(raw);
     if (!['task', 'worker', 'writer', 'reviewer'].includes(value.profile)) throw new Error('profile');
-    enabled.value = true; parseError.value = false; profile.value = value.profile;
+    enabled.value = true; parseError.value = false; profile.value = value.profile; workspace.value = value.execution?.workspace || 'shared';
     planMode.value = value.execution?.workflow?.plan_mode || 'auto'; completion.value = value.execution?.workflow?.completion || (profile.value === 'task' ? 'delivery' : 'handoff');
     toolMode.value = Array.isArray(value.execution?.allowed_tools) ? 'allowlist' : 'inherit'; toolsText.value = value.execution?.allowed_tools?.join(', ') || '';
   } catch { parseError.value = true; enabled.value = false; }
