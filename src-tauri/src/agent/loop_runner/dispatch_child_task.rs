@@ -46,7 +46,9 @@ async fn dispatch_inner(
     ctx: &mut DispatchCtx<'_>,
     inst: &AgentInstruction,
 ) -> Result<DispatchResult, String> {
-    let params = inst.get_params();
+    let requested=inst.get_params();
+    if let Some(error)=crate::agent::tools::input_validation::native_rejection("child_task",&inst.get_action(),&requested) {return Ok(error);}
+    let params=if matches!(child_task::request_action(&inst.get_action(),&requested).as_str(),"dispatch"|"resume") {crate::agent::tools::role_manager::merge_execution_defaults(ctx.state.inner(),&requested,None)?}else{requested};
     if let Some(error) = crate::agent::tools::input_validation::native_rejection(
         "child_task",
         &inst.get_action(),
@@ -57,6 +59,20 @@ async fn dispatch_inner(
     let action = inst.get_action();
     let actor = crate::agent::agent_mailbox::Actor::new(ctx.parent_run_id, ctx.final_session_id);
     let effective = child_task::request_action(&action, &params);
+    if effective=="dispatch" {
+        let profile=params["profile"].as_str().unwrap_or("task");
+        if profile!="task" {
+            let mut adapted=inst.clone();adapted.params=Some(params.clone());adapted.command=None;adapted.tool=Some(format!("child_{profile}"));adapted.action=Some("dispatch".into());
+            if profile=="reviewer" {let mut mapped=params.clone();mapped["question"]=params["task"].clone();adapted.params=Some(mapped);adapted.command=None;}
+            let result=match profile {
+                "worker"=>super::dispatch_child_worker::dispatch_child_worker(ctx,&adapted).await?,
+                "writer"=>super::dispatch_child_writer::dispatch_child_writer(ctx,&adapted).await?,
+                "reviewer"=>super::dispatch_child_reviewer::dispatch_child_reviewer(ctx,&adapted).await?,
+                _=>return Err("profile 仅允许 task/worker/writer/reviewer；未派发。".into()),
+            };
+            return match result {ArmOutcome::Done(out)|ArmOutcome::Early(out)=>Ok(out)};
+        }
+    }
     match effective.as_str() {
         "ask" => {
             let key=format!("{}:{}:{}",ctx.context.history_task_id,ctx.step_id,params);
@@ -75,7 +91,7 @@ async fn dispatch_inner(
         }
         "list" => {
             return Ok(output(
-                json!({"tasks":crate::agent::agent_mailbox::family_list(ctx.state.inner(),&actor)?}),
+                json!({"tasks":crate::agent::agent_mailbox::family_list(ctx.state.inner(),&actor)?,"collaboration":crate::agent::agent_mailbox::coordination::list(ctx.state.inner(),&actor,params["offset"].as_u64().unwrap_or(0))?}),
             ))
         }
         "receipt" => {
@@ -229,7 +245,16 @@ async fn dispatch_inner(
     } else {
         None
     };
-    let task_identity = json!([params["task"], params.get("context"), predecessor]).to_string();
+    let task_role=if let Some(name)=params["role"].as_str() {
+        if crate::agent::tools::role_manager::is_card_disabled_for(&ctx.model_routing.disabled_role_cards,name,"task") {return Err(format!("角色 {name} 已在当前会话排除；未派发。"));}
+        let card=crate::agent::tools::role_manager::resolve_enabled_card(ctx.state.inner(),name)?.ok_or("角色不存在或已禁用")?;
+        if !card.allows_kind("task") {return Err("角色未允许挂载为通用子任务；请在角色配置勾选通用子任务，或选择其专用执行类型。".into());}
+        crate::agent::tools::role_manager::validate_dispatch_inputs(&card,params.get("custom_inputs"))?;
+        Some(card)
+    }else{None};
+    let mut child_routing=ctx.model_routing.clone();
+    if let Some(card)=&task_role {if !card.model_id.is_empty(){crate::agent::execution::runtime::bind_primary_model(&mut child_routing,&card.model_id);}}
+    let task_identity = json!([params["task"], params.get("context"), params.get("execution"), params.get("role"), params.get("custom_inputs"), predecessor]).to_string();
     let key = format!(
         "general:{}:{}:{}",
         ctx.context.history_task_id,
@@ -275,6 +300,7 @@ async fn dispatch_inner(
             route: "child_task:workspace_busy".into(),
         });
     }
+    ModelConfig::from_db_state(ctx.state.inner(),&child_routing.pro)?;
     ctx.checkpoint.prepare_tool(inst.clone(), ctx.context);
     save_checkpoint(ctx.state.inner(), ctx.checkpoint)?;
     let _workspace = crate::agent::workspace_lock::acquire_delegation_lock(
@@ -290,13 +316,16 @@ async fn dispatch_inner(
             ctx.parent_run_id,
             ctx.final_session_id,
             ctx.workspace_dir,
-            &ctx.model_routing.pro,
+            &child_routing.pro,
             0,
             "task",
             Some(1),
             None,
             predecessor.as_deref(),
             &crate::agent::child_reviewer::ChildRunIdentity {
+                contract_schema: task_role.as_ref().and_then(|card|card.parse_custom_schema()).filter(|schema|!schema.is_empty()).map(|schema|serde_json::to_string(&schema)).transpose().map_err(|e|e.to_string())?,
+                execution_config: params.get("execution").map(Value::to_string),
+                dispatch_input: Some(json!({"params":params}).to_string()),
                 task_id: key,
                 ..crate::agent::child_reviewer::ChildRunIdentity::fresh("task")
             },
@@ -308,8 +337,10 @@ async fn dispatch_inner(
         child_session: format!("task-{id}"),
         child_run: id.clone(),
     };
+    let execution=crate::agent::execution::runtime::ExecutionConfig::parse(&params,"task")?;
+    let role_context=task_role.as_ref().map(|card|format!("{}\n{}\n{}\n本次角色输入材料：{}",crate::agent::tools::role_manager::persona_block(card),crate::agent::tools::role_manager::skills_block(ctx.state.inner(),card),card.parse_custom_schema().map(|s|s.render_prompt_instructions()).unwrap_or_default(),params.get("custom_inputs").unwrap_or(&Value::Null))).unwrap_or_default();
     let goal = format!(
-        "{}\n\n{}\n\n【宿主提供的父会话证据目录】{}（只读引用请用绝对路径；你的 tmp/ 独立）。",
+        "{}\n\n{}\n\n{role_context}\n\n【宿主提供的父会话证据目录】{}（只读引用请用绝对路径；你的 tmp/ 独立）。",
         params["task"].as_str().unwrap_or_default(),
         params["context"].as_str().unwrap_or_default(),
         crate::agent::path_guard::get_session_tmp_dir(ctx.final_session_id).display()
@@ -318,11 +349,11 @@ async fn dispatch_inner(
         ctx.app.clone(),
         ctx.state.inner().clone(),
         binding,
-        ctx.model_routing.clone(),
+        child_routing,
         goal,
         ctx.workspace_dir.into(),
         ctx.checkpoint.auto_pilot,
-        ctx.checkpoint.plan_mode.as_str().into(),
+        execution.workflow.plan_mode.unwrap_or_else(||ctx.checkpoint.plan_mode.as_str().into()),
         _workspace,
     )?;
     Ok(DispatchResult {view:None,success:true,stdout:json!({"child_run_id":id,"execution_status":"running","delivery_accepted":false,"next":"可用 child_task.status / send / wait / cancel；共享工作区暂由该子任务使用。需要信息时子任务可给 parent 发消息，父任务等待会被消息唤醒。"}).to_string(),stderr:String::new(),route:"child_task:spawned".into()})

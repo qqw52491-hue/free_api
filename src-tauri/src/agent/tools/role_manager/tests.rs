@@ -147,6 +147,7 @@ fn explicit_tech_lead_choice_is_not_bypassed() {
     #[test]
     fn writer_defaults_merge_from_card() {
         let card = RoleCard {
+ execution_defaults: String::new(),
             id: "x".into(), name: "frontend_designer".into(), label: "前端".into(),
             model_id: "gemini".into(), persona_prompt: "审美优先".into(),
             scope_hints: "src/components, src/assets".into(),
@@ -435,6 +436,7 @@ fn skills_block_whitelist_injects_listed_docs_only() {
     let card = RoleCard {
         allowed_skills: "code_review, nonexistent_skill".into(),
         ..RoleCard {
+            execution_defaults: String::new(),
             id: "x".into(), name: "n".into(), label: "l".into(),
             model_id: String::new(), persona_prompt: String::new(),
             scope_hints: String::new(), default_test_command: String::new(),
@@ -464,6 +466,7 @@ fn skills_block_whitelist_injects_listed_docs_only() {
     }
     // 空白名单不注入
     let empty = skills_block(&db, &RoleCard {
+ execution_defaults: String::new(),
         id: "y".into(), name: "n2".into(), label: "l".into(),
         model_id: String::new(), persona_prompt: String::new(),
         scope_hints: String::new(), default_test_command: String::new(),

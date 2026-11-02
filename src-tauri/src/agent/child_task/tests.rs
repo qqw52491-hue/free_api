@@ -51,6 +51,7 @@ impl Fixture {
         let context = SandwichContext::new("system".into(), "child goal".into());
         let mut cp = AgentCheckpoint::new(self.binding.child_session.clone(), &context);
         cp.pending_finalization = Some(FinalizationReceipt {
+        handoff: false,
             receipt_id: "host-receipt".into(),
             diff_hash: "empty".into(),
             scope_revision: 0,
@@ -412,4 +413,13 @@ fn progress_and_long_results_are_bounded_and_child_data_follows_parent_cleanup()
         f.root.join("test.db").exists(),
         "共享工作区不得作为子会话数据删除"
     );
+}
+
+#[test]
+fn handoff_receipt_is_separate_from_formal_delivery_acceptance() {
+    let f=Fixture::new();f.finish_readonly();
+    f.db.0.lock().unwrap().execute("UPDATE agent_child_runs SET execution_config_json='{\"workflow\":{\"completion\":\"handoff\"}}' WHERE id=?1",[&f.binding.child_run]).unwrap();
+    assert_eq!(settle(&f.db,&f.binding,&Ok(()),1).unwrap()["execution_status"],"failed","a delivery receipt cannot be reused as a handoff receipt");
+    let mut cp=load_checkpoint(&f.db,&f.binding.child_session).unwrap().unwrap();cp.pending_finalization.as_mut().unwrap().handoff=true;crate::agent::checkpoint::save_checkpoint(&f.db,&mut cp).unwrap();
+    let body=settle(&f.db,&f.binding,&Ok(()),1).unwrap();assert_eq!(body["execution_status"],"succeeded");assert_eq!(body["handoff_accepted"],true);assert_eq!(body["delivery_accepted"],false);
 }

@@ -25,6 +25,9 @@ const MAX_PERSONA_CHARS: usize = 3_000;
 const MAX_SCOPE_CHARS: usize = 500;
 const MAX_TEST_COMMAND_CHARS: usize = 200;
 
+mod execution;
+pub(crate) use execution::merge_execution_defaults;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RoleCard {
     pub id: String,
@@ -35,7 +38,7 @@ pub struct RoleCard {
     pub scope_hints: String,
     pub default_test_command: String,
     #[serde(default)]
-    pub allowed_kinds: String,      // 逗号分隔: writer,worker,reviewer；空=不限
+    pub allowed_kinds: String,      // 逗号分隔: task,writer,worker,reviewer；空=不限
     #[serde(default)]
     pub max_concurrency: i64,       // 0=跟随全局默认
     pub enabled: bool,
@@ -49,6 +52,8 @@ pub struct RoleCard {
     pub input_schema: String,       // 角色自定义入参契约 (JSON 序列化的 ContractSchema)
     #[serde(default)]
     pub allowed_skills: String,     // 逗号分隔 skill 名白名单；空=不注入技能手册
+    #[serde(default)]
+    pub execution_defaults: String,
     #[serde(default)]
     pub allowed_mcp: String,        // 逗号分隔 MCP 插件名白名单；空=不授权 MCP（前向兼容字段）
 }
@@ -87,7 +92,7 @@ impl RoleCard {
         serde_json::from_str(trimmed).ok()
     }
 
-    /// 检查该角色卡是否允许挂载到指定 child kind (writer, worker, reviewer)
+    /// 检查该角色卡是否允许挂载到指定 child kind (task, writer, worker, reviewer)
     pub fn allows_kind(&self, kind: &str) -> bool {
         let allowed = self.allowed_kinds.trim();
         if allowed.is_empty() {
@@ -121,11 +126,12 @@ fn map_card(row: &rusqlite::Row<'_>) -> rusqlite::Result<RoleCard> {
         input_schema: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
         allowed_skills: row.get::<_, Option<String>>(13).ok().flatten().unwrap_or_default(),
         allowed_mcp: row.get::<_, Option<String>>(14).ok().flatten().unwrap_or_default(),
+        execution_defaults: row.get::<_,Option<String>>(15).ok().flatten().unwrap_or_default(),
     })
 }
 
 const CARD_COLUMNS: &str =
-    "id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, max_concurrency, enabled, custom_schema, focus_domains, input_schema, allowed_skills, allowed_mcp";
+    "id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, max_concurrency, enabled, custom_schema, focus_domains, input_schema, allowed_skills, allowed_mcp, execution_defaults";
 
 
 pub fn list_cards(db: &DbState, include_disabled: bool) -> Result<Vec<RoleCard>, String> {
@@ -327,6 +333,7 @@ pub fn upsert_card(db: &DbState, params: &Value) -> Result<RoleCard, String> {
         if changed == 0 { return Err("系统基础卡尚未初始化，请重启应用。".into()); }
         return resolve_enabled_card(db, name)?.ok_or("系统基础卡不可用".into());
     }
+    let execution_defaults=execution::normalize(params)?;
     let (
         name,
         label,
@@ -360,8 +367,8 @@ pub fn upsert_card(db: &DbState, params: &Value) -> Result<RoleCard, String> {
     }
     let id = existing.unwrap_or_else(|| Uuid::new_v4().to_string());
     conn.execute(
-        "INSERT INTO agent_role_cards (id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, max_concurrency, enabled, custom_schema, focus_domains, input_schema, allowed_skills, allowed_mcp, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10, ?11, ?12, ?13, ?14, ?15, ?15)
+        "INSERT INTO agent_role_cards (id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, max_concurrency, enabled, custom_schema, focus_domains, input_schema, allowed_skills, allowed_mcp, created_at, updated_at, execution_defaults)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10, ?11, ?12, ?13, ?14, ?15, ?15, COALESCE(?16,''))
          ON CONFLICT(name) DO UPDATE SET
             label=excluded.label, model_id=excluded.model_id, persona_prompt=excluded.persona_prompt,
             scope_hints=excluded.scope_hints, default_test_command=excluded.default_test_command,
@@ -371,8 +378,9 @@ pub fn upsert_card(db: &DbState, params: &Value) -> Result<RoleCard, String> {
             input_schema=excluded.input_schema,
             allowed_skills=excluded.allowed_skills,
             allowed_mcp=excluded.allowed_mcp,
+            execution_defaults=COALESCE(?16,agent_role_cards.execution_defaults),
             enabled=1, updated_at=excluded.updated_at",
-        params![id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, max_concurrency, custom_schema, focus_domains, input_schema, allowed_skills, allowed_mcp, now],
+        params![id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, max_concurrency, custom_schema, focus_domains, input_schema, allowed_skills, allowed_mcp, now, execution_defaults],
     )
     .map_err(|e| e.to_string())?;
     drop(conn);
@@ -582,7 +590,7 @@ pub fn build_role_cards_menu_filtered(db: &DbState, disabled_names: &[String]) -
                 return false;
             }
             // 若卡片在它所支持的全部工位上都被单独排除了，才排除
-            let kinds = ["writer", "worker", "reviewer"];
+            let kinds = ["task", "writer", "worker", "reviewer"];
             let has_any_active = kinds
                 .iter()
                 .any(|k| c.allows_kind(k) && !is_card_disabled_for(disabled_names, &c.name, k));
@@ -592,7 +600,7 @@ pub fn build_role_cards_menu_filtered(db: &DbState, disabled_names: &[String]) -
     if active_cards.is_empty() {
         return Ok(String::new());
     }
-    let mut out = String::from("\n### 角色池（派发 child_reviewer/child_worker/child_writer 时传 \"role\": \"角色标识\" 即可挂载人设与专属模型；每张卡标注了「可挂载」类型，只能用于所列类型，否则派发会被拒）\n【提示】reviewer 角色建议在角色选择器中钉一个与规划者不同家族的模型：异构模型盲区互补，交叉审查收益最大。\n");
+    let mut out = String::from("\n### 角色池（派发 child_task 或兼容的 child_reviewer/child_worker/child_writer 时传 \"role\": \"角色标识\" 即可挂载人设与专属模型；每张卡标注了「可挂载」类型，只能用于所列类型，否则派发会被拒）\n【提示】reviewer 角色建议在角色选择器中钉一个与规划者不同家族的模型：异构模型盲区互补，交叉审查收益最大。\n");
     out.push_str("【基础卡】system_worker / system_writer / system_reviewer 常驻，不可删除或休眠，默认跟随路由；专业卡可自由管理。tech_lead 缺失时 submit_plan 使用基础 reviewer 加载方案审查协议，不免除审查。\n");
     for card in active_cards {
         let model_note = if card.model_id.is_empty() {
@@ -634,9 +642,12 @@ pub fn build_role_cards_menu_filtered(db: &DbState, disabled_names: &[String]) -
         } else {
             String::new()
         };
+        let execution_note=if card.execution_defaults.is_empty(){String::new()}else{
+            serde_json::from_str::<Value>(&card.execution_defaults).ok().map(|defaults|format!("；默认执行组合 {} / {} / {}，可用 child_task.dispatch(role={})",defaults["profile"].as_str().unwrap_or("未知"),defaults["execution"]["workflow"]["plan_mode"].as_str().unwrap_or("auto"),defaults["execution"]["workflow"]["completion"].as_str().unwrap_or("handoff"),card.name)).unwrap_or_else(||"；执行配置损坏，请先修订".into())
+        };
         out.push_str(&format!(
-            "- [{}] {}：{}（{}{}{}{}{}；可挂载: {}）\n",
-            card.name, card.label, card.persona_prompt.chars().take(80).collect::<String>(), model_note, scope_note, schema_note, focus_note, input_note, card.allowed_kinds
+            "- [{}] {}：{}（{}{}{}{}{}{}；可挂载: {}）\n",
+            card.name, card.label, card.persona_prompt.chars().take(80).collect::<String>(), model_note, scope_note, schema_note, focus_note, input_note, execution_note, card.allowed_kinds
         ));
     }
     out.push_str("\n> 💡 **【派发纪律】** 派发给子 Agent 的 task 必须自包含：\n");

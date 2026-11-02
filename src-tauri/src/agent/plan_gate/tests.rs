@@ -24,7 +24,7 @@
                 purpose TEXT,
                 batch_id TEXT,
                 contract_id TEXT,
-                contract_schema TEXT,
+                contract_schema TEXT, execution_config_json TEXT, execution_checkpoint_json TEXT, execution_version INTEGER NOT NULL DEFAULT 0,
                 applied_at TEXT,
                 started_at TEXT
             );",

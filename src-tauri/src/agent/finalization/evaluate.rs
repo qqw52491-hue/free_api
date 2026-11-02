@@ -169,8 +169,13 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
     .await;
     let initial_hash = crate::agent::reviewer_gatekeeper::task_review_snapshot(
         db, session_id, workspace, context, baseline, run_started_at, &delivery_paths).0.hash;
+    if let Err(error)=crate::agent::execution::runtime::validate_output(db,run_id,&request_payload) {blockers.push(format!("角色交付契约未通过：{error}"));}
     let registered_evidence = crate::agent::evidence_store::review_digest(db, session_id, run_started_at);
     let state_fp = acceptance_fingerprint(context, checkpoint, &request_payload);
+    let handoff=match crate::agent::execution::runtime::config(db,run_id) {
+        Ok(config)=>{if let Some(blocker)=crate::agent::execution::runtime::workflow_blocker(&config,checkpoint.plan_phase.is_approved()) {blockers.push(blocker);}config.workflow.completion.as_deref()==Some("handoff")},
+        Err(error)=>{blockers.push(error);false}
+    };
     let review_policy_fingerprint = crate::agent::review_team::policy_fingerprint(db, model_routing);
     let evidence_index_fingerprint = registered_evidence.as_ref().ok().and_then(|value| value.as_ref()).map(|digest| {
         use sha2::{Digest, Sha256};
@@ -184,6 +189,7 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
                 && r.is_fresh(&initial_hash, context.resource_scope.revision, &contract_fp)
                 && !r.acceptance_fingerprint.is_empty()
                 && r.acceptance_fingerprint == state_fp
+                && r.handoff==handoff
                 && r.review_policy_fingerprint == review_policy_fingerprint
                 && r.evidence_index_fingerprint == evidence_index_fingerprint
         }) {
@@ -318,7 +324,14 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
             frozen.material_fingerprint = review_hash.clone();
         }
     }
-    if blockers.is_empty() && !interrupted_since(interrupt_rx, generation) {
+    if handoff {
+        review=ReceiptReview::NotRequired;
+        material_notices.push("本次仅为子任务结果交接，未新增独立终审；父任务负责集成、完整目标验证与正式交付。".into());
+        if let Some(previous)=checkpoint.last_review_result.as_ref().filter(|r|!r.is_passed()&&!r.is_service_failure()) {
+            blockers.extend(previous.blocking_issues.iter().map(|issue|format!("已有审查阻塞未核销：[{}] {}",issue.file,issue.issue)));
+        }
+    }
+    if !handoff && blockers.is_empty() && !interrupted_since(interrupt_rx, generation) {
         let evidence = (!host_evidence.is_empty()).then(|| host_evidence.join("\n\n"));
         let human_waivers = checkpoint.human_waiver_text();
         let mut completed_review = None;
@@ -459,6 +472,7 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
     let _ = diff_context; // 机械对账使用的同一份材料已在 collect_checks 中消费。
     CompletionEvaluation {
         receipt: FinalizationReceipt {
+            handoff,
             receipt_id: format!("fr_{}_s{}", &run_id[..run_id.len().min(8)], step_id),
             diff_hash: receipt_hash,
             scope_revision: context.resource_scope.revision,
@@ -741,10 +755,11 @@ async fn collect_checks(
         }
     }
     {
+        crate::agent::agent_mailbox::coordination::kick(db);
         let conn=db.0.lock().map_err(|e|e.to_string());
         match conn.and_then(|conn|crate::agent::agent_mailbox::replies::pending_on(&conn,run_id)) {
-            Ok(true)=>open_todos.push("已有只读追问尚未结束或结果尚未回收；请等待并回收后再交付。".into()),
-            Err(error)=>open_todos.push(format!("只读追问状态读取失败：{error}")),
+            Ok(true)=>open_todos.push("已有协作执行尚未结束、消息尚未接收或结果尚未回收；请等待并回收后再交付。".into()),
+            Err(error)=>open_todos.push(format!("协作状态读取失败：{error}")),
             Ok(false)=>{}
         }
     }

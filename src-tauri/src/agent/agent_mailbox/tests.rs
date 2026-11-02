@@ -78,7 +78,7 @@ fn family_messages_preserve_json_and_host_source_and_reject_other_tasks() {
     let inbox = pending(&f.db, &b).unwrap();
     assert_eq!(inbox.len(), 1);
     assert_eq!(inbox[0]["sender_run_id"], a.run);
-    assert_eq!(inbox[0]["sender_kind"], "agent");
+    assert_eq!(inbox[0]["sender_kind"], "agent_material");
     assert_eq!(inbox[0]["payload"]["data"], packet["data"]);
     let again = send(&f.db, &a, &packet, Some("step-1"), false).unwrap();
     assert_eq!(sent["message_id"], again["message_id"]);

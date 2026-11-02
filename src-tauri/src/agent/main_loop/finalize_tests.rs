@@ -14,6 +14,7 @@ INSERT INTO chat_sessions VALUES ('s','t','m','now','now',0);").unwrap();
 }
 fn ready(c: &SandwichContext, cp: &AgentCheckpoint) -> FinalizationReceipt {
     FinalizationReceipt {
+        handoff: false,
         receipt_id: "r".into(),
         diff_hash: "h".into(),
         scope_revision: c.resource_scope.revision,
@@ -336,4 +337,10 @@ fn production_commit_advances_block_only_after_ready_and_discloses_waiver() {
         .query_row("SELECT content FROM chat_messages", [], |r| r.get(0))
         .unwrap();
     assert!(msg.contains("验证披露"));
+}
+
+#[test]
+fn handoff_readiness_never_substitutes_for_a_delivery_receipt() {
+    let db=db();let mut c=context();let mut cp=AgentCheckpoint::new("s".into(),&c);let mut receipt=ready(&c,&cp);receipt.handoff=true;cp.pending_finalization=Some(receipt);
+    assert!(commit(&db,&mut cp,&mut c).unwrap_err().contains("不能复用"));no_terminal_rows(&db);
 }

@@ -775,6 +775,8 @@ mod tests {
         }
         // 真实落一行旧 run（带逻辑身份）：备胎应继承其 task_id 且 attempt+1
         let old_identity = crate::agent::child_reviewer::ChildRunIdentity {
+ dispatch_input: None,
+ execution_config: None,
             task_id: "task-planreview-x".to_string(),
             attempt_id: 1,
             purpose: Some("plan_review".to_string()),
@@ -857,6 +859,8 @@ mod tests {
         let ws = base.join("ws");
         std::fs::create_dir_all(&ws).unwrap();
         let id1 = crate::agent::child_reviewer::ChildRunIdentity {
+ dispatch_input: None,
+ execution_config: None,
             task_id: "task-shared".to_string(),
             attempt_id: 1,
             purpose: Some("worker".to_string()),
@@ -1043,6 +1047,8 @@ mod tests {
             cp.plan_reviewer_retry_count = 1;
             let phase = cp.plan_phase;
             let identity = crate::agent::child_reviewer::ChildRunIdentity {
+ dispatch_input: None,
+ execution_config: None,
                 task_id:"review-task".into(), attempt_id:1, purpose:Some("plan_review".into()),
                 batch_id:Some("batch-stop".into()), contract_id:None, contract_schema:None,
             };
@@ -1213,6 +1219,8 @@ mod tests {
         ])
         .with_strict_closed_set(false);
         let identity = crate::agent::child_reviewer::ChildRunIdentity {
+ dispatch_input: None,
+ execution_config: None,
             task_id: "task-cve".to_string(),
             attempt_id: 1,
             purpose: Some("plan_review".to_string()),
@@ -1313,6 +1321,8 @@ mod tests {
             ),
         ]);
         let identity = crate::agent::child_reviewer::ChildRunIdentity {
+ dispatch_input: None,
+ execution_config: None,
             task_id: "task-wb".to_string(),
             attempt_id: 1,
             purpose: Some("worker".to_string()),

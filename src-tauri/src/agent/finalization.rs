@@ -170,6 +170,8 @@ pub struct FrozenVerificationRun {
 /// 终态收据：一次通过门禁评估的冻结快照。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FinalizationReceipt {
+    #[serde(default)]
+    pub handoff: bool,
     pub receipt_id: String,
     /// 提交时冻结的审查材料哈希；diff 变化即收据失效。
     pub diff_hash: String,
@@ -541,6 +543,7 @@ mod tests {
 
     fn receipt(diff_hash: &str, revision: u64, fingerprint: &str) -> FinalizationReceipt {
         FinalizationReceipt {
+            handoff: false,
             receipt_id: "fr_test".to_string(),
             diff_hash: diff_hash.to_string(),
             scope_revision: revision,

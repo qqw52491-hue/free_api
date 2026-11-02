@@ -807,3 +807,23 @@ async fn snapshot_executor_version_prevents_reusing_old_success_but_keeps_curren
         "material", "contract", &obligations).is_none(), "旧错误执行器的成功不能沿用");
     std::fs::remove_dir_all(workspace).unwrap();
 }
+
+#[tokio::test]
+async fn explicit_handoff_keeps_real_verification_and_does_not_claim_independent_delivery_review() {
+    use std::sync::{Arc,Mutex};
+    let workspace=std::env::temp_dir().join(format!("handoff-evaluation-{}",uuid::Uuid::new_v4()));std::fs::create_dir_all(&workspace).unwrap();
+    for fails in [false,true] {
+        let db=DbState(Arc::new(Mutex::new(crate::db::init_db(&std::path::PathBuf::from(":memory:")).unwrap())));
+        db.0.lock().unwrap().execute("INSERT INTO agent_child_runs(id,parent_run_id,parent_session_id,workspace_root,model_id,status,started_at,kind,execution_config_json) VALUES ('handoff','parent','session',?1,'mock','running','now','task','{\"workflow\":{\"completion\":\"handoff\"}}')",[workspace.to_string_lossy()]).unwrap();
+        let baseline=GitBaseline::capture(&workspace);let mut c=context();
+        c.record_side_effect(1,"local_file".into(),"artifact.txt".into());
+        c.change_verification=Some(ChangeVerification{status:"verified".into(),evidence_refs:vec!["step_1".into()],waived_reason:None});
+        c.review_contract=Some(serde_json::from_value(json!({"scope_statement":"subtask","obligations":[{"id":"check","question":"explicit command must pass","status":"evidenced","evidence_refs":["step_1"],"closure_form":"command","verify_command":if fails{"false"}else{"true"}}]})).unwrap());
+        let mut cp=checkpoint(&c);let app=tauri::test::mock_app();let (_tx,mut rx)=watch::channel(0);
+        let instruction=serde_json::from_value(json!({"tool":"finish","params":{"summary":"handoff"}})).unwrap();
+        let evaluation=evaluate_completion(app.handle(),&db,&mut c,&mut cp,"handoff","session",3,&workspace,&baseline,Utc::now()-chrono::Duration::seconds(1),&ModelRoutingConfig::default(),&mut rx,&instruction,CompletionMode::Finish,false,false).await;
+        assert!(evaluation.receipt.handoff);assert!(evaluation.review_result.is_none());assert_eq!(evaluation.receipt.is_ready(),!fails,"{:?}",evaluation.receipt);
+        assert!(matches!(evaluation.receipt.review,ReceiptReview::NotRequired));
+    }
+    let _=std::fs::remove_dir_all(workspace);
+}

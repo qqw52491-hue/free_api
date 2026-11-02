@@ -127,6 +127,7 @@ pub(crate) fn execute_command_with_images(
     shell_guard: Option<&std::sync::Arc<ShellExecutionGuard>>,
 ) -> DispatchResult {
     if tool.eq_ignore_ascii_case("view_image") || action.eq_ignore_ascii_case("view_image") {
+        if let Some(id)=run_id {if let Err(error)=crate::agent::execution::runtime::authorize_call(db,id,"view_image",action,params) {return crate::agent::tools::input_validation::rejection(error);}}
         if let Some(pending) = pending {
             return crate::agent::tools::view_image::dispatch(params, workspace_root, session_id, pending);
         }
@@ -167,6 +168,11 @@ fn execute_command_in_run(
     // 单步、流水线及并行叶子共用纯参数预检，先报错再做原有安全裁决。
     if let Some(result) = crate::agent::tools::input_validation::native_rejection(tool, action, params) {
         return result;
+    }
+    if let Some(id)=run_id {
+        if let Err(error)=crate::agent::execution::runtime::authorize_call(db,id,tool,action,params) {
+            return crate::agent::tools::input_validation::rejection(error);
+        }
     }
     if let (Some(guard), Some(workspace)) = (shell_guard, workspace_root) {
         if let Some(result) = guard.check(tool, action, params, workspace) { return result; }

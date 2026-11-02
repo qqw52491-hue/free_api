@@ -9,7 +9,10 @@ where
     T: Future<Output = Result<ControlFlow<B, S>, E>>,
 {
     loop {
-        match turn(state).await? {
+        // Keep the turn future out of the driver's inline async state. In debug
+        // builds, moving a large turn/state through nested poll frames exhausted
+        // the desktop runtime's 2 MiB worker stack before the first model call.
+        match Box::pin(turn(state)).await? {
             ControlFlow::Continue(next) => state = next,
             ControlFlow::Break(result) => return Ok(result),
         }
@@ -17,8 +20,12 @@ where
 }
 
 pub(crate) mod actions;
+pub(crate) mod runtime;
 
 pub(crate) mod protocol;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod stack_tests;

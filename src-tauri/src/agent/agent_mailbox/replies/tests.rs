@@ -153,6 +153,16 @@ fn admission_completion_and_receipt_consumption_share_one_authoritative_ledger()
         "a result not yet consumed must still hold completion"
     );
     f.apply(&ticket.run);
+    assert_eq!(
+        f.commit().unwrap_err(),
+        PENDING_REPLY,
+        "root collection cannot replace recipient receipt"
+    );
+    // Historical ordinary message is now explicitly received by its owner too.
+    super::super::deliver_specialist(&f.db, &f.b.run, &mut vec![]).unwrap();
+    let inbox = pending(&f.db, &f.c).unwrap();
+    assert_eq!(inbox.len(), 1);
+    super::super::deliver_specialist(&f.db, &f.c.run, &mut vec![]).unwrap();
     f.commit().unwrap();
     let duplicate = register(&f.db, &f.c, &f.question(), "question-1").unwrap();
     assert!(duplicate.1.is_none());
@@ -161,14 +171,13 @@ fn admission_completion_and_receipt_consumption_share_one_authoritative_ledger()
         .unwrap_err()
         .contains("已结束"));
     let inbox = pending(&f.db, &f.c).unwrap();
-    assert_eq!(inbox.len(), 1);
-    assert_eq!(inbox[0]["payload"]["data"]["read_only_reply"], true);
+    assert!(inbox.is_empty());
     let original = read_result(&f.db, &f.c, &json!({"child_run_id":f.b.run})).unwrap();
     assert!(original["text"].as_str().unwrap().contains("old-answer"));
     finish(&f.db, &ticket, output(), vec![], 99).unwrap();
     assert_eq!(
         pending(&f.db, &f.c).unwrap().len(),
-        1,
+        0,
         "late duplicate completion must not emit another answer"
     );
 }
@@ -389,6 +398,7 @@ async fn admitted_start_failure_is_reported_and_does_not_leave_a_running_attempt
     assert!(pending(&f.db, &f.c).unwrap()[0]["payload"]["data"]["error_kind"].is_string());
     assert_eq!(f.commit().unwrap_err(), PENDING_REPLY);
     f.apply(id);
+    super::super::deliver_specialist(&f.db, &f.c.run, &mut vec![]).unwrap();
     f.commit().unwrap();
 }
 
@@ -425,4 +435,37 @@ fn generic_task_history_reads_existing_checkpoint_with_exact_source_and_no_contr
         .unwrap()
         .contains("pending_finalization"));
     assert!(read_result(&f.db, &f.c, &json!({"child_run_id":f.b.run,"offset":-1})).is_err());
+}
+
+#[test]
+fn ordinary_message_admission_and_root_success_share_the_terminal_transaction() {
+    let f = Fixture::new();
+    let gate = Arc::new(Barrier::new(3));
+    let (admission, completion) = std::thread::scope(|scope| {
+        let g = gate.clone();
+        let fixture = &f;
+        let first = scope.spawn(move || {
+            g.wait();
+            super::super::send(
+                &fixture.db,
+                &fixture.c,
+                &fixture.question(),
+                Some("send-close-race"),
+                false,
+            )
+        });
+        let g = gate.clone();
+        let fixture = &f;
+        let second = scope.spawn(move || {
+            g.wait();
+            fixture.commit()
+        });
+        gate.wait();
+        (first.join().unwrap(), second.join().unwrap())
+    });
+    match (admission, completion) {
+        (Ok(_), Err(error)) => assert_eq!(error, PENDING_REPLY),
+        (Err(error), Ok(())) => assert!(error.contains("主任务已结束")),
+        other => panic!("send/terminal ordering disagreed: {:?}", (other.0, other.1)),
+    }
 }

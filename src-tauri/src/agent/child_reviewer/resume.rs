@@ -176,8 +176,14 @@ pub(crate) async fn run_resumed_review(
     let started = std::time::Instant::now();
     let log_suffix = format!("child-{child_id}");
     let stage = format!("child:{child_id}");
-    let completion_tokens = 0;
-    let prompt_tokens = 0;
+    let snapshot=match crate::agent::execution::runtime::Snapshot::load(&db,&child_id,"reviewer_resume") {
+        Ok(saved)=>saved.unwrap_or_else(||crate::agent::execution::runtime::Snapshot::new(&child_id,"reviewer_resume",json!({}))),
+        Err(error)=>{crate::agent::execution::runtime::fail_checkpoint(&db,&child_id,error);return;}
+    };
+    let messages=match snapshot.state.get("messages") {Some(value)=>match serde_json::from_value(value.clone()){Ok(messages)=>messages,Err(error)=>{crate::agent::execution::runtime::fail_checkpoint(&db,&child_id,error.to_string());return;}},None=>messages};
+    let completion_tokens=snapshot.state["completion_tokens"].as_i64().unwrap_or(0);
+    let prompt_tokens=snapshot.state["prompt_tokens"].as_i64().unwrap_or(0);
+    let attempt=snapshot.state["attempt"].as_u64().unwrap_or(1) as u32;
     let db = &db;
     let child_id = &child_id;
     let session_id = &session_id;
@@ -187,8 +193,14 @@ pub(crate) async fn run_resumed_review(
     let progress = &progress;
     let stage = &stage;
     let log_suffix = &log_suffix;
-    let _ = crate::agent::execution::run((messages, interrupt_rx, completion_tokens, prompt_tokens, 1u32),
-        move |(mut messages, mut interrupt_rx, mut completion_tokens, mut prompt_tokens, attempt)| async move {
+    let _ = crate::agent::execution::run((snapshot, messages, interrupt_rx, completion_tokens, prompt_tokens, attempt),
+        move |(mut snapshot, mut messages, mut interrupt_rx, mut completion_tokens, mut prompt_tokens, attempt)| async move {
+        snapshot.phase="ready".into();
+        snapshot.state=json!({"dispatch_input":snapshot.state.get("dispatch_input"),"messages":messages,"completion_tokens":completion_tokens,"prompt_tokens":prompt_tokens,"attempt":attempt});
+        if let Err(error)=snapshot.save(db) {
+            crate::agent::execution::runtime::fail_checkpoint(db,child_id,error);
+            return Ok(std::ops::ControlFlow::Break(()));
+        }
         crate::agent::control::mark_stage(&stage, &format!("child_task:llm_call:{attempt}"));
         if let Some(sink) = &progress {
             sink(json!({"type":"child_reviewer_action", "child_run_id":child_id,
@@ -364,6 +376,6 @@ pub(crate) async fn run_resumed_review(
                     review_output_rejection_feedback(&error, attempt, MAX_REVIEW_OUTPUT_ATTEMPTS)}));
             }
         }
-        Ok::<_, std::convert::Infallible>(std::ops::ControlFlow::Continue((messages, interrupt_rx, completion_tokens, prompt_tokens, attempt + 1)))
+        Ok::<_, std::convert::Infallible>(std::ops::ControlFlow::Continue((snapshot, messages, interrupt_rx, completion_tokens, prompt_tokens, attempt + 1)))
     }).await;
 }

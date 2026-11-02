@@ -67,7 +67,7 @@ pub async fn run_agent_main_loop(
         let conn = state.0.lock().map_err(|e| e.to_string())?;
         model_routing.validate_desktop_start(&conn)?;
     }
-    run_agent_main_loop_in_workspace(
+    Box::pin(run_agent_main_loop_in_workspace(
         app,
         state,
         registry_state,
@@ -83,7 +83,7 @@ pub async fn run_agent_main_loop(
         plan_mode,
         None,
         task_start_mode,
-    )
+    ))
     .await
 }
 
@@ -130,7 +130,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
     );
 
     let cleanup_db = DbState(state.0.clone());
-    let result = run_agent_main_loop_in_workspace_inner(
+    let result = Box::pin(run_agent_main_loop_in_workspace_inner(
         app,
         state,
         registry_state,
@@ -147,7 +147,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
         run_budget,
         task_start_mode,
         None,
-    )
+    ))
     .await;
 
     // 其他宿主错误经 ? 提前返回时也必须收停；已走失败出口的再次调用是幂等的。

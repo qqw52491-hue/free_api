@@ -182,7 +182,8 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             target_session_id TEXT NOT NULL,
             payload_json TEXT NOT NULL,
             created_at TEXT NOT NULL,
-            delivered_at TEXT
+            delivered_at TEXT,
+            claimed_run_id TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_agent_messages_target ON agent_messages(target_run_id, delivered_at, created_at);
         CREATE TABLE IF NOT EXISTS agent_stage_marks (
@@ -525,6 +526,13 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             created_at TEXT NOT NULL
         );",
     )?;
+    let _ = conn.execute("ALTER TABLE agent_role_cards ADD COLUMN execution_defaults TEXT NOT NULL DEFAULT ''", []);
+    let _ = conn.execute("ALTER TABLE agent_child_runs ADD COLUMN execution_config_json TEXT", []);
+    let _ = conn.execute("ALTER TABLE agent_child_runs ADD COLUMN execution_checkpoint_json TEXT", []);
+    let _ = conn.execute("ALTER TABLE agent_child_runs ADD COLUMN execution_version INTEGER NOT NULL DEFAULT 0", []);
+    // A claimed inbox keeps its original recipient; only the associated execution consumes it.
+    let _ = conn.execute("ALTER TABLE agent_messages ADD COLUMN claimed_run_id TEXT", []);
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_messages_claim ON agent_messages(claimed_run_id, delivered_at)", [])?;
     // 滚动迁移：早期版本只有 run_id（UUID），评测报告按 session_id 关联会恒空
     // （列已存在时本语句报 duplicate column，属于正常情况，静默忽略）
     let _ = conn.execute(

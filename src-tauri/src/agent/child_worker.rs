@@ -550,6 +550,11 @@ pub async fn spawn_child_worker(
     interrupt_rx: watch::Receiver<u64>,
     identity: &crate::agent::child_reviewer::ChildRunIdentity,
 ) -> Result<String, String> {
+    crate::agent::execution::runtime::ExecutionConfig::parse(params,"worker")?;
+    let mut effective_identity=identity.clone();
+    effective_identity.dispatch_input=Some(json!({"params":params,"persona":persona}).to_string());
+    if let Some(value)=params.get("execution") {effective_identity.execution_config=Some(value.to_string());}
+    let identity=&effective_identity;
     let request = parse_worker_request(params)?;
     let workspace = workspace_root
         .canonicalize()

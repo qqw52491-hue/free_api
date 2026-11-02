@@ -1491,6 +1491,8 @@
 
         // 前驱失败行：task_id 固定为 "task-f"，attempt 1
         let prev_identity = ChildRunIdentity {
+ dispatch_input: None,
+ execution_config: None,
             task_id: "task-f".to_string(),
             attempt_id: 1,
             purpose: Some("plan_review".to_string()),
@@ -1506,6 +1508,8 @@
 
         // 已存在的备胎：同 task_id，attempt 2，仍在途（崩溃窗口的真实形状）
         let spare_identity = ChildRunIdentity {
+ dispatch_input: None,
+ execution_config: None,
             task_id: "task-f".to_string(),
             attempt_id: 2,
             purpose: Some("plan_review".to_string()),

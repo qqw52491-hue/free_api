@@ -218,7 +218,7 @@ async fn blocking_dispatch_scope_is_isolated_and_unknown_results_stay_unassigned
 #[tokio::test]
 async fn child_registration_and_resume_keep_original_group_even_after_parent_switches() {
     let db = db();
-    db.0.lock().unwrap().execute_batch("CREATE TABLE agent_child_runs(id TEXT PRIMARY KEY,parent_run_id TEXT,parent_session_id TEXT,workspace_root TEXT,model_id TEXT,status TEXT,started_at TEXT,evidence_ref_count INTEGER,kind TEXT,workspace_copy TEXT,resumed_from TEXT,task_id TEXT,attempt_id INTEGER,purpose TEXT,batch_id TEXT,contract_id TEXT,contract_schema TEXT)").unwrap();
+    db.0.lock().unwrap().execute_batch("CREATE TABLE agent_child_runs(id TEXT PRIMARY KEY,parent_run_id TEXT,parent_session_id TEXT,workspace_root TEXT,model_id TEXT,status TEXT,started_at TEXT,evidence_ref_count INTEGER,kind TEXT,workspace_copy TEXT,resumed_from TEXT,task_id TEXT,attempt_id INTEGER,purpose TEXT,batch_id TEXT,contract_id TEXT,contract_schema TEXT, execution_config_json TEXT, execution_checkpoint_json TEXT, execution_version INTEGER NOT NULL DEFAULT 0)").unwrap();
     let mut ctx = context();
     let original = WorkGroup::capture("s", &ctx, 7).unwrap();
     let child = in_group(Some(original.clone()), async {

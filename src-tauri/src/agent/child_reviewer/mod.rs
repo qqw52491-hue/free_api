@@ -81,6 +81,7 @@ fn reviewer_thinking_cap(value: Option<&str>) -> usize {
 /// Mutable review state travels through the shared turn driver. The stream sink
 /// retains activity accounting; contract and evidence rules remain profile hooks.
 struct ReviewCursor<F> {
+    snapshot: crate::agent::execution::runtime::Snapshot,
     messages: Vec<Value>,
     tool_steps_used: u32,
     non_compliant_strikes: u32,
@@ -115,6 +116,11 @@ pub async fn spawn_child_reviewer(
     let current_params = retire_consumer_params(params);
     let params = &current_params;
     crate::agent::control::mark_stage(parent_session_id, "child_spawn:parse_request");
+    crate::agent::execution::runtime::ExecutionConfig::parse(params,"reviewer")?;
+    let mut effective_identity=identity.clone();
+    effective_identity.dispatch_input=Some(json!({"params":params,"persona":persona}).to_string());
+    if let Some(value)=params.get("execution") {effective_identity.execution_config=Some(value.to_string());}
+    let identity=&effective_identity;
     let request = parse_child_review_request(params)?;
     crate::agent::control::mark_stage(parent_session_id, "child_spawn:evidence");
     let (evidence_excerpt, allowed_refs) =
@@ -515,6 +521,21 @@ pub async fn spawn_child_reviewer(
         // 超限后不再判死——带疤收敛（缺项写入 missing_evidence + 留痕标记）。
         let coverage_fix_attempts: u32 = 0;
 
+        let saved=match crate::agent::execution::runtime::Snapshot::load(&db_clone,&child_run_id_clone,"reviewer") {
+            Ok(value)=>value,Err(error)=>{crate::agent::execution::runtime::fail_checkpoint(&db_clone,&child_run_id_clone,error);return;}
+        };
+        let snapshot=saved.unwrap_or_else(||crate::agent::execution::runtime::Snapshot::new(&child_run_id_clone,"reviewer",json!({})));
+        let mut messages=messages;
+        if let Some(history)=snapshot.state.get("messages") {match serde_json::from_value(history.clone()){Ok(value)=>messages=value,Err(error)=>{crate::agent::execution::runtime::fail_checkpoint(&db_clone,&child_run_id_clone,error.to_string());return;}}}
+        let tool_steps_used=snapshot.state["tool_steps_used"].as_u64().unwrap_or(tool_steps_used as u64) as u32;
+        let llm_call_index=snapshot.state["llm_call_index"].as_u64().unwrap_or(llm_call_index as u64) as usize;
+        let non_compliant_strikes=snapshot.state["non_compliant_strikes"].as_u64().unwrap_or(non_compliant_strikes as u64) as u32;
+        let budget_warned=snapshot.state["budget_warned"].as_bool().unwrap_or(budget_warned);
+        let timeout_retried=snapshot.state["timeout_retried"].as_bool().unwrap_or(timeout_retried);
+        let cur_timeout_secs=snapshot.state["cur_timeout_secs"].as_u64().unwrap_or(cur_timeout_secs);
+        let coverage_fix_attempts=snapshot.state["coverage_fix_attempts"].as_u64().unwrap_or(coverage_fix_attempts as u64) as u32;
+        let think_overflows=snapshot.state["think_overflows"].as_u64().unwrap_or(think_overflows as u64) as u32;
+        let cur_effort=snapshot.state["cur_effort"].as_str().map(str::to_owned).unwrap_or(cur_effort);
         let think_chars = &think_chars;
         let stage_key = &stage_key;
         let config = &config;
@@ -531,8 +552,11 @@ pub async fn spawn_child_reviewer(
         let db_clone = &db_clone;
         let allowed_refs = &allowed_refs;
         let Some((messages, duration_ms, completion_tokens, prompt_tokens, mut result_val)) =
-            crate::agent::execution::run(ReviewCursor { messages, tool_steps_used, non_compliant_strikes, budget_warned, llm_call_index, timeout_retried, cur_timeout_secs, coverage_fix_attempts, cur_effort, think_overflows, on_stream_event, interrupt_rx },
-                move |ReviewCursor { mut messages, mut tool_steps_used, mut non_compliant_strikes, mut budget_warned, mut llm_call_index, mut timeout_retried, mut cur_timeout_secs, mut coverage_fix_attempts, mut cur_effort, mut think_overflows, mut on_stream_event, mut interrupt_rx }| async move {
+            crate::agent::execution::run(ReviewCursor { snapshot, messages, tool_steps_used, non_compliant_strikes, budget_warned, llm_call_index, timeout_retried, cur_timeout_secs, coverage_fix_attempts, cur_effort, think_overflows, on_stream_event, interrupt_rx },
+                move |ReviewCursor { mut snapshot, mut messages, mut tool_steps_used, mut non_compliant_strikes, mut budget_warned, mut llm_call_index, mut timeout_retried, mut cur_timeout_secs, mut coverage_fix_attempts, mut cur_effort, mut think_overflows, mut on_stream_event, mut interrupt_rx }| async move {
+            snapshot.phase="ready".into();
+            snapshot.state=json!({"dispatch_input":snapshot.state.get("dispatch_input"),"messages":messages,"tool_steps_used":tool_steps_used,"llm_call_index":llm_call_index,"non_compliant_strikes":non_compliant_strikes,"budget_warned":budget_warned,"timeout_retried":timeout_retried,"cur_timeout_secs":cur_timeout_secs,"coverage_fix_attempts":coverage_fix_attempts,"cur_effort":cur_effort,"think_overflows":think_overflows});
+            if let Err(error)=snapshot.save(db_clone) {crate::agent::execution::runtime::fail_checkpoint(db_clone,child_run_id_clone,error);return Ok(std::ops::ControlFlow::Break(None));}
             let flow = 'turn: {
             llm_call_index += 1;
             think_chars.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -793,7 +817,9 @@ pub async fn spawn_child_reviewer(
                     } else {
                         None
                     };
-                    let observation = match baseline_diff {
+                    let observation = match crate::agent::execution::runtime::authorize(db_clone,child_run_id_clone,&tool_name) {
+                        Err(error)=>error,
+                        Ok(())=>match baseline_diff {
                         Some(text) => text,
                         None => match crate::agent::review_tools::execute(
                             &workspace_root_owned,
@@ -805,6 +831,7 @@ pub async fn spawn_child_reviewer(
                             Ok(out) => out,
                             Err(e) => format!("取证请求被拒绝: {}", e),
                         },
+                    },
                     };
                     tool_steps_used += 1;
                     non_compliant_strikes = 0;
@@ -873,7 +900,7 @@ pub async fn spawn_child_reviewer(
                 std::ops::ControlFlow::Continue(())
             };
             Ok::<_, std::convert::Infallible>(match flow {
-                std::ops::ControlFlow::Continue(()) => std::ops::ControlFlow::Continue(ReviewCursor { messages, tool_steps_used, non_compliant_strikes, budget_warned, llm_call_index, timeout_retried, cur_timeout_secs, coverage_fix_attempts, cur_effort, think_overflows, on_stream_event, interrupt_rx }),
+                std::ops::ControlFlow::Continue(()) => std::ops::ControlFlow::Continue(ReviewCursor { snapshot, messages, tool_steps_used, non_compliant_strikes, budget_warned, llm_call_index, timeout_retried, cur_timeout_secs, coverage_fix_attempts, cur_effort, think_overflows, on_stream_event, interrupt_rx }),
                 std::ops::ControlFlow::Break((duration, completion, prompt, result)) =>
                     std::ops::ControlFlow::Break(Some((messages, duration, completion, prompt, result))),
             })

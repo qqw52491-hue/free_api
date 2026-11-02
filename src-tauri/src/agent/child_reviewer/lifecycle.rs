@@ -30,6 +30,8 @@ pub(crate) struct ChildRunIdentity {
     pub contract_id: Option<String>,
     /// 交付契约模式 JSON（custom_schema 序列化），消费端按它做运行时校验
     pub contract_schema: Option<String>,
+    pub execution_config: Option<String>,
+    pub dispatch_input: Option<String>,
 }
 
 impl ChildRunIdentity {
@@ -42,12 +44,16 @@ impl ChildRunIdentity {
             batch_id: None,
             contract_id: None,
             contract_schema: None,
+            execution_config: None,
+            dispatch_input: None,
         }
     }
 
     /// 从派发信封取身份
     pub fn from_envelope(env: &crate::agent::protocol::DispatchEnvelope) -> Self {
         Self {
+            execution_config: env.input_payload.get("execution").map(Value::to_string),
+            dispatch_input: Some(json!({"params":env.input_payload,"persona":env.persona}).to_string()),
             task_id: env.task_id.clone(),
             attempt_id: env.attempt_id,
             purpose: env.purpose.clone(),
@@ -72,6 +78,8 @@ impl ChildRunIdentity {
             batch_id: prev.batch_id.clone(),
             contract_id: prev.contract_id.clone(),
             contract_schema: prev.contract_schema.clone(),
+            execution_config: prev.execution_config.clone(),
+            dispatch_input: prev.dispatch_input.clone(),
         }
     }
 }
@@ -85,7 +93,7 @@ pub(crate) fn load_run_identity(
 ) -> Option<ChildRunIdentity> {
     let conn = db.0.lock().ok()?;
     conn.query_row(
-        "SELECT COALESCE(task_id, id), attempt_id, purpose, batch_id, contract_id, contract_schema FROM agent_child_runs WHERE id = ?1",
+        "SELECT COALESCE(task_id, id), attempt_id, purpose, batch_id, contract_id, contract_schema, execution_config_json FROM agent_child_runs WHERE id = ?1",
         params![child_run_id],
         |row| {
             Ok(ChildRunIdentity {
@@ -95,6 +103,8 @@ pub(crate) fn load_run_identity(
                 batch_id: row.get::<_, Option<String>>(3)?,
                 contract_id: row.get::<_, Option<String>>(4)?,
                 contract_schema: row.get::<_, Option<String>>(5)?,
+                execution_config: row.get::<_, Option<String>>(6)?,
+                dispatch_input: None,
             })
         },
     )
@@ -163,6 +173,18 @@ pub(crate) fn begin_child_run_extended(
     resumed_from: Option<&str>,
     identity: &ChildRunIdentity,
 ) -> Result<String, String> {
+    if let Some(raw)=&identity.execution_config {
+        let value:Value=serde_json::from_str(raw).map_err(|e|format!("执行配置不是有效 JSON：{e}"))?;
+        crate::agent::execution::runtime::ExecutionConfig::parse(&json!({"execution":value}),kind)?;
+    }
+    let mut effective_identity=identity.clone();
+    let parent_config=crate::agent::execution::runtime::config(db,parent_run_id)?;
+    if let Some(parent_tools)=parent_config.allowed_tools.clone() {
+        let mut child_config=match &identity.execution_config {Some(raw)=>serde_json::from_str::<crate::agent::execution::runtime::ExecutionConfig>(raw).map_err(|e|e.to_string())?,None=>Default::default()};
+        child_config.allowed_tools=Some(match child_config.allowed_tools {None=>parent_tools,Some(tools)=>tools.into_iter().filter(|t|parent_config.permits(t)).collect()});
+        effective_identity.execution_config=Some(serde_json::to_string(&child_config).map_err(|e|e.to_string())?);
+    }
+    let identity=&effective_identity;
     let child_run_id = Uuid::new_v4().to_string();
     let root = workspace_root
         .canonicalize()
@@ -215,8 +237,11 @@ pub(crate) fn begin_child_run_extended(
         .unwrap_or(1);
     let attempt_id = derived_attempt.max(identity.attempt_id as i64);
 
+    let mut initial=crate::agent::execution::runtime::Snapshot::new(&child_run_id,if kind=="review" {"reviewer"}else{kind},json!({"dispatch_input":identity.dispatch_input.as_ref().and_then(|raw|serde_json::from_str::<Value>(raw).ok())}));
+    initial.phase="registered".into();initial.version=1;
+    let initial_json=serde_json::to_string(&initial).map_err(|e|e.to_string())?;
     conn.execute(
-        "INSERT INTO agent_child_runs (id, parent_run_id, parent_session_id, workspace_root, model_id, status, started_at, evidence_ref_count, kind, workspace_copy, resumed_from, task_id, attempt_id, purpose, batch_id, contract_id, contract_schema) VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        "INSERT INTO agent_child_runs (id, parent_run_id, parent_session_id, workspace_root, model_id, status, started_at, evidence_ref_count, kind, workspace_copy, resumed_from, task_id, attempt_id, purpose, batch_id, contract_id, contract_schema, execution_config_json, execution_checkpoint_json, execution_version) VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, 1)",
         params![
             child_run_id,
             parent_run_id,
@@ -234,6 +259,8 @@ pub(crate) fn begin_child_run_extended(
             identity.batch_id,
             identity.contract_id,
             identity.contract_schema,
+            identity.execution_config,
+            initial_json,
         ],
     )
     .map_err(|error| error.to_string())?;
@@ -254,7 +281,7 @@ pub(crate) fn load_child_run_for_resume(
 ) -> Result<(String, String, Option<String>, Option<String>, String, String, Option<String>, ChildRunIdentity), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     conn.query_row(
-        "SELECT status, kind, workspace_copy, message_history_json, model_id, workspace_root, result_json, COALESCE(task_id, id), COALESCE(attempt_id, 1), purpose, batch_id, contract_id, contract_schema FROM agent_child_runs WHERE id = ?1 AND parent_session_id = ?2",
+        "SELECT status, kind, workspace_copy, message_history_json, model_id, workspace_root, result_json, COALESCE(task_id, id), COALESCE(attempt_id, 1), purpose, batch_id, contract_id, contract_schema, execution_config_json FROM agent_child_runs WHERE id = ?1 AND parent_session_id = ?2",
         params![child_run_id, parent_session_id],
         |row| {
             Ok((
@@ -272,6 +299,8 @@ pub(crate) fn load_child_run_for_resume(
                     batch_id: row.get::<_, Option<String>>(10)?,
                     contract_id: row.get::<_, Option<String>>(11)?,
                     contract_schema: row.get::<_, Option<String>>(12)?,
+                    execution_config: row.get::<_, Option<String>>(13)?,
+                    dispatch_input: None,
                 },
             ))
         },
@@ -320,7 +349,7 @@ pub(crate) fn finish_child_run_with_history(
         // 单向迁移：running -> 终态；例外——被 reap 标记为 reaped_stale 的行仍允许
         // 迟到结果落库（真实结论覆盖收割占位结果），归档元数据与会话同寿命保留，
         // 复盘可查"曾超时"与"实际结论"双重事实；cancelled/interrupted 依旧拒绝覆盖。
-        "UPDATE agent_child_runs SET status=?2, finished_at=?3, duration_ms=?4, completion_tokens=?5, prompt_tokens=?9, error_kind=?6, result_json=?7, message_history_json=?8 WHERE id=?1 AND (status IN ('queued','running') OR (status='timed_out' AND error_kind='reaped_stale'))",
+        "UPDATE agent_child_runs SET status=?2, finished_at=?3, duration_ms=?4, completion_tokens=?5, prompt_tokens=?9, error_kind=?6, result_json=?7, message_history_json=?8, execution_checkpoint_json=CASE WHEN execution_checkpoint_json IS NULL OR NOT json_valid(execution_checkpoint_json) THEN execution_checkpoint_json ELSE json_set(execution_checkpoint_json,'$.phase','ended','$.version',execution_version+1) END, execution_version=execution_version+1 WHERE id=?1 AND (status IN ('queued','running') OR (status='timed_out' AND error_kind='reaped_stale'))",
         params![
             child_run_id,
             status,
@@ -333,6 +362,8 @@ pub(crate) fn finish_child_run_with_history(
             prompt_tokens,
         ],
     );
+    drop(conn);
+    crate::agent::agent_mailbox::coordination::kick(db);
     // ⚡ 唤醒挂起等待中的协程（watch 版本号广播，不存在丢失通知的竞态窗口）
     crate::agent::job_engine::notify_job_state_changed();
 }

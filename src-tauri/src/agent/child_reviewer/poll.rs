@@ -186,7 +186,9 @@ pub fn reap_stale_child_runs(db: &DbState, parent_run_id: &str) -> usize {
         );
         reaped += 1;
     }
+    drop(conn);
     if reaped > 0 {
+        crate::agent::agent_mailbox::coordination::kick(db);
         crate::agent::job_engine::notify_job_state_changed();
     }
     reaped

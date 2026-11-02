@@ -598,6 +598,13 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
         }
         None => AgentCheckpoint::new(final_session_id.clone(), &context),
     };
+    let execution_config=crate::agent::execution::runtime::config(state.inner(),&run_id)?;
+    if let Some(tools)=execution_config.allowed_tools {
+        context.add_host_feedback(&format!("【当前宿主执行配置】本子任务的业务工具仅允许：{}；控制与交付入口仍按宿主流程处理。",tools.join(", ")));
+    }
+    if execution_config.workflow.completion.as_deref()==Some("handoff") {
+        context.add_host_feedback("【当前宿主流程】本轮 finish 交回子任务结果；父任务负责集成及整体正式交付。已明确的验证要求和有效阻塞仍须处理；不要把本轮交接称为已独立终审的完整交付。");
+    }
     for message in pending_live_goals {
         crate::agent::conversation::append_live_goal(&mut context, &message);
         checkpoint.pending_finalization = None;
@@ -1184,21 +1191,8 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
         effective_retry_step_limit(run_budget.as_ref(), checkpoint.step_id, resume_from_failed);
     let spent_prompt_tokens: i64 = 0;
     let budget_stop_reason: Option<String> = None;
-    let Some(turn::MainExecution {
-        app,
-        state,
-        final_session_id,
-        run_id,
-        goal,
-        run_trace_steps,
-        mut run_machine,
-        mut checkpoint,
-        context,
-        max_steps,
-        budget_stop_reason,
-        ..
-    }) = crate::agent::execution::run(
-        turn::MainExecution {
+    let Some(execution) = crate::agent::execution::run(
+        Box::new(turn::MainExecution {
             app,
             state,
             registry_state,
@@ -1229,13 +1223,27 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
             max_steps,
             spent_prompt_tokens,
             budget_stop_reason,
-        },
+        }),
         turn::turn_main,
     )
     .await?
     else {
         return Ok(());
     };
+    let turn::MainExecution {
+        app,
+        state,
+        final_session_id,
+        run_id,
+        goal,
+        run_trace_steps,
+        mut run_machine,
+        mut checkpoint,
+        context,
+        max_steps,
+        budget_stop_reason,
+        ..
+    } = *execution;
 
     if run_machine.state() == AgentRunState::Finalizing {
         advance_run_state(
@@ -1299,6 +1307,9 @@ mod artifact_bridge_tests;
 
 #[cfg(test)]
 mod path_scope_manifest_tests;
+
+#[cfg(test)]
+mod stack_tests;
 
 #[cfg(test)]
 mod capability_hint_tests {

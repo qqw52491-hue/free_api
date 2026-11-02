@@ -4,6 +4,7 @@ pub(crate) const WAIT_INTERRUPTED: &str = "agent_message:interrupted";
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 pub(crate) mod replies;
+pub(crate) mod coordination;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Actor {
@@ -163,6 +164,13 @@ pub(crate) fn send(
             json!({"message_id":id,"target":to,"created_at":created,"delivery":if delivered.is_some(){"in_context"}else{"queued"},"duplicate":true,"notice":"in_context 只证明已保存到对方上下文，不证明模型已理解或完成要求。"}),
         );
     }
+    if !replies::root_active_on(&tx, &owner.run)? {
+        return Err("所属主任务已结束；消息未登记。".into());
+    }
+    if !human && sender.run != owner.run {
+        let active: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM agent_child_runs WHERE id=?1 AND status IN ('queued','running'))",[&sender.run],|r|r.get(0)).map_err(|e|e.to_string())?;
+        if !active { return Err("发送方执行已结束；新消息未登记。".into()); }
+    }
     let status: Option<String> = if kind == "main" {
         tx.query_row(
             "SELECT status FROM agent_run_traces WHERE id=?1 AND session_id=?2",
@@ -179,16 +187,17 @@ pub(crate) fn send(
         .optional()
     }
     .map_err(|e| e.to_string())?;
-    if !matches!(status.as_deref(), Some("queued" | "running" | "waiting_human")) {
-        return Err("接收方已结束或当前状态未知，消息未入队。通用任务请用 child_task.resume 追问；专用任务沿用 resume_child。".into());
+    if !matches!(status.as_deref(), Some("queued" | "running" | "waiting_human")) && (human || status.as_deref() != Some("succeeded")) {
+        return Err(format!("接收方状态为 {}；本入口仅接收运行中消息及 Agent 发给成功成员的只读材料，消息未入队。失败或取消成员请由负责人显式续派。",status.as_deref().unwrap_or("unknown")));
     }
     let now = chrono::Utc::now().to_rfc3339();
-    tx.execute("INSERT INTO agent_messages (id,session_id,root_run_id,sender_run_id,sender_session_id,sender_kind,target_run_id,target_session_id,payload_json,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![id,owner.session,owner.run,sender.run,sender.session,if human{"user_material"}else{"agent"},target.run,target.session,payload.to_string(),now]).map_err(|e|e.to_string())?;
+    tx.execute("INSERT INTO agent_messages (id,session_id,root_run_id,sender_run_id,sender_session_id,sender_kind,target_run_id,target_session_id,payload_json,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![id,owner.session,owner.run,sender.run,sender.session,if human{"user_material"}else{"agent_material"},target.run,target.session,payload.to_string(),now]).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     drop(conn);
+    coordination::kick(db);
     crate::agent::job_engine::notify_job_state_changed();
     Ok(
-        json!({"message_id":id,"target":target.run,"created_at":now,"delivery":"queued","notice":"已入队；在接收方下一个安全边界注入。不会中断正在执行的工具，不作为人工批准。"}),
+        json!({"message_id":id,"target":target.run,"created_at":now,"delivery":"queued","notice":"已登记；运行中在安全边界接收，成功结束后由关联只读执行接收。不会中断工具，不作为人工批准。"}),
     )
 }
 
@@ -206,7 +215,7 @@ pub(crate) fn pending_page(
     if !exists {
         return Ok(vec![]);
     } // 旧数据库/最小夹具没有消息表，也就不存在可投递消息。
-    let mut stmt=conn.prepare("SELECT id,sender_run_id,sender_kind,payload_json,created_at FROM agent_messages WHERE target_run_id=?1 AND target_session_id=?2 AND delivered_at IS NULL ORDER BY rowid LIMIT ?3 OFFSET ?4").map_err(|e|e.to_string())?;
+    let mut stmt=conn.prepare("SELECT id,sender_run_id,sender_kind,payload_json,created_at FROM agent_messages WHERE ((target_run_id=?1 AND target_session_id=?2 AND claimed_run_id IS NULL) OR claimed_run_id=?1) AND delivered_at IS NULL ORDER BY rowid LIMIT ?3 OFFSET ?4").map_err(|e|e.to_string())?;
     let rows = stmt
         .query_map(
             params![
@@ -280,6 +289,14 @@ pub(crate) fn deliver_specialist(
     run: &str,
     messages: &mut Vec<Value>,
 ) -> Result<usize, String> {
+    deliver_specialist_with_snapshot(db,run,messages,None)
+}
+
+pub(crate) fn deliver_specialist_with_snapshot(
+    db:&DbState,run:&str,messages:&mut Vec<Value>,
+    mut snapshot:Option<&mut crate::agent::execution::runtime::Snapshot>,
+)->Result<usize,String>{
+    if snapshot.as_ref().is_some_and(|s|s.execution_id!=run) {return Err("收信执行与 checkpoint 归属不一致；未注入或核销。".into());}
     let actor = Actor::new(run, &format!("child:{run}"));
     let inbox = pending(db, &actor)?;
     if inbox.is_empty() {
@@ -302,7 +319,7 @@ pub(crate) fn deliver_specialist(
     .map_err(|e| e.to_string())?;
     for item in &inbox {
         tx.execute(
-            "UPDATE agent_messages SET delivered_at=?1 WHERE id=?2 AND target_run_id=?3 AND delivered_at IS NULL",
+            "UPDATE agent_messages SET delivered_at=?1 WHERE id=?2 AND ((target_run_id=?3 AND claimed_run_id IS NULL) OR claimed_run_id=?3) AND delivered_at IS NULL",
             params![
                 chrono::Utc::now().to_rfc3339(),
                 item["message_id"].as_str(),
@@ -311,26 +328,33 @@ pub(crate) fn deliver_specialist(
         )
         .map_err(|e| e.to_string())?;
     }
+    let mut saved=snapshot.as_deref().cloned();
+    if let Some(candidate_snapshot)=saved.as_mut() {
+        candidate_snapshot.state["messages"]=json!(candidate);
+        candidate_snapshot.save_on(&tx)?;
+    }
     tx.commit().map_err(|e| e.to_string())?;
+    if let (Some(target),Some(saved))=(snapshot.as_deref_mut(),saved) {*target=saved;}
     *messages = candidate;
     Ok(inbox.len())
 }
 
 pub(crate) fn receipt(db: &DbState, actor: &Actor, id: &str) -> Result<Value, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    let (from,to,raw,at,delivered):(String,String,String,String,Option<String>)=conn.query_row(
-        "SELECT sender_run_id,target_run_id,payload_json,created_at,delivered_at FROM agent_messages WHERE id=?1 AND (sender_run_id=?2 OR target_run_id=?2 OR target_run_id=(SELECT resumed_from FROM agent_child_runs WHERE id=?2 AND (kind='task' OR purpose='readonly_reply')))",
-        params![id,actor.run],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).map_err(|_|"消息不存在或不属于当前收发方/宿主绑定的前次任务。".to_string())?;
+    let (from,to,raw,at,delivered,claimed):(String,String,String,String,Option<String>,Option<String>)=conn.query_row(
+        "SELECT sender_run_id,target_run_id,payload_json,created_at,delivered_at,claimed_run_id FROM agent_messages WHERE id=?1 AND (sender_run_id=?2 OR target_run_id=?2 OR claimed_run_id=?2 OR target_run_id=(SELECT resumed_from FROM agent_child_runs WHERE id=?2 AND (kind='task' OR purpose IN ('readonly_reply','readonly_inbox'))))",
+        params![id,actor.run],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).map_err(|_|"消息不存在或不属于当前收发方/宿主绑定的前次任务。".to_string())?;
     let status:Option<String>=conn.query_row("SELECT status FROM agent_child_runs WHERE id=?1 UNION ALL SELECT status FROM agent_run_traces WHERE id=?1 LIMIT 1",[&to],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+    let execution_status:Option<String>=conn.query_row("SELECT status FROM agent_child_runs WHERE id=?1",[claimed.as_deref().unwrap_or(&to)],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
     let delivery = if delivered.is_some() {
         "in_context"
-    } else if matches!(status.as_deref(), Some("queued" | "running" | "waiting_human")) {
+    } else if matches!(execution_status.as_deref().or(status.as_deref()), Some("queued" | "running" | "waiting_human")) {
         "queued"
     } else {
         "not_delivered_target_ended"
     };
     Ok(
-        json!({"message_id":id,"sender_run_id":from,"target_run_id":to,"payload":serde_json::from_str::<Value>(&raw).ok(),"created_at":at,"delivered_at":delivered,"delivery":delivery,"target_status":status,"notice":"in_context 只证明带来源材料或节选及原文入口已保存到上下文，不证明模型理解或完成；结束时未投递的消息会作为后续追问的历史材料保留。"}),
+        json!({"message_id":id,"sender_run_id":from,"target_run_id":to,"payload":serde_json::from_str::<Value>(&raw).ok(),"created_at":at,"delivered_at":delivered,"delivery":delivery,"target_status":status,"execution_run_id":claimed,"execution_status":execution_status,"notice":"in_context 只证明带来源材料或节选及原文入口已保存到上下文，不证明模型理解或完成；结束时未投递的消息会作为后续追问的历史材料保留。"}),
     )
 }
 
@@ -384,8 +408,8 @@ pub(crate) async fn wait(
 pub(crate) fn family_list(db: &DbState, actor: &Actor) -> Result<Vec<Value>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let owner = root(&conn, actor)?;
-    let mut stmt=conn.prepare("WITH RECURSIVE family(id) AS (SELECT ?1 UNION SELECT c.id FROM agent_child_runs c JOIN family f ON c.parent_run_id=f.id) SELECT c.id,c.kind,c.status,c.model_id,c.parent_run_id,c.started_at,c.finished_at,c.purpose,c.resumed_from FROM agent_child_runs c JOIN family f ON f.id=c.id ORDER BY (c.status='running') DESC,c.started_at DESC LIMIT 100").map_err(|e|e.to_string())?;
-    let rows=stmt.query_map([owner.run],|r|Ok(json!({"child_run_id":r.get::<_,String>(0)?,"kind":r.get::<_,String>(1)?,"execution_status":r.get::<_,String>(2)?,"model":r.get::<_,String>(3)?,"parent_run_id":r.get::<_,String>(4)?,"started_at":r.get::<_,String>(5)?,"finished_at":r.get::<_,Option<String>>(6)?,"purpose":r.get::<_,Option<String>>(7)?,"resumed_from":r.get::<_,Option<String>>(8)?}))).map_err(|e|e.to_string())?;
+    let mut stmt=conn.prepare("WITH RECURSIVE family(id) AS (SELECT ?1 UNION SELECT c.id FROM agent_child_runs c JOIN family f ON c.parent_run_id=f.id) SELECT c.id,c.kind,c.status,c.model_id,c.parent_run_id,c.started_at,c.finished_at,c.purpose,c.resumed_from,c.applied_at,(c.result_json IS NOT NULL),c.execution_config_json,CASE WHEN c.kind='task' THEN COALESCE((SELECT json_object('profile','task','phase',p.phase,'version',p.version) FROM agent_checkpoints p WHERE p.run_id='task-'||c.id),c.execution_checkpoint_json) ELSE c.execution_checkpoint_json END FROM agent_child_runs c JOIN family f ON f.id=c.id ORDER BY (c.status='running') DESC,c.started_at DESC LIMIT 100").map_err(|e|e.to_string())?;
+    let rows=stmt.query_map([owner.run],|r|Ok(json!({"child_run_id":r.get::<_,String>(0)?,"kind":r.get::<_,String>(1)?,"execution_status":r.get::<_,String>(2)?,"model":r.get::<_,String>(3)?,"parent_run_id":r.get::<_,String>(4)?,"started_at":r.get::<_,String>(5)?,"finished_at":r.get::<_,Option<String>>(6)?,"purpose":r.get::<_,Option<String>>(7)?,"resumed_from":r.get::<_,Option<String>>(8)?,"collected_at":r.get::<_,Option<String>>(9)?,"result_available":r.get::<_,bool>(10)?,"execution_config":r.get::<_,Option<String>>(11)?.and_then(|s|serde_json::from_str::<Value>(&s).ok()),"checkpoint":r.get::<_,Option<String>>(12)?.and_then(|s|serde_json::from_str::<Value>(&s).ok()).map(|s|json!({"profile":s["profile"],"phase":s["phase"],"version":s["version"]}))}))).map_err(|e|e.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())
 }
@@ -439,7 +463,8 @@ pub(crate) async fn specialist_action(
             )
             .map(|v| v.to_string()),
         ),
-        "team_status" => Some(family_list(db, &actor).map(|v| json!({"tasks":v}).to_string())),
+        "team_status" if params.get("offset").is_some_and(|v| v.as_u64().is_none()) => Some(Err("team_status.offset 类型错误：期望非负整数；未查询。".into())),
+        "team_status" => Some(family_list(db, &actor).and_then(|v| coordination::list(db,&actor,params["offset"].as_u64().unwrap_or(0)).map(|c|json!({"tasks":v,"collaboration":c}).to_string()))),
         _ => None,
     }
 }

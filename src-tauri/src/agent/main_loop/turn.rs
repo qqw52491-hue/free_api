@@ -36,8 +36,8 @@ pub(super) struct MainExecution<'a, 'b> {
 }
 
 pub(super) async fn turn_main<'a, 'b>(
-    state: MainExecution<'a, 'b>,
-) -> Result<ControlFlow<Option<MainExecution<'a, 'b>>, MainExecution<'a, 'b>>, String> {
+    state: Box<MainExecution<'a, 'b>>,
+) -> Result<ControlFlow<Option<Box<MainExecution<'a, 'b>>>, Box<MainExecution<'a, 'b>>>, String> {
     if state.checkpoint.step_id >= state.max_steps {
         return Ok(ControlFlow::Break(Some(state)));
     }
@@ -72,7 +72,7 @@ pub(super) async fn turn_main<'a, 'b>(
         max_steps,
         mut spent_prompt_tokens,
         mut budget_stop_reason,
-    } = state;
+    } = *state;
     let flow = 'turn: {
         crate::agent::agent_mailbox::deliver_main(
             state.inner(),
@@ -1254,12 +1254,13 @@ pub(super) async fn turn_main<'a, 'b>(
                 ) {
                     Ok(finish) => finish,
                     Err(error) if error == crate::agent::agent_mailbox::replies::PENDING_REPLY => {
-                        context.add_host_feedback("交付提交前新受理的只读追问尚未回收；本次未结束，请等待答复并处理交接。");
+                        crate::agent::agent_mailbox::coordination::kick(state.inner());
+                        context.add_host_feedback("交付提交前新受理的协作尚未结清；本次未结束，请等待答复并处理交接。");
                         checkpoint.complete_step(step_id, &context);
                         save_checkpoint(state.inner(), &mut checkpoint)?;
                         let _ = app.emit(
                             &format!("agent-log-{}", final_session_id),
-                            "交付暂缓：正在等待已受理的只读追问。",
+                            "交付暂缓：正在等待已登记的协作。",
                         );
                         break 'turn ControlFlow::Continue(());
                     }
@@ -1362,7 +1363,7 @@ pub(super) async fn turn_main<'a, 'b>(
         sleep(Duration::from_millis(500)).await;
         ControlFlow::Continue(())
     };
-    let state = MainExecution {
+    let state = Box::new(MainExecution {
         app,
         state,
         registry_state,
@@ -1393,7 +1394,7 @@ pub(super) async fn turn_main<'a, 'b>(
         max_steps,
         spent_prompt_tokens,
         budget_stop_reason,
-    };
+    });
     Ok(match flow {
         ControlFlow::Continue(()) => ControlFlow::Continue(state),
         ControlFlow::Break(()) => ControlFlow::Break(Some(state)),

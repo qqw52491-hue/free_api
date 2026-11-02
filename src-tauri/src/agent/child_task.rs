@@ -143,6 +143,7 @@ pub(crate) fn result(db: &DbState, parent: &str, id: &str) -> Result<Value, Stri
         .filter(Value::is_object)
         .unwrap_or_else(|| json!({}));
     body["delivery_accepted"] = json!(status == "succeeded" && body["delivery_accepted"] == true);
+    body["handoff_accepted"] = json!(status == "succeeded" && body["handoff_accepted"] == true);
     body["execution_ended"] = json!(status != "running");
     // status 与验收分别表达；没有正式提交的成功终态不能推断目标达成。
     body["execution_status"] = json!(status);
@@ -199,7 +200,10 @@ pub(crate) fn settle(
         .as_ref()
         .and_then(|(_, raw)| raw.as_deref())
         .and_then(|s| serde_json::from_str::<Value>(s).ok());
-    let accepted = saved.as_ref().is_some_and(|(s, _)| s == "succeeded")
+    let config_raw:Option<String>=conn.query_row("SELECT execution_config_json FROM agent_child_runs WHERE id=?1",[&binding.child_run],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let execution_config=config_raw.map(|raw|serde_json::from_str::<crate::agent::execution::runtime::ExecutionConfig>(&raw).map_err(|e|e.to_string())).transpose()?.unwrap_or_default();
+    let mode_matches=receipt.is_some_and(|r|r.handoff==(execution_config.workflow.completion.as_deref()==Some("handoff")));
+    let accepted = mode_matches && saved.as_ref().is_some_and(|(s, _)| s == "succeeded")
         && checkpoint
             .as_ref()
             .is_some_and(|cp| cp.phase == crate::agent::checkpoint::AgentPhase::Done)
@@ -212,6 +216,7 @@ pub(crate) fn settle(
                     .and_then(Value::as_str)
                     == Some(r.receipt_id.as_str())
         });
+    let handoff=receipt.is_some_and(|r|r.handoff);
     let status = if accepted {
         "succeeded"
     } else if saved
@@ -224,7 +229,7 @@ pub(crate) fn settle(
     };
     let body = json!({
         "child_run_id":binding.child_run,"child_session_id":binding.child_session,
-        "parent_run_id":binding.parent_run,"execution_status":status,"delivery_accepted":accepted,
+        "parent_run_id":binding.parent_run,"execution_status":status,"delivery_accepted":accepted && !handoff,"handoff_accepted":accepted && handoff,
         "execution_ended":true,"delivery":completion,
         "artifact_base":crate::agent::path_guard::get_session_tmp_dir(&binding.parent_session).join("delegated").join(&binding.child_session),
         "verification":receipt.map(|r| &r.verification),"review":receipt.map(|r| &r.review),
@@ -237,6 +242,9 @@ pub(crate) fn settle(
         "UPDATE agent_child_runs SET status=?2,result_json=?3,finished_at=?4,duration_ms=?5,consumed_at=?4 WHERE id=?1 AND kind='task'",
         params![binding.child_run,status,body.to_string(),chrono::Utc::now().to_rfc3339(),elapsed as i64],
     ).map_err(|e| e.to_string())?;
+    drop(conn);
+    crate::agent::agent_mailbox::coordination::kick(db);
+    crate::agent::job_engine::notify_job_state_changed();
     Ok(body)
 }
 

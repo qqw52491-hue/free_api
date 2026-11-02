@@ -254,7 +254,7 @@ pub async fn chat_iterate_role_card_ai(
 
     let kind_hint_str = role_kind_hint
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "未指定特定类型，请根据需求智能判断最适合的 child kind (writer, reviewer 或 worker)".to_string());
+        .unwrap_or_else(|| "未指定特定类型，请根据需求智能判断最适合的 child kind (task、writer、reviewer 或 worker)".to_string());
 
     let sys_prompt = r#"你是一位顶级 AI Agent 架构专家与对话式角色设计顾问。用户正在与你共同【多轮迭代设计与微调一个专精的角色卡 (Role Card)】。
 
@@ -271,7 +271,7 @@ pub async fn chat_iterate_role_card_ai(
 【角色卡各字段规范】：
 1. name: 唯一标识 slug，全小写字母加下划线（如 vue_tailwind_reviewer, rust_concurrency_guard）。
 2. label: 中文展示名称，以最符合身份的 1 个 Emoji 开头（如 "🎨 Vue 样式审查专家"）。
-3. allowed_kinds: 挂载类型数组，可选 ["writer"](改码)、["reviewer"](审查)、["worker"](调研探针)。
+3. allowed_kinds: 挂载类型数组，可选 ["task"](通用子目标)、["writer"](隔离改码)、["reviewer"](审查)、["worker"](调研探针)。
 4. scope_hints: 调度唤醒提示词（1~2 句话，说明主 Agent 在何种业务场景下派发此专家）。
 5. default_test_command: 基线验证命令（如 "npm test", "cargo test", "npm run build" 或 ""）。
 6. persona_prompt: 详实专业的人设提示词（300~500字）。涵盖：专家身份、核心检查/执行标准（至少3项明确指标）、绝不允许犯的红线禁忌、打分评价维度。

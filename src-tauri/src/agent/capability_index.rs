@@ -549,7 +549,8 @@ mod tests {
                 allowed_kinds TEXT NOT NULL DEFAULT '', hard_scope TEXT NOT NULL DEFAULT '',
                 max_concurrency INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1,
                 custom_schema TEXT NOT NULL DEFAULT '', focus_domains TEXT NOT NULL DEFAULT '',
-                input_schema TEXT NOT NULL DEFAULT ''
+                input_schema TEXT NOT NULL DEFAULT '',
+                allowed_skills TEXT NOT NULL DEFAULT '', allowed_mcp TEXT NOT NULL DEFAULT '', execution_defaults TEXT NOT NULL DEFAULT ''
             );",
         )
         .unwrap();

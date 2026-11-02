@@ -27,6 +27,8 @@ pub(crate) fn commit_completed_run(
         .as_ref()
         .filter(|r| r.is_ready() && !r.acceptance_fingerprint.is_empty())
         .ok_or_else(|| "交付未提交：缺少当前版本的就绪验收收据".to_string())?;
+    let handoff=crate::agent::execution::runtime::config(db,run_id)?.workflow.completion.as_deref()==Some("handoff");
+    if receipt.handoff!=handoff {return Err("执行的交接/交付配置已变化；原收据不能复用，请重新核验。".into());}
     if receipt.acceptance_fingerprint
         != crate::agent::finalization::acceptance_fingerprint(context, checkpoint, &receipt.finish_payload)
     {
@@ -103,6 +105,7 @@ pub(crate) fn commit_completed_run(
         }
     }
     if let Some(ref receipt) = checkpoint.pending_finalization {
+        emitted_finish["handoff"]=json!(receipt.handoff);
         if let serde_json::Value::Object(ref mut map) = emitted_finish {
             map.insert(
                 "finalization_receipt".to_string(),

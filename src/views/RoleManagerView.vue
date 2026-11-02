@@ -4,7 +4,7 @@
       <div class="header-main">
         <h2>🎭 Agent 专家工坊 (Role Team)</h2>
         <p class="header-sub">
-          配置多 Agent 协作角色卡。每个角色拥有独立的 Persona 提示词与专属模型绑定，主调度 Master 会在复杂任务中自动唤醒对应专家角色。
+          配置角色知识、模型、工具范围与默认流程。各子任务分别保存执行进度。
         </p>
       </div>
       <div class="header-actions">
@@ -269,6 +269,10 @@
             {{ opt.label }}
           </button>
         </div>
+      </div>
+
+      <div class="field wide">
+        <RoleExecutionSettings v-model="form.execution_defaults" @profile-change="ensureExecutionKind" />
       </div>
 
       <label class="field wide">
@@ -574,6 +578,7 @@
               <span class="tag-icon">🧪</span>
               <span class="tag-text">{{ card.default_test_command }}</span>
             </div>
+            <div v-if="card.execution_defaults" class="meta-tag kind-tag" :title="executionLabel(card)"><span class="tag-text">{{ executionLabel(card) }}</span></div>
             <div v-if="card.allowed_kinds" class="meta-tag kind-tag" :title="`允许挂载类型: ${card.allowed_kinds}`">
               <span class="tag-icon">🏷️</span>
               <span class="tag-text">{{ card.allowed_kinds }}</span>
@@ -632,6 +637,7 @@
 import { ref, reactive, onMounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import ModelSelectDropdown from '../components/common/ModelSelectDropdown.vue';
+import RoleExecutionSettings from '../components/agent/RoleExecutionSettings.vue';
 
 interface RoleCard {
   id: string;
@@ -648,6 +654,7 @@ interface RoleCard {
   custom_schema?: string;
   focus_domains?: string;
   input_schema?: string;
+  execution_defaults?: string;
 }
 
 interface SchemaFieldFormItem {
@@ -666,6 +673,7 @@ interface ModelItem {
 }
 
 const kindOptions = [
+  { value: 'task', label: '通用子任务 (Task)' },
   { value: 'writer', label: '✍️ 代码修改专家 (Writer)' },
   { value: 'worker', label: '🔍 只读侦察探针 (Worker)' },
   { value: 'reviewer', label: '🛡️ 终态审查专家 (Reviewer)' },
@@ -700,6 +708,7 @@ interface RoleChatMessage {
 const aiChatHistory = ref<RoleChatMessage[]>([]);
 
 const aiKindOptions = [
+  { value: 'task', label: '通用子目标 (Task)' },
   { value: 'writer', label: '✍️ 改码专精 (Writer)' },
   { value: 'reviewer', label: '🛡️ 阶段审查 (Reviewer)' },
   { value: 'worker', label: '🔍 调研探针 (Worker)' },
@@ -818,6 +827,7 @@ const form = reactive({
   persona_prompt: '',
   scope_hints: '',
   default_test_command: '',
+  execution_defaults: JSON.stringify({ profile: 'task', execution: { workflow: { plan_mode: 'auto', completion: 'delivery' } } }),
   allowed_kinds: [] as string[],
   max_concurrency: 0,
   enabled: true,
@@ -1062,6 +1072,18 @@ function getFocusDomainLabels(card: RoleCard): string {
   return list.map((item) => labelMap[item] || item).join(', ');
 }
 
+function ensureExecutionKind(profile: string) {
+  if (form.allowed_kinds.length && !form.allowed_kinds.includes(profile)) form.allowed_kinds.push(profile);
+}
+function executionLabel(card: RoleCard) {
+  if (!card.execution_defaults) return '';
+  try {
+    const value = JSON.parse(card.execution_defaults);
+    const names: Record<string, string> = { task: '通用任务', worker: '只读调查', writer: '隔离修改', reviewer: '专用审查' };
+    return `${names[value.profile] || value.profile} · ${value.execution?.workflow?.completion === 'handoff' || value.profile !== 'task' ? '结果交接' : '完整交付'}`;
+  } catch { return '执行组合需修订'; }
+}
+
 function startCreate() {
   isEditing.value = false;
   isCreating.value = true;
@@ -1072,6 +1094,7 @@ function startCreate() {
     persona_prompt: '',
     scope_hints: '',
     default_test_command: '',
+    execution_defaults: JSON.stringify({ profile: 'task', execution: { workflow: { plan_mode: 'auto', completion: 'delivery' } } }),
     allowed_kinds: [],
     max_concurrency: 0,
     enabled: true,
@@ -1097,6 +1120,8 @@ function applyPreset(tpl: typeof presetTemplates[0]) {
   form.persona_prompt = tpl.persona_prompt;
   form.default_test_command = tpl.default_test_command;
   form.allowed_kinds = tpl.allowed_kinds ? tpl.allowed_kinds.split(',').map((s) => s.trim()).filter(Boolean) : [];
+  const executionProfile = form.allowed_kinds.length === 1 ? form.allowed_kinds[0] : 'task';
+  form.execution_defaults = JSON.stringify({ profile: executionProfile, execution: { workflow: executionProfile === 'task' ? { plan_mode: 'auto', completion: 'delivery' } : { completion: 'handoff' } } });
   form.max_concurrency = tpl.max_concurrency || 0;
   form.enabled = true;
   form.focus_domains = tpl.focus_domains ? [...tpl.focus_domains] : [];
@@ -1171,6 +1196,7 @@ function editCard(card: RoleCard) {
 
   Object.assign(form, {
     name: card.name,
+    execution_defaults: card.execution_defaults || '',
     label: card.label,
     model_id: card.model_id || '',
     persona_prompt: card.persona_prompt,
@@ -1289,6 +1315,10 @@ async function generateWithAi() {
     if ('scope_hints' in roleData) form.scope_hints = roleData.scope_hints ?? '';
     if ('default_test_command' in roleData) form.default_test_command = roleData.default_test_command ?? '';
     if (Array.isArray(roleData.allowed_kinds)) form.allowed_kinds = [...roleData.allowed_kinds];
+    if (!wasEditing && form.allowed_kinds.length === 1 && form.execution_defaults === JSON.stringify({ profile: 'task', execution: { workflow: { plan_mode: 'auto', completion: 'delivery' } } })) {
+      const profile = form.allowed_kinds[0];
+      form.execution_defaults = JSON.stringify({ profile, execution: { workflow: profile === 'task' ? { plan_mode: 'auto', completion: 'delivery' } : { completion: 'handoff' } } });
+    }
     if (!wasEditing) {
       form.max_concurrency = 0;
       form.enabled = true;
@@ -1455,6 +1485,7 @@ async function saveRoleCard() {
         persona_prompt: form.persona_prompt.trim(),
         scope_hints: form.scope_hints.trim(),
         default_test_command: form.default_test_command.trim(),
+        execution_defaults: form.execution_defaults,
         allowed_kinds: form.allowed_kinds.join(','),
         max_concurrency: Number(form.max_concurrency) || 0,
         enabled: form.enabled,

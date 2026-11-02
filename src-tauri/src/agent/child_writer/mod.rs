@@ -116,7 +116,7 @@ pub struct ChangedFile {
 /// 首次修改前的文件基线：before 内容 + 当时是否已存在。
 /// existed_before=false 时 spawn 指纹按缺失文件哨兵 "empty/deleted" 记录，
 /// 使三态冲突检测对新建文件给出正确语义（父工作区仍无此文件 → CleanReplay）。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WriteBaseline {
     pub content: String,
     pub existed_before: bool,
@@ -486,7 +486,11 @@ pub async fn run_writer(
 ) {
     use crate::agent::execution::actions::{Capabilities, Profile, Session};
     let started_at = std::time::Instant::now();
-    let git_available = init_git_baseline(&copy_root).await;
+    let git_available = match crate::agent::execution::runtime::Snapshot::load(&db,&child_run_id,"writer") {
+        Ok(Some(snapshot)) if snapshot.phase!="registered"=>copy_root.join(".git").is_dir(),
+        Err(_)=>false,
+        _=>init_git_baseline(&copy_root).await,
+    };
     let messages = if let Some(msgs) = initial_messages {
         msgs
     } else {
@@ -698,6 +702,11 @@ pub async fn spawn_child_writer(
     interrupt_rx: watch::Receiver<u64>,
     identity: &crate::agent::child_reviewer::ChildRunIdentity,
 ) -> Result<String, String> {
+    crate::agent::execution::runtime::ExecutionConfig::parse(params,"writer")?;
+    let mut effective_identity=identity.clone();
+    effective_identity.dispatch_input=Some(json!({"params":params,"persona":persona}).to_string());
+    if let Some(value)=params.get("execution") {effective_identity.execution_config=Some(value.to_string());}
+    let identity=&effective_identity;
     let request = parse_writer_request(params)?;
     let parent = workspace_root
         .canonicalize()

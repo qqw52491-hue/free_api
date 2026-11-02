@@ -186,6 +186,12 @@ pub async fn run_tool_phase(
     }
 
     crate::agent::agent_mailbox::deliver_main(state.inner(),&crate::agent::agent_mailbox::Actor::new(parent_run_id,final_session_id),context,checkpoint)?;
+    let entry=inst.get_tool();
+    if !entry.is_empty() && inst.commands.is_empty() && inst.parallel.is_none() && inst.plan_tree.is_none() && !matches!(entry.as_str(),"parallel"|"sequential"|"pipeline"|"finish") {
+        if let Err(error)=crate::agent::execution::runtime::authorize_call(state.inner(),parent_run_id,&entry,&inst.get_action(),&inst.get_params()) {
+            return Ok(crate::agent::tools::input_validation::rejection(error));
+        }
+    }
     let occupied=crate::agent::child_task::runtime::active(parent_run_id);
     let coordination=inst.get_tool().eq_ignore_ascii_case("child_task") || inst.get_action().eq_ignore_ascii_case("child_task") || matches!(inst.get_tool().as_str(),"wait_jobs"|"wait_job"|"ask_human");
     if !occupied.is_empty() && !coordination && (is_write_or_side_effect_tool(inst) || crate::agent::context::AuditLedger::is_mutating_side_effect_with_action(&inst.get_tool(),&inst.get_action(),&inst.get_params())) {

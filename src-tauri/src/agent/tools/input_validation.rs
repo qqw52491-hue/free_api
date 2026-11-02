@@ -147,10 +147,10 @@ pub(crate) fn validate_native(tool: &str, action: &str, params: &Value) -> Resul
                 "result"|"status"|"cancel"=>{text(&tool,params,&["child_run_id"],false)?;optional(&tool,params,"output_id","string")?;},
                 "resume"=>{text(&tool,params,&["child_run_id"],false)?;text(&tool,params,&["message"],false)?;if params["message"].as_str().unwrap().chars().count()>65_536{return Err("追问超过 65536 字符，未执行。".into())}},
                 "receipt"=>text(&tool,params,&["message_id"],false)?,
-                "list"=>{},
+                "list"=>{optional(&tool,params,"offset","非负整数")?;},
                 "inbox"=>{optional(&tool,params,"child_run_id","string")?;optional(&tool,params,"offset","非负整数")?;optional(&tool,params,"limit","非负整数")?;},
                 "wait"=>{optional(&tool,params,"child_run_id","string")?;optional(&tool,params,"timeout_secs","非负整数")?;},
-                "dispatch"=>{text(&tool,params,&["task"],false)?;optional(&tool,params,"context","string")?;let size=params["task"].as_str().unwrap().chars().count()+params.get("context").and_then(Value::as_str).unwrap_or_default().chars().count();if size>65_536{return Err("child_task 的 task + context 超过 65536 字符；本次未执行。请用已有引用。".into())}},
+                "dispatch"=>{crate::agent::execution::runtime::ExecutionConfig::parse(params,params["profile"].as_str().unwrap_or("task"))?;optional(&tool,params,"profile","string")?;text(&tool,params,&["task"],false)?;optional(&tool,params,"context","string")?;let size=params["task"].as_str().unwrap().chars().count()+params.get("context").and_then(Value::as_str).unwrap_or_default().chars().count();if size>65_536{return Err("child_task 的 task + context 超过 65536 字符；本次未执行。请用已有引用。".into())}},
                 _=>return Err(format!("未知 child_task action='{effective}'；允许 dispatch/result/resume/status/list/send/ask/read_agent_result/inbox/receipt/wait/cancel；本次未执行。")),
             }
         }
@@ -186,6 +186,7 @@ pub(crate) fn validate_child_item(db: &DbState, tool: &str, params: &Value) -> R
     if !params.is_object() {
         return Err(type_error(tool, "params", "object", params));
     }
+    crate::agent::execution::runtime::ExecutionConfig::parse(params, if tool=="child_task" {"task"}else{tool})?;
     optional(tool, params, "role", "string")?;
     optional(tool, params, "custom_inputs", "object")?;
     if tool == "child_writer" {
@@ -445,8 +446,8 @@ mod tests {
     #[test]
     fn role_writer_defaults_still_apply_before_required_request_checks() {
         let db = empty_db();
-        db.0.lock().unwrap().execute_batch("CREATE TABLE agent_role_cards(id TEXT, name TEXT, label TEXT, model_id TEXT, persona_prompt TEXT, scope_hints TEXT, default_test_command TEXT, enabled INTEGER, allowed_kinds TEXT, hard_scope TEXT, max_concurrency INTEGER, custom_schema TEXT, focus_domains TEXT, input_schema TEXT, allowed_skills TEXT, allowed_mcp TEXT);").unwrap();
-        db.0.lock().unwrap().execute_batch("INSERT INTO agent_role_cards VALUES ('id','writer_role','Writer','','','src/a.rs','cargo check',1,'writer','',0,'','','','','');").unwrap();
+        db.0.lock().unwrap().execute_batch("CREATE TABLE agent_role_cards(id TEXT, name TEXT, label TEXT, model_id TEXT, persona_prompt TEXT, scope_hints TEXT, default_test_command TEXT, enabled INTEGER, allowed_kinds TEXT, hard_scope TEXT, max_concurrency INTEGER, custom_schema TEXT, focus_domains TEXT, input_schema TEXT, allowed_skills TEXT, allowed_mcp TEXT, execution_defaults TEXT NOT NULL DEFAULT '');").unwrap();
+        db.0.lock().unwrap().execute_batch("INSERT INTO agent_role_cards VALUES ('id','writer_role','Writer','','','src/a.rs','cargo check',1,'writer','',0,'','','','','','');").unwrap();
         let inst: AgentInstruction = serde_json::from_value(
             json!({"tool":"child_writer","command":{"role":"writer_role","task":"fix"}}),
         )

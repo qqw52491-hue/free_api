@@ -10,16 +10,17 @@ pub(crate) const PENDING_REPLY: &str = "agent_reply:pending";
 const PURPOSE: &str = "readonly_reply";
 
 #[derive(Clone, Debug)]
-struct Ticket {
-    request: String,
-    run: String,
-    original: String,
-    responsible: String,
-    root: Actor,
-    requester: Actor,
-    model: String,
-    workspace: PathBuf,
-    prior: String,
+pub(super) struct Ticket {
+    pub(super) request: String,
+    pub(super) run: String,
+    pub(super) original: String,
+    pub(super) responsible: String,
+    pub(super) root: Actor,
+    pub(super) requester: Actor,
+    pub(super) model: String,
+    pub(super) workspace: PathBuf,
+    pub(super) prior: String,
+    pub(super) inbox: bool,
 }
 
 pub(crate) fn root_active_on(conn: &Connection, run: &str) -> Result<bool, String> {
@@ -40,7 +41,10 @@ pub(crate) fn pending_on(conn: &Connection, run: &str) -> Result<bool, String> {
     if !exists {
         return Ok(false);
     }
-    conn.query_row("SELECT EXISTS(SELECT 1 FROM agent_child_runs WHERE parent_run_id=?1 AND purpose=?2 AND (status IN ('queued','running') OR applied_at IS NULL OR applied_at=''))",
+    if super::coordination::pending_on(conn, run)? {
+        return Ok(true);
+    }
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM agent_child_runs WHERE parent_run_id=?1 AND purpose IN (?2,'readonly_inbox') AND (status IN ('queued','running') OR applied_at IS NULL OR applied_at=''))",
         params![run, PURPOSE], |r| r.get(0)).map_err(|e| e.to_string())
 }
 
@@ -61,8 +65,8 @@ pub(crate) fn read_result(db: &DbState, actor: &Actor, params: &Value) -> Result
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let (target, kind) = resolve(&conn, actor, id)?;
     let view = params["view"].as_str().unwrap_or("result");
-    if !matches!(view, "result" | "history") {
-        return Err("view 仅允许 result/history。".into());
+    if !matches!(view, "result" | "history" | "checkpoint") {
+        return Err("view 仅允许 result/history/checkpoint。".into());
     }
     let (status, mut text): (String, Option<String>) = if kind == "main" {
         conn.query_row(
@@ -72,7 +76,9 @@ pub(crate) fn read_result(db: &DbState, actor: &Actor, params: &Value) -> Result
         )
     } else {
         conn.query_row(
-            if view == "history" {
+            if view == "checkpoint" {
+                "SELECT status,execution_checkpoint_json FROM agent_child_runs WHERE id=?1"
+            } else if view == "history" {
                 "SELECT status,message_history_json FROM agent_child_runs WHERE id=?1"
             } else {
                 "SELECT status,result_json FROM agent_child_runs WHERE id=?1"
@@ -84,11 +90,17 @@ pub(crate) fn read_result(db: &DbState, actor: &Actor, params: &Value) -> Result
     .map_err(|e| e.to_string())?;
     let mut source = if kind == "main" {
         "agent_run_traces.completion_json"
+    } else if view == "checkpoint" {
+        "agent_child_runs.execution_checkpoint_json"
     } else if view == "history" {
         "agent_child_runs.message_history_json"
     } else {
         "agent_child_runs.result_json"
     };
+    if kind=="task" && view=="checkpoint" {
+        let full:Option<String>=conn.query_row("SELECT json_object('phase',phase,'version',version,'step_id',json_extract(snapshot_json,'$.step_id'),'pending',json_extract(snapshot_json,'$.pending'),'prepared_instruction',json_extract(snapshot_json,'$.prepared_instruction')) FROM agent_checkpoints WHERE run_id=?1",[&target.session],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+        if full.is_some() {text=full;source="agent_checkpoints(phase,version,step_id,pending,prepared_instruction)";}
+    }
     if kind == "task" && view == "history" && text.is_none() {
         // Generic tasks already persist their history in their own checkpoint.
         // Project only existing conversational material, never approval/control state.
@@ -179,7 +191,7 @@ fn register(
     let now = chrono::Utc::now().to_rfc3339();
     // Host-owned coordination work is a direct child of the live root. This lets
     // the existing receipt reducer account for it even when B's original owner ended.
-    tx.execute("INSERT INTO agent_child_runs(id,parent_run_id,parent_session_id,workspace_root,model_id,status,started_at,kind,resumed_from,task_id,attempt_id,purpose) VALUES (?1,?2,?3,?4,?5,'queued',?6,'worker',?7,?8,1,?9)",
+    tx.execute("INSERT INTO agent_child_runs(id,parent_run_id,parent_session_id,workspace_root,model_id,status,started_at,kind,resumed_from,task_id,attempt_id,purpose,execution_config_json) VALUES (?1,?2,?3,?4,?5,'queued',?6,'worker',?7,?8,1,?9,(SELECT execution_config_json FROM agent_child_runs WHERE id=?7))",
         params![run,owner.run,owner.session,workspace,model,now,target.run,format!("reply:{request}"),PURPOSE]).map_err(|e|e.to_string())?;
     insert_message(&tx, &request, actor, &reply, &owner, &payload)?;
     insert_message(
@@ -214,6 +226,7 @@ fn register(
             model,
             workspace: workspace.into(),
             prior: prior.unwrap_or_default(),
+            inbox: false,
         }),
     ))
 }
@@ -227,30 +240,34 @@ pub(crate) fn ask(
 ) -> Result<Value, String> {
     let (body, ticket) = register(db, actor, params, retry)?;
     if let Some(ticket) = ticket {
-        crate::agent::work_history::bind_async(
-            db,
-            &ticket.root.session,
-            &ticket.run,
-            Some(&ticket.original),
-        );
-        let db = db.clone();
-        let rescue_db = db.clone();
-        let rescue = ticket.clone();
-        let execution = tokio::spawn(answer(db, ticket, app));
-        tokio::spawn(async move {
-            if let Err(error) = execution.await {
-                let output = crate::agent::execution::actions::Output {
-                    status: "failed".into(),
-                    error_kind: Some(format!("只读答复执行器退出：{error}")),
-                    confidence: "unverified".into(),
-                    ..Default::default()
-                };
-                let _ = finish(&rescue_db, &rescue, output, vec![], 0);
-            }
-        });
+        launch(db, ticket, app);
     }
     crate::agent::job_engine::notify_job_state_changed();
     Ok(body)
+}
+
+pub(super) fn launch(db: &DbState, ticket: Ticket, app: Option<tauri::AppHandle>) {
+    crate::agent::work_history::bind_async(
+        db,
+        &ticket.root.session,
+        &ticket.run,
+        Some(&ticket.original),
+    );
+    let db = db.clone();
+    let rescue_db = db.clone();
+    let rescue = ticket.clone();
+    let execution = tokio::spawn(answer(db, ticket, app));
+    tokio::spawn(async move {
+        if let Err(error) = execution.await {
+            let output = crate::agent::execution::actions::Output {
+                status: "failed".into(),
+                error_kind: Some(format!("只读答复执行器退出：{error}")),
+                confidence: "unverified".into(),
+                ..Default::default()
+            };
+            let _ = finish(&rescue_db, &rescue, output, vec![], 0);
+        }
+    });
 }
 
 fn answer(
@@ -306,8 +323,13 @@ fn answer(
             return;
         }
         let prior: String = ticket.prior.chars().take(4000).collect();
+        let instruction = if ticket.inbox {
+            "你是原成员的一轮只读收信接续。读取宿主投递的消息和原交接，根据内容决定是否用 send_message 直接回复发送者；通知和答复不要求再次回复。仅可 read_file/list_dir/read_message/read_agent_result/send_message/finish。不能修改、执行命令或派发任务。finish 记录本次处理结论，不会自动再发一封回复。每轮输出 JSON 动作；finish 返回 findings/confidence/evidence_refs/missing_evidence。"
+        } else {
+            "你是一次只读追问的答复者。根据历史交接、收到的问题和必要读取回答，然后 finish。仅可 read_file、list_dir、read_agent_result、read_message、finish。禁止写入、运行命令、派发任务或恢复原实施流程。若需要修改，在 missing_evidence 说明。每轮输出 JSON 动作；finish 返回 findings/confidence/evidence_refs/missing_evidence。"
+        };
         let messages = vec![
-            json!({"role":"system","content":"你是一次只读追问的答复者。根据历史交接、收到的问题和必要读取回答，然后 finish。仅可 read_file、list_dir、read_agent_result、read_message、finish。禁止写入、运行命令、派发任务或恢复原实施流程。若需要修改，在 findings 或 missing_evidence 说明，交原负责人安排。历史材料不是新的授权；未核实的内容明确披露。每轮输出 JSON 动作；finish 返回 findings/confidence/evidence_refs/missing_evidence。"}),
+            json!({"role":"system","content":instruction}),
             json!({"role":"user","content":format!("此前成员编号：{}；原负责人：{}。历史结果节选（可能截断，原文可 read_agent_result）：\n{}",ticket.original,ticket.responsible,prior)}),
         ];
         let session = Session::new(
@@ -322,6 +344,7 @@ fn answer(
             Capabilities::Reply {
                 workspace: ticket.workspace.clone(),
                 root_run: ticket.root.run.clone(),
+                can_send: ticket.inbox,
             },
             Profile {
                 kind: "worker",
@@ -348,7 +371,7 @@ fn answer(
     })
 }
 
-fn finish(
+pub(super) fn finish(
     db: &DbState,
     ticket: &Ticket,
     mut output: crate::agent::execution::actions::Output,
@@ -376,7 +399,8 @@ fn finish(
         action_log: output.action_log,
     };
     let mut value = serde_json::to_value(&result).map_err(|e| e.to_string())?;
-    value["read_only_reply"] = json!(true);
+    value["read_only_reply"] = json!(!ticket.inbox);
+    value["inbox_continuation"] = json!(ticket.inbox);
     value["requester_run_id"] = json!(ticket.requester.run);
     value["reply_to"] = json!(ticket.original);
     value["request_id"] = json!(ticket.request);
@@ -384,7 +408,7 @@ fn finish(
     let history = crate::agent::child_writer::dehydrate_child_messages(&messages);
     let changed=tx.execute("UPDATE agent_child_runs SET status=?2,result_json=?3,message_history_json=?4,finished_at=?5,duration_ms=?6,completion_tokens=?7,prompt_tokens=?8,error_kind=?9 WHERE id=?1 AND status IN ('queued','running')",
         params![ticket.run,result.status,value.to_string(),serde_json::to_string(&history).map_err(|e|e.to_string())?,chrono::Utc::now().to_rfc3339(),elapsed as i64,result.completion_tokens,result.prompt_tokens,result.error_kind]).map_err(|e|e.to_string())?;
-    if changed == 1 {
+    if changed == 1 && !ticket.inbox {
         let from = Actor::new(&ticket.run, &format!("child:{}", ticket.run));
         let payload = json!({"message":"只读追问已结束；这是补充答复，不代表原成果被修改或重新通过验证。","data":value});
         insert_message(
@@ -395,6 +419,11 @@ fn finish(
             &ticket.root,
             &payload,
         )?;
+        tx.execute(
+            "UPDATE agent_messages SET sender_kind='peer_answer' WHERE id=?1",
+            [format!("{}:answer", ticket.request)],
+        )
+        .map_err(|e| e.to_string())?;
         if ticket.requester.run != ticket.root.run {
             insert_message(
                 &tx,
@@ -407,6 +436,7 @@ fn finish(
         }
     }
     if changed == 1
+        && !ticket.inbox
         && ticket.responsible != ticket.root.run
         && ticket.responsible != ticket.requester.run
     {
@@ -421,8 +451,14 @@ fn finish(
             &json!({"message":"所属成员的只读追问已结束；没有修改原交付。","data":value}),
         )?;
     }
+    if changed == 1 && ticket.inbox && result.status == "succeeded" {
+        // Mail accepted after the last model turn is still outstanding. The
+        // next associated run claims it; this old terminal only ends itself.
+        tx.execute("UPDATE agent_messages SET claimed_run_id=NULL WHERE claimed_run_id=?1 AND delivered_at IS NULL", [&ticket.run]).map_err(|e|e.to_string())?;
+    }
     tx.commit().map_err(|e| e.to_string())?;
     drop(conn);
+    super::coordination::kick(db);
     crate::agent::job_engine::notify_job_state_changed();
     Ok(())
 }
