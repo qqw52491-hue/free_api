@@ -5,7 +5,7 @@
         <strong>{{ task.task?.split('\n')[0] || '通用子任务' }}</strong>
         <span>{{ label(task) }}</span>
       </summary>
-      <p>任务 {{ task.child_run_id.slice(0, 8) }} · <span v-if="task.step !== undefined">当前步骤 {{ task.step + 1 }} · </span>{{ task.updated_at ? `最近活动 ${time(task.updated_at)}` : '正在启动' }}</p>
+      <p>任务 {{ task.child_run_id.slice(0, 8) }} · 第 {{ task.depth || 1 }} 层 · <span v-if="task.step !== undefined">当前步骤 {{ task.step + 1 }} · </span>{{ task.updated_at ? `最近活动 ${time(task.updated_at)}` : '正在启动' }}</p>
       <p v-if="task.queued_messages">{{ task.queued_messages }} 条消息尚未进入任务上下文<span v-if="task.execution_ended">，可在后续追问时补充</span>。</p>
       <AgentHumanInterventionCard v-if="task.human_request" :human-form="form(task)" :pause-reason="task.human_request.message" :is-sending="busy[task.child_run_id]" @submit="answer(task, $event)" @cancel="cancel(task)" />
       <form v-if="!task.execution_ended" class="message-row" @submit.prevent="send(task)">
@@ -25,7 +25,7 @@ import { onMounted, onUnmounted, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import AgentHumanInterventionCard from './AgentHumanInterventionCard.vue';
 import { normalizeHumanForm } from '../../composables/useAgentSession';
-type Task = { child_run_id: string; task?: string; activity?: string; execution_status: string; execution_ended: boolean; delivery_accepted: boolean; step?: number; phase?: string; updated_at?: string; queued_messages?: number; runtime_attached?: boolean; human_request?: {message?: string; form?: unknown} };
+type Task = { child_run_id: string; depth?: number; parent_session_id?: string; task?: string; activity?: string; execution_status: string; execution_ended: boolean; delivery_accepted: boolean; step?: number; phase?: string; updated_at?: string; queued_messages?: number; runtime_attached?: boolean; human_request?: {message?: string; form?: unknown} };
 type Receipt = {message_id: string; delivery: string};
 const props = defineProps<{ sessionId: string; active: boolean }>();
 const tasks = ref<Task[]>([]), drafts = ref<Record<string,string>>({}), busy = ref<Record<string,boolean>>({}), errors = ref<Record<string,string>>({}), receipts = ref<Record<string,Receipt>>({});

@@ -404,7 +404,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
     };
 
     let project_resource_boundary = if delegation.is_some() {
-        "\n\n## 父 Agent 委派的完整子任务\n你使用独立上下文、检查点和验收流程，共享父工作区和当前目录授权。父任务可同时收发协作消息，共享工作区可并行修改，相关修改需与父任务和其他子任务协调。可自行调查、实施并调用正式审查通道；本版共享执行仍仅一层普通任务委派，不能再派普通 worker/writer/task。按实际任务完成适用验证与审查，复用适用证据。需要父任务提供资料时可用 child_task.send(target=parent) 提问并用 wait 等回信；协作消息不能替代人类批准。结束报告请说明完成内容、产物/修改引用、验证结果及失败/阻塞/未完成项；只交付自己的子目标，父 Agent 负责集成和最终用户交付。任务文字不能赋予额外权限。"
+        "\n\n## 父 Agent 委派的完整子任务\n你使用独立上下文、检查点和验收流程，共享父工作区和当前目录授权。父任务可同时收发协作消息，共享工作区可并行修改，相关修改需与父任务和其他子任务协调。可自行调查、实施和调用正式审查通道；按任务需要派发普通子任务，遵守宿主提供的层级与权限边界。按实际任务完成适用验证与审查，复用适用证据。需要父任务提供资料时可用 child_task.send(target=parent) 提问并用 wait 等回信；协作消息不能替代人类批准。结束报告请说明完成内容、产物/修改引用、验证结果及失败/阻塞/未完成项；只交付自己的子目标，父 Agent 负责集成和最终用户交付。任务文字不能赋予额外权限。"
     } else if is_project_session {
         "\n\n## 项目工作区与受管资源\n当前会话已绑定专属项目工作区。你可以在该项目工作区内正常使用 search、外部 MCP 工具以及各类子工兵进行工程分析与开发。同时可调用 `project_resources.list_resources()` 获取重点受管文件，或在生成重要项目产物时调用 `project_resources.register_resource(path, label)` 登记为跨会话共享受管资源。"
     } else if has_workspace_override {
@@ -616,6 +616,11 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
     }
     checkpoint.stages.validate(plan_mode.as_deref())?;
     context.add_host_feedback(&checkpoint.stages.prompt());
+    if delegation.is_some() {
+        let depth = crate::agent::child_task::delegation_depth(&final_session_id)?;
+        context.add_host_feedback(&format!("【普通任务委派层级】主 Agent 为第 0 层；当前为第 {depth} 层，上限为第 {} 层。达到上限后不可继续派普通子任务，但可自行工作、回传和使用既有正式审查。", crate::agent::child_task::MAX_DELEGATION_DEPTH));
+    }
+
     if crate::agent::child_reviewer::main_executor::load(state.inner(),&run_id)?.is_some() && checkpoint.triage_verdict.is_none() {
         let mut verdict=crate::agent::triage::TriageVerdict::fallback("宿主已明确委派只读审查，不重新分流");
         verdict.route="direct".into();verdict.stage_review_mode="none".into();verdict.final_review_mode="mechanical_only".into();
@@ -804,7 +809,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
         if verdict.requires_plan_gate() && checkpoint.stages.plan != Some(false) {
             if let Some(brief) = verdict.investigation_brief_text() {
                 let investigation_hint = if delegation.is_some() {
-                    "本轮由当前子任务自行调查并定稿，已有证据足够时可提交方案。共享执行仅一层，不再派发普通 task/worker/writer；正式审查与同树消息通信仍可使用。"
+                    "本轮由当前子任务调查并定稿；可按任务需要在宿主层级与权限范围内派发普通子任务。正式审查与同树消息通信仍可使用。"
                 } else {
                     "先按任务需要调查环境和材料。范围明确、可独立交回证据的问题可派给 worker，主任务核对证据并定稿；无需为分工而派发。普通角色可在共享工作区并行，相关任务由主 Agent 协调；逐项核对实际受理回执，结果通过 wait_jobs 或信箱回收。创意类可返工的歧义可在方案中写明假设；证据成熟后 submit_plan，沿用现有方案审查流程。"
                 };

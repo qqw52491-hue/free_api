@@ -117,7 +117,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "child_task",
-        summary: "统一子任务入口：profile=task/worker/writer 均使用通用执行器，worker/writer 选择调查/实施角色；reviewer 保留正式审查；role 挂载人设/模型/默认组合，任务标题不决定类型。worker/writer 也能直接通信，无需为通信改选 task。立即返回身份与结果回收方式；共享工作区可并行，相关变更需协调；通用任务仅一层；消息不是人工授权，专用 Agent 原契约保留",
+        summary: "统一子任务入口：profile=task/worker/writer 均使用通用执行器，worker/writer 选择调查/实施角色；reviewer 保留正式审查；role 挂载人设/模型/默认组合，任务标题不决定类型。worker/writer 也能直接通信，无需为通信改选 task。立即返回身份与结果回收方式；共享工作区可并行，相关变更需协调；普通任务最多五层（主任务为第零层）；消息不是人工授权，专用 Agent 原契约保留",
         actions: &[
             "dispatch(task: string, context?: string [task+context <=65536 字符], role?: string, profile?: task|worker|writer|reviewer, custom_inputs?: object, execution?: {stages?: {plan?: boolean, plan_review?: boolean, stage_review?: boolean, final_review?: boolean} [省略自动，false 关闭自动触发；handoff 子任务默认关闭重复环节], workspace?: shared|isolated [缺省共享，isolated 仅 writer 的显式补丁模式], allowed_tools?: string[], workflow?: {plan_mode?: auto|cross_review|plan_approval, completion?: handoff|delivery}}) — 默认 task 使用通用阶段与独立检查点，可选择讨论模式及结果交接/完整交付；worker/writer 也使用相同主循环与流程配置；只有正式 reviewer 或显式 execution.workspace=isolated 的 writer 使用专用结果适配。权限可按工具或 tool.action 缩小；空数组禁用业务工具。返回 child_run_id，结果按各适配契约读取",
             "status(child_run_id: string) / list(offset?: number) — 查真实状态、活动与协作登记；list.collaboration 返回消息原接收者、本次执行者和接收状态，每页100条并标注 has_more；不预测完成百分比",

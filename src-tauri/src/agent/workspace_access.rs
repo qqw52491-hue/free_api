@@ -50,8 +50,15 @@ pub(crate) fn delegate_sessions(parent: &str) -> Vec<String> {
         .filter(|(_, owner)| owner.as_str() == parent).map(|(child, _)| child.clone()).collect()
 }
 fn authority_session(session: &str) -> String {
-    DELEGATES.read().unwrap_or_else(|e| e.into_inner()).get(session).cloned()
-        .unwrap_or_else(|| session.into())
+    let delegates = DELEGATES.read().unwrap_or_else(|e| e.into_inner());
+    let mut node = session.to_owned();
+    let mut seen = std::collections::HashSet::new();
+    while let Some(parent) = delegates.get(&node) {
+        // A corrupt cycle must not resolve to any session's permissions.
+        if !seen.insert(node.clone()) { return String::new(); }
+        node = parent.clone();
+    }
+    node
 }
 
 static SESSIONS: LazyLock<RwLock<HashMap<String, SessionAccess>>> =

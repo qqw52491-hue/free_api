@@ -228,8 +228,8 @@ async fn dispatch_inner(
             route: "child_task:result".into(),
         });
     }
-    if child_task::parent_session(ctx.final_session_id).is_some() {
-        return Ok(DispatchResult { view:None,success:false,stdout:String::new(),stderr:"本版共享执行仅支持一层普通任务委派（task/worker/writer）；本次未启动子任务。正式 reviewer 审查通道仍可使用。".into(),route:"child_task:depth_limit".into() });
+    if let Err(reason) = child_task::check_delegation_depth(ctx.final_session_id) {
+        return Ok(DispatchResult { view:None,success:false,stdout:String::new(),stderr:reason,route:"child_task:depth_limit".into() });
     }
     if inst.dispatches.is_some() {
         return Ok(DispatchResult {
@@ -341,10 +341,11 @@ async fn dispatch_inner(
     ModelConfig::from_db_state(ctx.state.inner(),&child_routing.pro)?;
     ctx.checkpoint.prepare_child_dispatch(inst, ctx.context, slot, true)?;
     save_checkpoint(ctx.state.inner(), ctx.checkpoint)?;
+    let (workspace_session, workspace_run) = child_task::workspace_owner(ctx.final_session_id, ctx.parent_run_id)?;
     let _workspace = crate::agent::workspace_lock::acquire_delegation_lock(
         ctx.workspace_dir,
-        ctx.final_session_id,
-        ctx.parent_run_id,
+        &workspace_session,
+        &workspace_run,
     )
     .await?;
     let id = match existing {

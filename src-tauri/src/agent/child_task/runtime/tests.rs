@@ -133,3 +133,43 @@ async fn human_wait_does_not_spend_model_rounds_at_the_normal_wait_deadline_and_
     RUNS.lock().unwrap().remove(&id);
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[tokio::test]
+async fn nested_cancellation_waits_for_descendants() {
+    let token = uuid::Uuid::new_v4().to_string();
+    let root = format!("root-{token}");
+    let child = format!("child-{token}");
+    let grandchild = format!("grandchild-{token}");
+    let (child_done_tx, child_done) = watch::channel(false);
+    let (child_cancel, mut child_rx) = watch::channel(false);
+    let (grand_done_tx, grand_done) = watch::channel(false);
+    let (grand_cancel, mut grand_rx) = watch::channel(false);
+    for (id, parent_run, done, cancel) in [
+        (child.clone(), root.clone(), child_done, child_cancel),
+        (grandchild.clone(), child.clone(), grand_done, grand_cancel),
+    ] {
+        RUNS.lock().unwrap().insert(id.clone(), Running {
+            binding: TaskBinding { parent_session: format!("session-{parent_run}"), parent_run, child_session: format!("task-{id}"), child_run:id },
+            done, cancel, paused:Arc::new(Mutex::new(None)),
+        });
+    }
+    let grand_id = grandchild.clone();
+    let grand_worker = tokio::spawn(async move {
+        while !*grand_rx.borrow_and_update() { grand_rx.changed().await.unwrap(); }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        grand_done_tx.send_replace(true);
+        RUNS.lock().unwrap().remove(&grand_id);
+    });
+    let child_id = child.clone();
+    let child_worker = tokio::spawn(async move {
+        while !*child_rx.borrow_and_update() { child_rx.changed().await.unwrap(); }
+        stop_children(&child_id).await;
+        child_done_tx.send_replace(true);
+        RUNS.lock().unwrap().remove(&child_id);
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), stop_children(&root)).await.unwrap();
+    child_worker.await.unwrap();
+    grand_worker.await.unwrap();
+    assert!(!attached(&child));
+    assert!(!attached(&grandchild));
+}

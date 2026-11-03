@@ -491,3 +491,18 @@ fn every_message_keeps_its_identity_and_full_body_reference_when_a_batch_is_long
     }
     assert!(text.contains("payload_truncated"));
 }
+
+#[test]
+fn nested_tasks_exchange_messages_with_root_and_siblings() {
+    let f = Fixture::new();
+    let child = f.child(&f.parent, "task");
+    let grandchild = f.child(&child, "task");
+    let sibling = f.child(&f.parent, "task");
+    let human = send(&f.db, &f.parent, &json!({"target":grandchild.run,"message":"补充资料"}), None, true).unwrap();
+    assert_eq!(receipt(&f.db, &f.parent, human["message_id"].as_str().unwrap()).unwrap()["delivery"], "queued");
+    assert_eq!(pending(&f.db, &grandchild).unwrap()[0]["sender_kind"], "user_material");
+    send(&f.db, &grandchild, &json!({"target":sibling.run,"message":"请确认接口"}), None, false).unwrap();
+    assert_eq!(pending(&f.db, &sibling).unwrap()[0]["sender_run_id"], grandchild.run);
+    send(&f.db, &grandchild, &json!({"target":"parent","message":"进展"}), None, false).unwrap();
+    assert_eq!(pending(&f.db, &child).unwrap()[0]["sender_run_id"], grandchild.run);
+}

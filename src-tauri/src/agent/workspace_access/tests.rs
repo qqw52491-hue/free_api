@@ -505,3 +505,20 @@ fn project_manager_delete_also_revokes_live_directory_grants() {
     .is_err());
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "keep");
 }
+
+#[test]
+fn nested_delegates_follow_live_root_directory_permissions() {
+    let f = Fixture::new();
+    let child = format!("child-{}", f.session);
+    let grandchild = format!("grandchild-{}", f.session);
+    bind_delegate(&child, &f.session);
+    bind_delegate(&grandchild, &child);
+    f.set(DirectoryAccess::ReadOnly);
+    assert_eq!(directories(Some(&grandchild), &f.primary)[0].access, DirectoryAccess::ReadOnly);
+    f.set(DirectoryAccess::ReadWrite);
+    assert_eq!(directories(Some(&grandchild), &f.primary)[0].access, DirectoryAccess::ReadWrite);
+    revoke_project(&f.project);
+    assert!(directories(Some(&grandchild), &f.primary).is_empty());
+    unbind_delegate(&grandchild);
+    unbind_delegate(&child);
+}

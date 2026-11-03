@@ -25,6 +25,28 @@ pub(crate) fn parent_session(child: &str) -> Option<String> {
         .get(child)
         .map(|b| b.parent_session.clone())
 }
+/// Root is depth 0; five levels of ordinary delegated tasks are allowed.
+pub(crate) const MAX_DELEGATION_DEPTH: usize = 5;
+pub(crate) fn delegation_depth(session: &str) -> Result<usize, String> {
+    let active = ACTIVE.lock().map_err(|e| e.to_string())?;
+    let mut node = session.to_owned();
+    let mut seen = std::collections::HashSet::new();
+    let mut depth = 0;
+    while let Some(binding) = active.get(&node) {
+        if !seen.insert(node.clone()) { return Err("任务委派关系存在循环；未派发。".into()); }
+        depth += 1;
+        node = binding.parent_session.clone();
+    }
+    Ok(depth)
+}
+pub(crate) fn check_delegation_depth(session: &str) -> Result<usize, String> {
+    let depth = delegation_depth(session)?;
+    if depth >= MAX_DELEGATION_DEPTH {
+        return Err(format!("当前普通任务位于第 {depth} 层，已达上限 {MAX_DELEGATION_DEPTH} 层；未派发。可自行完成或交回父任务。"));
+    }
+    Ok(depth)
+}
+
 pub(crate) fn is_delegating(parent: &str) -> bool {
     ACTIVE
         .lock()
@@ -129,6 +151,36 @@ pub(crate) fn find_task(db: &DbState, session: &str, key: &str) -> Result<Option
     ).optional().map_err(|e| e.to_string())
 }
 
+/// Reconstruct the same nested artifact path from recorded ownership, even after
+/// in-memory delegate bindings have disappeared (for example after a restart).
+fn artifact_base(conn: &rusqlite::Connection, id: &str) -> Result<std::path::PathBuf, String> {
+    let mut current = id.to_owned();
+    let mut descendants = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        if !seen.insert(current.clone()) {
+            return Err("子任务产物归属链存在循环。".into());
+        }
+        let parent_session: String = conn.query_row(
+            "SELECT parent_session_id FROM agent_child_runs WHERE id=?1 AND kind='task'",
+            [&current], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        descendants.push(format!("task-{current}"));
+        // A resumed parent's run ID can change, but its child-session identity
+        // remains stable. Only follow a session backed by a recorded task.
+        let parent_id = parent_session.strip_prefix("task-");
+        let recorded: bool = if let Some(parent_id) = parent_id {
+            conn.query_row("SELECT EXISTS(SELECT 1 FROM agent_child_runs WHERE id=?1 AND kind='task')", [parent_id], |row| row.get(0)).map_err(|e| e.to_string())?
+        } else { false };
+        if !recorded {
+            let mut path = crate::agent::path_guard::get_session_tmp_dir(&parent_session);
+            for child in descendants.iter().rev() { path = path.join("delegated").join(child); }
+            return Ok(path);
+        }
+        current = parent_id.unwrap().to_owned();
+    }
+}
+
 /// 只有父会话可取本任务交接；不得用任意 session/output 取得跨会话数据。
 pub(crate) fn result(db: &DbState, parent: &str, id: &str) -> Result<Value, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -156,9 +208,9 @@ pub(crate) fn result(db: &DbState, parent: &str, id: &str) -> Result<Value, Stri
     body["goal"] = json!(goal);
     body["child_run_id"] = json!(id);
     body["child_session_id"] = json!(format!("task-{id}"));
-    body["artifact_base"] = json!(crate::agent::path_guard::get_session_tmp_dir(parent)
-        .join("delegated")
-        .join(format!("task-{id}")));
+    if body.get("artifact_base").and_then(Value::as_str).is_none() {
+        body["artifact_base"] = json!(artifact_base(&conn, id)?);
+    }
     Ok(body)
 }
 
@@ -229,7 +281,7 @@ pub(crate) fn settle(
         "child_run_id":binding.child_run,"child_session_id":binding.child_session,
         "parent_run_id":binding.parent_run,"execution_status":status,"delivery_accepted":accepted && !handoff,"handoff_accepted":accepted && handoff,
         "execution_ended":true,"delivery":completion,
-        "artifact_base":crate::agent::path_guard::get_session_tmp_dir(&binding.parent_session).join("delegated").join(&binding.child_session),
+        "artifact_base":artifact_base(&conn, &binding.child_run)?,
         "verification":receipt.map(|r| &r.verification),"review":receipt.map(|r| &r.review),
         "material_notices":receipt.map(|r| &r.material_notices),
         "host_error":outcome.as_ref().err(),
@@ -277,6 +329,8 @@ pub(crate) fn import_effects(
 /// 子事件保持在独立进度载荷内，不能推进父任务的 complete 或人工状态。
 pub(crate) fn relay_progress(id: &str, payload: Value) -> Option<Value> {
     let kind = payload["type"].as_str().unwrap_or_default();
+    // A descendant is already safely wrapped; keep its identity across hops.
+    if kind == "child_task_progress" { return Some(payload); }
     if !matches!(
         kind,
         "agent_paused" | "step_start" | "step_done" | "step_error" | "action_phase" | "complete"
@@ -395,6 +449,22 @@ pub(crate) fn task_owner(
     Ok(owner)
 }
 
+/// Desktop session may inspect and intervene in descendants, not other task trees.
+/// Keep each node's actual parent for scoped result lookup and the originating
+/// root run for user-authored messages and receipts.
+fn visible_tasks(db: &DbState, session: &str, target: Option<&str>) -> Result<Vec<(String,String,String,usize)>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(
+        "WITH RECURSIVE tree(id,owner,root_run,depth) AS (
+            SELECT id,parent_session_id,parent_run_id,1 FROM agent_child_runs WHERE parent_session_id=?1 AND kind='task'
+            UNION ALL
+            SELECT c.id,c.parent_session_id,t.root_run,t.depth+1 FROM agent_child_runs c JOIN tree t ON c.parent_session_id='task-' || t.id WHERE c.kind='task' AND t.depth < 64
+         ) SELECT id,owner,root_run,depth FROM tree WHERE (?2 IS NULL OR id=?2) ORDER BY depth, id"
+    ).map_err(|e| e.to_string())?;
+    let rows=stmt.query_map(params![session,target], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get::<_,i64>(3)? as usize))).map_err(|e|e.to_string())?;
+    rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())
+}
+
 #[tauri::command]
 pub(crate) async fn control_child_task(
     state: tauri::State<'_, DbState>,
@@ -404,36 +474,21 @@ pub(crate) async fn control_child_task(
 ) -> Result<Value, String> {
     use tauri::Manager;
     if action == "list" {
-        let ids: Vec<String> = {
-            let conn = state.0.lock().map_err(|e| e.to_string())?;
-            let mut stmt=conn.prepare("SELECT id FROM agent_child_runs WHERE parent_session_id=?1 AND kind='task' ORDER BY started_at DESC LIMIT 20").map_err(|e|e.to_string())?;
-            let rows = stmt
-                .query_map([&session_id], |r| r.get(0))
-                .map_err(|e| e.to_string())?;
-            rows.collect::<Result<Vec<_>, _>>()
-                .map_err(|e| e.to_string())?
-        };
-        return ids
-            .iter()
-            .map(|id| status(state.inner(), &session_id, id))
-            .collect::<Result<Vec<_>, _>>()
-            .map(|tasks| json!({"tasks":tasks}));
+        let mut tasks = Vec::new();
+        for (id, owner, _, depth) in visible_tasks(state.inner(), &session_id, None)? {
+            let mut body = status(state.inner(), &owner, &id)?;
+            body["depth"] = json!(depth);
+            body["parent_session_id"] = json!(owner);
+            tasks.push(body);
+        }
+        return Ok(json!({"tasks":tasks}));
     }
-    let id = params["child_run_id"]
-        .as_str()
-        .ok_or("缺少 child_run_id。")?;
-    result(state.inner(), &session_id, id)?;
-    let parent_run: String = {
-        let conn = state.0.lock().map_err(|e| e.to_string())?;
-        conn.query_row(
-            "SELECT parent_run_id FROM agent_child_runs WHERE id=?1",
-            [id],
-            |r| r.get(0),
-        )
-        .map_err(|e| e.to_string())?
-    };
+    let id = params["child_run_id"].as_str().ok_or("缺少 child_run_id。")?;
+    let (_, owner, parent_run, _) = visible_tasks(state.inner(), &session_id, Some(id))?
+        .into_iter().next().ok_or("该子任务不属于当前会话的任务树；操作未执行。")?;
+    result(state.inner(), &owner, id)?;
     match action.as_str() {
-        "status" => status(state.inner(), &session_id, id),
+        "status" => status(state.inner(), &owner, id),
         "receipt" => crate::agent::agent_mailbox::receipt(
             state.inner(),
             &crate::agent::agent_mailbox::Actor::new(&parent_run, &session_id),

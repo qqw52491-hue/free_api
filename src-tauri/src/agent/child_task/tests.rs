@@ -470,3 +470,80 @@ fn handoff_receipt_is_separate_from_formal_delivery_acceptance() {
     let mut cp=load_checkpoint(&f.db,&f.binding.child_session).unwrap().unwrap();cp.pending_finalization.as_mut().unwrap().handoff=true;crate::agent::checkpoint::save_checkpoint(&f.db,&mut cp).unwrap();
     let body=settle(&f.db,&f.binding,&Ok(()),1).unwrap();assert_eq!(body["execution_status"],"succeeded");assert_eq!(body["handoff_accepted"],true);assert_eq!(body["delivery_accepted"],false);
 }
+
+#[test]
+fn nested_delegation_depth_and_workspace_owner_are_tracked_per_tree() {
+    let token = uuid::Uuid::new_v4().to_string();
+    let root = format!("depth-root-{token}");
+    let root_run = format!("depth-run-{token}");
+    let mut parent_session = root.clone();
+    let mut parent_run = root_run.clone();
+    let mut guards = Vec::new();
+    assert_eq!(delegation_depth(&root).unwrap(), 0);
+    for depth in 1..=MAX_DELEGATION_DEPTH {
+        assert_eq!(check_delegation_depth(&parent_session).unwrap(), depth - 1);
+        let binding = TaskBinding {parent_session:parent_session.clone(),parent_run:parent_run.clone(),
+            child_session:format!("depth-{depth}-{token}"),child_run:format!("run-{depth}-{token}")};
+        guards.push(TaskGuard::enter(binding.clone()));
+        parent_session = binding.child_session;
+        parent_run = binding.child_run;
+        assert_eq!(delegation_depth(&parent_session).unwrap(), depth);
+        assert_eq!(workspace_owner(&parent_session,&parent_run).unwrap(), (root.clone(),root_run.clone()));
+    }
+    assert!(check_delegation_depth(&parent_session).unwrap_err().contains("上限 5"));
+    while let Some(guard) = guards.pop() { drop(guard); }
+}
+
+#[test]
+fn desktop_tree_is_session_scoped_and_returns_real_parent_and_depth() {
+    let f = Fixture::new();
+    let root_id = &f.binding.child_run;
+    let grandchild = crate::agent::child_reviewer::begin_child_run(&f.db, root_id, &f.binding.child_session, &f.root, "model",0,"task",None).unwrap();
+    let grand_session = format!("task-{grandchild}");
+    let great = crate::agent::child_reviewer::begin_child_run(&f.db, &grandchild, &grand_session, &f.root,"model",0,"task",None).unwrap();
+    let nodes = visible_tasks(&f.db,&f.binding.parent_session,None).unwrap();
+    assert!(nodes.iter().any(|(id,owner,root,depth)| id==root_id && owner==&f.binding.parent_session && root=="parent-run" && *depth==1));
+    assert!(nodes.iter().any(|(id,owner,root,depth)| id==&great && owner==&grand_session && root=="parent-run" && *depth==3));
+    assert!(visible_tasks(&f.db,"unrelated-session",Some(&great)).unwrap().is_empty());
+    assert!(visible_tasks(&f.db,&f.binding.child_session,Some(&great)).unwrap().iter().any(|(_,_,root,depth)| root==root_id && *depth==2));
+}
+
+#[test]
+fn nested_artifact_path_survives_parent_binding_cleanup() {
+    let f = Fixture::new();
+    let first = TaskGuard::enter(f.binding.clone());
+    let id = crate::agent::child_reviewer::begin_child_run(&f.db, &f.binding.child_run, &f.binding.child_session, &f.root, "model", 0, "task", None).unwrap();
+    let child_session = format!("task-{id}");
+    let expected = crate::agent::path_guard::get_session_tmp_dir(&f.binding.child_session).join("delegated").join(&child_session);
+    assert_eq!(result(&f.db, &f.binding.child_session, &id).unwrap()["artifact_base"], json!(expected));
+    drop(first);
+    assert_eq!(result(&f.db, &f.binding.child_session, &id).unwrap()["artifact_base"], json!(expected));
+    let binding = TaskBinding {parent_session:f.binding.child_session.clone(),parent_run:f.binding.child_run.clone(),child_session,child_run:id.clone()};
+    assert_eq!(settle(&f.db, &binding, &Ok(()), 0).unwrap()["artifact_base"], json!(expected));
+    assert_eq!(result(&f.db, &f.binding.child_session, &id).unwrap()["artifact_base"], json!(expected));
+}
+
+#[test]
+fn nested_progress_keeps_descendant_identity_across_hops() {
+    let nested = relay_progress("grandchild", json!({"type":"agent_paused","message":"需要批准"})).unwrap();
+    let relayed = relay_progress("child", nested.clone()).unwrap();
+    assert_eq!(relayed, nested);
+    assert_eq!(relayed["child_run_id"], "grandchild");
+    assert_eq!(relayed["type"], "child_task_progress");
+}
+
+#[tokio::test]
+async fn nested_delegation_shares_root_lock_until_last_lease_exits() {
+    let f = Fixture::new();
+    let root = crate::agent::workspace_lock::acquire_workspace_lock(&f.root, &f.binding.parent_session, &f.binding.parent_run, "parent").await.unwrap();
+    let guard = TaskGuard::enter(f.binding.clone());
+    let (session, run) = workspace_owner(&f.binding.child_session, &f.binding.child_run).unwrap();
+    let nested = tokio::time::timeout(std::time::Duration::from_secs(2), crate::agent::workspace_lock::acquire_delegation_lock(&f.root, &session, &run)).await.unwrap().unwrap().unwrap();
+    drop(root);
+    let competing = crate::agent::workspace_lock::acquire_workspace_lock(&f.root, "other", "other-run", "other");
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(150), competing).await.is_err());
+    drop(nested);
+    drop(guard);
+    let replacement = tokio::time::timeout(std::time::Duration::from_secs(2), crate::agent::workspace_lock::acquire_workspace_lock(&f.root, "other", "other-run", "other")).await.unwrap().unwrap();
+    drop(replacement);
+}
