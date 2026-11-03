@@ -22,7 +22,7 @@ const MAX_FINISH_FORMAT_RETRIES: u32 = 5;
 const MAX_FINISH_REQUEST_RETRIES: u32 = 5;
 
 /// Reviewer 主动发起的真实复验若失败，不能再按旧通过回执放行。
-fn enforce_failed_rechecks(
+pub(crate) fn enforce_failed_rechecks(
     result: &mut ReviewResult,
     rechecks: &std::collections::BTreeMap<String, crate::agent::host_verify::ObligationVerifyResult>,
 ) {
@@ -731,6 +731,26 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     let cancellation_generation = *interrupt_rx.borrow();
     let _registration = registration;
 
+    // Desktop reviews use the ordinary executor; non-desktop callers retain the
+    // legacy headless adapter until they provide a main-loop application host.
+    if let (Some(handle),Some(parent_run)) = (
+        (app as &dyn std::any::Any).downcast_ref::<AppHandle>(),
+        crate::agent::child_reviewer::main_executor::parent_run(),
+    ) {
+        progress.phase("reviewing","通用 Agent 正在执行终审");
+        let result=crate::agent::child_reviewer::main_executor::run_final(
+            handle.clone(),db,&parent_run,session_id,workspace,&model_config,&messages,
+            &review_fingerprint,verify_obligations.clone(),run_started_at,interrupt_rx.clone(),
+        ).await;
+        if !_registration.complete() {
+            progress.fail("cancelled",crate::agent::review_control::STOP_NOTE);
+            return ReviewResult::cancelled(crate::agent::review_control::STOP_NOTE,&model_id,&review_fingerprint);
+        }
+        return match result {
+            Ok(result)=>{progress.phase("completed","终审结果已回收");result},
+            Err(error)=>{progress.fail("request",&error);ReviewResult::failed_open(&error,&model_id,&review_fingerprint)},
+        };
+    }
     // 终审取证环：与 child_reviewer 同构——审查者可先请求只读工具核实产物
     // （tmp/ 前缀直达会话产物区），预算用尽后强制收敛为判决 JSON。
     // forensic_budget 已在组装提示词时读取（工具段按预算条件拼接）。

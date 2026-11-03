@@ -70,6 +70,69 @@ fn checkpoint(c: &SandwichContext) -> AgentCheckpoint {
 }
 
 #[tokio::test]
+async fn human_approved_plan_satisfies_fixed_plan_requirement_across_restore_and_mode_switch() {
+    use crate::agent::checkpoint::{PlanExecutionMode, PlanPhase, load_checkpoint, save_checkpoint};
+    use crate::agent::plan_gate::{check_pre_write_gatekeeper, configured_plan_missing, submit_plan_rejection};
+    use std::sync::{Arc, Mutex};
+    let db = DbState(Arc::new(Mutex::new(crate::db::init_db(&std::path::PathBuf::from(":memory:")).unwrap())));
+    let workspace = std::env::temp_dir().join(format!("human-plan-delivery-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let baseline = GitBaseline::non_git();
+    let mut c = context();
+    let mut cp = checkpoint(&c);
+    cp.stages.plan = Some(false);
+    cp.set_execution_mode(PlanExecutionMode::PlanApproval);
+    cp.stages.plan = Some(true); // The UI turns it back on when selecting approval.
+    cp.stages.plan_review = Some(false);
+    cp.stages.final_review = Some(false);
+    let plan = serde_json::from_value(json!({"plan_summary":"read existing evidence"})).unwrap();
+    assert!(submit_plan_rejection(&cp, &plan).is_none());
+    assert!(configured_plan_missing(&cp));
+    assert!(check_pre_write_gatekeeper(&mut cp,&c,&db,"run",1,false).is_some());
+    // Approved alone (e.g. automatic release) is not an approval record.
+    cp.plan_phase = PlanPhase::Approved;
+    assert!(configured_plan_missing(&cp));
+    cp.plan_phase = PlanPhase::Reviewing;
+    let app = tauri::test::mock_app();
+    let (_tx, mut rx) = watch::channel(0);
+    let instruction = serde_json::from_value(json!({"tool":"finish","params":{"summary":"evidence reviewed"}})).unwrap();
+    let pending = evaluate_completion(app.handle(),&db,&mut c,&mut cp,"run","session",1,&workspace,&baseline,Utc::now(),&ModelRoutingConfig::default(),&mut rx,&instruction,CompletionMode::Finish,false,false).await;
+    assert!(!pending.receipt.is_ready());
+    assert!(pending.receipt.blockers.iter().any(|s|s.contains("ask_human")));
+    cp.apply_explicit_plan_decision(&db,&mut c,true,"请批准上述方案","批准方案");
+    assert!(cp.submitted_plan.is_none());
+    save_checkpoint(&db,&mut cp).unwrap();
+    let mut cp = load_checkpoint(&db,"session").unwrap().unwrap();
+    for mode in [PlanExecutionMode::PlanApproval, PlanExecutionMode::Auto] {
+        cp.set_execution_mode(mode);
+        assert!(!configured_plan_missing(&cp));
+        assert!(check_pre_write_gatekeeper(&mut cp,&c,&db,"run",2,false).is_none());
+        let result = evaluate_completion(app.handle(),&db,&mut c,&mut cp,"run","session",2,&workspace,&baseline,Utc::now(),&ModelRoutingConfig::default(),&mut rx,&instruction,CompletionMode::Finish,false,false).await;
+        assert!(result.receipt.is_ready(),"{:?}",result.receipt.blockers);
+    }
+    cp.apply_explicit_plan_decision(&db,&mut c,false,"修订后再批准","先不批准");
+    assert!(configured_plan_missing(&cp),"reopened approval must not reuse the old marker");
+    let _ = std::fs::remove_dir_all(workspace);
+}
+
+#[tokio::test]
+async fn enabled_final_review_keeps_the_existing_no_material_exemption() {
+    use std::sync::{Arc, Mutex};
+    let db=DbState(Arc::new(Mutex::new(crate::db::init_db(&std::path::PathBuf::from(":memory:")).unwrap())));
+    let workspace=std::env::temp_dir().join(format!("readonly-final-on-{}",uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let mut c=context();let mut cp=checkpoint(&c);cp.stages.final_review=Some(true);
+    let app=tauri::test::mock_app();let (_tx,mut rx)=watch::channel(0);
+    let inst=serde_json::from_value(json!({"tool":"finish","params":{"summary":"a plain text answer"}})).unwrap();
+    let result=evaluate_completion(app.handle(),&db,&mut c,&mut cp,"run","session",1,&workspace,&GitBaseline::non_git(),Utc::now(),&ModelRoutingConfig::default(),&mut rx,&inst,CompletionMode::Finish,false,false).await;
+    assert!(result.receipt.is_ready(),"{:?}",result.receipt.blockers);
+    let review=result.review_result.expect("the original mechanical exemption returns a host result");
+    assert_eq!(review.model_id,"triage:mechanical_only");
+    assert!(review.summary.contains("已跳过终审"));
+    let _=std::fs::remove_dir_all(workspace);
+}
+
+#[tokio::test]
 async fn review_logging_during_finish_keeps_receipt_valid_and_real_changes_reach_reviewer() {
     use crate::agent::child_reviewer::retirement_tests::MockReviewer;
     for change_real_file in [false, true] {
@@ -823,6 +886,26 @@ async fn explicit_handoff_keeps_real_verification_and_does_not_claim_independent
         let instruction=serde_json::from_value(json!({"tool":"finish","params":{"summary":"handoff"}})).unwrap();
         let evaluation=evaluate_completion(app.handle(),&db,&mut c,&mut cp,"handoff","session",3,&workspace,&baseline,Utc::now()-chrono::Duration::seconds(1),&ModelRoutingConfig::default(),&mut rx,&instruction,CompletionMode::Finish,false,false).await;
         assert!(evaluation.receipt.handoff);assert!(evaluation.review_result.is_none());assert_eq!(evaluation.receipt.is_ready(),!fails,"{:?}",evaluation.receipt);
+        assert!(matches!(evaluation.receipt.review,ReceiptReview::NotRequired));
+    }
+    let _=std::fs::remove_dir_all(workspace);
+}
+
+#[tokio::test]
+async fn disabled_final_review_still_executes_verification_for_full_delivery() {
+    use std::sync::{Arc,Mutex};
+    let workspace=std::env::temp_dir().join(format!("handoff-evaluation-{}",uuid::Uuid::new_v4()));std::fs::create_dir_all(&workspace).unwrap();
+    for fails in [false,true] {
+        let db=DbState(Arc::new(Mutex::new(crate::db::init_db(&std::path::PathBuf::from(":memory:")).unwrap())));
+        db.0.lock().unwrap().execute("INSERT INTO agent_child_runs(id,parent_run_id,parent_session_id,workspace_root,model_id,status,started_at,kind,execution_config_json) VALUES ('handoff','parent','session',?1,'mock','running','now','task','{\"workflow\":{\"completion\":\"delivery\"}}')",[workspace.to_string_lossy()]).unwrap();
+        let baseline=GitBaseline::capture(&workspace);let mut c=context();
+        c.record_side_effect(1,"local_file".into(),"artifact.txt".into());
+        c.change_verification=Some(ChangeVerification{status:"verified".into(),evidence_refs:vec!["step_1".into()],waived_reason:None});
+        c.review_contract=Some(serde_json::from_value(json!({"scope_statement":"subtask","obligations":[{"id":"check","question":"explicit command must pass","status":"evidenced","evidence_refs":["step_1"],"closure_form":"command","verify_command":if fails{"false"}else{"true"}}]})).unwrap());
+        let mut cp=checkpoint(&c);cp.stages.final_review=Some(false);let app=tauri::test::mock_app();let (_tx,mut rx)=watch::channel(0);
+        let instruction=serde_json::from_value(json!({"tool":"finish","params":{"summary":"handoff"}})).unwrap();
+        let evaluation=evaluate_completion(app.handle(),&db,&mut c,&mut cp,"handoff","session",3,&workspace,&baseline,Utc::now()-chrono::Duration::seconds(1),&ModelRoutingConfig::default(),&mut rx,&instruction,CompletionMode::Finish,false,false).await;
+        assert!(!evaluation.receipt.handoff);assert!(evaluation.review_result.is_none());assert_eq!(evaluation.receipt.is_ready(),!fails,"{:?}",evaluation.receipt);
         assert!(matches!(evaluation.receipt.review,ReceiptReview::NotRequired));
     }
     let _=std::fs::remove_dir_all(workspace);

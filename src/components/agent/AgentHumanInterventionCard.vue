@@ -30,8 +30,8 @@
       <div class="plan-approval-banner">
         <span class="banner-icon">🛡️</span>
         <div class="banner-text">
-          <strong>前置技术方案与审查报告已就绪</strong>
-          <span>请审阅上述排查证据与推演方案。批准后 Agent 将放行门禁并开始写入代码；如有疑虑可提出修改建议打回重新推演。</span>
+          <strong>请确认方案与审查情况</strong>
+          <span>请审阅上述方案和已有审查情况。批准后 Agent 将继续执行；如需重试审查或修改方案，可提出意见并打回。</span>
         </div>
       </div>
 

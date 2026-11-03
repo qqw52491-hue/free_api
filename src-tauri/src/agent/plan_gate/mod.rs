@@ -23,11 +23,12 @@ pub(crate) fn pre_write_plan_required(
 ) -> bool {
     if submitted_review_active(checkpoint)
         || checkpoint.plan_mode == PlanExecutionMode::PlanApproval
-        || (checkpoint.triage_verdict.is_some()
-            && crate::agent::triage::write_floor_violation(inst, context, session_id).is_some())
     {
         return true;
     }
+    if let Some(required) = checkpoint.stages.plan { return required; }
+    if checkpoint.stages.plan_review == Some(true) { return true; }
+    if checkpoint.triage_verdict.is_some() && crate::agent::triage::write_floor_violation(inst, context, session_id).is_some() { return true; }
     match checkpoint.triage_verdict.as_ref() {
         Some(v) if v.fallback.is_some() => {
             checkpoint.plan_mode != PlanExecutionMode::Auto
@@ -50,6 +51,118 @@ pub(crate) fn submitted_review_active(checkpoint: &AgentCheckpoint) -> bool {
         && checkpoint.plan_review_expected_count > 0
 }
 
+/// 正式方案可经 submit_plan 保存，也可经原人工审批通道获批。
+/// 仅有自动 Approved 状态不证明存在方案；被拒绝/重新打开的人工方案也不沿用。
+pub(crate) fn configured_plan_missing(checkpoint: &AgentCheckpoint) -> bool {
+    (checkpoint.stages.plan == Some(true) || checkpoint.stages.plan_review == Some(true))
+        && checkpoint.submitted_plan.is_none()
+        && !(checkpoint.plan_phase.is_approved() && checkpoint.approved_plan_summary.is_some())
+}
+
+pub(crate) fn reviewed_human_plan(checkpoint: &AgentCheckpoint) -> bool {
+    checkpoint.plan_mode == PlanExecutionMode::PlanApproval
+        && checkpoint.stages.plan_review == Some(true)
+}
+
+/// Reuse the registered review batch before presenting the original human
+/// approval card. A finished rejection/failure is disclosed, not auto-approved
+/// or made impossible for the user to arbitrate.
+pub(crate) fn human_plan_review_material(
+    checkpoint: &AgentCheckpoint,
+    db: &DbState,
+) -> Result<Option<String>, DispatchResult> {
+    if !reviewed_human_plan(checkpoint) { return Ok(None); }
+    let reject = |route: &str, message: &str| DispatchResult {
+        view: None, success: false, stdout: String::new(), stderr: message.into(), route: route.into(),
+    };
+    let failed_before_start = checkpoint.submitted_plan.is_some()
+        && checkpoint.plan_review_batch_id.is_none()
+        && !checkpoint.plan_review_dispatch_failures.is_empty();
+    if !submitted_review_active(checkpoint) && !failed_before_start {
+        return Err(reject("plan_gatekeeper:need_reviewer_dispatch",
+            "当前同时开启人工批准和方案审查；请先 submit_plan 保存方案并派发原方案审查，再用 ask_human(kind: plan_approval) 呈报结果。尚未请求人工批准。"));
+    }
+    if !failed_before_start && !checkpoint.plan_review_batch_complete(db) {
+        return Err(reject("plan_gatekeeper:need_wait_reviewer_jobs",
+            "本批方案审查尚未收齐；请用 wait_jobs 收取审查结果，再呈报人工批准。尚未请求人工批准。"));
+    }
+    if failed_before_start {
+        return Ok(Some(format!("【本次已保存的方案（批准对象）】\n{}\n\n【方案审查未启动】\n{}\n本次没有 Agent 审查结论，不能视为通过。可在打回意见中要求重试审查，也可批准未审方案或要求修改。\n历史有效审查发现（不代表审查了本次方案）：{}",
+            serde_json::to_string_pretty(&checkpoint.submitted_plan).unwrap_or_default(),
+            checkpoint.plan_review_dispatch_failures.join("；"),
+            serde_json::to_string_pretty(&checkpoint.current_review_findings()).unwrap_or_default())));
+    }
+    let dispatch_notes = if checkpoint.plan_review_dispatch_failures.is_empty() { String::new() }
+        else { format!("\n【未启动的审查员】\n{}", checkpoint.plan_review_dispatch_failures.join("；")) };
+    let failed_runs: Vec<(String, String)> = checkpoint.plan_review_batch_id.as_ref().and_then(|batch| {
+        db.0.lock().ok().and_then(|conn| {
+            let mut stmt = conn.prepare("SELECT id, COALESCE(error_kind, status) FROM agent_child_runs WHERE batch_id = ?1 AND consumed_at IS NOT NULL AND status != 'succeeded'").ok()?;
+            let rows = stmt.query_map(rusqlite::params![batch], |r| Ok((r.get(0)?, r.get(1)?))).ok()?;
+            Some(rows.flatten().collect())
+        })
+    }).unwrap_or_default();
+    Ok(Some(format!("【本次已保存的方案（批准对象）】\n{}\n\n【本批 Agent 当前审查结果与有效发现】\n{}\n本批回执：成功 {} 条，失败 {} 条。审查结束不等于通过；请结合上述意见决定批准或打回。{}\n已启动但失败的审查任务及原因：{}",
+        serde_json::to_string_pretty(&checkpoint.submitted_plan).unwrap_or_default(),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "current_results":checkpoint.current_review_deliveries(Some(db)),
+            "effective_findings":checkpoint.current_review_findings(),
+        })).unwrap_or_default(),
+        checkpoint.plan_review_delivered_count(db),checkpoint.plan_review_failed_count(db),dispatch_notes,
+        serde_json::to_string(&failed_runs).unwrap_or_default())))
+}
+
+/// 宿主在正式方案提交后复用既有 wait_jobs / ask_human，不额外请求模型规划。
+/// 回执消费与人工决定仍由原有处理器及 checkpoint 持久化负责。
+pub(crate) fn automatic_plan_approval_instruction(
+    checkpoint: &AgentCheckpoint,
+    db: &DbState,
+) -> Result<Option<crate::agent::types::AgentInstruction>, String> {
+    if !checkpoint.auto_plan_approval_pending || checkpoint.plan_mode != PlanExecutionMode::PlanApproval {
+        return Ok(None);
+    }
+    let plan = checkpoint.submitted_plan.as_ref().ok_or("自动人工审批缺少已提交的方案，未请求批准")?;
+    if let Err(result) = human_plan_review_material(checkpoint, db) {
+        if result.route != "plan_gatekeeper:need_wait_reviewer_jobs" {
+            return Err(result.stderr);
+        }
+        let batch = checkpoint.plan_review_batch_id.as_ref().ok_or("方案审查批次缺失，未请求批准")?;
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare("SELECT id FROM agent_child_runs WHERE batch_id=?1 AND consumed_at IS NULL ORDER BY id")
+            .map_err(|e| e.to_string())?;
+        let ids: Vec<String> = stmt.query_map([batch], |row| row.get(0))
+            .map_err(|e| e.to_string())?.collect::<Result<_, _>>().map_err(|e| e.to_string())?;
+        if ids.is_empty() { return Err("方案审查批次尚未收齐且找不到待收回执；未请求批准".into()); }
+        return Ok(Some(serde_json::from_value(serde_json::json!({
+            "description":"等待本批方案审查结果", "tool":"wait_jobs", "params":{"job_ids":ids}
+        })).map_err(|e| format!("构造审查等待失败：{e}"))?));
+    }
+    let body = format!("【本次提交的正式方案】\n{}", serde_json::to_string_pretty(plan).map_err(|e| e.to_string())?);
+    Ok(Some(serde_json::from_value(serde_json::json!({
+        "description":"请用户批准或打回方案", "tool":"ask_human",
+        "params":{"kind":"plan_approval","message":"请确认本次正式方案。",
+            "form":{"kind":"plan_approval","title":"请确认方案与审查情况","description":body}}
+    })).map_err(|e| format!("构造人工审批失败：{e}"))?))
+}
+
+/// 宿主为当前正式方案生成的等待只读取本批回执，不扩大角色业务工具权限。
+pub(crate) fn is_automatic_plan_wait(
+    checkpoint: &AgentCheckpoint, db: &DbState, inst: &crate::agent::types::AgentInstruction,
+) -> bool {
+    if !checkpoint.auto_plan_approval_pending || checkpoint.plan_mode != PlanExecutionMode::PlanApproval
+        || !inst.get_tool().eq_ignore_ascii_case("wait_jobs") || inst.declared_action().is_some() {
+        return false;
+    }
+    let Some(batch) = checkpoint.plan_review_batch_id.as_ref() else { return false };
+    let params = inst.get_params();
+    let Some(ids) = params.get("job_ids").and_then(|v| v.as_array()) else { return false };
+    if ids.is_empty() { return false; }
+    let Ok(conn) = db.0.lock() else { return false };
+    ids.iter().all(|id| id.as_str().is_some_and(|id| conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_child_runs WHERE id=?1 AND batch_id=?2)",
+        rusqlite::params![id, batch], |row| row.get::<_, bool>(0)
+    ).unwrap_or(false)))
+}
+
 /// submit_plan 适用性预检（纯 checkpoint 判定，不含 DB 在途行检查）。
 /// 返回 Some(reason) 表示当前状态不可用提交；None 放行。
 /// 覆盖：模式/阶段/升级挂起/未闭合审查轮次/预算上限。
@@ -57,15 +170,6 @@ pub(crate) fn submit_plan_rejection(
     checkpoint: &AgentCheckpoint,
     submission: &crate::agent::types::PlanSubmission,
 ) -> Option<String> {
-    if checkpoint.plan_mode != PlanExecutionMode::CrossReview
-        && checkpoint.plan_mode != PlanExecutionMode::Auto
-    {
-        return Some(format!(
-            "【ℹ️ submit_plan 不适用】当前执行模式为 {:?}，方案提交通道在交叉审查模式与全自动模式下有效。\n\
-             方案审批模式请调用 ask_human(kind: plan_approval) 呈报方案。",
-            checkpoint.plan_mode
-        ));
-    }
     if checkpoint.plan_phase.is_approved() && submission.revision_reason.trim().is_empty() {
         return Some(
             "【ℹ️ submit_plan 不适用】方案已获放行，无需再次提交。请按已批准方案执行写入与验证。\n\
@@ -248,7 +352,18 @@ pub(crate) fn check_pre_write_gatekeeper(
     if let Some(blocked) = stage_blocker_interception(checkpoint, db) {
         return Some(blocked);
     }
+    if !submitted_review_active(checkpoint) && checkpoint.plan_mode != PlanExecutionMode::PlanApproval {
+        if checkpoint.stages.plan == Some(false) { return None; }
+        if configured_plan_missing(checkpoint) {
+            return Some(DispatchResult { view:None, success:false, stdout:String::new(), stderr:"当前配置要求正式方案；请先 submit_plan 保存方案。".into(), route:"plan_gatekeeper:configured_plan_required".into() });
+        }
+    }
 
+    if reviewed_human_plan(checkpoint) && checkpoint.approved_plan_summary.is_none() {
+        return Some(DispatchResult { view:None, success:false, stdout:String::new(),
+            stderr:"Agent 方案审查不替代人工批准；请在本批结果收齐后 ask_human(kind: plan_approval) 呈报方案与意见。".into(),
+            route:"plan_gatekeeper:need_human_approval".into() });
+    }
     if checkpoint.plan_phase.is_approved() && checkpoint.stage_review_blockers_open == 0 {
         checkpoint.recent_gate_block_step = None;
         return None;
@@ -608,3 +723,5 @@ fn gate_interception(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod human_review_tests;

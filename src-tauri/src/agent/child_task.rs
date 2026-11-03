@@ -32,6 +32,17 @@ pub(crate) fn is_delegating(parent: &str) -> bool {
         .values()
         .any(|b| b.parent_session == parent)
 }
+
+pub(crate) fn workspace_owner(session:&str,run:&str)->Result<(String,String),String> {
+    let active=ACTIVE.lock().map_err(|e|e.to_string())?;
+    let(mut session,mut run)=(session.to_string(),run.to_string());
+    let mut seen=std::collections::BTreeSet::new();
+    while let Some(binding)=active.get(&session) {
+        if !seen.insert(session.clone()){return Err("工作区委派身份链存在循环，未取得项目锁。".into());}
+        session=binding.parent_session.clone();run=binding.parent_run.clone();
+    }
+    Ok((session,run))
+}
 pub(crate) struct TaskGuard(pub TaskBinding);
 impl TaskGuard {
     pub fn enter(binding: TaskBinding) -> Self {

@@ -91,16 +91,17 @@ pub(crate) fn merge_execution_defaults(
     // configured plan/delivery defaults when selecting another ordinary preset.
     if profile != defaults.profile && (fixed_profile.is_some() || profile=="reviewer" || defaults.profile=="reviewer" || defaults.execution.workspace.as_deref()==Some("isolated")) {
         base["workflow"] = json!({});
+        base["stages"] = json!({});
     }
     if let Some(explicit) = params.get("execution") {
         let object = explicit.as_object().ok_or("execution 类型错误：期望对象")?;
         for (key, value) in object {
-            if key == "workflow" {
+            if key == "workflow" || key == "stages" {
                 let workflow = value
                     .as_object()
                     .ok_or("execution.workflow 类型错误：期望对象")?;
                 for (field, value) in workflow {
-                    base["workflow"][field] = value.clone();
+                    base[key][field] = value.clone();
                 }
             } else {
                 base[key] = value.clone();

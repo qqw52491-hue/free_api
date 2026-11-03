@@ -135,6 +135,8 @@ pub struct AgentCheckpoint {
     /// 运行执行模式：Auto（全自动）、CrossReview（交叉审查）、PlanApproval（方案审批）
     #[serde(default)]
     pub plan_mode: PlanExecutionMode,
+    #[serde(default)]
+    pub stages: crate::agent::stage_settings::StageSettings,
     /// 方案审查结果是否已被主循环或 wait_jobs 消费并注入上下文（“问过”且“听过”）
     #[serde(default)]
     pub plan_reviewer_consumed: bool,
@@ -158,6 +160,9 @@ pub struct AgentCheckpoint {
     /// submitted_plan 落账时的 step_id（审计与血缘追踪）
     #[serde(default)]
     pub submitted_plan_step: Option<usize>,
+    /// 已提交的正式方案尚需宿主自动交由人工批准。
+    #[serde(default)]
+    pub auto_plan_approval_pending: bool,
     /// 方案最终定稿人：Some("tech_lead") = Tech Lead 在 1v1 中修订定稿，
     /// submitted_plan 已是审查者版本而非提交方原版（血缘标记，供审计与回放）
     #[serde(default)]
@@ -196,6 +201,9 @@ pub struct AgentCheckpoint {
     /// 批次登记时的成员数（派发时刻的既定事实，标量不漂移）
     #[serde(default)]
     pub plan_review_expected_count: u32,
+    /// 本次方案审查派发中未启动的角色及原因；不冒充子任务回执。
+    #[serde(default)]
+    pub plan_review_dispatch_failures: Vec<String>,
     /// 已交付成员的解析产物缓存（run_id → 交付数据）——内容缓存而非成员名单，
     /// 幂等去重天然由 HashMap key 承担
     #[serde(default)]
@@ -416,10 +424,12 @@ impl AgentCheckpoint {
             approved_target_files: None,
             policy_decision_summary: None,
             plan_mode: PlanExecutionMode::Auto,
+            stages: Default::default(),
             plan_reviewer_consumed: false,
             plan_review_batch: PlanReviewBatchState::default(),
             plan_review_batch_id: None,
             plan_review_expected_count: 0,
+            plan_review_dispatch_failures: Vec::new(),
             plan_review_deliveries: std::collections::HashMap::new(),
             review_delivery_sources: Default::default(),
             review_finding_todos: Default::default(),
@@ -429,6 +439,7 @@ impl AgentCheckpoint {
             triage_revisions: Vec::new(),
             submitted_plan: None,
             submitted_plan_step: None,
+            auto_plan_approval_pending: false,
             plan_finalized_by: None,
             last_review_scorecard: None,
             last_review_blocking_count: 0,

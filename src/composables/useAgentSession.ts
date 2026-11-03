@@ -102,6 +102,9 @@ function loadModelRouting(): ModelRouting {
                 : {},
             stage_reviewer_override: typeof stored.stage_reviewer_override === "string" ? stored.stage_reviewer_override : undefined,
             stage_review_committee: stored.stage_review_committee === true,
+            stages: stored.stages && typeof stored.stages === 'object' ? Object.fromEntries(
+                ['plan','plan_review','stage_review','final_review'].filter(key => typeof (stored.stages as Record<string, unknown>)[key] === 'boolean').map(key => [key, (stored.stages as Record<string, unknown>)[key]])
+            ) : undefined,
             reviewer_backup_model: typeof stored.reviewer_backup_model === "string" ? stored.reviewer_backup_model.trim() : "",
         };
     } catch {

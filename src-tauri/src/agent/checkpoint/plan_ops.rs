@@ -91,6 +91,7 @@ impl AgentCheckpoint {
     pub fn set_plan_review_batch(&mut self, batch_id: impl Into<String>, member_count: usize) {
         self.plan_review_batch_id = Some(batch_id.into());
         self.plan_review_expected_count = member_count as u32;
+        self.plan_review_dispatch_failures.clear();
         self.plan_review_deliveries.clear();
         self.review_delivery_sources.clear();
         if member_count > 1 {
@@ -629,14 +630,14 @@ impl AgentCheckpoint {
         crate::agent::context::types::PlanGateProjection {
             mode: self.plan_mode.as_str().to_string(),
             phase: self.plan_phase.as_str().to_string(),
-            plan_required: crate::agent::plan_gate::submitted_review_active(self) || self
+            plan_required: crate::agent::plan_gate::submitted_review_active(self) || self.plan_mode == PlanExecutionMode::PlanApproval || self.stages.plan.unwrap_or(self.stages.plan_review == Some(true) || self
                 .triage_verdict
                 .as_ref()
                 .map_or(false, |v| v.requires_plan_gate())
                 || matches!(
                     self.plan_mode,
                     PlanExecutionMode::CrossReview | PlanExecutionMode::PlanApproval
-                ),
+                )),
             reviewer_dispatched: self.plan_reviewer_retry_count > 0,
             reviewer_consumed: self.plan_reviewer_consumed,
             reviewer_budget_used: self.plan_reviewer_retry_count,
@@ -657,6 +658,9 @@ impl AgentCheckpoint {
     /// 并同步 auto_pilot 兼容字段。所有模式切换都必须走这里，
     /// 避免 reconcile / plan_mode / auto_pilot 三处赋值散落导致漏改。
     pub fn set_execution_mode(&mut self, new_mode: PlanExecutionMode) {
+        if new_mode != PlanExecutionMode::PlanApproval {
+            self.auto_plan_approval_pending = false;
+        }
         self.reconcile_plan_phase_for_mode_switch(new_mode);
         self.plan_mode = new_mode;
         self.auto_pilot = matches!(

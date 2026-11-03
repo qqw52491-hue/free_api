@@ -621,10 +621,10 @@
         let auto = exploration_checkpoint(PlanExecutionMode::Auto, PlanPhase::Exploring, 0);
         assert!(submit_plan_rejection(&auto, &valid_submission()).is_none());
 
-        // PlanApproval 模式 → 不适用（应走 ask_human）
+        // 人工批准模式同样提交正式方案，由宿主衔接人工确认。
         let approval =
             exploration_checkpoint(PlanExecutionMode::PlanApproval, PlanPhase::Exploring, 0);
-        assert!(submit_plan_rejection(&approval, &valid_submission()).unwrap().contains("不适用"));
+        assert!(submit_plan_rejection(&approval, &valid_submission()).is_none());
 
         // 已放行 → 不适用
         let approved =

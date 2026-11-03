@@ -382,6 +382,7 @@ export const STATE_CARD_LEVELS: StateCardLevelOption[] = [
 ];
 
 export interface ModelRouting {
+    stages?: StageSettings;
     reasoning_effort_version: 2;
     pro: string;
     flash: string;
@@ -405,6 +406,8 @@ export interface ModelRouting {
     /** 本会话排除/休眠的角色卡名称列表（无需修改全局工坊，即可在当前会话动态启闭某专家） */
     disabled_role_cards?: string[];
 }
+
+export interface StageSettings { plan?: boolean; plan_review?: boolean; stage_review?: boolean; final_review?: boolean }
 
 export interface RoleCard {
     id: string;

@@ -58,7 +58,8 @@ async fn run_tool_phase_guarded(
 ) -> Result<DispatchResult, String> {
     // 通用委派包含完整的多步运行；每个子步骤仍受同一工具看门狗约束。
     // 不能再把整个子任务当成一条短工具调用，超时丢弃其 Future 会留下共享工作区工具。
-    if inst.get_tool().eq_ignore_ascii_case("child_task") || inst.get_action().eq_ignore_ascii_case("child_task") {
+    if inst.get_tool().eq_ignore_ascii_case("child_task") || inst.get_action().eq_ignore_ascii_case("child_task")
+        || inst.get_tool().eq_ignore_ascii_case("ask_human") || inst.get_action().eq_ignore_ascii_case("ask") {
         let group = crate::agent::work_history::WorkGroup::capture(final_session_id, context, step_id);
         crate::agent::work_history::prepare_group(state.inner(), group.as_ref());
         return crate::agent::work_history::in_group(group, run_tool_phase(
@@ -223,7 +224,10 @@ pub async fn run_call_llm_and_run_tool_phases(
 
     // LLM 回复已落盘但工具尚未开始时，恢复直接进入同一工具处理器。
     // 这样不会为同一个决策额外消耗一次模型调用，也不会绕过工具前的 pending 提交。
-    if let Some(inst) = resume_instruction {
+    if let Some(mut inst) = resume_instruction {
+        if crate::agent::child_reviewer::main_executor::load(state.inner(),run_id)?.is_some() {
+            inst=crate::agent::child_reviewer::main_executor::restrict_instruction(inst);
+        }
         crate::agent::advance_run_state(
             &app,
             &final_session_id,
@@ -501,6 +505,9 @@ pub async fn run_call_llm_and_run_tool_phases(
         };
 
         let model_tier = routing.tier.to_string();
+        if crate::agent::child_reviewer::main_executor::load(state.inner(),run_id)?.is_some() {
+            inst=crate::agent::child_reviewer::main_executor::restrict_instruction(inst);
+        }
         inst.description = inst.description.trim().to_string();
         if inst.description.is_empty() {
             inst.description = "执行下一步操作".to_string();
@@ -698,8 +705,10 @@ pub async fn run_call_llm_and_run_tool_phases(
             });
         }
         // --- C. 判断执行结果 ---
-        if dispatch_result.success || inst.get_action() == "finish" {
-            break (inst, dispatch_result); // 成功！
+        if dispatch_result.success || inst.get_action() == "finish"
+            || (checkpoint.auto_plan_approval_pending && dispatch_result.route == "submit_plan:dispatch_failed") {
+            // 已保存的未审方案交给自动人工仲裁，而不是先让模型重复提交。
+            break (inst, dispatch_result);
         } else {
             let repeat_failure_blocked = dispatch_result.route == REPEATED_FAILURE_BLOCKED_ROUTE;
             if !repeat_failure_blocked {

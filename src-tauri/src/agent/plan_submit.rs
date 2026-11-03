@@ -14,7 +14,7 @@ mod team;
 
 /// submit_plan 编排：校验 → 组装 Tech Lead 证据包 → spawn（唯一可失败的外部副作用）
 /// → 成功后由 checkpoint.commit_plan_submission 一次合并全部状态。
-/// 任何失败路径都不触碰 checkpoint，杜绝「方案已保存但审查未注册」的半截状态。
+/// 人工审批与审查同时开启时，派发失败会保存明确标记的未审方案，供人工仲裁；其他失败不改变方案状态。
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_submit_plan(
     app: &AppHandle,
@@ -49,6 +49,11 @@ pub async fn handle_submit_plan(
             "plan_liveness:submit_plan_not_applicable"
         };
         return reject(reason, route);
+    }
+    if checkpoint.stages.plan == Some(false) || checkpoint.stages.plan_review == Some(false)
+        || (checkpoint.plan_mode == crate::agent::checkpoint::PlanExecutionMode::PlanApproval
+            && checkpoint.stages.plan_review != Some(true)) {
+        return record_plan_without_review(checkpoint, submission, step_id).unwrap_or_else(|error|reject(error,"plan_liveness:submit_plan_invalid"));
     }
     // DB 在途守卫：崩溃孤儿行（spawn 成功但批次未注册）也要挡住重复提交
     if crate::agent::child_reviewer::has_running_child_runs(db, parent_run_id) {
@@ -111,10 +116,13 @@ pub async fn handle_submit_plan(
         db, &model_routing.disabled_role_cards,
     ) {
         Ok(card) => card,
-        Err(error) => return reject(
-            format!("【⚠️ submit_plan 已拒绝】{error}"),
-            "plan_liveness:submit_plan_role_unavailable",
-        ),
+        Err(error) => {
+            let notice = format!("方案审查角色未启动：{error}");
+            if record_human_review_dispatch_failure(checkpoint, submission, step_id, vec![notice.clone()]) {
+                return reject(format!("{notice}；方案已保存但未经审查，可重试或请求人工仲裁。"), "submit_plan:dispatch_failed");
+            }
+            return reject(format!("【⚠️ submit_plan 已拒绝】{error}"), "plan_liveness:submit_plan_role_unavailable");
+        },
     };
 
     // ---- 组装 Tech Lead 评审证据包 ----
@@ -246,6 +254,10 @@ pub async fn handle_submit_plan(
     if let Err(err) =
         crate::agent::tools::role_manager::validate_dispatch_inputs(&card, Some(&custom_inputs))
     {
+        let notice = format!("方案审查角色未启动：{err}");
+        if record_human_review_dispatch_failure(checkpoint, submission, step_id, vec![notice.clone()]) {
+            return reject(format!("{notice}；方案已保存但未经审查，可重试或请求人工仲裁。"), "submit_plan:dispatch_failed");
+        }
         return reject(err, "plan_liveness:submit_plan_invalid");
     }
     // 入口分流作为 triage_reference 附给子任务，不认证为事实或禁止事项
@@ -397,6 +409,34 @@ pub async fn handle_submit_plan(
 
 }
 
+/// 仅组合审批保存未启动的方案：这是失败事实而非虚构批次或自动批准。
+pub(super) fn record_human_review_dispatch_failure(
+    checkpoint: &mut AgentCheckpoint,
+    submission: &crate::agent::types::PlanSubmission,
+    step: usize,
+    failures: Vec<String>,
+) -> bool {
+    if !crate::agent::plan_gate::reviewed_human_plan(checkpoint) || failures.is_empty() {
+        return false;
+    }
+    if checkpoint.plan_phase.is_approved() {
+        checkpoint.plan_reviewer_retry_count = 0;
+    }
+    checkpoint.submitted_plan = Some(submission.clone());
+    checkpoint.submitted_plan_step = Some(step);
+    checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::Reviewing;
+    checkpoint.approved_plan_summary = None;
+    checkpoint.approved_target_files = None;
+    checkpoint.plan_unreviewed_release = false;
+    checkpoint.plan_finalized_by = None;
+    checkpoint.plan_review_batch_id = None;
+    checkpoint.plan_review_expected_count = 0;
+    checkpoint.plan_reviewer_consumed = true; // 无已启动成员需要等待；不代表审查通过。
+    checkpoint.plan_reviewer_last_dispatch = None;
+    checkpoint.plan_review_dispatch_failures = failures;
+    true
+}
+
 /// Auto 模式下 submit_plan 的策略预检：把「写入时才跑的判定」前置为正常工具结果。
 /// - FastPass → 方案落账（审计母本）+ 核准范围登记（scope drift 对账基准），
 ///   返回就绪文案；不设 plan_phase=Approved——后续写入仍逐次过策略判定，
@@ -405,10 +445,35 @@ pub async fn handle_submit_plan(
 ///   Tech Lead 派发链（自动开启审查，复用整套批次台账/裁决/放行仪式）。
 /// - Block   → 返回拒绝结果（危险命令黑名单级）。
 /// 返回 Some = 终态答复；None = 继续走正常审查派发。
+pub(crate) fn record_plan_without_review(checkpoint: &mut AgentCheckpoint, submission: &crate::agent::types::PlanSubmission, step_id: usize) -> Result<DispatchResult,String> {
+    if checkpoint.plan_gate_projection().blocking_count > 0 {
+        return Err("已有方案审查阻塞尚未核销；关闭后续自动审查不撤销该结论。".into());
+    }
+    let (targets, _) = crate::agent::plan_gate::validate_plan_submission(submission, false)?;
+    checkpoint.submitted_plan=Some(submission.clone());
+    checkpoint.submitted_plan_step=Some(step_id);
+    if checkpoint.plan_mode == crate::agent::checkpoint::PlanExecutionMode::PlanApproval {
+        // 只保存方案，不把“无需 Agent 审查”误记为人工批准。
+        checkpoint.plan_phase=crate::agent::checkpoint::PlanPhase::Reviewing;
+        checkpoint.approved_plan_summary=None;
+        checkpoint.approved_target_files=None;
+        checkpoint.plan_unreviewed_release=false;
+        checkpoint.plan_review_batch_id=None;
+        checkpoint.plan_review_expected_count=0;
+        checkpoint.plan_review_dispatch_failures.clear();
+        checkpoint.plan_reviewer_consumed=true;
+    } else {
+        checkpoint.plan_phase=crate::agent::checkpoint::PlanPhase::Approved;
+        if !targets.is_empty() { checkpoint.approved_target_files=Some(targets); }
+    }
+    Ok(DispatchResult {view:None,success:true,stdout:"方案已保存；按配置不自动派发方案审查，未产生审查通过结论。".into(),stderr:String::new(),route:"plan:recorded_without_review".into()})
+}
+
 fn auto_policy_for_review_mode(
     checkpoint: &mut AgentCheckpoint, submission: &crate::agent::types::PlanSubmission,
     workspace: &Path, step: usize, committee: bool,
 ) -> Option<DispatchResult> {
+    if checkpoint.stages.plan_review == Some(true) { return None; }
     let mut probe = checkpoint.clone();
     let verdict = auto_policy_verdict(&mut probe, submission, workspace, step);
     if committee && verdict.as_ref().is_some_and(|v|v.route == "plan_gatekeeper:auto_preflight_fast_pass") {

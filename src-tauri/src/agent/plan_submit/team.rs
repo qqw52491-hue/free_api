@@ -147,11 +147,13 @@ pub(super) async fn dispatch_plan_team(
         }
     }
     if ids.is_empty() {
+        let saved = record_human_review_dispatch_failure(checkpoint, submission, step, notices.clone());
         return DispatchResult {
             view: None,
             success: false,
             stdout: String::new(),
-            stderr: format!("方案审查未能启动，本次未批准方案：{}", notices.join("；")),
+            stderr: format!("方案审查未能启动，本次未批准方案：{}{}", notices.join("；"),
+                if saved { "。方案已保存但未经审查；将如实交由用户仲裁。" } else { "" }),
             route: "submit_plan:dispatch_failed".into(),
         };
     }
@@ -161,10 +163,16 @@ pub(super) async fn dispatch_plan_team(
                 .into(),
         );
     }
+    if crate::agent::plan_gate::reviewed_human_plan(checkpoint) {
+        checkpoint.plan_review_dispatch_failures = notices.clone();
+    }
     let summary = format!("【✅ {}方案已提交并进入审查】第 {} 轮，实际启动 {} 位：{}。\n请用 wait_jobs(job_ids:{}) 等待本批结果；所有成员结果收齐前不视为批准。审查完成不等于方案通过，具体 blocking 和修订裁决继续生效。{}",
         if revision {"修订"}else{""},round,ids.len(),labels.join("、"),
         serde_json::to_string(&ids).unwrap_or_default(),
         if notices.is_empty(){String::new()}else{format!("\n派发说明：{}",notices.join("；"))});
+    let summary=if crate::agent::plan_gate::reviewed_human_plan(checkpoint) {
+        format!("{summary}\n当前还要求人工批准；宿主将收齐本批审查结果并自动呈报方案与意见，取得批准后再实施。")
+    } else {summary};
     DispatchResult {
         view: None,
         success: true,

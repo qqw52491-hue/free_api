@@ -38,7 +38,7 @@ pub(super) struct MainExecution<'a, 'b> {
 pub(super) async fn turn_main<'a, 'b>(
     state: Box<MainExecution<'a, 'b>>,
 ) -> Result<ControlFlow<Option<Box<MainExecution<'a, 'b>>>, Box<MainExecution<'a, 'b>>>, String> {
-    if state.checkpoint.step_id >= state.max_steps {
+    if state.checkpoint.step_id >= state.max_steps && !state.checkpoint.auto_plan_approval_pending {
         return Ok(ControlFlow::Break(Some(state)));
     }
     let MainExecution {
@@ -100,15 +100,18 @@ pub(super) async fn turn_main<'a, 'b>(
         );
         crate::agent::control::mark_stage(&final_session_id, "loop_top:receipt_poll");
         // token 预算在步骤边界检查：一旦跨线立即收敛出报告，不再派发新步骤
-        if let Some(reason) = token_budget_stop_reason(run_budget.as_ref(), spent_prompt_tokens) {
-            budget_stop_reason = Some(reason);
-            break 'turn ControlFlow::Break(());
+        if !checkpoint.auto_plan_approval_pending {
+            if let Some(reason) = token_budget_stop_reason(run_budget.as_ref(), spent_prompt_tokens) {
+                budget_stop_reason = Some(reason);
+                break 'turn ControlFlow::Break(());
+            }
         }
 
         // 🧭 retriage 资源里程点（实验，默认关）：只看资源事实（探索相位 + 步数
         // 阈值 + 从未复核），由 supervisor 判断漫游是否合理——宿主不碰认知。
         let milestone = crate::agent::retriage::retriage_milestone_steps();
         if milestone > 0
+            && !checkpoint.auto_plan_approval_pending
             && checkpoint.plan_phase == crate::agent::checkpoint::PlanPhase::Exploring
             && checkpoint.retriage_used == 0
             && checkpoint.step_id >= milestone
@@ -330,7 +333,11 @@ pub(super) async fn turn_main<'a, 'b>(
         // batch_id+consumed_at 推导——孤儿 id 让门禁等死人的死锁类
         // 结构性消失，无需再对账。
         checkpoint.refresh_consumed_flags(state.inner());
-        let resume_instruction = recovered_instruction.take();
+        let resume_instruction = if let Some(recovered) = recovered_instruction.take() {
+            Some(recovered)
+        } else {
+            crate::agent::plan_gate::automatic_plan_approval_instruction(&checkpoint, state.inner())?
+        };
         // 每轮规划前把方案门禁状态投影进上下文底部状态卡：模型在决策时即可见
         // 当前模式与放行条件，不再靠写入被拒（一整轮 LLM 往返）反推门禁规则。
         context.plan_gate = Some(checkpoint.plan_gate_projection());

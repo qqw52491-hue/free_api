@@ -41,6 +41,8 @@ pub struct ModelRoutingConfig {
     /// 会话级阶段审查门禁覆盖："disabled"（直通免审）| 角色名（如 "frontend_ui_reviewer"）| 空串/缺省（跟随全局默认）
     #[serde(default)]
     pub stage_reviewer_override: Option<String>,
+    #[serde(default)]
+    pub stages: crate::agent::stage_settings::StageSettings,
     /// 审查人数：true = 方案/终审及适用的阶段审查最多 3 位；false = 单审（默认）。
     /// 保留 stage_review_committee 字段名兼容已有前端配置，不额外触发阶段审查。
     #[serde(default)]
@@ -74,6 +76,7 @@ impl Default for ModelRoutingConfig {
             routing_mode: String::new(),
             role_models: BTreeMap::new(),
             stage_reviewer_override: None,
+            stages: Default::default(),
             stage_review_committee: false,
             disabled_role_cards: Vec::new(),
             auto_cross_family_reviewer: false,

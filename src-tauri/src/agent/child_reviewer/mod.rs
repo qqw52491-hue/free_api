@@ -17,6 +17,7 @@ mod lifecycle;
 mod parse;
 mod poll;
 mod resume;
+pub(crate) mod main_executor;
 #[cfg(test)]
 mod resume_tests;
 #[cfg(test)]
@@ -414,6 +415,20 @@ pub async fn spawn_child_reviewer(
         }
     }
 
+    if let Some(handle) = app.as_ref() {
+        let program = main_executor::ReviewProgram {
+            parent_session: parent_session_id.into(), workspace: workspace_root.into(),
+            messages: messages.clone(), allowed_refs: allowed_refs.clone(), schema: custom_schema.clone(),
+            has_verify_obligation: Some(has_verify_obligation), role: param_role.clone(), role_label: param_role_label.clone(),
+            model: config.model_name.clone(), can_finalize: is_plan_review.then_some(can_finalize),
+            evidence_scope_refs: evidence_scope_refs.clone(), final_fingerprint: None, verify_obligations: vec![],
+            evidence_since: None,
+        };
+        if let Err(error)=main_executor::start(handle.clone(), db, &child_run_id, parent_run_id, &config.model_id, reasoning_effort.clone(), program, interrupt_rx) {
+            crate::agent::execution::runtime::fail_checkpoint(db,&child_run_id,error.clone());return Err(error);
+        }
+        return Ok(child_run_id);
+    }
     let registration = match crate::agent::review_control::register(
         db,
         parent_session_id,

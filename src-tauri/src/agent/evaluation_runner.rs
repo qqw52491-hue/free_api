@@ -867,6 +867,7 @@ mod tests {
             .unwrap();
         let db = DbState(Arc::new(StdMutex::new(connection)));
         let requested = ModelRoutingConfig {
+            stages: Default::default(),
             pro: "glm-test".to_string(),
             flash: "sense-test".to_string(),
             vision: "glm-test".to_string(),

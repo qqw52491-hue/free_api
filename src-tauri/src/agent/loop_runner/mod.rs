@@ -169,6 +169,11 @@ pub async fn run_tool_phase(
     }
 
     // 参数错误不进入审查/冷却/读取台账：预检只读，不修改 checkpoint。
+    if !is_finish_instruction(inst) && inst.prepare_finish.is_none() && inst.fail_task.is_none() {
+        if let Some(program)=crate::agent::child_reviewer::main_executor::load(state.inner(),parent_run_id)? {
+            return Ok(crate::agent::child_reviewer::main_executor::tool(state.inner(),parent_run_id,&program,inst,interrupt_rx).await);
+        }
+    }
     if let Some(result) = crate::agent::tools::input_validation::instruction_rejection(state.inner(), inst) {
         emit_tool_event(app, final_session_id, step_id, inst, "failed",
             Some(result.route.clone()), Some(false), &result.stderr, Some(0), None);
@@ -188,8 +193,10 @@ pub async fn run_tool_phase(
     crate::agent::agent_mailbox::deliver_main(state.inner(),&crate::agent::agent_mailbox::Actor::new(parent_run_id,final_session_id),context,checkpoint)?;
     let entry=inst.get_tool();
     if !entry.is_empty() && inst.commands.is_empty() && inst.parallel.is_none() && inst.plan_tree.is_none() && !matches!(entry.as_str(),"parallel"|"sequential"|"pipeline"|"finish") {
-        if let Err(error)=crate::agent::execution::runtime::authorize_call(state.inner(),parent_run_id,&entry,&inst.get_action(),&inst.get_params()) {
-            return Ok(crate::agent::tools::input_validation::rejection(error));
+        if !crate::agent::plan_gate::is_automatic_plan_wait(checkpoint, state.inner(), inst) {
+            if let Err(error)=crate::agent::execution::runtime::authorize_call(state.inner(),parent_run_id,&entry,&inst.get_action(),&inst.get_params()) {
+                return Ok(crate::agent::tools::input_validation::rejection(error));
+            }
         }
     }
     record_dispatch_advice(context, inst, workspace_dir);
@@ -247,6 +254,15 @@ pub async fn run_tool_phase(
             .await
         };
         let mut result = result;
+        // 只有本步确实落账了方案才启动自动审批；参数拒绝不触发。
+        if checkpoint.plan_mode == crate::agent::checkpoint::PlanExecutionMode::PlanApproval
+            && checkpoint.submitted_plan_step == Some(step_id)
+            && checkpoint.submitted_plan.is_some()
+            && (result.success || result.route == "submit_plan:dispatch_failed")
+        {
+            checkpoint.auto_plan_approval_pending = true;
+            save_checkpoint(state.inner(), checkpoint)?;
+        }
         if let Some(notice) = inst.ignored_mixed_entry_notice() {
             if result.success {
                 result.stdout.push_str(&notice);

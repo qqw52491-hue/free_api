@@ -57,7 +57,7 @@ pub(super) async fn dispatch_ask_human(
             .unwrap_or("AI 请求人类协助与指示")
             .to_string();
         // 人工特赦带上「当时问了什么」：只记「确认执行」这类回复，审查员看不出批准的是什么。
-        let waiver_question: String = form_val
+        let mut waiver_question: String = form_val
             .and_then(|f| f.get("description"))
             .and_then(|v| v.as_str())
             .filter(|s| !s.trim().is_empty())
@@ -90,12 +90,6 @@ pub(super) async fn dispatch_ask_human(
                 && ctx.checkpoint.plan_reviewer_retry_count
                     >= crate::agent::checkpoint::max_plan_reviewer_rounds())));
 
-        ctx.app.emit(
-            &format!("agent-log-{}", ctx.final_session_id),
-            format!("⏸️ AI 已挂起，等待人类协助: {}", ask_msg),
-        )
-        .ok();
-
         // 若处于仲裁/审批上下文但模型未提供 form，自动补齐 plan_approval 结构化表单，
         // 使得前端直接渲染【批准方案】【打回修改】等可点击卡片，提升人机协作效率。
         let mut final_form_val: Option<serde_json::Value> = if form_val.is_some() {
@@ -111,6 +105,20 @@ pub(super) async fn dispatch_ask_human(
         };
 
         if is_approval_context {
+            // Explicit non-approval questions (credentials, clarification, etc.)
+            // remain available while the configured review is still running.
+            if is_plan_approval_kind || ask_kind.is_empty() {
+                match crate::agent::plan_gate::human_plan_review_material(ctx.checkpoint, ctx.state.inner()) {
+                    Err(result) => return Ok(ArmOutcome::Early(result)),
+                    Ok(Some(material)) => {
+                        if let Some(object)=final_form_val.as_mut().and_then(Value::as_object_mut) {
+                            object.insert("description".into(),json!(&material));
+                        }
+                        waiver_question=material;
+                    }
+                    Ok(None) => {}
+                }
+            }
             if let Err(reject_msg) = normalize_approval_description(
                 &mut final_form_val, params.get("message").and_then(Value::as_str),
             ) {
@@ -124,6 +132,10 @@ pub(super) async fn dispatch_ask_human(
         }
 
         // 通知前端进入暂停状态
+        ctx.app.emit(
+            &format!("agent-log-{}", ctx.final_session_id),
+            format!("⏸️ AI 已挂起，等待人类协助: {}", ask_msg),
+        ).ok();
         ctx.app.emit(
             &format!("agent-progress-{}", ctx.final_session_id),
             json!({
@@ -147,8 +159,12 @@ pub(super) async fn dispatch_ask_human(
         // 「本次所问即该命令」——回复回来后按指纹核销（语义上确认与否归人类，
         // 机械上只认命令原文在场）。
         ctx.checkpoint.git_destructive_mark_asked(&ask_msg);
-        ctx.checkpoint.prepared_instruction = Some(inst.clone());
         ctx.checkpoint.wait_for_human(ask_msg.clone(), ctx.context);
+        if is_plan_approval_kind && ctx.checkpoint.auto_plan_approval_pending {
+            // wait_for_human clears prepared_instruction; keep the actual card so
+            // a restart can re-present the same approval with its decision semantics.
+            ctx.checkpoint.prepared_instruction = Some(inst.clone());
+        }
         save_checkpoint(ctx.state.inner(), ctx.checkpoint)?;
         crate::agent::advance_run_state(
             ctx.app,
@@ -180,6 +196,11 @@ pub(super) async fn dispatch_ask_human(
                     route: RUN_INTERRUPTED_ROUTE.to_string(),
                 }))
             }
+            None if ctx.checkpoint.auto_plan_approval_pending => {
+                return Ok(ArmOutcome::Early(DispatchResult { view: None, success: true,
+                    stdout: "人工审批通道已关闭，方案尚未批准。".into(), stderr: String::new(),
+                    route: RUN_INTERRUPTED_ROUTE.to_string() }));
+            }
             None => ("人类未回复，通道异常关闭".to_string(), false),
         };
         ctx.context.add_error_feedback(&format!("【人类回复】{}", reply));
@@ -189,8 +210,12 @@ pub(super) async fn dispatch_ask_human(
             let clean_reply = strip_plan_decision_marker(&reply);
             ctx.checkpoint.apply_explicit_plan_decision(ctx.state.inner(), ctx.context, approved, &waiver_question, &clean_reply);
         }
+        if received_human_reply && is_plan_approval_kind {
+            // 自由文本仍由主模型判断；不重复弹出同一方案。
+            ctx.checkpoint.auto_plan_approval_pending = false;
+        }
         if received_human_reply {
-            ctx.checkpoint.register_human_reply(&ask_msg, &reply, is_approval_context && explicit_plan.is_none());
+            ctx.checkpoint.register_human_reply(if is_approval_context {&waiver_question} else {&ask_msg}, &reply, is_approval_context && explicit_plan.is_none());
         }
         ctx.checkpoint.begin_planning(ctx.step_id, ctx.context);
         save_checkpoint(ctx.state.inner(), ctx.checkpoint)?;

@@ -22,6 +22,7 @@ pub(crate) fn spawn_review_resume(
     checkpoint: &mut crate::agent::checkpoint::AgentCheckpoint,
     interrupt: watch::Receiver<u64>,
     progress: Option<ResumeProgressSink>,
+    app: Option<AppHandle>,
 ) -> Result<String, ResumeReviewError> {
     let error = |route, message| ResumeReviewError { route, message };
     crate::agent::review_control::ensure_allowed(db, session, &config.model_id)
@@ -91,6 +92,10 @@ pub(crate) fn spawn_review_resume(
         .and_then(|s| serde_json::from_str::<Value>(s).ok())
         .and_then(|v| v.get("plan_review_can_finalize").and_then(Value::as_bool));
     let old_budget = checkpoint.plan_reviewer_retry_count;
+    let prior_main_program=if app.is_some() {super::main_executor::load(db,target).map_err(|e|error("resume_child:invalid_saved_program",e))?} else {None};
+    if prior_main_program.as_ref().is_some_and(|p|p.final_fingerprint.is_some()) {
+        return Err(error("resume_child:final_review_transport","该记录是终审回执，使用原正式交付入口复审；未按 findings 对质协议派发。".into()));
+    }
     let old_consumed = checkpoint.plan_reviewer_consumed;
     if !checkpoint.plan_phase.is_approved() {
         checkpoint
@@ -127,6 +132,21 @@ pub(crate) fn spawn_review_resume(
         checkpoint.plan_reviewer_consumed = false;
     }
     config.max_tokens = 900;
+    if let Some(app)=app {
+        let mut program=prior_main_program.unwrap_or(super::main_executor::ReviewProgram {
+            parent_session:session.into(),workspace:workspace.into(),messages:vec![],allowed_refs:vec![],schema:None,
+            has_verify_obligation:None,role:None,role_label:None,model:config.model_name.clone(),can_finalize,
+            evidence_scope_refs:vec![],final_fingerprint:None,verify_obligations:vec![],
+            evidence_since:None,
+        });
+        program.messages=messages;program.schema=schema;program.can_finalize=can_finalize;program.model=config.model_name.clone();
+        program.workspace=workspace.into();program.parent_session=session.into();
+        if let Err(message)=super::main_executor::start(app,db,&id,parent_run,&config.model_id,effort,program,interrupt) {
+            crate::agent::execution::runtime::fail_checkpoint(db,&id,message.clone());
+            return Err(error("resume_child:main_executor_start_failed",message));
+        }
+        return Ok(id);
+    }
     tokio::spawn(run_resumed_review(
         DbState(db.0.clone()),
         id.clone(),

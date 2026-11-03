@@ -81,6 +81,12 @@ fn execute(
     Box::pin(async move {
         let state = app.state::<DbState>();
         let registry = app.state::<Arc<tokio::sync::Mutex<crate::agent::mcp::PluginRegistry>>>();
+        let review=crate::agent::child_reviewer::main_executor::load(state.inner(),&binding.child_run)?;
+        let _review_workspace=if review.is_some() {
+            let (session,run)=super::workspace_owner(&binding.parent_session,&binding.parent_run)?;
+            crate::agent::workspace_lock::acquire_delegation_lock(&workspace,&session,&run).await?
+        }else{None};
+        let budget=review.map(|_|crate::agent::main_loop::AgentRunBudget{max_steps:Some(crate::agent::review_tools::forensic_budget() as usize+crate::agent::child_reviewer::MAX_REVIEW_OUTPUT_ATTEMPTS as usize),max_prompt_tokens:None});
         crate::agent::work_history::in_group(
             None,
             crate::agent::main_loop::run_agent_main_loop_in_workspace_inner(
@@ -98,7 +104,7 @@ fn execute(
                 Some(workspace),
                 binding.child_run.clone(),
                 Some(mode),
-                None,
+                budget,
                 None,
                 Some(binding),
             ),
@@ -193,8 +199,15 @@ pub(crate) fn spawn(
             &binding.child_run,
         )
         .await;
-        let settled = super::settle(&db, &binding, &result, started.elapsed().as_millis() as u64);
+        let settled = match crate::agent::child_reviewer::main_executor::load(&db,&binding.child_run) {
+            Ok(Some(_))=>crate::agent::child_reviewer::main_executor::settle(&db,&binding,&result,started.elapsed().as_millis() as u64),
+            Ok(None)=>super::settle(&db, &binding, &result, started.elapsed().as_millis() as u64),
+            Err(error)=>Err(error),
+        };
         if let Err(error) = settled {
+            // Execution has ended; a conversion/storage error must not leave a
+            // running child forever. Existing terminal CAS preserves cancellation.
+            crate::agent::execution::runtime::fail_checkpoint(&db,&binding.child_run,error.clone());
             let _ = app.emit(
                 &format!("agent-log-{}", binding.parent_session),
                 format!("子任务 {} 交接保存失败：{error}", binding.child_run),

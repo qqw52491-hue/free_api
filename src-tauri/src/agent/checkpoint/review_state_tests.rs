@@ -168,6 +168,7 @@ impl Fixture {
             &mut self.cp,
             self.rx.clone(),
             None,
+            None,
         )
     }
 

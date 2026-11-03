@@ -399,7 +399,7 @@ async fn dispatch_inner(
         goal,
         ctx.workspace_dir.into(),
         ctx.checkpoint.auto_pilot,
-        execution.workflow.plan_mode.unwrap_or_else(||ctx.checkpoint.plan_mode.as_str().into()),
+        execution.workflow.plan_mode.unwrap_or_else(||"auto".into()),
         _workspace,
     )?;
     Ok(DispatchResult {view:None,success:true,stdout:json!({"child_run_id":id,"execution_status":"running","delivery_accepted":false,"next":"可用 child_task.status / send / wait / cancel；共享工作区可并行使用，请协调相关修改。需要信息时子任务可给 parent 发消息，父任务等待会被消息唤醒。"}).to_string(),stderr:String::new(),route:"child_task:spawned".into()})

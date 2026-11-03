@@ -57,6 +57,10 @@
         let mut triage=crate::agent::triage::TriageVerdict::fallback("fixture");
         triage.stage_review_mode="none".into();cp.triage_verdict=Some(triage);
         assert!(should_fire(&cp,&db,&context,&instruction,&many).is_none());
+        cp.stages.stage_review=Some(true);
+        assert!(should_fire(&cp,&db,&context,&instruction,&many).is_some());
+        cp.stages.stage_review=Some(false);
+        assert!(should_fire(&cp,&db,&context,&instruction,&many).is_none());
         let _=std::fs::remove_dir_all(root);
     }
 

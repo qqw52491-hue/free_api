@@ -58,9 +58,11 @@ pub fn should_fire(
     instruction: &AgentInstruction,
     model_routing: &ModelRoutingConfig,
 ) -> Option<String> {
+    if checkpoint.stages.stage_review == Some(false) { return None; }
+    let explicitly_enabled = checkpoint.stages.stage_review == Some(true);
     // 任务入口分流判决 stage_review_mode="none" → 阶段审查整体关闭；
     // 注意这只关闭"中段复审"，已判出的 stage blockers 拦截在写入门禁处仍生效。
-    if checkpoint
+    if !explicitly_enabled && checkpoint
         .triage_verdict
         .as_ref()
         .is_some_and(|v| !v.needs_stage_review())
@@ -68,7 +70,7 @@ pub fn should_fire(
         return None;
     }
     // 0. 会话级阶段审查门禁覆盖检查（若为 disabled/none 则直通免审）
-    if let Some(ref ovr) = model_routing.stage_reviewer_override {
+    if let Some(ref ovr) = model_routing.stage_reviewer_override.as_ref().filter(|_| !explicitly_enabled) {
         let clean = ovr.trim();
         if clean.eq_ignore_ascii_case("disabled") || clean.eq_ignore_ascii_case("none") {
             return None;
@@ -79,13 +81,13 @@ pub fn should_fire(
         return None;
     }
     // 仅在方案已批准后介入（批准前由方案审查负责），全自动模式保持原有行为
-    if !checkpoint.plan_phase.is_approved() {
+    if !explicitly_enabled && !checkpoint.plan_phase.is_approved() {
         return None;
     }
-    if checkpoint.plan_mode == PlanExecutionMode::Auto {
+    if !explicitly_enabled && checkpoint.plan_mode == PlanExecutionMode::Auto {
         return None;
     }
-    if !stage_review_enabled() {
+    if !explicitly_enabled && !stage_review_enabled() {
         return None;
     }
     // 已有在途审查或尚有未解决的拦截时，不重复派发（等消费或对质收敛）
@@ -173,11 +175,12 @@ pub async fn dispatch(
     step_id: usize,
     interrupt_rx: watch::Receiver<u64>,
 ) -> Result<(), String> {
+    if checkpoint.stages.stage_review == Some(false) { return Ok(()); }
     // 1. 检查会话级是否有指定的审查官角色卡，未硬性指定时自适应从启用专家中匹配
     let (is_explicit_override, explicit_card) = if let Some(ref ovr) = model_routing.stage_reviewer_override {
         let clean = ovr.trim();
         if clean.eq_ignore_ascii_case("disabled") || clean.eq_ignore_ascii_case("none") {
-            return Ok(());
+            if checkpoint.stages.stage_review == Some(true) { (false, None) } else { return Ok(()); }
         } else if !clean.is_empty()
             && !clean.eq_ignore_ascii_case("default")
             && !clean.eq_ignore_ascii_case("follow_global")

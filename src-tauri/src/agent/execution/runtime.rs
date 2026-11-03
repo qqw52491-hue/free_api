@@ -17,6 +17,8 @@ pub struct ExecutionConfig {
     pub allowed_tools: Option<Vec<String>>,
     #[serde(default)]
     pub workflow: Workflow,
+    #[serde(default)]
+    pub stages: crate::agent::stage_settings::StageSettings,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -36,6 +38,7 @@ impl ExecutionConfig {
             Some(value) => serde_json::from_value(value.clone())
                 .map_err(|e| format!("execution 参数错误：{e}；未启动执行。"))?,
         };
+        config.stages.validate(config.workflow.plan_mode.as_deref())?;
         if config.allowed_tools.as_ref().is_some_and(|tools| {
             tools
                 .iter()
@@ -69,7 +72,7 @@ impl ExecutionConfig {
         }
         if (matches!(profile,"reviewer"|"review"|"child_reviewer") || config.workspace.as_deref()==Some("isolated"))
             && (config.workflow.plan_mode.is_some()
-                || config.workflow.completion.as_deref() == Some("delivery"))
+                || config.workflow.completion.as_deref() == Some("delivery") || !config.stages.is_empty())
         {
             return Err("当前审查/隔离补丁适配交回专用结果；完整方案流程请使用共享工作区的通用执行方式。".into());
         }
@@ -273,11 +276,14 @@ pub fn bind_primary_model(routing: &mut crate::agent::router::ModelRoutingConfig
         .insert(crate::agent::router::roles::EXECUTOR.into(), model.into());
 }
 pub fn workflow_blocker(config: &ExecutionConfig, plan_approved: bool) -> Option<String> {
-    (matches!(config.workflow.plan_mode.as_deref(),Some("cross_review"|"plan_approval"))&&!plan_approved)
+    ((config.stages.plan == Some(true) || (config.stages.plan != Some(false) && matches!(config.workflow.plan_mode.as_deref(),Some("cross_review"|"plan_approval"))))&&!plan_approved)
         .then(||"当前执行配置要求先完成方案讨论或批准；尚未取得已批准的方案状态，请先 submit_plan 并完成对应流程。".into())
 }
 
 pub fn validate_output(db: &DbState, id: &str, payload: &Value) -> Result<(), String> {
+    if let Some(program)=crate::agent::child_reviewer::main_executor::load(db,id)? {
+        return crate::agent::child_reviewer::main_executor::validate(db,id,&program,payload,0).map(|_|());
+    }
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let exists:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_child_runs')",[],|r|r.get(0)).map_err(|e|e.to_string())?;
     if !exists {

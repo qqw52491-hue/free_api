@@ -50,6 +50,7 @@ pub mod finish_guard;
 pub mod workspace_lock;
 pub(crate) mod workspace_access;
 pub mod stage_review;
+pub mod stage_settings;
 pub mod review_tools;
 pub(crate) mod review_stream;
 pub mod eval_oracle;

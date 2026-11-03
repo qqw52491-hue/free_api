@@ -145,15 +145,19 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
                 if idle <= stall_threshold_secs || crate::agent::child_task::is_delegating(&w_session) || crate::agent::child_task::runtime::paused(&w_run).is_some() {
                     continue;
                 }
-                let phase = crate::agent::checkpoint::load_checkpoint(&w_db, &w_run)
+                let saved = crate::agent::checkpoint::load_checkpoint(&w_db, &w_run)
                     .ok()
                     .flatten()
                     .or_else(|| {
                         crate::agent::checkpoint::load_checkpoint(&w_db, &w_session)
                             .ok()
                             .flatten()
-                    })
-                    .map(|cp| format!("{:?}", cp.phase))
+                    });
+                // 人类还在看审批卡不是程序死锁，不能按无心跳超时终止。
+                if saved.as_ref().is_some_and(|cp| cp.phase == crate::agent::checkpoint::AgentPhase::WaitUser) {
+                    continue;
+                }
+                let phase = saved.map(|cp| format!("{:?}", cp.phase))
                     .unwrap_or_else(|| "unknown".to_string());
                 let stage = crate::agent::control::read_stage(&w_session)
                     .unwrap_or_else(|| "unknown".to_string());
@@ -602,10 +606,25 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
         crate::agent::execution::runtime::bind_registered_requirements(state.inner(),&run_id,&mut context)?;
     }
     let execution_config=crate::agent::execution::runtime::config(state.inner(),&run_id)?;
+    if !is_resuming_existing {
+        checkpoint.stages = if delegation.is_some() {
+            execution_config.stages.for_child(execution_config.workflow.completion.as_deref()==Some("handoff"), execution_config.workflow.plan_mode.as_deref())
+        } else { model_routing.stages.clone() };
+    }
+    if is_resuming_existing && plan_mode.as_deref()==Some("plan_approval") {
+        checkpoint.stages.plan=Some(true);
+    }
+    checkpoint.stages.validate(plan_mode.as_deref())?;
+    context.add_host_feedback(&checkpoint.stages.prompt());
+    if crate::agent::child_reviewer::main_executor::load(state.inner(),&run_id)?.is_some() && checkpoint.triage_verdict.is_none() {
+        let mut verdict=crate::agent::triage::TriageVerdict::fallback("宿主已明确委派只读审查，不重新分流");
+        verdict.route="direct".into();verdict.stage_review_mode="none".into();verdict.final_review_mode="mechanical_only".into();
+        checkpoint.triage_verdict=Some(verdict);
+    }
     if let Some(tools)=execution_config.allowed_tools {
         context.add_host_feedback(&format!("【当前宿主执行配置】本子任务的业务工具仅允许：{}；控制与交付入口仍按宿主流程处理。",tools.join(", ")));
     }
-    if execution_config.workflow.completion.as_deref()==Some("handoff") {
+    if execution_config.workflow.completion.as_deref()==Some("handoff") && checkpoint.stages.final_review != Some(true) {
         context.add_host_feedback("【当前宿主流程】本轮 finish 交回子任务结果；父任务负责集成及整体正式交付。已明确的验证要求和有效阻塞仍须处理；不要把本轮交接称为已独立终审的完整交付。");
     }
     for message in pending_live_goals {
@@ -782,7 +801,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
             });
         }
         // 入口调查参考：供执行模型定位，后续证据可修正；非方案路由不注入。
-        if verdict.requires_plan_gate() {
+        if verdict.requires_plan_gate() && checkpoint.stages.plan != Some(false) {
             if let Some(brief) = verdict.investigation_brief_text() {
                 let investigation_hint = if delegation.is_some() {
                     "本轮由当前子任务自行调查并定稿，已有证据足够时可提交方案。共享执行仅一层，不再派发普通 task/worker/writer；正式审查与同树消息通信仍可使用。"
@@ -840,6 +859,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
     // 模式切换守卫：按目标执行模式（全自动/交叉审查/方案审批）规范化方案阶段；人工确认过的方案永久保留。
     // 续跑缺省保留自动升级的审查模式；显式配置才改变模式。
     checkpoint.apply_entry_execution_mode(is_resuming_existing, plan_mode.as_deref(), auto_pilot);
+    checkpoint.stages.validate(Some(checkpoint.plan_mode.as_str()))?;
     // 初始工作区是会话选择的已声明资源；恢复时保留 checkpoint 中已有的显式契约。
     // 仅在显式项目会话、存在 workspace_override 或 auto_pilot 模式下才声明主工作区。
     // 在未选项目的通用自由会话中，主工作区保持为 None（自由模式），避免将宿主机启动目录误作为资源约束强塞给 Agent 及外部 MCP。
@@ -1090,6 +1110,16 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
             if recovered_instruction.is_none() {
                 return Err("checkpoint phase=run_tool 但缺少 prepared instruction".to_string());
             }
+            // 方案已落账且自动审批已登记：不要重放已执行的提交；交给自动等待/审批接续。
+            if checkpoint.auto_plan_approval_pending
+                && recovered_instruction.as_ref().is_some_and(|i| i.submit_plan.is_some()) {
+                recovered_instruction = None;
+            }
+        }
+        RecoveryDecision::ResumeWaiting if checkpoint.auto_plan_approval_pending
+            && checkpoint.prepared_instruction.as_ref().is_some_and(|i| i.get_tool().eq_ignore_ascii_case("ask_human")) => {
+            // 恢复已展示的审批卡：复用原 ask_human 表单与结构化按钮处理。
+            recovered_instruction = checkpoint.prepared_instruction.clone();
         }
         RecoveryDecision::ResumeWaiting
         | RecoveryDecision::RequireHumanReview

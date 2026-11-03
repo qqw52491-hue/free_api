@@ -142,10 +142,16 @@ impl AgentCheckpoint {
     ) {
         if !approved {
             self.plan_phase = PlanPhase::Reviewing;
+            if self.plan_mode == crate::agent::checkpoint::PlanExecutionMode::PlanApproval {
+                // 用户打回的是旧方案：允许提交新方案重新评审，不抹掉既有事实和发现。
+                self.plan_escalation_required = None;
+                self.plan_reviewer_retry_count = 0;
+            }
             return;
         }
         self.plan_phase = PlanPhase::Approved;
-        self.plan_unreviewed_release = self.plan_review_deliveries.is_empty();
+        self.plan_unreviewed_release = self.plan_review_deliveries.is_empty()
+            || (self.plan_review_batch_id.is_none() && !self.plan_review_dispatch_failures.is_empty());
         self.gate_human_escape_directed = false;
         self.recent_gate_block_step = None;
         self.approved_plan_summary = Some(reply.chars().take(500).collect());

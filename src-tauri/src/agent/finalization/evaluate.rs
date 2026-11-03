@@ -68,6 +68,7 @@ pub(crate) fn acceptance_fingerprint(
         "stage_blockers": checkpoint.stage_review_blockers_open,
         "plan_phase": checkpoint.plan_phase,
         "plan_mode": checkpoint.plan_mode,
+        "stages": checkpoint.stages,
         "todos": context.todo_list.iter().map(|t| (&t.id, &t.status, &t.description)).collect::<Vec<_>>(),
         "active_scope": context.active_target_block().map(|b| (&b.id, &b.scope)),
         "summary": finish_payload.get("summary"),
@@ -151,6 +152,26 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
 ) -> CompletionEvaluation {
     let generation = *interrupt_rx.borrow();
     let request_payload = delivery_payload(instruction);
+    let review_program=crate::agent::child_reviewer::main_executor::load(db,run_id);
+    if !matches!(&review_program,Ok(None)) {
+        let mut blockers=Vec::new();
+        match review_program {
+            Ok(Some(program))=>if let Err(error)=crate::agent::child_reviewer::main_executor::validate(db,run_id,&program,&request_payload,0) {blockers.push(error);},
+            Err(error)=>blockers.push(format!("审查执行配置无法读取，未确认结果契约：{error}")),
+            Ok(None)=>unreachable!(),
+        }
+        if interrupted_since(interrupt_rx,generation) {blockers.push("审查已收到停止信号，未提交有效结论。".into());}
+        return CompletionEvaluation {
+            receipt:FinalizationReceipt {
+                handoff:true,receipt_id:uuid::Uuid::new_v4().to_string(),diff_hash:String::new(),
+                scope_revision:context.resource_scope.revision,contract_fingerprint:contract_fingerprint(context.review_contract.as_ref()),
+                acceptance_fingerprint:acceptance_fingerprint(context,checkpoint,&request_payload),evidence_index_fingerprint:None,
+                review_policy_fingerprint:String::new(),frozen_verification_run:None,step_id,
+                verification:ReceiptVerification::NotRequired,review:ReceiptReview::NotRequired,
+                material_notices:vec![],blockers,risk_flags:vec![],finish_payload:request_payload,created_at:Utc::now().to_rfc3339(),
+            },review_result:None,
+        };
+    }
     let body = delivery_body(&request_payload);
     let delivery_paths = crate::agent::reviewer_gatekeeper::delivery_file_paths(db, session_id, &request_payload);
     let (mut blockers, mut notices, diff_context) = collect_checks(
@@ -172,6 +193,17 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
     if let Err(error)=crate::agent::execution::runtime::validate_output(db,run_id,&request_payload) {blockers.push(format!("角色交付契约未通过：{error}"));}
     let registered_evidence = crate::agent::evidence_store::review_digest(db, session_id, run_started_at);
     let state_fp = acceptance_fingerprint(context, checkpoint, &request_payload);
+    if crate::agent::plan_gate::configured_plan_missing(checkpoint) {
+        blockers.push(if checkpoint.plan_mode == crate::agent::checkpoint::PlanExecutionMode::PlanApproval {
+            "当前配置要求正式方案，请先 submit_plan 提交；宿主自动调用 ask_human 呈报并取得人工批准。".into()
+        } else {
+            "当前配置要求正式方案，尚未保存方案。".into()
+        });
+    }
+    if crate::agent::plan_gate::reviewed_human_plan(checkpoint)
+        && (!checkpoint.plan_phase.is_approved() || checkpoint.approved_plan_summary.is_none()) {
+        blockers.push("当前方案仍需人工批准；Agent 方案审查不能替代 ask_human(kind: plan_approval) 的批准。".into());
+    }
     let handoff=match crate::agent::execution::runtime::config(db,run_id) {
         Ok(config)=>{if let Some(blocker)=crate::agent::execution::runtime::workflow_blocker(&config,checkpoint.plan_phase.is_approved()) {blockers.push(blocker);}config.workflow.completion.as_deref()==Some("handoff")},
         Err(error)=>{blockers.push(error);false}
@@ -324,21 +356,28 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
             frozen.material_fingerprint = review_hash.clone();
         }
     }
-    if handoff {
+    let review_enabled = checkpoint.stages.final_review.unwrap_or(!handoff);
+    if !review_enabled {
         review=ReceiptReview::NotRequired;
-        material_notices.push("本次仅为子任务结果交接，未新增独立终审；父任务负责集成、完整目标验证与正式交付。".into());
+        material_notices.push("按本轮配置未新增独立终审；实际验证及已有阻塞继续保留。".into());
         if let Some(previous)=checkpoint.last_review_result.as_ref().filter(|r|!r.is_passed()&&!r.is_service_failure()) {
             blockers.extend(previous.blocking_issues.iter().map(|issue|format!("已有审查阻塞未核销：[{}] {}",issue.file,issue.issue)));
         }
     }
-    if !handoff && blockers.is_empty() && !interrupted_since(interrupt_rx, generation) {
+    if review_enabled && blockers.is_empty() && !interrupted_since(interrupt_rx, generation) {
+        let mut review_triage = checkpoint.triage_verdict.clone();
+        if checkpoint.stages.final_review == Some(true) {
+            if let Some(v) = review_triage.as_mut() {
+                if v.final_review_mode == "mechanical_only" { v.final_review_mode = "code_review".into(); }
+            }
+        }
         let evidence = (!host_evidence.is_empty()).then(|| host_evidence.join("\n\n"));
         let human_waivers = checkpoint.human_waiver_text();
         let mut completed_review = None;
         // 稳定材料仍只审一次。观察到变化时补充一次现有审查，不把哈希变化判作缺陷；
         // 持续变化只披露覆盖边界，不无限追加审查或要求执行模型盲目重交。
         for refresh in 0..=1 {
-            let result = crate::agent::reviewer_gatekeeper::evaluate_finish_diff(
+            let result = crate::agent::child_reviewer::main_executor::in_parent_run(run_id, crate::agent::reviewer_gatekeeper::evaluate_finish_diff(
                 app,
                 db,
                 context,
@@ -364,12 +403,11 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
                 human_waivers.as_deref(),
                 &notices,
                 checkpoint.approved_target_files.as_deref(),
-                checkpoint.triage_verdict.as_ref(),
+                review_triage.as_ref(),
                 Some(checkpoint.plan_mode),
                 body.as_deref(),
                 &delivery_paths,
-            )
-            .await;
+            )).await;
             let after_review = crate::agent::reviewer_gatekeeper::task_review_snapshot(db, session_id, workspace, context, baseline, run_started_at, &delivery_paths).0;
             if review_snapshot.hash != after_review.hash {
                 let paths = after_review.changed_paths_since(&review_snapshot);

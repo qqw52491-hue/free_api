@@ -280,3 +280,130 @@ async fn unit_plan_team_missing_models_leave_no_running_or_approved_orphans() {
         .unwrap();
     assert_eq!(running, 0);
 }
+
+#[tokio::test]
+async fn human_review_all_dispatches_fail_can_be_disclosed_and_arbitrated() {
+    use crate::agent::checkpoint::{load_checkpoint, save_checkpoint, PlanExecutionMode};
+    let fixture = crate::agent::review_team::tests::TestDb::new();
+    let mut context = crate::agent::context::SandwichContext::new("sys".into(), "goal".into());
+    let mut cp = AgentCheckpoint::new("human-failed-dispatch".into(), &context);
+    cp.set_execution_mode(PlanExecutionMode::PlanApproval);
+    cp.stages.plan_review = Some(true);
+    cp.stages.plan = Some(true);
+    cp.stages.final_review = Some(false);
+    let submission = serde_json::from_value(json!({"plan_summary":"未审方案"})).unwrap();
+    let snapshots = vec![
+        PlanReviewerDispatchSnapshot::new("missing-model", "flash", "auto", "", json!({"role_label":"专家甲"})).with_batch_id("failed-batch"),
+        PlanReviewerDispatchSnapshot::new("other", "flash", "auto", "", json!({"role_label":"专家乙", "host_input_error":"缺少所需输入"})).with_batch_id("failed-batch"),
+    ];
+    let (_tx, rx) = watch::channel(0);
+    let result = dispatch_plan_team(None, &fixture.db, "failed-run", "human-failed-dispatch", &fixture.root,
+        &mut cp, &submission, 3, 1, false, true, snapshots, rx).await;
+    assert!(!result.success);
+    assert_eq!(result.route, "submit_plan:dispatch_failed");
+    assert!(result.stderr.contains("方案已保存但未经审查"));
+    assert_eq!(cp.submitted_plan.as_ref().unwrap().plan_summary, "未审方案");
+    assert!(cp.plan_review_batch_id.is_none());
+    assert_eq!(cp.plan_reviewer_retry_count, 0);
+    assert!(!cp.plan_phase.is_approved());
+    assert!(crate::agent::plan_gate::check_pre_write_gatekeeper(&mut cp, &context, &fixture.db, "failed-run", 4, false).is_some());
+    save_checkpoint(&fixture.db, &mut cp).unwrap();
+    let mut cp = load_checkpoint(&fixture.db, "human-failed-dispatch").unwrap().unwrap();
+    let material = crate::agent::plan_gate::human_plan_review_material(&cp, &fixture.db).unwrap().unwrap();
+    for expected in ["未审方案", "专家甲未启动", "专家乙未启动", "缺少所需输入", "没有 Agent 审查结论"] {
+        assert!(material.contains(expected), "missing {expected}: {material}");
+    }
+    assert!(crate::agent::plan_gate::submit_plan_rejection(&cp, &submission).is_none(), "允许重试");
+    cp.apply_explicit_plan_decision(&fixture.db, &mut context, false, &material, "打回");
+    assert!(!cp.plan_phase.is_approved());
+    cp.apply_explicit_plan_decision(&fixture.db, &mut context, true, &material, "接受未经审查，批准");
+    assert!(cp.plan_phase.is_approved());
+    assert!(cp.plan_unreviewed_release);
+    assert!(crate::agent::plan_gate::check_pre_write_gatekeeper(&mut cp, &context, &fixture.db, "failed-run", 5, false).is_none());
+    let app = tauri::test::mock_app();
+    let (_interrupt_tx, mut interrupt_rx) = watch::channel(0);
+    let finish = serde_json::from_value(json!({"tool":"finish", "params":{"summary":"完成"}})).unwrap();
+    let evaluated = crate::agent::finalization::evaluate_completion(
+        app.handle(), &fixture.db, &mut context, &mut cp, "failed-run", "human-failed-dispatch",
+        5, &fixture.root, &crate::agent::reviewer_gatekeeper::GitBaseline::non_git(),
+        chrono::Utc::now(), &Default::default(), &mut interrupt_rx, &finish,
+        crate::agent::finalization::CompletionMode::Finish, false, false,
+    ).await;
+    assert!(evaluated.receipt.is_ready(), "{:?}", evaluated.receipt.blockers);
+    let mut revision = submission.clone();
+    revision.plan_summary = "新版本".into();
+    revision.revision_reason = "改变方案".into();
+    assert!(record_human_review_dispatch_failure(&mut cp, &revision, 6, vec!["专家仍未启动".into()]));
+    assert!(!cp.plan_phase.is_approved());
+    assert!(cp.approved_plan_summary.is_none());
+    let material = crate::agent::plan_gate::human_plan_review_material(&cp, &fixture.db).unwrap().unwrap();
+    assert!(material.contains("新版本") && !material.contains("专家甲未启动"));
+    let snapshot = PlanReviewerDispatchSnapshot::new("mock", "flash", "auto", "", json!({})).with_batch_id("retry");
+    cp.commit_plan_submission(revision, "retry", &snapshot, 7);
+    assert!(cp.plan_review_dispatch_failures.is_empty());
+    assert!(crate::agent::plan_gate::human_plan_review_material(&cp, &fixture.db).is_err());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn human_review_partial_dispatch_discloses_failure_after_waiting_for_started_member() {
+    use crate::agent::checkpoint::{load_checkpoint, save_checkpoint, PlanExecutionMode};
+    let fixture = crate::agent::review_team::tests::TestDb::new();
+    {
+        let conn = fixture.db.0.lock().unwrap();
+        conn.execute("INSERT INTO platforms (id,name,base_url,api_key,created_at) VALUES ('local-test','local-test','http://127.0.0.1:9/v1','test-only','now')", []).unwrap();
+        conn.execute("INSERT INTO models (id,platform_id,name,display_name,created_at) VALUES ('local-test','local-test','test','test','now')", []).unwrap();
+    }
+    let context = crate::agent::context::SandwichContext::new("sys".into(), "goal".into());
+    let mut cp = AgentCheckpoint::new("partial-human".into(), &context);
+    cp.set_execution_mode(PlanExecutionMode::PlanApproval);
+    cp.stages.plan_review = Some(true);
+    let plan = serde_json::from_value(json!({"plan_summary":"部分启动方案"})).unwrap();
+    let good = PlanReviewerDispatchSnapshot::new("local-test", "flash", "auto", "", json!({
+        "role_label":"可启动专家", "question":"检查方案", "plan_review":true,
+        "evidence_excerpt":"已读取的方案材料"})).with_purpose("plan_review").with_batch_id("partial-human-batch");
+    let bad = PlanReviewerDispatchSnapshot::new("missing", "flash", "auto", "", json!({
+        "role_label":"缺失专家", "question":"检查方案", "plan_review":true,
+        "evidence_excerpt":"已读取的方案材料"})).with_purpose("plan_review").with_batch_id("partial-human-batch");
+    let (tx, rx) = watch::channel(0);
+    let result = dispatch_plan_team(None, &fixture.db, "partial-human-run", "partial-human", &fixture.root,
+        &mut cp, &plan, 1, 1, false, true, vec![bad, good], rx).await;
+    assert!(result.success, "{}", result.stderr);
+    assert!(result.stdout.contains("缺失专家未启动"));
+    assert_eq!(cp.plan_review_expected_count, 1);
+    assert_eq!(crate::agent::plan_gate::human_plan_review_material(&cp, &fixture.db).unwrap_err().route,
+        "plan_gatekeeper:need_wait_reviewer_jobs");
+    let id = cp.reviewer_dispatches.keys().next().unwrap().clone();
+    // 停止后台运行；构造已消费的技术失败，验证审批投影，不依赖本机监听或真实模型。
+    tx.send(1).unwrap();
+    fixture.db.0.lock().unwrap().execute("UPDATE agent_child_runs SET status='failed', error_kind='request_or_stream', consumed_at='now', applied_at='now' WHERE id=?1", [&id]).unwrap();
+    cp.record_reviewer_failure_for_run(&fixture.db, &id);
+    save_checkpoint(&fixture.db, &mut cp).unwrap();
+    let cp = load_checkpoint(&fixture.db, "partial-human").unwrap().unwrap();
+    let material = crate::agent::plan_gate::human_plan_review_material(&cp, &fixture.db).unwrap().unwrap();
+    assert!(material.contains("缺失专家未启动"), "{material}");
+    assert!(material.contains("成功 0 条，失败 1 条"), "{material}");
+    assert!(material.contains("request_or_stream"), "{material}");
+    assert!(!cp.plan_phase.is_approved());
+}
+
+#[tokio::test]
+async fn human_review_role_unavailable_preserves_failure_for_user() {
+    use crate::agent::checkpoint::PlanExecutionMode;
+    let fixture = crate::agent::review_team::tests::TestDb::new();
+    let mut context = crate::agent::context::SandwichContext::new("sys".into(), "goal".into());
+    let mut cp = AgentCheckpoint::new("disabled-reviewer-session".into(), &context);
+    cp.set_execution_mode(PlanExecutionMode::PlanApproval);
+    cp.stages.plan_review = Some(true);
+    let plan = serde_json::from_value(json!({"plan_summary":"核对接口", "evidence_refs":["src/a.rs"]})).unwrap();
+    let mut routing = crate::agent::router::ModelRoutingConfig::default();
+    routing.disabled_role_cards = vec!["tech_lead".into()];
+    let error = crate::agent::tools::role_manager::resolve_plan_reviewer_card(&fixture.db, &routing.disabled_role_cards).unwrap_err();
+    assert!(record_human_review_dispatch_failure(&mut cp, &plan, 1, vec![format!("方案审查角色未启动：{error}")]));
+    let material = crate::agent::plan_gate::human_plan_review_material(&cp, &fixture.db).unwrap().unwrap();
+    assert!(material.contains("tech_lead") && material.contains("未启动") && material.contains("核对接口"), "{material}");
+    assert!(!cp.plan_phase.is_approved());
+    cp.resume_failed_task(&mut context, "继续");
+    let resumed = crate::agent::plan_gate::human_plan_review_material(&cp, &fixture.db).unwrap().unwrap();
+    assert!(resumed.contains("tech_lead"));
+    assert!(!cp.plan_phase.is_approved());
+}

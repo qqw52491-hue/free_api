@@ -39,7 +39,8 @@ impl AgentCheckpoint {
             if !reply.trim().is_empty() && reply != context.current_goal {
                 context.add_error_feedback(&format!("【人类回复】{}", reply));
             }
-            if self.phase == AgentPhase::WaitUser && self.pending.is_none() {
+            if self.phase == AgentPhase::WaitUser && self.pending.is_none()
+                && !self.auto_plan_approval_pending {
                 self.begin_planning(self.step_id, context);
             }
         }
@@ -60,6 +61,10 @@ impl AgentCheckpoint {
         let stopped_reason = self.last_error.clone().unwrap_or_default();
         // 失败/取消不是审查通过；已落账的真实结论、blocking 和人工裁决一律保留。
         if !self.plan_phase.is_approved() {
+            // 无人启动的失败事实可在续跑后继续交人工仲裁；旧在途批次则须重新派发。
+            if self.plan_review_batch_id.is_some() {
+                self.plan_review_dispatch_failures.clear();
+            }
             self.plan_review_batch_id = None;
             self.plan_review_expected_count = 0;
             self.plan_reviewer_retry_count = 0;
@@ -74,6 +79,8 @@ impl AgentCheckpoint {
         self.stage_review_run_ids.clear();
         self.stage_review_rebuttal_run_id = None;
         self.stage_review_confrontation_target = None;
+        // 失败续跑会清理旧的在途审查；不能把它当成本次已收齐并自动批准。
+        self.auto_plan_approval_pending = false;
         self.retry_count = 0;
         self.recent_gate_block_step = None;
         self.consecutive_gate_blocked = 0;

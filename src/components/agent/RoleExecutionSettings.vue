@@ -18,6 +18,8 @@
       </div>
       <p class="hint">{{ !specialized ? '普通角色使用同一通用执行器，共享可用 Skill、MCP 和工具；自动模式仍按任务需要安排方案。' : '正式审查或显式隔离补丁使用专用结果契约；完整流程选择共享工作区。' }}</p>
       <label v-if="profile === 'writer'" class="tool-mode">工作区方式<select v-model="workspace" @change="changeProfile"><option value="shared">共享父工作区，直接实施</option><option value="isolated">隔离补丁，审阅后 apply</option></select></label>
+      <StageSettingsFields v-if="!specialized" v-model="stages" :approval="planMode === 'plan_approval'" @update:model-value="publish()" />
+      <p class="hint">结果交接子任务默认关闭重复环节；显式选择方案模式时沿用该模式。自动不代表关闭。</p>
       <details>
         <summary>工具权限</summary>
         <label class="tool-mode">权限范围<select v-model="toolMode" @change="publish()"><option value="inherit">继承父任务可用工具</option><option value="allowlist">仅允许指定工具</option></select></label>
@@ -33,6 +35,9 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
+import StageSettingsFields from './StageSettingsFields.vue';
+import type { StageSettings } from './types';
+const stages = ref<StageSettings>({});
 type Profile = 'task' | 'worker' | 'writer' | 'reviewer';
 type PlanMode = 'auto' | 'cross_review' | 'plan_approval';
 type Completion = 'handoff' | 'delivery';
@@ -58,26 +63,28 @@ const presets: Preset[] = [
   { id: 'review', label: '专用审查', description: '按审查契约返回裁决与发现', profile: 'reviewer', planMode: 'auto', completion: 'handoff' },
 ];
 const names: Record<Profile, string> = { task: '通用子任务', worker: '调查助手', writer: '实施助手', reviewer: '专用审查' };
-const summary = computed(() => `${names[profile.value]} · ${!specialized.value ? ({ auto: '自动安排方案', cross_review: '先审查方案', plan_approval: '方案人工批准' }[planMode.value]) + ' · ' : ''}${completion.value === 'delivery' ? '完整交付' : '结果交接'} · ${toolMode.value === 'inherit' ? '继承可用能力' : '限定工具范围'}`);
+const summary = computed(() => `${names[profile.value]} · ${!specialized.value ? ({ auto: '按固定环节配置', cross_review: '先审查方案', plan_approval: '方案人工批准' }[planMode.value]) + ' · ' : ''}${completion.value === 'delivery' ? '完整交付' : '结果交接'} · ${toolMode.value === 'inherit' ? '继承可用能力' : '限定工具范围'}`);
 function toolNames() { return [...new Set(toolsText.value.split(/[,，\n]/).map(s => s.trim()).filter(Boolean))]; }
 function publish(includeProfile = false) {
   parseError.value = false;
+  if (planMode.value === 'plan_approval' && stages.value.plan === false) stages.value = { ...stages.value, plan: true };
   if (!enabled.value) { lastEmitted = ''; emit('update:modelValue', ''); return; }
   const workflow = !specialized.value ? { plan_mode: planMode.value, completion: completion.value } : { completion: 'handoff' };
-  lastEmitted = JSON.stringify({ profile: profile.value, execution: { ...(workspace.value === 'isolated' ? { workspace: 'isolated' } : {}), ...(toolMode.value === 'allowlist' ? { allowed_tools: toolNames() } : {}), workflow } });
+  lastEmitted = JSON.stringify({ profile: profile.value, execution: { ...(!specialized.value ? { stages: stages.value } : {}), ...(workspace.value === 'isolated' ? { workspace: 'isolated' } : {}), ...(toolMode.value === 'allowlist' ? { allowed_tools: toolNames() } : {}), workflow } });
   emit('update:modelValue', lastEmitted);
   if (includeProfile) emit('profile-change', profile.value);
 }
 function changeProfile() {
   if (profile.value !== 'writer') workspace.value = 'shared';
   if (specialized.value) { completion.value = 'handoff'; planMode.value = 'auto'; }
+  if (planMode.value === 'plan_approval' && stages.value.plan === false) stages.value = { ...stages.value, plan: true };
   publish(true);
 }
 function applyPreset(preset: Preset) {
-  enabled.value = true; workspace.value = 'shared'; profile.value = preset.profile; planMode.value = preset.planMode; completion.value = preset.completion;
+  enabled.value = true; stages.value = {}; workspace.value = 'shared'; profile.value = preset.profile; planMode.value = preset.planMode; completion.value = preset.completion;
   toolMode.value = preset.tools ? 'allowlist' : 'inherit'; toolsText.value = preset.tools?.join(', ') || ''; publish(true);
 }
-function matches(preset: Preset) { return enabled.value && workspace.value === 'shared' && profile.value === preset.profile && planMode.value === preset.planMode && completion.value === preset.completion && toolMode.value === 'inherit'; }
+function matches(preset: Preset) { return Object.keys(stages.value).length === 0 && enabled.value && workspace.value === 'shared' && profile.value === preset.profile && planMode.value === preset.planMode && completion.value === preset.completion && toolMode.value === 'inherit'; }
 watch(() => props.modelValue, raw => {
   if (raw === lastEmitted) return;
   if (!raw) { enabled.value = false; parseError.value = false; return; }
@@ -85,6 +92,7 @@ watch(() => props.modelValue, raw => {
     const value = JSON.parse(raw);
     if (!['task', 'worker', 'writer', 'reviewer'].includes(value.profile)) throw new Error('profile');
     enabled.value = true; parseError.value = false; profile.value = value.profile; workspace.value = value.execution?.workspace || 'shared';
+    stages.value = value.execution?.stages || {};
     planMode.value = value.execution?.workflow?.plan_mode || 'auto'; completion.value = value.execution?.workflow?.completion || (profile.value === 'task' ? 'delivery' : 'handoff');
     toolMode.value = Array.isArray(value.execution?.allowed_tools) ? 'allowlist' : 'inherit'; toolsText.value = value.execution?.allowed_tools?.join(', ') || '';
   } catch { parseError.value = true; enabled.value = false; }

@@ -102,7 +102,7 @@
                         >
                             <span class="model-icon">🤖</span>
                             <span>{{ currentModelName }}</span>
-                            <span v-if="isStageReviewerDisabled" class="chip-gate-badge disabled" title="当前会话已开启免审直通">⚡免审</span>
+                            <span v-if="isStageReviewerDisabled" class="chip-gate-badge disabled" title="中途阶段审查关闭；方案审查和终审分别按配置执行">阶段审查关</span>
                             <span v-else class="chip-gate-badge custom" :title="modelChipTooltip">{{ stageReviewerBadgeText }}</span>
                             <svg viewBox="0 0 24 24" class="chevron-icon"><path d="m8 10 4 4 4-4"/></svg>
                         </button>
@@ -172,7 +172,7 @@
                                         >
                                             <span class="tab-btn-icon">🛡️</span>
                                             <span class="tab-btn-text">审查</span>
-                                            <span v-if="isStageReviewerDisabled" class="tab-count-badge disabled">免审</span>
+                                            <span v-if="isStageReviewerDisabled" class="tab-count-badge disabled">阶段关</span>
                                             <span v-else-if="reviewerRoleCards.length > 0" class="tab-count-badge" :class="{ 'is-custom': isReviewerCustom }">
                                                 {{ reviewerActiveCardsCount }}/{{ reviewerRoleCards.length }}
                                             </span>
@@ -497,6 +497,8 @@
 
                                     <!-- Station 3: 🛡️ 阶段审查工位 (Reviewer) -->
                                     <div v-else-if="activeRoutingTab === 'reviewer'" class="tab-pane-content station-pane">
+                                        <StageSettingsFields v-model="modelRouting.stages" :disabled="isRunning" :approval="currentPlanMode === 'plan_approval'" />
+                                        <p class="section-desc">新任务使用此配置；续跑沿用原检查点。自动沿用已有策略，关闭不自动重开。</p>
                                         <div class="squad-section gate-section">
                                             <div class="section-head">
                                                 <div class="section-title-wrap">
@@ -524,7 +526,7 @@
                                                             type="button"
                                                             class="gate-mode-pill-btn"
                                                             :class="{ active: currentPlanMode === 'auto' && !isStageReviewerDisabled }"
-                                                            title="自动模式：方案按策略预检；阶段审查不自动启动。明确选择多人时，正式提交方案仍会派审。"
+                                                            title="使用自动模式并恢复阶段审查的自动策略，默认不启动中途阶段审查。明确选择多人时，正式提交方案仍会派审。"
                                                             :disabled="isRunning"
                                                             @click="setTriggerMode('auto')"
                                                         >
@@ -535,7 +537,7 @@
                                                             type="button"
                                                             class="gate-mode-pill-btn"
                                                             :class="{ active: currentPlanMode === 'cross_review' && !isStageReviewerDisabled }"
-                                                            title="交叉审查模式：正式方案交审；阶段审查仍需满足写入或阶段推进等触发条件"
+                                                            title="使用交叉审查模式并恢复阶段审查的自动策略；阶段审查仍需满足写入或阶段推进等触发条件"
                                                             :disabled="isRunning"
                                                             @click="setTriggerMode('cross_review')"
                                                         >
@@ -586,6 +588,9 @@
 
                                                 <div v-if="isStageReviewerDisabled" class="gate-policy-banner disabled">
                                                     中途阶段审查已关闭；下面的人数选择仍适用于正式方案审查和终审。
+                                                </div>
+                                                <div v-else-if="modelRouting.stages?.stage_review === true" class="gate-policy-banner adaptive">
+                                                    中途阶段审查已开启，满足写入或阶段推进等条件时执行；不要求每一步都派审。
                                                 </div>
                                                 <div v-if="isCommitteeMode" class="gate-policy-banner committee">
                                                     <strong>多人审查已选择</strong>：正式方案审查与终审最多 3 位；阶段审查仅在原条件触发时使用多人。
@@ -1242,6 +1247,8 @@
 </template>
 
 <script setup lang="ts">
+import StageSettingsFields from "./StageSettingsFields.vue";
+import { stageReviewerIsDisabled, withStageTriggerMode } from "./stageSettings";
 import { formatFileSize, formatMs, formatTokens } from "./formatUtils";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
@@ -1371,6 +1378,7 @@ const planModes: PlanModeOption[] = [
 ];
 
 function selectPlanMode(mode: PlanExecutionMode) {
+    if (mode === 'plan_approval' && props.modelRouting.stages?.plan === false) props.modelRouting.stages = { ...props.modelRouting.stages, plan: true };
     emit("update:planMode", mode);
     emit("update:autoPilot", mode !== "plan_approval");
     planMenuOpen.value = false;
@@ -1998,13 +2006,8 @@ function hibernateAllCardsForSlot(slot: string) {
     });
 }
 
-const currentStageReviewerOverride = computed(() => {
-    return (props.modelRouting?.stage_reviewer_override || "").trim();
-});
-
 const isStageReviewerDisabled = computed(() => {
-    const clean = currentStageReviewerOverride.value.toLowerCase();
-    return clean === "disabled" || clean === "none";
+    return stageReviewerIsDisabled(props.modelRouting);
 });
 
 const isCommitteeMode = computed(() => {
@@ -2024,18 +2027,8 @@ const modelChipTooltip = computed(() => {
 });
 
 function setTriggerMode(mode: "auto" | "cross_review" | "disabled") {
-    if (mode === "disabled") {
-        emit("update:model-routing", {
-            ...props.modelRouting,
-            stage_reviewer_override: "disabled",
-        });
-    } else {
-        emit("update:planMode", mode);
-        emit("update:model-routing", {
-            ...props.modelRouting,
-            stage_reviewer_override: undefined,
-        });
-    }
+    if (mode !== "disabled") emit("update:planMode", mode);
+    emit("update:model-routing", withStageTriggerMode(props.modelRouting, mode));
 }
 
 function setConcurrencyMode(mode: "adaptive" | "committee") {

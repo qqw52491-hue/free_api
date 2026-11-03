@@ -10,7 +10,7 @@ pub fn plan_approval_need_human_approval() -> String {
     "【⚠️ 门禁保护触发：写入已被拦截，目标文件未做任何修改！】\n\
      【原因】当前处于【方案审批模式】，尚未获得人工方案审批放行，禁止直接写文件、派发写入子 Agent 或执行变更工具。\n\
      【必须执行的操作】：\n\
-     请调用 ask_human 工具（设置 kind: 'plan_approval'），将经过审查推演的技术方案呈现给用户；\n\
+     请先用 submit_plan 提交正式方案；宿主按配置完成方案审查后自动调用 ask_human 呈报用户；\n\
      待用户在交互界面审阅并批准方案后，门禁将自动放行修改。严禁未获批准直接假装完成或草率结项！".to_string()
 }
 
@@ -19,7 +19,7 @@ pub fn plan_approval_resume_child_blocked() -> String {
     "【⚠️ 门禁保护触发：恢复子任务已被拦截，目标文件未做任何修改！】\n\
      【原因】当前处于【方案审批模式】，尝试通过 resume_child 恢复写入型子 Agent 修改代码同样需要人工方案审批放行。\n\
      【必须执行的操作】：\n\
-     请调用 ask_human 工具（设置 kind: 'plan_approval'），将经过审查推演的技术方案呈现给用户；\n\
+     请先用 submit_plan 提交正式方案；宿主按配置完成方案审查后自动调用 ask_human 呈报用户；\n\
      待用户在交互界面审阅并批准方案后，门禁将自动放行修改。严禁未获批准直接假装完成或草率结项！".to_string()
 }
 
