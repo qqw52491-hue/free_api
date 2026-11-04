@@ -340,6 +340,14 @@ pub async fn run_call_llm_and_run_tool_phases(
     }
 
     let (instruction, result) = loop {
+        // 每次模型请求前动态刷新方案门禁投影（含上级方案状态），确保上级方案通过/打回/重开后
+        // 下一次请求中的底部状态卡即时更新或消除旧提示，且不污染持久历史。
+        crate::agent::plan_gate::sync_plan_gate_projection(
+            checkpoint,
+            context,
+            state.inner(),
+            final_session_id,
+        );
         // --- 🚦 调用网关：动态路由 ---
         let routing =
             crate::agent::router::AgentRouter::route_for_step(&context, &model_routing, step_id);

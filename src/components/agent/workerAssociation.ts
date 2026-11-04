@@ -20,7 +20,7 @@ function record(value: unknown): Record<string, unknown> {
 }
 export function stepWorkerTool(step: Pick<AgentStepItem, "tool" | "action">): string {
     const tools = [step.tool, step.action].map(t => (t || "").toLowerCase());
-    return tools.find(t => /^(child_worker|child_reviewer|child_writer|resume_child|wait_jobs|wait_for_jobs|parallel)$/.test(t)) || "";
+    return tools.find(t => /^(child_task|child_worker|child_reviewer|child_writer|resume_child|wait_jobs|wait_for_jobs|parallel)$/.test(t)) || "";
 }
 export function isWorkerStep(step: Pick<AgentStepItem, "tool" | "action">): boolean {
     return !!stepWorkerTool(step);
@@ -79,6 +79,75 @@ export function parseChildJobReceipts(step: AgentStepItem): ChildJobReceipt[] {
             output,
             model,
         });
+    }
+    const pushJsonReceipt = (rawObj: unknown, dispatchIndex?: number) => {
+        const obj = record(rawObj);
+        const nestedTask = obj.task && typeof obj.task === "object" ? record(obj.task) : null;
+        const target = nestedTask?.child_run_id ? nestedTask : obj;
+        const id = typeof target.child_run_id === "string" ? target.child_run_id.trim() : "";
+        if (!id) return;
+        const purpose = String(target.purpose || target.profile || "").toLowerCase();
+        const stepTool = stepWorkerTool(step);
+        const inferredTool = purpose === "reviewer" || stepTool === "child_reviewer"
+            ? "child_reviewer"
+            : purpose === "writer" || stepTool === "child_writer"
+                ? "child_writer"
+                : "child_worker";
+        const execStatus = typeof target.execution_status === "string" ? target.execution_status : "";
+        const ended = target.execution_ended === true || ["succeeded", "failed", "cancelled"].includes(execStatus);
+        const hasAcceptanceFlags = "delivery_accepted" in target || "handoff_accepted" in target;
+        const accepted = target.delivery_accepted === true || target.handoff_accepted === true;
+        const finalStatus: AgentToolStatus | undefined = ended
+            ? (hasAcceptanceFlags ? (accepted ? "succeeded" : "failed") : jobStatus(execStatus))
+            : undefined;
+        const statusSummary = ended
+            ? (target.delivery_accepted === true
+                ? "子目标已正式交付"
+                : target.handoff_accepted === true
+                    ? "已交接回父任务"
+                    : execStatus === "cancelled"
+                        ? "子任务已停止"
+                        : "子任务未完成正式交付")
+            : undefined;
+        const desc = typeof target.summary === "string" && target.summary.trim()
+            ? target.summary.trim()
+            : statusSummary
+                ? statusSummary
+                : typeof target.latest_step === "string" && target.latest_step.trim()
+                    ? target.latest_step.trim()
+                    : typeof target.task === "string"
+                        ? target.task.split("\n")[0].trim()
+                        : undefined;
+        const model = typeof target.model_id === "string" && target.model_id.trim()
+            ? target.model_id.trim()
+            : typeof target.model === "string" && target.model.trim()
+                ? target.model.trim()
+                : undefined;
+        const durationMs = typeof target.duration_ms === "number" ? target.duration_ms : undefined;
+        const prev = receipts.get(id);
+        receipts.set(id, {
+            ...prev,
+            id,
+            tool: prev?.tool || inferredTool,
+            dispatchIndex: dispatchIndex ?? prev?.dispatchIndex,
+            status: finalStatus ?? prev?.status,
+            durationMs: durationMs ?? prev?.durationMs,
+            description: desc || prev?.description,
+            output: ended ? JSON.stringify(target) : prev?.output,
+            model: model || prev?.model,
+        });
+    };
+    const trimmed = text.trim();
+    if (trimmed.startsWith("{")) {
+        const parsed = record(trimmed);
+        if (Array.isArray(parsed.results)) {
+            parsed.results.forEach((item, idx) => {
+                const entry = record(item);
+                if (entry.output) pushJsonReceipt(entry.output, idx);
+            });
+        } else {
+            pushJsonReceipt(parsed);
+        }
     }
     return [...receipts.values()];
 }

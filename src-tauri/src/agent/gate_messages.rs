@@ -165,6 +165,38 @@ pub fn plan_approval_requires_submission() -> String {
      请输出 {\"submit_plan\": {\"plan_summary\": \"...\", \"target_files\": [...], \"root_cause\": \"...\", \"evidence_refs\": [...], \"intended_verification\": \"...\", \"risk_level\": \"low|medium|high\"}} 把本轮已成熟的方案结构化落账；落账后系统自动派发 Tech Lead 复核，通过后写入立即放行。".to_string()
 }
 
+/// Auto 模式：任务已被判定需要方案、尚未 submit_plan，且此前没有审查。
+/// 不能沿用“审查已有结论”的文案，否则会把不存在的审查说成事实。
+pub fn plan_submission_required_before_write() -> String {
+    "【⚠️ 方案门禁拦截：写入前需要先提交正式方案】\n\
+     【原因】本任务已被判定需要方案，当前尚未用 submit_plan 保存方案。此前的读取和调查不受影响。\n\
+     【必须执行的操作】：\n\
+     请输出 {\"submit_plan\": {\"plan_summary\": \"...\", \"target_files\": [...], \"root_cause\": \"...\", \"evidence_refs\": [...], \"intended_verification\": \"...\", \"risk_level\": \"low|medium|high\"}}。\
+     系统按配置判断是否需要审查；不需要审查时保存后即可写入。".to_string()
+}
+
+/// 普通委派子任务：决策前动态提示上级任务方案尚未通过，调查不受限。
+pub fn delegated_ancestor_plan_status(reason: &str) -> String {
+    let reason = reason.trim();
+    let detail = if reason.is_empty() {
+        String::new()
+    } else {
+        format!("（上级任务{reason}）")
+    };
+    format!(
+        "【上级方案状态】上级任务的方案尚未通过{detail}。你可以继续读取、搜索和分析，并将调查结论、拟修改位置及验证方式反馈给上级。真实写入需等待上级方案通过；状态可能变化，写入时系统会重新检查。\n\n"
+    )
+}
+
+/// 普通委派子任务：上级任务方案未通过时暂停写入，调查不受限。
+pub fn delegated_write_paused(reason: &str) -> String {
+    format!(
+        "【上级任务方案未通过，本次写入暂停】上级任务{reason}。\n\
+         方案通过前可以继续只读调查和分析；需要改动时，可把调查结论和拟修改内容（文件、改法、验证方式）交回上级任务。\
+         上级方案通过后可直接重试写入，无需另行申请。"
+    )
+}
+
 /// 方案审查轮次预算耗尽的统一提示（常规派发与反驳对质共用）
 pub fn reviewer_retry_limit() -> String {
     "【❌ 操作受限：方案审查轮数已达上限（2 轮）】\n\

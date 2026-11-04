@@ -651,6 +651,7 @@ impl AgentCheckpoint {
             human_waived,
             unreviewed_release: self.plan_unreviewed_release,
             pending_human_reply: self.pending_human_reply.clone(),
+            ancestor_plan_pending: None,
         }
     }
 

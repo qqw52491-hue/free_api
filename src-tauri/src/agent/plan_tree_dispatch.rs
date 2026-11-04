@@ -143,7 +143,7 @@ pub(crate) fn run_plan_tree_sync_with_images(
 /// 受控并行统一单批上限；读、写、Shell 与未知工具均按分支数量核对。
 pub(crate) const MAX_CONTROLLED_PARALLEL_BRANCHES: usize = 5;
 
-const ASYNC_CHILD_TOOLS: &[&str] = &["child_worker", "child_writer", "child_reviewer"];
+const ASYNC_CHILD_TOOLS: &[&str] = &["child_task", "child_worker", "child_writer", "child_reviewer"];
 
 pub(crate) fn check_no_async_child_tools<I>(tools: I) -> Result<(), String>
 where
@@ -156,10 +156,12 @@ where
             .iter()
             .any(|&c| t == c || t.ends_with(&format!(":{}", c)) || t.ends_with(&format!("/{}", c)))
         {
+            if t == "child_task" || t.ends_with(":child_task") || t.ends_with("/child_task") {
+                return Err("❌ 「child_task」是异步后台子 Agent，不能放在 parallel 同步执行树中。请逐次使用 child_task 的 dispatch 派发；已派发任务仍可后台并行运行。".into());
+            }
             return Err(format!(
-                "❌ 「{}」是异步后台子 Agent，不能放在 parallel 同步执行树中（契约冲突：parallel 同步等待完整结果，而子任务为异步后台运行并返回 job_id）。如需批量派发子任务，请直接使用对应工具的 dispatches 数组，例如：{{\"tool\": \"{}\", \"dispatches\": [ {{...}}, {{...}} ]}}。",
-                tool.as_ref(),
-                tool.as_ref()
+                "❌ 「{}」是异步后台子 Agent，不能放在 parallel 同步执行树中。请直接使用对应工具的 dispatches 数组，例如：{{\"tool\":\"{}\",\"dispatches\":[{{\"task\":\"任务 A\"}},{{\"task\":\"任务 B\"}}]}}；也可逐次派发，任务会在后台并行运行。",
+                tool.as_ref(), tool.as_ref()
             ));
         }
     }
@@ -364,6 +366,10 @@ mod tests {
         let err = validate_controlled_parallel_batch(&steps).unwrap_err();
         assert!(err.contains("异步后台子 Agent"));
         assert!(err.contains("dispatches 数组"));
+
+        let child_task_error = validate_controlled_parallel_batch(&[json!({"tool":"child_task","params":{"task":"A"}})]).unwrap_err();
+        assert!(child_task_error.contains("逐次"));
+        assert!(!child_task_error.contains("dispatches"));
 
         // 2. plan_tree 拒绝嵌套的 child_writer
         let tree = parse(json!({

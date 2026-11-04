@@ -339,8 +339,13 @@ pub(super) async fn turn_main<'a, 'b>(
             crate::agent::plan_gate::automatic_plan_approval_instruction(&checkpoint, state.inner())?
         };
         // 每轮规划前把方案门禁状态投影进上下文底部状态卡：模型在决策时即可见
-        // 当前模式与放行条件，不再靠写入被拒（一整轮 LLM 往返）反推门禁规则。
-        context.plan_gate = Some(checkpoint.plan_gate_projection());
+        // 当前模式与放行条件（含委派上级方案待通过状态），不再靠写入被拒反推门禁规则。
+        crate::agent::plan_gate::sync_plan_gate_projection(
+            &checkpoint,
+            &mut context,
+            state.inner(),
+            &final_session_id,
+        );
         if resume_instruction.is_none() {
             checkpoint.begin_planning(step_id, &context);
             save_checkpoint(state.inner(), &mut checkpoint)?;

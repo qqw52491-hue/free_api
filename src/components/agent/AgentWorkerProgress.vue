@@ -196,13 +196,13 @@ const displayModel = computed(() => props.review?.model || workerModel.value || 
 const durationMs = computed(() => props.review?.elapsedMs ?? props.worker?.durationMs);
 const diagnosis = computed(() => props.review ? reviewDiagnosis(props.review, props.isRunning) : null);
 const rowStatus = computed(() => {
-    if (!props.review) return !props.isRunning && (props.worker?.status === 'running' || props.worker?.status === 'pending') ? 'challenged' : props.worker?.status || 'pending';
+    if (!props.review) return !props.isRunning && !props.worker?.extra?.hostTaskState && (props.worker?.status === 'running' || props.worker?.status === 'pending') ? 'challenged' : props.worker?.status || 'pending';
     if (props.review.phase === 'passed') return 'succeeded';
     if (props.review.phase === 'rejected') return 'failed';
     if (diagnosis.value?.tone === 'warning') return 'challenged';
     return isReviewTerminal(props.review.phase) ? 'pending' : 'running';
 });
-const statusText = computed(() => props.review ? reviewStatusLabel(props.review, props.isRunning) : props.worker?.reviewStopped ? '已停止 · 本任务排除' : !props.isRunning && (props.worker?.status === 'running' || props.worker?.status === 'pending') ? '未完成' : ({ running: '执行中', pending: '等待中', succeeded: '已完成', failed: '失败', challenged: '待核验' }[rowStatus.value]));
+const statusText = computed(() => props.review ? reviewStatusLabel(props.review, props.isRunning) : props.worker?.reviewStopped ? '已停止 · 本任务排除' : typeof props.worker?.extra?.hostTaskState === 'string' ? props.worker.extra.hostTaskState : !props.isRunning && (props.worker?.status === 'running' || props.worker?.status === 'pending') ? '状态待核对' : ({ running: '执行中', pending: '等待中', succeeded: '已完成', failed: '失败', challenged: '待核验' }[rowStatus.value]));
 const activity = computed(() => {
     if (props.review) {
         return statusText.value;
@@ -210,7 +210,7 @@ const activity = computed(() => {
     const worker = props.worker;
     if (!worker) return statusText.value;
     if (worker.reviewStopped) return '已停止 · 本任务排除';
-    if (!props.isRunning && (worker.status === 'running' || worker.status === 'pending')) return statusText.value;
+    if (!props.isRunning && !worker.extra?.hostTaskState && (worker.status === 'running' || worker.status === 'pending')) return statusText.value;
     if (worker.status === 'running' && worker.livePreview) {
         return worker.livePreview.streamType === 'thinking' ? '正在思考' : '正在生成结论';
     }

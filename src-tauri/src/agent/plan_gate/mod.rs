@@ -336,6 +336,127 @@ pub(crate) fn stage_blocker_interception(checkpoint: &AgentCheckpoint, db: &DbSt
     })
 }
 
+/// 委派子任务写入前核对一个上级任务的方案状态。只读取已落账状态：不派审、不清理台账、
+/// 不改上级 checkpoint。上级要求方案且尚未通过时返回原因；方案通过或未要求方案时
+/// 返回 None——通过后不再额外限制。只读调查不经过这里。
+pub(crate) fn ancestor_plan_pending(ancestor: &AgentCheckpoint, db: &DbState) -> Option<&'static str> {
+    let human = ancestor.plan_mode == PlanExecutionMode::PlanApproval;
+    let review_active = submitted_review_active(ancestor);
+    if !human && !review_active && ancestor.stages.plan == Some(false) {
+        return None;
+    }
+    if reviewed_human_plan(ancestor) && ancestor.approved_plan_summary.is_none() {
+        return Some("方案尚待人工批准");
+    }
+    if ancestor.plan_phase.is_approved() {
+        return None;
+    }
+    if human {
+        return Some("方案尚待人工批准");
+    }
+    if configured_plan_missing(ancestor) {
+        return Some("按配置需要正式方案，尚未提交");
+    }
+    if review_active {
+        // 上级审查通过后要等它自己下一次写入才落 Approved；这里按同一组条件只读判定。
+        let mut cp = ancestor.clone();
+        cp.refresh_review_sources(db);
+        let passed = cp.plan_reviewer_consumed
+            && cp.plan_review_batch_complete(db)
+            && !cp.plan_review_deliveries.is_empty()
+            && cp.plan_escalation_required.is_none()
+            && cp.plan_stage_blocking_count() == 0
+            && !cp.plan_revisions_required(db);
+        return (!passed).then_some("方案审查尚未通过");
+    }
+    let triage_requires = ancestor
+        .triage_verdict
+        .as_ref()
+        .is_some_and(|v| v.fallback.is_none() && v.requires_plan_gate());
+    (triage_requires && ancestor.submitted_plan.is_none()).then_some("已被判定需要方案，尚未提交")
+}
+
+/// 沿普通任务委派链逐级核对上级任务的已保存 checkpoint；任一上级方案未通过时返回原因。
+/// 根任务、上级无需方案、方案已通过或读取失败（沿用 fail-open）时返回 None。
+pub(crate) fn delegated_ancestor_plan_pending(
+    db: &DbState,
+    session_id: &str,
+) -> Option<&'static str> {
+    let mut node = session_id.to_string();
+    let mut seen = std::collections::HashSet::new();
+    while let Some(parent) = crate::agent::child_task::parent_session(&node) {
+        if !seen.insert(parent.clone()) {
+            break;
+        }
+        if let Ok(Some(cp)) = crate::agent::checkpoint::load_checkpoint(db, &parent) {
+            if let Some(reason) = ancestor_plan_pending(&cp, db) {
+                return Some(reason);
+            }
+        }
+        node = parent;
+    }
+    None
+}
+
+/// 刷新当前上下文的方案门禁瞬态投影（含委派链上级方案待通过状态）。
+/// 仅更新瞬态 `context.plan_gate`，不写入持久化历史，确保上级状态变化后下一次请求即时更新或消失。
+pub(crate) fn sync_plan_gate_projection(
+    checkpoint: &AgentCheckpoint,
+    context: &mut crate::agent::context::SandwichContext,
+    db: &DbState,
+    session_id: &str,
+) {
+    let mut gate = checkpoint.plan_gate_projection();
+    gate.ancestor_plan_pending =
+        delegated_ancestor_plan_pending(db, session_id).map(str::to_owned);
+    context.plan_gate = Some(gate);
+}
+
+/// 只有主循环直接派发的 child_writer 能跳过上级写入门禁。
+/// 组合命令的叶子由同步执行器运行，不走 child_writer 派发臂，不能按叶子的 action 豁免。
+pub(crate) fn is_delegation_dispatch_only(inst: &crate::agent::types::AgentInstruction) -> bool {
+    if inst.parallel.is_some() || inst.plan_tree.is_some() || !inst.commands.is_empty()
+        || inst.command.as_ref().and_then(|v| v.get("commands")).and_then(|v| v.as_array()).is_some()
+    {
+        return false;
+    }
+    let tool = inst.get_tool();
+    let action = inst.get_action();
+    let is_child_writer = tool.eq_ignore_ascii_case("child_writer")
+        || (tool.eq_ignore_ascii_case("core") && action.eq_ignore_ascii_case("child_writer"));
+    let is_apply = action.to_ascii_lowercase().starts_with("apply")
+        || inst.get_params().get("action").and_then(|v| v.as_str())
+            .is_some_and(|a| a.to_ascii_lowercase().starts_with("apply"));
+    is_child_writer && !is_apply
+}
+
+/// 上级方案拦截使用与主循环相同的写入分类；纯读取和直接派发继续放行。
+pub(crate) fn delegated_instruction_interception(
+    db: &DbState,
+    session_id: &str,
+    inst: &crate::agent::types::AgentInstruction,
+) -> Option<DispatchResult> {
+    let is_write = crate::agent::dispatcher::is_write_or_side_effect_tool(inst)
+        || inst.get_tool().eq_ignore_ascii_case("child_writer")
+        || inst.get_action().eq_ignore_ascii_case("child_writer");
+    if !is_write || is_delegation_dispatch_only(inst) {
+        return None;
+    }
+    delegated_write_interception(db, session_id)
+}
+
+/// 沿普通任务委派链逐级核对上级任务；任一上级方案未通过即暂停本次写入。
+/// 每次写入时实时读取上级状态，因此方案通过、打回或重开都会立即反映到已在运行的子任务。
+pub(crate) fn delegated_write_interception(db: &DbState, session_id: &str) -> Option<DispatchResult> {
+    delegated_ancestor_plan_pending(db, session_id).map(|reason| DispatchResult {
+        view: None,
+        success: false,
+        stdout: String::new(),
+        stderr: gate_messages::delegated_write_paused(reason),
+        route: "plan_gatekeeper:parent_plan_pending".to_string(),
+    })
+}
+
 /// 统合前置写入门禁判定（支持全自动、双 Agent 交叉审查、人工方案审批三种模式）
 /// - 若放行返回 None，并适时将 plan_phase 置为 Approved；
 /// - 若拦截返回 Some(DispatchResult)。
@@ -673,7 +794,7 @@ fn gate_interception(
                             Some(DispatchResult { view: None,
                                 success: false,
                                 stdout: String::new(),
-                                stderr: crate::agent::gate_messages::plan_approval_requires_submission(),
+                                stderr: crate::agent::gate_messages::plan_submission_required_before_write(),
                                 route: "plan_gatekeeper:no_submitted_plan".to_string(),
                             })
                         }

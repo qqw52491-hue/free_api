@@ -490,7 +490,14 @@ pub async fn run_tool_phase(
                 );
             }
         }
-        let rejection = if plan_needed {
+        // 普通委派子任务：上级方案未通过时暂停真实写入（调查不受限，通过后不再限制）。
+        // 继续向下派发子任务不在这里拦，孙任务写入时会自行核对同一条委派链。
+        let delegated_rejection = crate::agent::plan_gate::delegated_instruction_interception(
+            state.inner(), final_session_id, inst,
+        );
+        let rejection = if delegated_rejection.is_some() {
+            delegated_rejection
+        } else if plan_needed {
             check_pre_write_gatekeeper(
                 checkpoint,
                 context,

@@ -47,10 +47,31 @@ pub(crate) use tool_events::*;
 pub(crate) use project_dispatch::*;
 pub(crate) use command_exec::*;
 
-fn value_has_side_effect(value: &serde_json::Value) -> bool {
-    serde_json::from_value::<AgentInstruction>(value.clone())
-        .map(|inst| is_write_or_side_effect_tool(&inst))
-        .unwrap_or(true)
+// 计划树叶子以 PlanNodeObj 的工具与参数分发：无 tool 时回退到 action，
+// 执行动作来自解包后的参数而不是外层 action。分类使用同一套规则。
+fn plan_leaf_has_side_effect(value: &serde_json::Value) -> bool {
+    let Ok(node) = serde_json::from_value::<crate::agent::plan_tree::PlanNodeObj>(value.clone()) else {
+        return true;
+    };
+    let tool = node.get_tool();
+    let Ok(params) = node.get_args() else { return true; };
+    // 动作引用在执行时才解析，不能提前假设它是只读。
+    if params.get("action").and_then(|v| v.as_str()).is_some_and(|v| v.starts_with('$')) {
+        return true;
+    }
+    let inst = AgentInstruction { tool: Some(tool), params: Some(params), ..Default::default() };
+    is_write_or_side_effect_tool(&inst)
+}
+
+// 流水线缺省子工具名时，执行器使用顶层 get_tool()，分类必须使用同一回退值。
+fn pipeline_value_has_side_effect(value: &serde_json::Value, parent_tool: &str) -> bool {
+    let Ok(mut inst) = serde_json::from_value::<AgentInstruction>(value.clone()) else {
+        return true;
+    };
+    if value.get("tool").and_then(|v| v.as_str()).is_none() {
+        inst.tool = Some(parent_tool.to_string());
+    }
+    is_write_or_side_effect_tool(&inst)
 }
 
 fn plan_has_side_effect(value: &serde_json::Value) -> bool {
@@ -60,7 +81,7 @@ fn plan_has_side_effect(value: &serde_json::Value) -> bool {
             .get("parallel")
             .and_then(|v| v.as_array())
             .map(|children| children.iter().any(plan_has_side_effect))
-            .unwrap_or_else(|| value_has_side_effect(value)),
+            .unwrap_or_else(|| plan_leaf_has_side_effect(value)),
         _ => true,
     }
 }
@@ -68,18 +89,20 @@ fn plan_has_side_effect(value: &serde_json::Value) -> bool {
 pub fn is_write_or_side_effect_tool(inst: &AgentInstruction) -> bool {
     // 组合入口按实际子调用分类，不能因为顶层名称是 pipeline/parallel 就漏掉写入。
     if let Some(parallel) = &inst.parallel {
-        return parallel.iter().any(value_has_side_effect);
+        return parallel.iter().any(plan_has_side_effect);
     }
     if let Some(tree) = &inst.plan_tree {
         return plan_has_side_effect(tree);
     }
     if !inst.commands.is_empty() {
-        return inst.commands.iter().any(value_has_side_effect);
+        let tool = inst.get_tool();
+        return inst.commands.iter().any(|value| pipeline_value_has_side_effect(value, &tool));
     }
     if let Some(commands) = inst.command.as_ref()
         .and_then(|v| v.get("commands"))
         .and_then(|v| v.as_array()) {
-        return commands.iter().any(value_has_side_effect);
+        let tool = inst.get_tool();
+        return commands.iter().any(|value| pipeline_value_has_side_effect(value, &tool));
     }
     // 调用参数里的 read_only/readonly 不是可信工具属性，不能覆盖有效动作。
 

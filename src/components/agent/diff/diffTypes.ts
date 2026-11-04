@@ -23,6 +23,7 @@ export function isSubAgentTool(tool?: string): boolean {
     if (!tool) return false;
     const t = tool.toLowerCase();
     return (
+        t.includes("child_task") ||
         t.includes("child_reviewer") ||
         t.includes("child_worker") ||
         t.includes("child_writer") ||

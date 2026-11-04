@@ -92,6 +92,9 @@ pub struct PlanGateProjection {
     pub unreviewed_release: bool,
     #[serde(default)]
     pub pending_human_reply: Option<crate::agent::human_reply::PendingHumanReply>,
+    /// 普通委派子任务：任一上级任务要求方案且尚未通过时的原因（瞬态，随上级已保存 checkpoint 动态更新）
+    #[serde(default)]
+    pub ancestor_plan_pending: Option<String>,
 }
 
 /// 失败教训记录（用于防止大模型在长任务中重复尝试已知失败的方法）

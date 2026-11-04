@@ -168,6 +168,27 @@
     }
 
     #[test]
+    fn nested_dispatches_are_checked_and_consumed_as_batches() {
+        for field in ["command", "params", "args"] {
+            let mut input = json!({"tool":"child_worker"});
+            input[field] = json!({"dispatches":[{"task":"A"},{"task":"B"}]});
+            let inst: AgentInstruction = serde_json::from_value(input).unwrap();
+            assert!(inst.has_dispatches());
+            assert_eq!(inst.get_dispatch_items(), vec![json!({"task":"A"}), json!({"task":"B"})]);
+        }
+        for bad in [
+            json!({"tool":"child_worker","command":{"dispatches":[]}}),
+            json!({"tool":"child_worker","params":{"dispatches":"not an array"}}),
+            json!({"tool":"child_worker","params":{"dispatches":[{"task":"A"}],"task":"other"}}),
+            json!({"tool":"child_worker","dispatches":[{"task":"A"}],"params":{"dispatches":[{"task":"B"}]}}),
+            json!({"tool":"child_worker","command":{"dispatches":[{"task":"A"}]},"params":{"task":"B"}}),
+        ] {
+            let inst: AgentInstruction = serde_json::from_value(bad).unwrap();
+            assert!(inst.checked_dispatches().is_err());
+        }
+    }
+
+    #[test]
     fn test_next_tool_hint_multiple_formats() {
         // 1. 逗号分隔字符串
         let json_comma = json!({

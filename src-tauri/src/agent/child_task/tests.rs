@@ -547,3 +547,100 @@ async fn nested_delegation_shares_root_lock_until_last_lease_exits() {
     let replacement = tokio::time::timeout(std::time::Duration::from_secs(2), crate::agent::workspace_lock::acquire_workspace_lock(&f.root, "other", "other-run", "other")).await.unwrap().unwrap();
     drop(replacement);
 }
+
+#[test]
+fn status_projects_rich_subagent_metadata_and_recent_steps() {
+    let f = Fixture::new();
+    {
+        let conn = f.db.0.lock().unwrap();
+        conn.execute(
+            "UPDATE agent_child_runs SET purpose='worker', model_id='claude-sonnet-4-20250514', execution_checkpoint_json=?2 WHERE id=?1",
+            params![
+                f.binding.child_run,
+                json!({
+                    "state": {
+                        "dispatch_input": {
+                            "params": {
+                                "task": "排查子任务状态面板的样式与多层级树形排序",
+                                "profile": "worker",
+                                "role": "system_worker",
+                                "role_label": "侦察探针"
+                            }
+                        }
+                    }
+                })
+                .to_string()
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_run_steps (run_id, seq, step_json) VALUES (?1, 0, ?2), (?1, 1, ?3)",
+            params![
+                f.binding.child_run,
+                json!({
+                    "id": 1,
+                    "tool": "local_file",
+                    "action": "read",
+                    "status": "succeeded",
+                    "description": "读取 child_task.rs 状态投影实现",
+                    "params": { "path": "src-tauri/src/agent/child_task.rs" }
+                })
+                .to_string(),
+                json!({
+                    "id": 2,
+                    "tool": "search",
+                    "action": "rg",
+                    "status": "running",
+                    "description": "检索前端 control_child_task 调用点",
+                    "params": { "query": "control_child_task" }
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+    }
+    let body = status(&f.db, &f.binding.parent_session, &f.binding.child_run).unwrap();
+    assert_eq!(body["purpose"], "worker");
+    assert_eq!(body["role"], "system_worker");
+    assert_eq!(body["role_label"], "侦察探针");
+    assert_eq!(body["model_id"], "claude-sonnet-4-20250514");
+    assert_eq!(body["task"], "排查子任务状态面板的样式与多层级树形排序");
+    assert_eq!(body["latest_tool"], "search");
+    assert_eq!(body["latest_step"], "检索前端 control_child_task 调用点");
+    assert_eq!(body["total_steps"], 2);
+    let steps = body["recent_steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 2);
+    assert_eq!(steps[0]["seq"], 1);
+    assert_eq!(steps[0]["tool"], "local_file");
+    assert_eq!(steps[0]["target"], "src-tauri/src/agent/child_task.rs");
+    assert_eq!(steps[1]["seq"], 2);
+    assert_eq!(steps[1]["tool"], "search");
+    assert_eq!(steps[1]["target"], "control_child_task");
+    assert!(body.get("task_truncated").is_none());
+
+    let long_task = "长目标".repeat(120);
+    f.db.0
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE agent_child_runs SET execution_checkpoint_json=?2 WHERE id=?1",
+            params![
+                f.binding.child_run,
+                json!({
+                    "state": {
+                        "dispatch_input": {
+                            "params": {
+                                "task": long_task,
+                                "profile": "worker"
+                            }
+                        }
+                    }
+                })
+                .to_string()
+            ],
+        )
+        .unwrap();
+    let truncated_body = status(&f.db, &f.binding.parent_session, &f.binding.child_run).unwrap();
+    assert_eq!(truncated_body["task_truncated"], true);
+    assert_eq!(truncated_body["task"].as_str().unwrap().chars().count(), 300);
+}

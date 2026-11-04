@@ -170,6 +170,24 @@ mod tests {
     }
 
     #[test]
+    fn nested_dispatch_batch_checkpoint_keeps_slots_after_restore() {
+        let f = Fixture::new();
+        let context = SandwichContext::new("system".into(), "goal".into());
+        let instruction: AgentInstruction = serde_json::from_value(json!({"tool":"child_worker", "command":{"dispatches":[{"task":"A"},{"task":"B"}]}})).unwrap();
+        let mut checkpoint = AgentCheckpoint::new("owner".into(), &context);
+        checkpoint.begin_child_dispatch_batch(&instruction, &context).unwrap();
+        checkpoint.child_dispatch_batch.as_mut().unwrap().results[0] = Some(DispatchResult { success:true, stdout:"first".into(), stderr:String::new(), route:"child_task:spawned".into(), view:None });
+        save_checkpoint(&f.db, &mut checkpoint).unwrap();
+        let mut restored = load_checkpoint(&f.db, "owner").unwrap().unwrap();
+        let recovered = restored.prepared_instruction.clone().unwrap();
+        assert_eq!(recovered.get_dispatch_items().len(), 2);
+        restored.begin_child_dispatch_batch(&recovered, &context).unwrap();
+        let slots = &restored.child_dispatch_batch.as_ref().unwrap().results;
+        assert!(slots[0].is_some());
+        assert!(slots[1].is_none());
+    }
+
+    #[test]
     fn batch_checkpoint_recovers_remaining_slots_and_registration_before_receipt() {
         let f = Fixture::new();
         let context = SandwichContext::new("system".into(), "goal".into());

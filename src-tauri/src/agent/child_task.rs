@@ -338,7 +338,7 @@ pub(crate) fn relay_progress(id: &str, payload: Value) -> Option<Value> {
         return None;
     }
     Some(
-        json!({"type":"child_task_progress","child_run_id":id,"event":{"type":kind,"description":payload.get("description"),"message":payload.get("message"),"form":payload.get("form"),"child_session_id":format!("task-{id}")}}),
+        json!({"type":"child_task_progress","child_run_id":id,"event":{"type":kind,"step_id":payload.get("step_id"),"tool":payload.get("tool"),"action":payload.get("action"),"description":payload.get("description"),"message":payload.get("message"),"form":payload.get("form"),"child_session_id":format!("task-{id}")}}),
     )
 }
 
@@ -374,31 +374,219 @@ pub(crate) fn status(db: &DbState, parent: &str, id: &str) -> Result<Value, Stri
         }
     }
     body["runtime_attached"] = json!(runtime::attached(id));
+    let raw_summary = body
+        .get("delivery")
+        .and_then(|d| d.get("summary"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let summary_truncated = raw_summary.as_ref().is_some_and(|s| s.chars().count() > 180);
+    let summary = raw_summary.map(|s| s.chars().take(180).collect::<String>());
     if let Some(map) = body.as_object_mut() {
         for field in ["goal", "delivery", "verification", "review"] {
             map.remove(field);
         }
     }
+    if let Some(summary) = summary {
+        body["summary"] = json!(summary);
+        if summary_truncated {
+            body["summary_truncated"] = json!(true);
+        }
+    }
     let session = format!("task-{id}");
+    let mut latest_tool: Option<String> = None;
+    let mut latest_step: Option<String> = None;
     if let Some(cp) = crate::agent::checkpoint::load_checkpoint(db, &session)? {
         body["step"] = json!(cp.step_id);
         body["phase"] = json!(cp.phase.as_str());
+        if let Some(inst) = cp.prepared_instruction.as_ref() {
+            let tool = inst.get_tool();
+            if !tool.is_empty() {
+                latest_tool = Some(tool);
+            }
+            let desc = inst.description.trim();
+            if !desc.is_empty() && desc != "执行操作" {
+                latest_step = Some(desc.chars().take(140).collect());
+            }
+        }
     }
     body["stage"] = json!(crate::agent::control::read_stage(&session));
     body["human_request"] = json!(runtime::paused(id));
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let meta:Option<(String,String,String,Option<String>)>=conn.query_row("SELECT goal,started_at,updated_at,completed_at FROM agent_run_traces WHERE id=?1 AND session_id=?2",params![id,session],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(|e|e.to_string())?;
     if let Some((goal, start, updated, end)) = meta {
-        body["task"] = json!(goal
-            .split("【宿主提供")
-            .next()
-            .unwrap_or(&goal)
-            .chars()
-            .take(240)
-            .collect::<String>());
+        let clean_goal = goal.split("【宿主提供").next().unwrap_or(&goal).trim();
+        let truncated = clean_goal.chars().count() > 300;
+        body["task"] = json!(clean_goal.chars().take(300).collect::<String>());
+        if truncated {
+            body["task_truncated"] = json!(true);
+        } else if let Some(map) = body.as_object_mut() {
+            map.remove("task_truncated");
+        }
         body["started_at"] = json!(start);
         body["updated_at"] = json!(updated);
         body["finished_at"] = json!(end);
+    }
+    if let Ok(Some((purpose, model_id, run_start, run_end, duration_ms, cp_json))) = conn
+        .query_row(
+            "SELECT purpose, model_id, started_at, finished_at, duration_ms, execution_checkpoint_json FROM agent_child_runs WHERE id=?1 AND kind='task'",
+            [id],
+            |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<i64>>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                ))
+            },
+        )
+        .optional()
+    {
+        if let Some(p) = purpose.filter(|s| !s.is_empty()) {
+            body["purpose"] = json!(p);
+        }
+        if let Some(m) = model_id.filter(|s| !s.is_empty()) {
+            body["model_id"] = json!(m);
+        }
+        if let Some(d) = duration_ms {
+            body["duration_ms"] = json!(d);
+        }
+        if body.get("started_at").and_then(Value::as_str).is_none() {
+            if let Some(s) = run_start {
+                body["started_at"] = json!(s);
+            }
+        }
+        if body.get("finished_at").and_then(Value::as_str).is_none() {
+            if let Some(f) = run_end {
+                body["finished_at"] = json!(f);
+            }
+        }
+        if let Some(raw_cp) = cp_json {
+            if let Ok(parsed) = serde_json::from_str::<Value>(&raw_cp) {
+                let params = &parsed["state"]["dispatch_input"]["params"];
+                if let Some(clean_task) = params["task"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    let truncated = clean_task.chars().count() > 300;
+                    body["task"] = json!(clean_task.chars().take(300).collect::<String>());
+                    if truncated {
+                        body["task_truncated"] = json!(true);
+                    } else if let Some(map) = body.as_object_mut() {
+                        map.remove("task_truncated");
+                    }
+                }
+                if body.get("purpose").is_none() {
+                    if let Some(prof) = params["profile"].as_str().filter(|s| !s.is_empty()) {
+                        body["purpose"] = json!(prof);
+                    }
+                }
+                if let Some(role) = params["role"].as_str().filter(|s| !s.is_empty()) {
+                    body["role"] = json!(role);
+                }
+                if let Some(role_label) = params["role_label"]
+                    .as_str()
+                    .or_else(|| params["roleLabel"].as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    body["role_label"] = json!(role_label);
+                }
+            }
+        }
+    }
+    if body.get("role_label").is_none() {
+        if let Some(role_name) = body.get("role").and_then(Value::as_str) {
+            if let Ok(Some(label)) = conn
+                .query_row(
+                    "SELECT label FROM agent_role_cards WHERE name=?1",
+                    [role_name],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()
+            {
+                if !label.trim().is_empty() {
+                    body["role_label"] = json!(label.trim());
+                }
+            }
+        }
+    }
+    if let Ok(total_steps) = conn.query_row(
+        "SELECT COUNT(*) FROM agent_run_steps WHERE run_id=?1",
+        [id],
+        |r| r.get::<_, i64>(0),
+    ) {
+        if total_steps > 0 {
+            body["total_steps"] = json!(total_steps);
+        }
+    }
+    let mut recent_steps = Vec::new();
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT seq, step_json FROM agent_run_steps WHERE run_id=?1 ORDER BY seq DESC LIMIT 6",
+    ) {
+        if let Ok(rows) = stmt.query_map([id], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        }) {
+            for row in rows.flatten() {
+                let (seq, step_raw) = row;
+                if let Ok(step_val) = serde_json::from_str::<Value>(&step_raw) {
+                    let s_tool = step_val["tool"]
+                        .as_str()
+                        .or_else(|| step_val["action"].as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned);
+                    let s_desc = step_val["description"]
+                        .as_str()
+                        .or_else(|| step_val["finding"].as_str())
+                        .or_else(|| step_val["thought"].as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty() && *s != "执行操作")
+                        .map(|s| s.chars().take(140).collect::<String>());
+                    if latest_tool.is_none() {
+                        latest_tool = s_tool.clone();
+                    }
+                    if latest_step.is_none() {
+                        latest_step = s_desc.clone();
+                    }
+                    let p = &step_val["params"];
+                    let target = p["path"]
+                        .as_str()
+                        .or_else(|| p["file_path"].as_str())
+                        .or_else(|| p["command"].as_str())
+                        .or_else(|| p["cmd"].as_str())
+                        .or_else(|| p["query"].as_str())
+                        .or_else(|| p["pattern"].as_str())
+                        .map(|s| s.lines().next().unwrap_or(s).trim())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.chars().take(90).collect::<String>());
+                    let s_status = step_val["status"]
+                        .as_str()
+                        .unwrap_or("succeeded")
+                        .to_owned();
+                    recent_steps.push(json!({
+                        "seq": seq + 1,
+                        "tool": s_tool.unwrap_or_else(|| "step".into()),
+                        "target": target,
+                        "description": s_desc,
+                        "status": s_status,
+                    }));
+                }
+            }
+        }
+    }
+    if !recent_steps.is_empty() {
+        recent_steps.reverse();
+        body["recent_steps"] = json!(recent_steps);
+    }
+    if let Some(tool) = latest_tool {
+        body["latest_tool"] = json!(tool);
+    }
+    if let Some(step_desc) = latest_step {
+        body["latest_step"] = json!(step_desc);
     }
     let pending: i64 = conn
         .query_row(
@@ -455,11 +643,11 @@ pub(crate) fn task_owner(
 fn visible_tasks(db: &DbState, session: &str, target: Option<&str>) -> Result<Vec<(String,String,String,usize)>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare(
-        "WITH RECURSIVE tree(id,owner,root_run,depth) AS (
-            SELECT id,parent_session_id,parent_run_id,1 FROM agent_child_runs WHERE parent_session_id=?1 AND kind='task'
+        "WITH RECURSIVE tree(id,owner,root_run,depth,sort_path) AS (
+            SELECT id,parent_session_id,parent_run_id,1,COALESCE(started_at,'') || '/' || id FROM agent_child_runs WHERE parent_session_id=?1 AND kind='task'
             UNION ALL
-            SELECT c.id,c.parent_session_id,t.root_run,t.depth+1 FROM agent_child_runs c JOIN tree t ON c.parent_session_id='task-' || t.id WHERE c.kind='task' AND t.depth < 64
-         ) SELECT id,owner,root_run,depth FROM tree WHERE (?2 IS NULL OR id=?2) ORDER BY depth, id"
+            SELECT c.id,c.parent_session_id,t.root_run,t.depth+1,t.sort_path || '>' || COALESCE(c.started_at,'') || '/' || c.id FROM agent_child_runs c JOIN tree t ON c.parent_session_id='task-' || t.id WHERE c.kind='task' AND t.depth < 64
+         ) SELECT id,owner,root_run,depth FROM tree WHERE (?2 IS NULL OR id=?2) ORDER BY sort_path"
     ).map_err(|e| e.to_string())?;
     let rows=stmt.query_map(params![session,target], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get::<_,i64>(3)? as usize))).map_err(|e|e.to_string())?;
     rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())
@@ -486,9 +674,11 @@ pub(crate) async fn control_child_task(
     let id = params["child_run_id"].as_str().ok_or("缺少 child_run_id。")?;
     let (_, owner, parent_run, _) = visible_tasks(state.inner(), &session_id, Some(id))?
         .into_iter().next().ok_or("该子任务不属于当前会话的任务树；操作未执行。")?;
-    result(state.inner(), &owner, id)?;
+    let full = result(state.inner(), &owner, id)?;
     match action.as_str() {
         "status" => status(state.inner(), &owner, id),
+        // 桌面“查看完整内容”：直接返回宿主保存的完整交接，不经模型侧的 2000/8000 字投影截断。
+        "result" => Ok(full),
         "receipt" => crate::agent::agent_mailbox::receipt(
             state.inner(),
             &crate::agent::agent_mailbox::Actor::new(&parent_run, &session_id),
@@ -522,6 +712,6 @@ pub(crate) async fn control_child_task(
                 true,
             )
         }
-        _ => Err("未知动作；允许 list/status/send/answer/cancel。".into()),
+        _ => Err("未知动作；允许 list/status/result/receipt/send/answer/cancel。".into()),
     }
 }

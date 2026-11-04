@@ -450,11 +450,17 @@ export function parseWorkerArtifacts(raw: unknown): {
 }
 
 export function extractWorkerDetails(step: AgentStepItem): { name: string; taskDesc: string; role: "reviewer" | "coder" | "worker"; roleLabel: string; model?: string } {
-    const isReviewer = step.tool === "child_reviewer" || step.action === "child_reviewer";
-    const isWriter = step.tool === "child_writer" || step.action === "child_writer";
+    let rawParamsObj: any = step.params || (step as any).params_summary;
+    if (typeof rawParamsObj === "string") {
+        try { rawParamsObj = JSON.parse(rawParamsObj); } catch { rawParamsObj = null; }
+    }
+    const profile = rawParamsObj && typeof rawParamsObj === "object" ? String(rawParamsObj.profile || "").toLowerCase() : "";
+    const isReviewer = step.tool === "child_reviewer" || step.action === "child_reviewer" || profile === "reviewer";
+    const isWriter = step.tool === "child_writer" || step.action === "child_writer" || profile === "writer";
+    const isGeneralTask = (step.tool === "child_task" || step.action === "child_task") && !isReviewer && !isWriter && profile !== "worker";
     const role: "reviewer" | "coder" | "worker" = isReviewer ? "reviewer" : isWriter ? "coder" : "worker";
-    const defaultLabel = isReviewer ? "代码审查员" : isWriter ? "沙箱写入员" : "侦察工作者";
-    const defaultRoleLabel = isReviewer ? "审查" : isWriter ? "写入" : "侦察";
+    const defaultLabel = isReviewer ? "代码审查员" : isWriter ? "沙箱写入员" : isGeneralTask ? "协同子任务" : "侦察工作者";
+    const defaultRoleLabel = isReviewer ? "审查" : isWriter ? "写入" : isGeneralTask ? "子任务" : "侦察";
 
     let taskDesc = "";
     let explicitRoleLabel = "";
@@ -498,7 +504,7 @@ export function extractWorkerDetails(step: AgentStepItem): { name: string; taskD
     let roleLabel = explicitRoleLabel || defaultRoleLabel;
 
     if (!explicitRoleLabel && !explicitRole && taskDesc) {
-        const cleanDesc = taskDesc.replace(/^[🔍⚡🛡️🔧\s]+/, "");
+        const cleanDesc = taskDesc.split(/\r?\n/)[0].replace(/^[🔍⚡🛡️🔧\s]+/, "").trim();
         const shortDesc = cleanDesc.length > 18 ? cleanDesc.slice(0, 17) + "…" : cleanDesc;
         name = `${defaultRoleLabel}: ${shortDesc}`;
     }

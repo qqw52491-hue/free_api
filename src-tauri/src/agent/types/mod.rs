@@ -787,28 +787,47 @@ impl AgentInstruction {
         )
     }
 
+    /// 兼容别名工具的顶层或参数对象中的批量清单；歧义格式在预检中拒绝。
+    pub(crate) fn checked_dispatches(&self) -> Result<Option<Vec<serde_json::Value>>, String> {
+        let mut lists: Vec<Vec<serde_json::Value>> = Vec::new();
+        if let Some(items) = &self.dispatches { lists.push(items.clone()); }
+        let tool = self.tool.as_deref().unwrap_or("").to_ascii_lowercase();
+        let action = self.action.as_deref().unwrap_or("").to_ascii_lowercase();
+        if !matches!(tool.as_str(), "child_worker" | "child_writer" | "child_reviewer")
+            && !(tool == "core" && matches!(action.as_str(), "child_worker" | "child_writer" | "child_reviewer")) {
+            return Ok(lists.pop());
+        }
+        for value in [self.params.as_ref(), self.command.as_ref(), self.extra_fields.get("args")].into_iter().flatten() {
+            if let Some(obj) = value.as_object() {
+                if let Some(batch) = obj.get("dispatches") {
+                    if obj.keys().any(|key| key != "dispatches" && key != "action") {
+                        return Err("批量派发不能同时包含单任务字段；请将每个任务参数放入 dispatches 数组。".into());
+                    }
+                    let items = batch.as_array().ok_or("dispatches 必须是非空数组。")?;
+                    lists.push(items.clone());
+                } else if self.dispatches.is_some() {
+                    return Err("顶层 dispatches 不能与单任务参数同时提供，请只保留一种派发格式。".into());
+                }
+            }
+        }
+        if lists.len() > 1 { return Err("检测到多个 dispatches，无法确定派发清单；请只提供一个。".into()); }
+        if !lists.is_empty() && [self.params.as_ref(), self.command.as_ref(), self.extra_fields.get("args")].into_iter().flatten().any(|value| !value.is_null() && value.get("dispatches").is_none()) {
+            return Err("dispatches 不能与单任务参数同时提供，请只保留一种派发格式。".into());
+        }
+        if lists.first().is_some_and(|items| items.is_empty()) { return Err("dispatches 必须是非空数组。".into()); }
+        Ok(lists.pop())
+    }
+
     pub fn has_dispatches(&self) -> bool {
-        self.dispatches.as_ref().is_some_and(|list| !list.is_empty())
+        self.dispatches.as_ref().is_some_and(|list| !list.is_empty()) || self.checked_dispatches().ok().flatten().is_some()
     }
 
-    /// 获取批量派发列表；如果没有提供非空 dispatches 则回退到单个 `vec![self.get_params()]`
     pub fn get_dispatch_items(&self) -> Vec<serde_json::Value> {
-        if let Some(ref items) = self.dispatches {
-            if !items.is_empty() {
-                return items.clone();
-            }
-        }
-        vec![self.get_params()]
+        self.checked_dispatches().ok().flatten().unwrap_or_else(|| vec![self.get_params()])
     }
 
-    /// 检查是否为混合格式（既有 dispatches 又有 params/command 单发字段）
     pub fn is_mixed_dispatch_format(&self) -> bool {
-        if let Some(ref items) = self.dispatches {
-            if !items.is_empty() {
-                return self.params.is_some() || self.command.is_some();
-            }
-        }
-        false
+        self.dispatches.is_some() && (self.params.is_some() || self.command.is_some())
     }
 
     pub fn get_action(&self) -> String {

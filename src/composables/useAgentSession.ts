@@ -44,6 +44,7 @@ import { asRecord, numberOrUndefined, toText, toTimestamp } from "../components/
 import { extractWorkerDetails, parseWorkerArtifacts } from "../components/agent/workerUtils";
 import { stripPlanDecisionMarker } from "../components/agent/planDecision";
 import { getStepJobIds, isWorkerStep, parseChildJobReceipts, stepWorkerTool } from "../components/agent/workerAssociation";
+import { mergeSnapshot, settleWithRetry, type ChildTaskSnapshot } from "../components/agent/delegatedTaskState";
 import { createIncrementalThoughtPreview } from "../components/agent/liveThoughtPreview";
 
 const MAX_LOGS = 600;
@@ -275,6 +276,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     const humanInterventions = ref<AgentHumanIntervention[]>([]);
     const llmParseErrors = ref<LlmParseErrorItem[]>([]);
     const teamWorkers = ref<AgentWorkerItem[]>([]);
+    const childTaskSnapshots = ref<ChildTaskSnapshot[]>([]);
+    watch(activeSessionId, () => { childTaskSnapshots.value = []; });
     const workerPreviewStreams = new Map<string, {
         thinking: ReturnType<typeof createIncrementalThoughtPreview>;
         content: ReturnType<typeof createIncrementalThoughtPreview>;
@@ -765,13 +768,19 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             historyRuns.value = [];
             return;
         }
+        const session = activeSessionId.value;
         try {
-            const traces = await invoke<unknown[]>("get_session_run_traces", { sessionId: activeSessionId.value });
+            const traces = await invoke<unknown[]>("get_session_run_traces", { sessionId: session });
+            if (session !== activeSessionId.value) return;
             const normalized = (Array.isArray(traces) ? traces : []).map((trace) => normalizeRunTrace(trace));
             normalized.forEach((run) => {
                 if (!run.summary) run.summary = summaryFromConversation(run);
             });
             historyRuns.value = dedupeHistoryRuns(normalized);
+            // 历史卡片不能只依赖派发回执；主动从宿主加载本会话任务树的结算状态。
+            void invoke<{ tasks: ChildTaskSnapshot[] }>("control_child_task", { sessionId: session, action: "list", params: {} })
+                .then((result) => { if (session === activeSessionId.value && Array.isArray(result.tasks)) updateChildTaskSnapshots(result.tasks); })
+                .catch(() => { /* 查询失败保持未知状态，不推断成功或失败 */ });
         } catch (error) {
             appendLog(`[过程历史加载失败] ${toText(error)}`);
         }
@@ -927,7 +936,12 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         const tool = stepWorkerTool(stepItem);
         const receipts = parseChildJobReceipts(stepItem);
         const ids = getStepJobIds(stepItem);
-        const isDispatch = ["child_worker", "child_reviewer", "child_writer", "resume_child"].includes(tool);
+        let rawStepParams = stepItem.rawParams ?? stepItem.params;
+        if (typeof rawStepParams === "string") { try { rawStepParams = JSON.parse(rawStepParams); } catch { rawStepParams = {}; } }
+        const stepParamsObj = asRecord(rawStepParams);
+        const childTaskAction = String(stepParamsObj.action || stepItem.action || "dispatch").toLowerCase();
+        const isChildTaskDispatch = tool === "child_task" && (childTaskAction === "dispatch" || childTaskAction === "resume" || childTaskAction === "child_task");
+        const isDispatch = ["child_worker", "child_reviewer", "child_writer", "resume_child"].includes(tool) || isChildTaskDispatch;
         // The temporary dispatch row is not a child and must disappear once the receipt arrives.
         teamWorkers.value = teamWorkers.value.filter(w => !(w.extra?.dispatchPlaceholder === true &&
             w.extra?.parentStepId === stepItem.id && (ids.length > 0 || stepItem.status !== "running" && stepItem.status !== "pending")));
@@ -988,6 +1002,72 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                     for (const [key, value] of Object.entries(arts)) if (value != null) (worker as any)[key] = value;
                 }
             }
+        }
+    }
+
+    function applySettledChildTaskToWorker(taskRecord: Record<string, unknown>) {
+        const id = toText(taskRecord.child_run_id);
+        if (!id) return;
+        const worker = teamWorkers.value.find((w) => w.id === id);
+        if (!worker) return;
+        const ended = taskRecord.execution_ended === true || ["succeeded", "failed", "cancelled"].includes(toText(taskRecord.execution_status));
+        // 已见终态单向：迟到的“运行中”查询结果不得覆盖已结算状态。
+        if (worker.extra?.settledByHost === true && !ended) return;
+        if (ended) worker.extra = { ...worker.extra, settledByHost: true };
+        const model = toText(taskRecord.model_id);
+        if (model && !worker.model) worker.model = model;
+        const roleLabel = toText(taskRecord.role_label);
+        if (roleLabel && (!worker.roleLabel || ["Worker", "侦察", "子任务", "审查员", "写入员"].includes(worker.roleLabel))) {
+            worker.roleLabel = roleLabel;
+        }
+        const duration = numberOrUndefined(taskRecord.duration_ms);
+        if (duration !== undefined) worker.durationMs = duration;
+        const latestTool = toText(taskRecord.latest_tool);
+        if (latestTool) worker.currentTool = latestTool;
+        const execStatus = toText(taskRecord.execution_status);
+        const deliveryAccepted = taskRecord.delivery_accepted === true;
+        const handoffAccepted = taskRecord.handoff_accepted === true;
+        const summary = toText(taskRecord.summary);
+        const latestStep = toText(taskRecord.latest_step);
+        const humanReq = asRecord(taskRecord.human_request);
+        if (Object.keys(humanReq).length > 0 && !ended) {
+            const msg = toText(humanReq.message);
+            worker.status = "running";
+            worker.currentStep = msg ? `⏸️ 等待回答: ${msg.split(/\r?\n/)[0].slice(0, 96)}` : "⏸️ 等待人工回答";
+            return;
+        }
+        if (!ended) {
+            worker.status = "running";
+            if (latestStep) worker.currentStep = latestStep.split(/\r?\n/)[0].slice(0, 120);
+            return;
+        }
+        worker.status = deliveryAccepted || handoffAccepted ? "succeeded" : "failed";
+        worker.progress = 100;
+        if (deliveryAccepted) {
+            worker.currentStep = summary ? `子目标已交付 · ${summary.split(/\r?\n/)[0]}` : "子目标已正式交付";
+        } else if (handoffAccepted) {
+            worker.currentStep = summary ? `已交接 · ${summary.split(/\r?\n/)[0]}` : "已交接回父任务";
+        } else if (execStatus === "cancelled") {
+            worker.currentStep = "已停止";
+        } else {
+            worker.currentStep = summary ? `未完成 · ${summary.split(/\r?\n/)[0]}` : "子任务未完成正式交付";
+        }
+    }
+
+    function updateChildTaskSnapshots(tasks: ChildTaskSnapshot[]) {
+        const previous = new Map(childTaskSnapshots.value.map((task) => [task.child_run_id, task]));
+        for (const task of tasks) {
+            if (typeof task.child_run_id === "string") previous.set(task.child_run_id, mergeSnapshot(previous.get(task.child_run_id), task));
+        }
+        childTaskSnapshots.value = [...previous.values()];
+    }
+
+    function handleChildTasksSynced(e: Event) {
+        const detail = (e as CustomEvent).detail;
+        if (!detail || detail.sessionId !== activeSessionId.value || !Array.isArray(detail.tasks)) return;
+        updateChildTaskSnapshots(detail.tasks);
+        for (const item of detail.tasks) {
+            applySettledChildTaskToWorker(asRecord(item));
         }
     }
 
@@ -1517,7 +1597,44 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         if (eventType === "child_task_progress") {
             const child = toText(payload.child_run_id);
             const event = asRecord(payload.event);
-            const detail = toText(event.description || event.message || event.execution_status || event.type);
+            const evType = toText(event.type);
+            const toolName = toText(event.tool || event.action);
+            const detail = toText(event.description || event.message || event.execution_status || evType);
+            if (child) {
+                const worker = teamWorkers.value.find((w) => w.id === child);
+                const alreadySettled = worker?.extra?.settledByHost === true;
+                if (worker && !alreadySettled) {
+                    if (toolName) worker.currentTool = toolName;
+                    if (evType === "complete") {
+                        // complete 仅表示子循环退出（无论成功或失败），不携带验收结果；终态以后台 settle 后的状态为准。
+                        worker.currentStep = "执行已结束，正在核对结算状态…";
+                    } else if (evType === "agent_paused") {
+                        worker.currentStep = detail ? `⏸️ 等待回答: ${detail.split(/\r?\n/)[0].slice(0, 96)}` : "⏸️ 等待人工回答";
+                    } else if (evType === "step_error") {
+                        worker.currentStep = detail ? `⚠️ ${detail.split(/\r?\n/)[0].slice(0, 100)}` : "步骤执行异常";
+                    } else if (detail && detail !== "执行操作") {
+                        worker.currentStep = detail.split(/\r?\n/)[0].slice(0, 120);
+                    }
+                }
+                if (evType === "complete" && !alreadySettled) {
+                    // 结算事务可能晚于 complete 事件：未结算或查询失败时按退避重试；乱序的旧“运行中”结果由 apply 内的终态保护丢弃。
+                    const sessionSnap = activeSessionId.value;
+                    void settleWithRetry(
+                        () => invoke<Record<string, unknown> & { child_run_id: string }>("control_child_task", {
+                            sessionId: sessionSnap,
+                            action: "status",
+                            params: { child_run_id: child },
+                        }),
+                        (settled) => { if (sessionSnap === activeSessionId.value) applySettledChildTaskToWorker(settled); },
+                        { shouldStop: () => sessionSnap !== activeSessionId.value },
+                    );
+                }
+                if (typeof window !== "undefined") {
+                    window.dispatchEvent(new CustomEvent("agent:child-task-progress", {
+                        detail: { sessionId: activeSessionId.value, childRunId: child, event },
+                    }));
+                }
+            }
             appendLog(`↳ 子任务 ${child}: ${detail}`);
             return;
         }
@@ -2210,6 +2327,9 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     }
 
     onMounted(async () => {
+        if (typeof window !== "undefined") {
+            window.addEventListener("agent:child-tasks-synced", handleChildTasksSynced);
+        }
         if (!activeSessionId.value.startsWith("draft-")) {
             await loadConversation();
             await loadRunTraces();
@@ -2220,6 +2340,9 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     });
 
     onUnmounted(() => {
+        if (typeof window !== "undefined") {
+            window.removeEventListener("agent:child-tasks-synced", handleChildTasksSynced);
+        }
         clearStreamDisplay();
         workerPreviewStreams.clear();
         stopElapsedTimer();
@@ -2304,6 +2427,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         stateMeta,
         teamState,
         teamWorkers,
+        childTaskSnapshots,
         isWaitingForHuman,
         canStart,
         completedToolCount,

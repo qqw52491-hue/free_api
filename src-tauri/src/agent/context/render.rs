@@ -165,13 +165,18 @@ impl ContextRenderer {
     /// 【按需条件化渲染原则】：每轮仅命中唯一的激活状态分支，严格控体积（单状态 1~3 行），稳吃前缀缓存。
     pub fn render_plan_gate(gate: Option<&PlanGateProjection>) -> String {
         let pending = gate.and_then(|g| g.pending_human_reply.as_ref()).map(|r| r.render()).unwrap_or_default();
-        format!("{}{}", pending, Self::render_plan_gate_status(gate))
+        let ancestor = gate
+            .and_then(|g| g.ancestor_plan_pending.as_deref())
+            .map(crate::agent::gate_messages::delegated_ancestor_plan_status)
+            .unwrap_or_default();
+        format!("{}{}{}", pending, ancestor, Self::render_plan_gate_status(gate))
     }
 
     fn render_plan_gate_status(gate: Option<&PlanGateProjection>) -> String {
         let Some(gate) = gate else {
             return String::new();
         };
+        let ancestor_pending = gate.ancestor_plan_pending.is_some();
 
         // 1. 已批准放行分支 (Approved)
         if gate.phase == "approved" {
@@ -180,6 +185,12 @@ impl ContextRenderer {
             } else {
                 ""
             };
+            if ancestor_pending {
+                return format!(
+                    "【方案门禁状态】🟢 本任务方案已放行{}（实际写入仍需等待上级方案通过）\n指引: 本任务自身的方案门已满足，但当前上级任务方案尚未通过，真实写入仍会被上级门禁暂停；待上级方案通过后即可按已批准方案执行写入并验证。若执行中新证据、验证失败或已批准假设被推翻，须停止沿用旧方案并重新 submit_plan，填写 revision_reason 且提交更新后的 evidence_refs；仅措辞优化、主观偏好或无新增证据不得重开。修订会撤销旧批准、重新锁定写入并消耗审查轮次。修订方案不是从零开始：须回顾上文历史里已完成的写入，在 plan_summary 中写明“已完成并保留的部分”与“需回退/重做的部分”。\n\n",
+                    waiver_hint
+                );
+            }
             return format!(
                 "【方案门禁状态】🟢 门禁已放行{}\n指引: 按已批准方案执行写入并验证。若执行中新证据、验证失败或已批准假设被推翻，须停止沿用旧方案并重新 submit_plan，填写 revision_reason 且提交更新后的 evidence_refs；仅措辞优化、主观偏好或无新增证据不得重开。修订会撤销旧批准、重新锁定写入并消耗审查轮次。修订方案不是从零开始：须回顾上文历史里已完成的写入，在 plan_summary 中写明“已完成并保留的部分”与“需回退/重做的部分”。\n\n",
                 waiver_hint
@@ -201,6 +212,9 @@ impl ContextRenderer {
 
         // 3. 全自动模式分支 (auto)
         if gate.mode != "cross_review" {
+            if ancestor_pending {
+                return "【方案门禁状态】🚀 全自动 (auto)（实际写入受上级方案门禁限制）\n指引: 本任务自身为全自动模式，但当前上级任务方案尚未通过，真实写入需等待上级方案通过后放行；期间可正常完成只读排查与方案阐述。\n\n".to_string();
+            }
             return "【方案门禁状态】🚀 全自动 (auto)\n指引: 完成只读排查与方案阐述后写入将自动放行；未经排查直接写入会被首轮门禁拦截。\n\n".to_string();
         }
 

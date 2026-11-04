@@ -124,6 +124,7 @@
                         :is-waiting-for-human="session.isWaitingForHuman.value"
                         :is-sending-human="session.isSendingHuman.value"
                         :team-state="session.teamState.value"
+                        :child-task-snapshots="session.childTaskSnapshots.value"
                         :review-progress="session.reviewProgress.value"
                         :live-shell-output="session.liveShellOutput.value"
                         @select-step="handleStepSelect"

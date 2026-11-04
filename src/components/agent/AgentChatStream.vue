@@ -1553,6 +1553,7 @@ import AgentTimelineSections from "./AgentTimelineSections.vue";
 import { buildQuestionMarks, type QuestionNavigationEntry } from "./questionNavigation";
 import { placeReviewRows, type ReviewProgressItem, type ReviewLocation } from "./reviewProgress";
 import { extractSubagentsFromStep } from "./workerUtils";
+import { historicalWorkerSnapshot, type ChildTaskSnapshot } from "./delegatedTaskState";
 import { getWorkerLiveLine } from "./liveThoughtPreview";
 
 const attachmentParseCache = new Map<string, { cleanText: string; attachments: ParsedAttachment[] }>();
@@ -1860,6 +1861,7 @@ const props = withDefaults(
         isWaitingForHuman?: boolean;
         isSendingHuman?: boolean;
         teamState?: AgentTeamState;
+        childTaskSnapshots?: ChildTaskSnapshot[];
         reviewProgress?: ReviewProgressItem[];
         liveShellOutput?: { command: string; tail: string; elapsedMs: number; done: boolean } | null;
     }>(),
@@ -1923,9 +1925,10 @@ function extractSubagentTask(step: any): string {
 // Object keys keep history and current-run steps isolated, even when step numbers repeat.
 const historicalStepWorkers = computed(() => {
     const map = new Map<AgentStepItem, AgentWorkerItem[]>();
+    const snapshots = new Map((props.childTaskSnapshots || []).map(task => [task.child_run_id, task]));
     for (const turn of props.historyTurns) {
         if (props.isRunning && turn.status === "running") continue;
-        for (const step of turn.steps) map.set(step, extractSubagentsFromStep(step, turn.steps, []));
+        for (const step of turn.steps) map.set(step, extractSubagentsFromStep(step, turn.steps, []).map(worker => historicalWorkerSnapshot(worker, snapshots.get(worker.id))));
     }
     return map;
 });

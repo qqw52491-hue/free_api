@@ -286,12 +286,63 @@ export function computeFormatStepOperation(step: AgentStepItem): StepOperationDi
     }
 
     // 7. 子智能体 (审查 / 写入 / 协同任务 / 追问对质)
+    if (t.includes("child_task")) {
+        const subAct = String(p.action || act || "dispatch").toLowerCase();
+        const childId = String(p.child_run_id || p.target || "").trim();
+        const shortId = childId ? `#${childId.slice(0, 8)}` : "";
+        if (subAct === "wait" || subAct === "inbox") {
+            return {
+                badgeIcon: "⏳",
+                badgeLabel: subAct === "inbox" ? "查看信箱" : "等待子任务",
+                actionText: shortId ? `等待子任务 ${shortId} 进展或回信` : "等待后台协同子任务消息与进展",
+                hasDiff: false,
+            };
+        }
+        if (subAct === "send" || subAct === "ask") {
+            const msg = String(p.message || p.question || "").replace(/\s+/g, " ").trim();
+            return {
+                badgeIcon: "💬",
+                badgeLabel: subAct === "ask" ? "追问子任务" : "协同发信",
+                actionText: msg ? `${shortId ? `${shortId} ` : ""}"${msg.slice(0, 42)}"` : `向子任务 ${shortId || ""} 发送协作消息`,
+                hasDiff: false,
+            };
+        }
+        if (subAct === "status" || subAct === "result" || subAct === "list" || subAct === "receipt" || subAct === "read_agent_result") {
+            return {
+                badgeIcon: "🤖",
+                badgeLabel: subAct === "result" || subAct === "read_agent_result" ? "回收结果" : "子任务状态",
+                actionText: shortId ? `查询子任务 ${shortId} (${subAct})` : `查询协同子任务 (${subAct})`,
+                hasDiff: false,
+            };
+        }
+        if (subAct === "cancel") {
+            return {
+                badgeIcon: "⏹️",
+                badgeLabel: "停止子任务",
+                actionText: shortId ? `停止子任务 ${shortId}` : "停止协同子任务",
+                hasDiff: false,
+            };
+        }
+        const profile = String(p.profile || "task").toLowerCase();
+        const rawTask = String(p.task || p.message || "").replace(/\s+/g, " ").trim();
+        const roleLabel = String(p.role_label || p.roleLabel || p.role || "").trim();
+        const badgeLabel = subAct === "resume" ? "追问子任务" : profile === "reviewer" ? "子审查" : profile === "writer" ? "子写入" : profile === "worker" ? "子探针" : "协同子任务";
+        const action = rawTask
+            ? `${badgeLabel}: "${rawTask.slice(0, 42)}${rawTask.length > 42 ? "…" : ""}"${roleLabel ? ` [${roleLabel}]` : ""}`
+            : (step.description && step.description !== "执行操作" ? step.description.replace(/\s+/g, " ") : "派发协同子任务");
+        return {
+            badgeIcon: profile === "writer" ? "✍️" : "🤖",
+            badgeLabel,
+            actionText: action,
+            hasDiff: false,
+        };
+    }
     if (t.includes("child_reviewer")) {
-        const question = String(p.question || p.message || "").trim();
+        const question = String(p.question || p.message || "").replace(/\s+/g, " ").trim();
         const role = String(p.role || "").trim();
         const action = question
             ? `审查: "${question.slice(0, 38)}"${role ? ` [${role}]` : ""}`
-            : (step.description && step.description !== "执行操作" ? step.description : "执行协同质量审查");
+            : (step.description && step.description !== "执行操作" ? step.description.replace(/\s+/g, " ") : "执行协同质量审查");
         return {
             badgeIcon: "🤖",
             badgeLabel: "子审查",
@@ -300,10 +351,10 @@ export function computeFormatStepOperation(step: AgentStepItem): StepOperationDi
         };
     }
     if (t.includes("child_writer")) {
-        const task = String(p.task || "").trim();
+        const task = String(p.task || "").replace(/\s+/g, " ").trim();
         const action = task
             ? `沙箱写入: "${task.slice(0, 35)}"`
-            : (fileName ? `子智能体写入 ${fileName}` : (step.description && step.description !== "执行操作" ? step.description : "执行沙箱代码写入"));
+            : (fileName ? `子智能体写入 ${fileName}` : (step.description && step.description !== "执行操作" ? step.description.replace(/\s+/g, " ") : "执行沙箱代码写入"));
         return {
             badgeIcon: "✍️",
             badgeLabel: "子写入",
@@ -315,11 +366,11 @@ export function computeFormatStepOperation(step: AgentStepItem): StepOperationDi
         };
     }
     if (t.includes("child_worker") || t.includes("sub_agent") || t.includes("invoke_subagent")) {
-        const task = String(p.task || "").trim();
+        const task = String(p.task || "").replace(/\s+/g, " ").trim();
         const role = String(p.role || "").trim();
         const action = task
             ? `子任务: "${task.slice(0, 38)}"${role ? ` [${role}]` : ""}`
-            : (step.description && step.description !== "执行操作" ? step.description : "执行协同子任务");
+            : (step.description && step.description !== "执行操作" ? step.description.replace(/\s+/g, " ") : "执行协同子任务");
         return {
             badgeIcon: "🤖",
             badgeLabel: "子代理",

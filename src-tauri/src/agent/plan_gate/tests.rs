@@ -818,3 +818,356 @@
         assert!(mixed.validate_executable_shape().is_ok());
         assert!(!mixed.is_bare_plan_submission());
     }
+
+    fn technical_plan_verdict() -> crate::agent::triage::TriageVerdict {
+        let mut verdict = crate::agent::triage::TriageVerdict::fallback("test");
+        verdict.fallback = None;
+        verdict.route = "technical_plan".into();
+        verdict
+    }
+
+    fn approved_delivery(decision: &str) -> ReviewerDeliveryData {
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("decision".to_string(), serde_json::json!(decision));
+        ReviewerDeliveryData {
+            findings: Vec::new(),
+            confidence: "confirmed".to_string(),
+            evidence_refs: Vec::new(),
+            missing_evidence: Vec::new(),
+            routing: Some("certain".to_string()),
+            withdrawn_findings: Vec::new(),
+            objection_verdicts: Vec::new(),
+            scorecard: None,
+            extra,
+        }
+    }
+
+    #[test]
+    fn delegated_writes_wait_for_required_plan_then_are_unrestricted() {
+        let db = setup_test_db();
+        let context = SandwichContext::new("sys".into(), "goal".into());
+        let mut parent = AgentCheckpoint::new("parent".into(), &context);
+        parent.set_execution_mode(PlanExecutionMode::Auto);
+        parent.triage_verdict = Some(technical_plan_verdict());
+        assert!(ancestor_plan_pending(&parent, &db).is_some(), "需要方案但未提交时暂停委派写入");
+
+        // 按配置无需审查而直接保存方案：与上级自身写入一致，之后不再限制。
+        parent.submitted_plan = Some(valid_submission());
+        parent.plan_phase = PlanPhase::Approved;
+        assert!(ancestor_plan_pending(&parent, &db).is_none());
+    }
+
+    #[test]
+    fn delegated_writes_are_not_limited_when_plan_is_not_required_or_disabled() {
+        let db = setup_test_db();
+        let context = SandwichContext::new("sys".into(), "goal".into());
+        let mut parent = AgentCheckpoint::new("parent".into(), &context);
+        parent.set_execution_mode(PlanExecutionMode::Auto);
+        assert!(ancestor_plan_pending(&parent, &db).is_none(), "未分流不额外限制");
+
+        let mut direct = technical_plan_verdict();
+        direct.route = "direct".into();
+        parent.triage_verdict = Some(direct);
+        assert!(ancestor_plan_pending(&parent, &db).is_none(), "简单任务不额外限制");
+
+        parent.triage_verdict = Some(technical_plan_verdict());
+        parent.stages.plan = Some(false);
+        assert!(ancestor_plan_pending(&parent, &db).is_none(), "方案环节关闭时沿用原权限");
+
+        let mut failed = technical_plan_verdict();
+        failed.fallback = Some("分流失败".into());
+        parent.stages.plan = None;
+        parent.triage_verdict = Some(failed);
+        assert!(ancestor_plan_pending(&parent, &db).is_none(), "分流失败不是需要方案的判决");
+    }
+
+    #[test]
+    fn delegated_writes_follow_human_plan_approval() {
+        let db = setup_test_db();
+        let context = SandwichContext::new("sys".into(), "goal".into());
+        let mut parent = AgentCheckpoint::new("parent".into(), &context);
+        parent.set_execution_mode(PlanExecutionMode::PlanApproval);
+        parent.stages.plan = Some(false);
+        assert_eq!(ancestor_plan_pending(&parent, &db), Some("方案尚待人工批准"), "人工批准模式不因环节开关放行");
+
+        parent.plan_phase = PlanPhase::Approved;
+        parent.approved_plan_summary = Some("用户批准".into());
+        assert!(ancestor_plan_pending(&parent, &db).is_none());
+    }
+
+    #[test]
+    fn delegated_writes_wait_for_review_and_pause_again_on_rebuttal() {
+        let db = setup_test_db();
+        let context = SandwichContext::new("sys".into(), "goal".into());
+        let mut parent = AgentCheckpoint::new("parent-review".into(), &context);
+        parent.set_execution_mode(PlanExecutionMode::Auto);
+        parent.triage_verdict = Some(technical_plan_verdict());
+        parent.submitted_plan = Some(valid_submission());
+        parent.plan_phase = PlanPhase::Reviewing;
+        parent.plan_reviewer_retry_count = 1;
+        seed_review(&db, "rev-a", &parent.run_id, "b-a", "running", false);
+        parent.set_plan_review_batch("b-a", 1);
+        assert_eq!(ancestor_plan_pending(&parent, &db), Some("方案审查尚未通过"), "审查进行中暂停写入");
+
+        mark_succeeded(&db, "rev-a");
+        parent.record_reviewer_delivery_for_run(&db, Some("rev-a"), &approved_delivery("approved"));
+        assert!(ancestor_plan_pending(&parent, &db).is_none(), "审查通过即放行，不必等上级自己再写一次");
+        assert!(!parent.plan_phase.is_approved(), "只读判定不改上级状态");
+
+        let mut rejected = AgentCheckpoint::new("parent-rebuttal".into(), &context);
+        rejected.set_execution_mode(PlanExecutionMode::Auto);
+        rejected.submitted_plan = Some(valid_submission());
+        rejected.plan_phase = PlanPhase::Reviewing;
+        rejected.plan_reviewer_retry_count = 1;
+        seed_review(&db, "rev-b", &rejected.run_id, "b-b", "running", false);
+        rejected.set_plan_review_batch("b-b", 1);
+        mark_succeeded(&db, "rev-b");
+        rejected.record_reviewer_delivery_for_run(&db, Some("rev-b"), &approved_delivery("rebuttal"));
+        assert_eq!(ancestor_plan_pending(&rejected, &db), Some("方案审查尚未通过"), "打回后暂停写入");
+    }
+
+    #[test]
+    fn delegated_write_interception_walks_chain_and_reads_live_parent_state() {
+        let dir = std::env::temp_dir().join(format!("delegated-plan-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = DbState(Arc::new(Mutex::new(crate::db::init_db(&dir.join("t.db")).unwrap())));
+        let context = SandwichContext::new("sys".into(), "goal".into());
+        let root = format!("root-{}", uuid::Uuid::new_v4());
+        let mut cp = AgentCheckpoint::new(root.clone(), &context);
+        cp.set_execution_mode(PlanExecutionMode::Auto);
+        cp.triage_verdict = Some(technical_plan_verdict());
+        crate::agent::checkpoint::save_checkpoint(&db, &mut cp).unwrap();
+
+        let child = format!("task-{}", uuid::Uuid::new_v4());
+        let grandchild = format!("task-{}", uuid::Uuid::new_v4());
+        let binding = |parent: &str, child: &str| crate::agent::child_task::TaskBinding {
+            parent_session: parent.into(), parent_run: format!("run-{parent}"),
+            child_session: child.into(), child_run: format!("run-{child}"),
+        };
+        let g1 = crate::agent::child_task::TaskGuard::enter(binding(&root, &child));
+        let g2 = crate::agent::child_task::TaskGuard::enter(binding(&child, &grandchild));
+
+        assert!(delegated_write_interception(&db, &root).is_none(), "根任务仍走自己的原有门禁");
+        for session in [&child, &grandchild] {
+            let blocked = delegated_write_interception(&db, session).expect("上级方案未通过时暂停");
+            assert_eq!(blocked.route, "plan_gatekeeper:parent_plan_pending");
+            assert!(blocked.stderr.contains("只读调查"));
+        }
+
+        // 已在运行的子任务下次写入即读到新状态
+        cp.submitted_plan = Some(valid_submission());
+        cp.plan_phase = PlanPhase::Approved;
+        crate::agent::checkpoint::save_checkpoint(&db, &mut cp).unwrap();
+        assert!(delegated_write_interception(&db, &child).is_none());
+        assert!(delegated_write_interception(&db, &grandchild).is_none());
+
+        drop(g2);
+        drop(g1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delegated_plan_status_prompt_tracks_ancestor_lifecycle_without_polluting_history() {
+        let dir = std::env::temp_dir().join(format!("delegated-prompt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = DbState(Arc::new(Mutex::new(crate::db::init_db(&dir.join("t.db")).unwrap())));
+
+        let root = format!("root-{}", uuid::Uuid::new_v4());
+        let child = format!("task-{}", uuid::Uuid::new_v4());
+        let grandchild = format!("task-{}", uuid::Uuid::new_v4());
+        let binding = |parent: &str, child: &str| crate::agent::child_task::TaskBinding {
+            parent_session: parent.into(),
+            parent_run: format!("run-{parent}"),
+            child_session: child.into(),
+            child_run: format!("run-{child}"),
+        };
+        let g1 = crate::agent::child_task::TaskGuard::enter(binding(&root, &child));
+        let g2 = crate::agent::child_task::TaskGuard::enter(binding(&child, &grandchild));
+
+        let mut root_ctx = SandwichContext::new("sys".into(), "root goal".into());
+        let mut root_cp = AgentCheckpoint::new(root.clone(), &root_ctx);
+        root_cp.set_execution_mode(PlanExecutionMode::Auto);
+
+        let mut child_ctx = SandwichContext::new("sys".into(), "child goal".into());
+        let mut child_cp = AgentCheckpoint::new(child.clone(), &child_ctx);
+        child_cp.stages.plan = Some(false);
+
+        let mut grand_ctx = SandwichContext::new("sys".into(), "grandchild goal".into());
+        let mut grand_cp = AgentCheckpoint::new(grandchild.clone(), &grand_ctx);
+        grand_cp.stages.plan = Some(false);
+
+        let render_assembled = |cp: &AgentCheckpoint, ctx: &mut SandwichContext, session: &str| {
+            sync_plan_gate_projection(cp, ctx, &db, session);
+            serde_json::to_string(&ctx.assemble_messages()).unwrap()
+        };
+
+        // 1. 上级 checkpoint 尚未落库（读取缺失 fail-open）：不虚称需等待方案，也不报错
+        let rendered_missing = render_assembled(&grand_cp, &mut grand_ctx, &grandchild);
+        assert!(!rendered_missing.contains("【上级方案状态】"));
+
+        // 2. 根任务需要方案但尚未提交：子任务与孙任务均看到动态提示，根任务自身不显示子任务提示
+        root_cp.triage_verdict = Some(technical_plan_verdict());
+        crate::agent::checkpoint::save_checkpoint(&db, &mut root_cp).unwrap();
+        crate::agent::checkpoint::save_checkpoint(&db, &mut child_cp).unwrap();
+
+        let root_rendered = render_assembled(&root_cp, &mut root_ctx, &root);
+        assert!(!root_rendered.contains("【上级方案状态】"), "根任务不应获得子任务提示");
+
+        for (cp, ctx, session) in [
+            (&child_cp, &mut child_ctx, child.as_str()),
+            (&grand_cp, &mut grand_ctx, grandchild.as_str()),
+        ] {
+            let rendered = render_assembled(cp, ctx, session);
+            assert!(rendered.contains("【上级方案状态】"), "{session} 应看到上级方案未通过提示");
+            assert!(rendered.contains("已被判定需要方案，尚未提交"));
+            assert!(rendered.contains("继续读取、搜索和分析"));
+            assert!(rendered.contains("【方案门禁状态】"), "{session} 自身方案状态不应被遮住");
+            assert!(rendered.contains("实际写入受上级方案门禁限制"));
+            assert!(!rendered.contains("写入将自动放行"), "不应同时声称写入自动放行");
+            assert!(!rendered.contains("🟢 门禁已放行"), "不应同时声称无条件放行");
+            assert!(ctx.turns_history.is_empty(), "动态提示不得写入持久历史");
+        }
+
+        // 2.1 若子任务自身也开启了方案审查（cross_review），应同时看到【上级方案状态】与自身的 submit_plan 指引
+        grand_cp.set_execution_mode(PlanExecutionMode::CrossReview);
+        let grand_cross_review = render_assembled(&grand_cp, &mut grand_ctx, &grandchild);
+        assert!(grand_cross_review.contains("【上级方案状态】"));
+        assert!(grand_cross_review.contains("【方案门禁状态】🔍 交叉审查 (cross_review)"));
+        assert!(grand_cross_review.contains("submit_plan"), "子任务自身的方案审查指引不得被上级提示遮住");
+        grand_cp.set_execution_mode(PlanExecutionMode::Auto);
+
+        // 3. 根任务方案通过并保存后：下一次组装立即移除【上级方案状态】，且历史中无残留旧提示
+        root_cp.submitted_plan = Some(valid_submission());
+        root_cp.plan_phase = PlanPhase::Approved;
+        crate::agent::checkpoint::save_checkpoint(&db, &mut root_cp).unwrap();
+
+        let grand_after_approve = render_assembled(&grand_cp, &mut grand_ctx, &grandchild);
+        assert!(!grand_after_approve.contains("【上级方案状态】"), "通过后提示应立即消失");
+        assert!(grand_after_approve.contains("【方案门禁状态】"));
+        assert!(grand_ctx.turns_history.is_empty());
+
+        // 4. 中间上级（子任务 B）开启方案审查且被打回（rebuttal）：孙任务 C 再次反映待通过状态
+        child_cp.stages.plan = Some(true);
+        child_cp.submitted_plan = Some(valid_submission());
+        child_cp.plan_phase = PlanPhase::Reviewing;
+        child_cp.plan_reviewer_retry_count = 1;
+        let rev_id = crate::agent::child_reviewer::begin_child_run_extended(
+            &db,
+            "run-child",
+            &child_cp.run_id,
+            &dir,
+            "mock",
+            0,
+            "review",
+            Some(3),
+            None,
+            None,
+            &crate::agent::child_reviewer::ChildRunIdentity {
+                batch_id: Some("b-child".into()),
+                ..crate::agent::child_reviewer::ChildRunIdentity::fresh("plan_review")
+            },
+        )
+        .unwrap();
+        child_cp.set_plan_review_batch("b-child", 1);
+        mark_succeeded(&db, &rev_id);
+        child_cp.record_reviewer_delivery_for_run(
+            &db,
+            Some(&rev_id),
+            &approved_delivery("rebuttal"),
+        );
+        crate::agent::checkpoint::save_checkpoint(&db, &mut child_cp).unwrap();
+
+        let grand_after_rebuttal = render_assembled(&grand_cp, &mut grand_ctx, &grandchild);
+        assert!(grand_after_rebuttal.contains("【上级方案状态】"), "中间上级打回后孙任务应再次看到提示");
+        assert!(grand_after_rebuttal.contains("方案审查尚未通过"));
+
+        // 5. 子任务 B 方案关闭且清除活跃审查后：不再额外提示等待方案
+        child_cp.stages.plan = Some(false);
+        child_cp.submitted_plan = None;
+        child_cp.plan_review_batch_id = None;
+        child_cp.plan_review_expected_count = 0;
+        crate::agent::checkpoint::save_checkpoint(&db, &mut child_cp).unwrap();
+
+        let grand_after_disable = render_assembled(&grand_cp, &mut grand_ctx, &grandchild);
+        assert!(!grand_after_disable.contains("【上级方案状态】"));
+
+        drop(g2);
+        drop(g1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delegation_exemption_only_covers_direct_writer_dispatch() {
+        let parse = |value| serde_json::from_value::<crate::agent::types::AgentInstruction>(value).unwrap();
+        for raw in [
+            serde_json::json!({"tool":"child_writer", "params":{"task":"调查"}}),
+            serde_json::json!({"tool":"core", "action":"child_writer", "dispatches":[{"task":"A"},{"task":"B"}]}),
+        ] { assert!(is_delegation_dispatch_only(&parse(raw))); }
+        for raw in [
+            serde_json::json!({"tool":"child_writer", "action":"apply", "params":{"child_run_id":"run"}}),
+            serde_json::json!({"tool":"child_writer", "params":{"action":"apply_diff"}}),
+            serde_json::json!({"tool":"plugin/write_file", "action":"child_writer"}),
+            serde_json::json!({"commands":[{"tool":"plugin/write_file", "action":"child_writer"}]}),
+            serde_json::json!({"parallel":[{"tool":"child_writer"}]}),
+            serde_json::json!({"plan_tree":{"parallel":[{"tool":"child_writer"}]}}),
+            serde_json::json!({"tool":"child_writer", "command":{"commands":[{"tool":"local_file", "action":"write"}]}}),
+        ] { assert!(!is_delegation_dispatch_only(&parse(raw.clone())), "{raw}"); }
+    }
+
+    #[test]
+    fn delegated_gate_blocks_real_pipeline_writes_then_allows_after_approval() {
+        let dir = std::env::temp_dir().join(format!("delegated-pipeline-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = DbState(Arc::new(Mutex::new(crate::db::init_db(&dir.join("test.db")).unwrap())));
+        let context = SandwichContext::new("sys".into(), "goal".into());
+        let root = format!("root-{}", uuid::Uuid::new_v4());
+        let child = format!("task-{}", uuid::Uuid::new_v4());
+        let mut cp = AgentCheckpoint::new(root.clone(), &context);
+        cp.set_execution_mode(PlanExecutionMode::Auto);
+        cp.triage_verdict = Some(technical_plan_verdict());
+        crate::agent::checkpoint::save_checkpoint(&db, &mut cp).unwrap();
+        let guard = crate::agent::child_task::TaskGuard::enter(crate::agent::child_task::TaskBinding {
+            parent_session: root.clone(), parent_run: format!("run-{root}"),
+            child_session: child.clone(), child_run: format!("run-{child}"),
+        });
+        let parse = |value| serde_json::from_value::<crate::agent::types::AgentInstruction>(value).unwrap();
+        let inherited = parse(serde_json::json!({"tool":"local_file", "command":{"commands":[
+            {"action":"write", "params":{"path":"out.txt", "content":"done"}}
+        ]}}));
+        let conflicting = parse(serde_json::json!({"commands":[
+            {"tool":"plugin/write_file", "action":"child_writer", "params":{"path":"out.txt", "content":"bad"}}
+        ]}));
+        // 计划树无 tool 时以 action 为工具，实际动作来自参数。
+        let tree = parse(serde_json::json!({"plan_tree":[
+            {"action":"local_file", "params":{"action":"write", "path":"tree.txt", "content":"done"}}
+        ]}));
+        let parallel = parse(serde_json::json!({"parallel":[
+            {"action":"local_file", "params":{"action":"write", "path":"parallel.txt", "content":"done"}}
+        ]}));
+        for inst in [&inherited, &conflicting, &tree, &parallel] {
+            assert!(crate::agent::dispatcher::is_write_or_side_effect_tool(inst));
+            assert_eq!(delegated_instruction_interception(&db, &child, inst).unwrap().route,
+                "plan_gatekeeper:parent_plan_pending");
+        }
+        assert!(!dir.join("out.txt").exists());
+        let readonly_tree = parse(serde_json::json!({"plan_tree":[
+            {"action":"local_file", "params":{"action":"list", "path":"."}}
+        ]}));
+        assert!(!crate::agent::dispatcher::is_write_or_side_effect_tool(&readonly_tree));
+        assert!(delegated_instruction_interception(&db, &child, &readonly_tree).is_none());
+        let readonly = parse(serde_json::json!({"tool":"local_file", "params":{"action":"list", "path":"."}}));
+        assert!(delegated_instruction_interception(&db, &child, &readonly).is_none());
+        let dispatch = parse(serde_json::json!({"tool":"child_writer", "params":{"task":"investigate"}}));
+        assert!(delegated_instruction_interception(&db, &child, &dispatch).is_none());
+
+        cp.submitted_plan = Some(valid_submission());
+        cp.plan_phase = PlanPhase::Approved;
+        crate::agent::checkpoint::save_checkpoint(&db, &mut cp).unwrap();
+        assert!(delegated_instruction_interception(&db, &child, &inherited).is_none());
+        let result = crate::agent::dispatcher::run_agent_step(&db, &child, &inherited,
+            &crate::agent::mcp::PluginRegistry::new(), Some(&dir));
+        assert!(result.success, "{}", result.stderr);
+        assert_eq!(std::fs::read_to_string(dir.join("out.txt")).unwrap(), "done");
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }

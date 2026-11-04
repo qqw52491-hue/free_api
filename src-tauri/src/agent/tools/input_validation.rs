@@ -244,12 +244,16 @@ pub(crate) fn instruction_rejection(
         raw_tool.as_str()
     };
     let params = inst.get_params();
+    if tool == "child_task" && (inst.dispatches.is_some() || params.get("dispatches").is_some()) {
+        return Some(rejection("child_task 暂不支持 dispatches，请逐次派发；已派发的任务可并行运行。".into()));
+    }
     if tool == "child_writer"
         && matches!(action_lc.as_str(), "apply" | "apply_diff" | "apply_changes")
     {
         return native_rejection(tool, &action, &params);
     }
     if matches!(tool, "child_writer" | "child_worker" | "child_reviewer") {
+        if let Err(error) = inst.checked_dispatches() { return Some(rejection(error)); }
         let items = inst.get_dispatch_items();
         let errors: Vec<_> = items
             .iter()
@@ -278,6 +282,18 @@ mod tests {
         DbState(Arc::new(Mutex::new(
             rusqlite::Connection::open_in_memory().unwrap(),
         )))
+    }
+
+    #[test]
+    fn nested_child_worker_batch_passes_preflight_and_ambiguous_batch_does_not() {
+        let valid: AgentInstruction = serde_json::from_value(json!({"tool":"child_worker", "command":{"dispatches":[{"task":"A"},{"task":"B"}]}})).unwrap();
+        assert!(instruction_rejection(&empty_db(), &valid).is_none());
+        let bad: AgentInstruction = serde_json::from_value(json!({"tool":"child_worker", "command":{"dispatches":[{"task":"A"}],"task":"B"}})).unwrap();
+        assert!(instruction_rejection(&empty_db(), &bad).unwrap().stderr.contains("批量派发"));
+        let partial: AgentInstruction = serde_json::from_value(json!({"tool":"child_worker", "params":{"dispatches":[{"task":"A"},{}]}})).unwrap();
+        assert!(instruction_rejection(&empty_db(), &partial).is_none());
+        let general: AgentInstruction = serde_json::from_value(json!({"tool":"child_task", "params":{"action":"dispatch","dispatches":[{"task":"A"}]}})).unwrap();
+        assert!(instruction_rejection(&empty_db(), &general).unwrap().stderr.contains("逐次派发"));
     }
 
     #[test]
