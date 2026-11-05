@@ -177,6 +177,24 @@ pub(crate) fn read_registered_evidence(
     serde_json::to_string(&result).map_err(|e| e.to_string())
 }
 
+/// Cache identity covers all execution receipts, independently of display windows.
+/// Process receipts are excluded so preparing/finishing does not invalidate itself.
+pub(crate) fn execution_receipt_fingerprint(db: &DbState, session: &str, since: chrono::DateTime<Utc>) -> Result<String,String> {
+    let conn=db.reader()?;
+    let mut stmt=conn.prepare("SELECT l.output_id,l.created_at,f.tool,f.outcome FROM agent_step_logs l LEFT JOIN agent_step_logs_fts f ON f.output_id=l.output_id AND f.session_id=l.session_id
+        WHERE l.session_id=?1 AND julianday(l.created_at)>=julianday(?2)
+        AND lower(trim(COALESCE(f.tool,'unknown'))) NOT IN ('','core','finish','prepare_finish','submit_plan','fail_task','ask_human','wait_jobs','resume_child')
+        AND lower(COALESCE(f.outcome,''))!='finish_challenged' ORDER BY l.output_id").map_err(|e|e.to_string())?;
+    let rows=stmt.query_map(rusqlite::params![session,since.to_rfc3339()],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,Option<String>>(3)?))).map_err(|e|e.to_string())?;
+    let mut hash=Sha256::new();
+    for row in rows {
+        let row=row.map_err(|e|e.to_string())?;
+        let at=chrono::DateTime::parse_from_rfc3339(&row.1).map_err(|e|e.to_string())?;
+        if at>=since { hash.update(serde_json::to_vec(&row).map_err(|e|e.to_string())?); }
+    }
+    Ok(format!("{:x}",hash.finalize()))
+}
+
 /// 长任务的早期 shell / pipeline 回执补充索引：最近 15 条之外，保留一小段较早的
 /// 可回查执行记录。这里只搬运宿主持久化来源，不通过命令名/输出关键词宣称
 /// 它是验证、更不推断旧结果适用于当前产物；适用性由终审核对。

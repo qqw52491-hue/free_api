@@ -17,7 +17,7 @@ use tokio::sync::watch;
 
 
 // 验收语义变更时升版：旧裁决不能在新规则下继续复用；Git 基线保持原样。
-const FINISH_REVIEW_RULES_VERSION: &str = "review-search-v13-task-directory-baselines";
+const FINISH_REVIEW_RULES_VERSION: &str = "review-search-v14-execution-navigation";
 const MAX_FINISH_FORMAT_RETRIES: u32 = 5;
 const MAX_FINISH_REQUEST_RETRIES: u32 = 5;
 
@@ -377,10 +377,14 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
 
     // 执行轨迹摘要：审查者核对"声称做过的验证"是否真实执行（谎报检测），
     // 也兼作已知证据地图减少重复取证。
-    let execution_evidence = collect_execution_evidence_digest(db, session_id, run_started_at);
-    if let Some(digest) = execution_evidence.as_ref() {
-        review_material.push_str(digest);
+    let mut execution_evidence = collect_execution_evidence_digest(db, session_id, run_started_at).unwrap_or_default();
+    if let Some(parent) = crate::agent::child_reviewer::main_executor::parent_run() {
+        let children = review_history_tool(db, &parent, "list_child_runs", &json!({"limit":30}))
+            .unwrap_or_else(|e|format!("查询失败：{e}；不能据此判断没有子任务。"));
+        execution_evidence.push_str(&format!("\n【宿主子执行状态目录（可翻页）】\n{children}\n按需用 read_child_result 和 list_execution_steps 核对原文；本目录不认证子任务自述。"));
     }
+    let execution_evidence = (!execution_evidence.is_empty()).then_some(execution_evidence);
+    if let Some(digest) = execution_evidence.as_ref() { review_material.push_str(digest); }
     // 路径归属线索变化后也须重新审查，不能沿用旧材料下的裁决。
     let evidence_fingerprint = with_execution_evidence_fingerprint(
         &base_review_fingerprint, Some(&write_origin_evidence),
@@ -562,6 +566,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
 {{"tool":"read_file","path":"src/foo.rs"}} 或 {{"tool":"read_file","path":"tmp/产物.xlsx"}}（tmp/ 前缀对 read_file/list_dir/grep_search 有效，直达会话产物区；办公/数据文件自动返回内容预览；大文件用 "start_line":221 翻页，单次最多 220 行）/ {{"tool":"list_dir","path":"."}} / {{"tool":"grep_search","pattern":"关键字","path":"src/"}}（不区分大小写的字面量搜索；path 可指定文件/目录或 tmp/ 路径，省略时覆盖工作区与会话产物区；返回 search_complete、has_more 与未读项，has_more=null 表示是否还有匹配未知） / {{"tool":"git_diff"}} / {{"tool":"git_log","n":10}} / {{"tool":"run_command","command":"cat \"$SESSION_TMP/data.csv\" | head -20"}}（仅只读命令；工作目录=工作区，$SESSION_TMP 为会话产物物理根——路径含空格必须加引号；命令内路径参数限工作区与会话 tmp 内）/ {{"tool":"python","code":"import os,openpyxl; wb=openpyxl.load_workbook(os.environ['SESSION_TMP']+'/xx.xlsx'); ..."}}（只读 python：文件写删/进程派生/网络访问均被宿主护栏拦截；宿主家目录不可读，系统区与两根内文件可读；SESSION_TMP 未设置说明本会话无产物区）{}。
 数据/报表类交付物强烈建议取证：机械材料只见文件名与大小，列全空、字段映射错、单位错这类语义缺陷只有读了内容才看得见。
 证据索引默认仅覆盖当前任务；同任务续跑保留原起点，明确引用的旧 output_id 仍可读取，source.relation 会标明 historical_reference。
+可用 {{"tool":"list_execution_steps","after_seq":-1,"limit":30}} 翻查完整父任务步骤目录；按 next_after_seq 继续，后代步骤需填 run_id。可用 {{"tool":"list_child_runs","limit":30}} 查询本任务树的子执行状态（用 next_after_id 作为 after_id 翻页），再用 {{"tool":"read_child_result","child_run_id":"目录中的ID","offset":0}} 分页查看完整交付。读取后代 output_id 时携带该 run_id；范围按宿主任务树校验。步骤描述和子任务自述不能代替实际回执。
 另可按工具证据索引读取原文：{{"tool":"read_step_output","output_id":"索引中的句柄","offset":0,"limit":4000}}（只限本会话，offset/limit 按字符；批量回执可加 branch_id 按分支读取或搜索，offset 在分支内计数；has_more=true 时用 next_offset 继续）。
 需要在长输出中定位具体错误时，可选用 {{"tool":"search_step_output","output_id":"索引中或明确引用的句柄","pattern":"E11000","context_lines":3,"max_matches":4}}（复用已有输出搜索，大小写不敏感字面量匹配；返回匹配行号、上下文、总命中数和 has_more。范围仅限已保存输出，不代表完整服务日志；不要求每次审查都搜索）。
 另可选用 {{"tool":"evidence_find","query":"对象或验证目的"}} 查本会话候选、{{"tool":"evidence_inspect","evidence_id":"登记句柄"}} 查完整记录、{{"tool":"evidence_compare","evidence_id":"登记句柄"}} 对登记文件采样比较。登记字段中的 command/reported_outcome 是 Agent 声明；核实原始命令与结果仍用 read_step_output。比较仅提供现场事实，不能证明验证与快照之间没有变化，亦不豁免当前契约验证。
@@ -871,9 +876,14 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
                 progress.phase("tool", &format!("正在取证：{}（第 {}/{} 步）", display_tool, tool_steps_used + 1, forensic_budget));
                 // verify 工具在环内直接处理：需异步跑宿主执行器 + 访问契约当前命令，
                 // review_tools::execute 保持同步纯函数
-                let observation = if tool_name == "read_step_output" {
+                let observation = if matches!(tool_name.as_str(), "read_step_output" | "get_step_output") {
                     read_review_step_output(db, session_id, &req, run_started_at)
                         .unwrap_or_else(|e| format!("取证请求被拒绝: {e}"))
+                } else if matches!(tool_name.as_str(), "list_execution_steps" | "list_child_runs" | "read_child_result") {
+                    match crate::agent::child_reviewer::main_executor::parent_run() {
+                        Some(parent) => review_history_tool(db, &parent, &tool_name, &req).unwrap_or_else(|e|format!("执行目录查询失败：{e}")),
+                        None => "当前辅助调用未绑定父 run，无法查询执行目录；请披露该覆盖边界。".into(),
+                    }
                 } else if tool_name == "search_step_output" {
                     search_review_step_output(db, session_id, &req, run_started_at)
                         .unwrap_or_else(|e| format!("取证请求被拒绝: {e}"))

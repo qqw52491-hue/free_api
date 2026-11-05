@@ -51,10 +51,29 @@ pub(crate) fn submitted_review_active(checkpoint: &AgentCheckpoint) -> bool {
         && checkpoint.plan_review_expected_count > 0
 }
 
+/// Formal plan selection is independent of whether its review is enabled.
+pub(crate) fn formal_plan_required(cp: &AgentCheckpoint) -> bool {
+    cp.plan_mode == PlanExecutionMode::PlanApproval || cp.stages.plan.unwrap_or(
+        cp.stages.plan_review == Some(true) || cp.triage_verdict.as_ref()
+            .is_some_and(|v| v.fallback.is_none() && v.requires_plan_gate()))
+}
+
+/// Effective discussion selection: explicit switches win; a successful complex
+/// triage selects discussion even for read-only work. A fallback is not a verdict.
+pub(crate) fn plan_discussion_required(checkpoint: &AgentCheckpoint) -> bool {
+    if checkpoint.stages.plan == Some(false) || checkpoint.stages.plan_review == Some(false) {
+        return false;
+    }
+    checkpoint.stages.plan_review == Some(true)
+        || checkpoint.triage_verdict.as_ref().is_some_and(|v| {
+            v.fallback.is_none() && v.requires_plan_gate()
+        })
+}
+
 /// 正式方案可经 submit_plan 保存，也可经原人工审批通道获批。
 /// 仅有自动 Approved 状态不证明存在方案；被拒绝/重新打开的人工方案也不沿用。
 pub(crate) fn configured_plan_missing(checkpoint: &AgentCheckpoint) -> bool {
-    (checkpoint.stages.plan == Some(true) || checkpoint.stages.plan_review == Some(true))
+    formal_plan_required(checkpoint)
         && checkpoint.submitted_plan.is_none()
         && !(checkpoint.plan_phase.is_approved() && checkpoint.approved_plan_summary.is_some())
 }
@@ -355,7 +374,9 @@ pub(crate) fn ancestor_plan_pending(ancestor: &AgentCheckpoint, db: &DbState) ->
         return Some("方案尚待人工批准");
     }
     if configured_plan_missing(ancestor) {
-        return Some("按配置需要正式方案，尚未提交");
+        return Some(if ancestor.stages.plan == Some(true) || ancestor.stages.plan_review == Some(true) {
+            "按配置需要正式方案，尚未提交"
+        } else { "已被判定需要方案，尚未提交" });
     }
     if review_active {
         // 上级审查通过后要等它自己下一次写入才落 Approved；这里按同一组条件只读判定。
@@ -523,8 +544,8 @@ fn gate_interception(
     is_resume_child: bool,
 ) -> Option<DispatchResult> {
     // 正式提交后已派出的审查是事实；Auto 不能在本批未收口时又走免审写入。
-    // 只复用方案门判定，不改变真实 plan_mode，阶段审查触发方式保持不变。
-    let effective_mode = if checkpoint.plan_mode == PlanExecutionMode::Auto && submitted_review_active(checkpoint) {
+    // 复用原批次裁决，不改变用户选择的真实 plan_mode。
+    let effective_mode = if checkpoint.plan_mode == PlanExecutionMode::Auto && (submitted_review_active(checkpoint) || plan_discussion_required(checkpoint)) {
         PlanExecutionMode::CrossReview
     } else { checkpoint.plan_mode };
     match effective_mode {

@@ -473,7 +473,7 @@ fn auto_policy_for_review_mode(
     checkpoint: &mut AgentCheckpoint, submission: &crate::agent::types::PlanSubmission,
     workspace: &Path, step: usize, committee: bool,
 ) -> Option<DispatchResult> {
-    if checkpoint.stages.plan_review == Some(true) { return None; }
+    if crate::agent::plan_gate::plan_discussion_required(checkpoint) { return None; }
     let mut probe = checkpoint.clone();
     let verdict = auto_policy_verdict(&mut probe, submission, workspace, step);
     if committee && verdict.as_ref().is_some_and(|v|v.route == "plan_gatekeeper:auto_preflight_fast_pass") {
@@ -626,4 +626,18 @@ mod tests {
         assert_eq!(cp.plan_mode,PlanExecutionMode::Auto,"人数选择不顺带改变阶段审查模式");
         assert!(auto_policy_for_review_mode(&mut cp,&submission,Path::new("/tmp"),3,false).is_some());
     }
+    #[test]
+    fn complex_readonly_submission_does_not_fast_pass_selected_discussion() {
+        let mut cp = auto_checkpoint();
+        let submission = PlanSubmission { plan_summary:"跨模块测试范围、步骤和验收标准".into(), ..Default::default() };
+        let mut verdict = crate::agent::triage::TriageVerdict::fallback("offline");
+        verdict.fallback=None;
+        cp.triage_verdict=Some(verdict.clone());
+        assert!(auto_policy_for_review_mode(&mut cp,&submission,Path::new("/tmp"),3,false).is_none());
+        assert!(cp.submitted_plan.is_none(), "review dispatch owns the plan commit");
+        assert_eq!(cp.plan_mode,PlanExecutionMode::Auto);
+        verdict.route="direct".into();cp.triage_verdict=Some(verdict);
+        assert!(auto_policy_for_review_mode(&mut cp,&submission,Path::new("/tmp"),3,false).is_some());
+    }
+
 }

@@ -381,3 +381,53 @@ async fn failed_final_recheck_survives_a_passed_model_verdict() {
     assert_eq!(result["verdict"], "rejected");
     assert!(!result["blocking_issues"].as_array().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn reviewer_navigates_middle_steps_and_child_results_with_scoped_output_alias() {
+    let f = Fixture::new();
+    let now = chrono::Utc::now();
+    let mut program = f.program.clone();
+    program.evidence_since = Some(now - chrono::Duration::seconds(1));
+    let proof = crate::agent::run_trace::save_step_output_with_meta(
+        &f.db, "owner", 33, "local_shell", "middle proof", "succeeded", "1521 passed",
+    ).unwrap();
+    {
+        let c=f.db.0.lock().unwrap();
+        for (id,session) in [("parent-run","owner"),("descendant","task-descendant"),("outsider","other")] {
+            c.execute("INSERT INTO agent_run_traces(id,session_id,goal,status,steps_json,started_at,updated_at) VALUES (?1,?2,'goal','running','[]',?3,?3)",params![id,session,now.to_rfc3339()]).unwrap();
+        }
+        for seq in 0..55 {
+            c.execute("INSERT INTO agent_run_steps(run_id,seq,step_json) VALUES ('parent-run',?1,?2)",params![seq,json!({"id":seq,"action":"local_shell","description":format!("step {seq}"),"status":"succeeded","output_id":if seq==33 {proof.clone()} else {format!("proof-{seq}")}}).to_string()]).unwrap();
+        }
+        c.execute("INSERT INTO agent_child_runs(id,parent_run_id,parent_session_id,workspace_root,model_id,status,started_at,kind,result_json) VALUES ('descendant','parent-run','owner',?1,'mock','succeeded',?2,'task',?3)",params![f.root.to_string_lossy(),now.to_rfc3339(),json!({"summary":"child result"}).to_string()]).unwrap();
+    }
+    let (_tx,mut rx)=watch::channel(0);
+    let run = |req: Value| serde_json::from_value::<AgentInstruction>(req).unwrap();
+    let page=tool(&f.db,&f.id,&program,&run(json!({"tool":"list_execution_steps","params":{"after_seq":29,"limit":10}})),&mut rx).await;
+    assert!(page.success,"{}",page.stderr);
+    let page:Value=serde_json::from_str(&page.stdout).unwrap();
+    assert_eq!(page["steps"][3]["output_id"],proof);
+    assert_eq!(page["next_after_seq"],39);
+    assert_eq!(page["has_more"],true);
+    for name in ["read_step_output","get_step_output"] {
+        let got=tool(&f.db,&f.id,&program,&run(json!({"tool":name,"params":{"output_id":proof}})),&mut rx).await;
+        assert!(got.success,"{}",got.stderr);assert!(got.stdout.contains("1521 passed"));
+    }
+    let children=tool(&f.db,&f.id,&program,&run(json!({"tool":"list_child_runs"})),&mut rx).await;
+    assert!(children.success,"{}",children.stderr);assert!(children.stdout.contains("descendant"));
+    let old_fingerprint:Value=serde_json::from_str(&children.stdout).unwrap();
+    f.db.0.lock().unwrap().execute("UPDATE agent_child_runs SET result_json=?1 WHERE id='descendant'",[json!({"summary":"child result updated"}).to_string()]).unwrap();
+    let changed=tool(&f.db,&f.id,&program,&run(json!({"tool":"list_child_runs","params":{"limit":1}})),&mut rx).await;
+    assert!(changed.success,"{}",changed.stderr);
+    let changed:Value=serde_json::from_str(&changed.stdout).unwrap();
+    assert_ne!(old_fingerprint["state_fingerprint"],changed["state_fingerprint"]);
+    assert_eq!(changed["has_more"],true);
+    let child=tool(&f.db,&f.id,&program,&run(json!({"tool":"read_child_result","params":{"child_run_id":"descendant"}})),&mut rx).await;
+    assert!(child.success,"{}",child.stderr);assert!(child.stdout.contains("child result"));
+    let child_proof=crate::agent::run_trace::save_step_output_with_meta(&f.db,"task-descendant",1,"read_file","child","succeeded","child evidence").unwrap();
+    let got=tool(&f.db,&f.id,&program,&run(json!({"tool":"get_step_output","params":{"run_id":"descendant","output_id":child_proof}})),&mut rx).await;
+    assert!(got.success,"{}",got.stderr);assert!(got.stdout.contains("child evidence"));
+    for req in [json!({"tool":"list_execution_steps","params":{"run_id":"outsider"}}),json!({"tool":"get_step_output","params":{"run_id":"outsider","output_id":proof}}),json!({"tool":"read_child_result","params":{"child_run_id":"outsider"}})] {
+        assert!(!tool(&f.db,&f.id,&program,&run(req),&mut rx).await.success);
+    }
+}

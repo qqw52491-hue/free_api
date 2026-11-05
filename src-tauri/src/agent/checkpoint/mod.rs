@@ -216,6 +216,12 @@ pub struct AgentCheckpoint {
     pub review_finding_todos: std::collections::BTreeMap<usize, ReviewFindingTodo>,
     #[serde(default)]
     pub stage_review_batch_id: Option<String>,
+    /// Host-recorded todo completion events not yet covered by a successful batch.
+    #[serde(default)]
+    pub stage_review_pending_milestones: Vec<(usize, Vec<crate::agent::types::TodoItem>)>,
+    /// Existing step identity captured by the current batch, not a new counter.
+    #[serde(default)]
+    pub stage_review_milestone_cutoff: Option<usize>,
     /// 带宿主身份的阶段审查观察；阻塞数仅为这份记录的投影。
     #[serde(default)]
     pub(crate) stage_review_state: Option<stage_state::StageReviewState>,
@@ -434,6 +440,8 @@ impl AgentCheckpoint {
             review_delivery_sources: Default::default(),
             review_finding_todos: Default::default(),
             stage_review_batch_id: None,
+            stage_review_pending_milestones: Vec::new(),
+            stage_review_milestone_cutoff: None,
             plan_escalation_required: None,
             retriage_used: 0,
             triage_revisions: Vec::new(),

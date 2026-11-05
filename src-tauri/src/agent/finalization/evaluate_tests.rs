@@ -910,3 +910,50 @@ async fn disabled_final_review_still_executes_verification_for_full_delivery() {
     }
     let _=std::fs::remove_dir_all(workspace);
 }
+
+#[tokio::test]
+async fn complex_readonly_finish_cannot_skip_selected_discussion() {
+    use std::sync::{Arc,Mutex};
+    use crate::agent::checkpoint::PlanPhase;
+    let db=DbState(Arc::new(Mutex::new(crate::db::init_db(&std::path::PathBuf::from(":memory:")).unwrap())));
+    let workspace=std::env::temp_dir().join(format!("readonly-discussion-{}",uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let mut c=context();let mut cp=checkpoint(&c);
+    let mut verdict=crate::agent::triage::TriageVerdict::fallback("fixture");verdict.fallback=None;cp.triage_verdict=Some(verdict);
+    cp.stages.final_review=Some(false);
+    let app=tauri::test::mock_app();let (_tx,mut rx)=watch::channel(0);
+    let inst=serde_json::from_value(json!({"tool":"finish","params":{"summary":"测试报告"}})).unwrap();
+    let routing=ModelRoutingConfig::default();let baseline=GitBaseline::non_git();
+    for state in 0..3 {
+        if state>0 {cp.submitted_plan=Some(serde_json::from_value(json!({"plan_summary":"范围、方法和验证标准","target_files":[]})).unwrap());}
+        if state==2 {cp.plan_phase=PlanPhase::Approved;}
+        let evaluation=evaluate_completion(app.handle(),&db,&mut c,&mut cp,"run","session",2,&workspace,&baseline,Utc::now(),&routing,&mut rx,&inst,CompletionMode::Finish,true,false).await;
+        assert_eq!(evaluation.receipt.is_ready(),state==2,"state {state}: {:?}",evaluation.receipt);
+    }
+    cp.submitted_plan=None;cp.plan_phase=PlanPhase::Exploring;cp.stages.plan=Some(false);
+    let evaluation=evaluate_completion(app.handle(),&db,&mut c,&mut cp,"run","session",3,&workspace,&baseline,Utc::now(),&routing,&mut rx,&inst,CompletionMode::Finish,true,false).await;
+    assert!(evaluation.receipt.is_ready(),"explicit off remains effective: {:?}",evaluation.receipt);
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+#[tokio::test]
+async fn audit_new_parent_output_invalidates_ready_receipt() {
+    use crate::agent::child_reviewer::retirement_tests::MockReviewer;
+    let mock=MockReviewer::new(vec![json!({"verdict":"passed","score":90,"blocking_issues":[],"nit_issues":[],"summary":"ok"}),json!({"verdict":"rejected","score":20,"blocking_issues":[{"file":"report.md","issue":"新证据与报告冲突","requirement":"更新报告"}],"nit_issues":[],"summary":"new proof"})]).await;
+    let w=mock.root.join("workspace");std::fs::create_dir_all(&w).unwrap();let baseline=GitBaseline::capture(&w);
+    std::fs::write(w.join("report.md"),"report").unwrap();let mut c=context();c.record_side_effect(1,"local_file".into(),"report.md".into());
+    c.change_verification=Some(ChangeVerification {status:"waived".into(),evidence_refs:vec![],waived_reason:Some("终审核对报告".into())});
+    let mut cp=checkpoint(&c);let mut routing=ModelRoutingConfig::default();routing.role_models.insert("reviewer".into(),"mock".into());
+    let app=tauri::test::mock_app();let (_tx,mut rx)=watch::channel(0);let start=Utc::now()-chrono::Duration::seconds(1);
+    let inst=serde_json::from_value(json!({"tool":"finish","params":{"summary":"报告完成","details":"测试通过"}})).unwrap();
+    let first=evaluate_completion(app.handle(),&mock.db,&mut c,&mut cp,"run","session",10,&w,&baseline,start,&routing,&mut rx,&inst,CompletionMode::Prepare,true,false).await;
+    assert!(first.receipt.is_ready(),"{:?}",first.receipt);cp.pending_finalization=Some(first.receipt);
+    // Process feedback alone does not invalidate an otherwise applicable receipt.
+    crate::agent::run_trace::save_step_output_with_meta(&mock.db,"session",10,"prepare_finish","预检","succeeded","ready").unwrap();
+    let same=evaluate_completion(app.handle(),&mock.db,&mut c,&mut cp,"run","session",11,&w,&baseline,start,&routing,&mut rx,&inst,CompletionMode::Prepare,true,false).await;
+    assert!(same.receipt.is_ready());assert_eq!(mock.requests.lock().unwrap().len(),1);
+    crate::agent::run_trace::save_step_output_with_meta(&mock.db,"session",11,"read_file","新观测","succeeded","实际观测：测试失败").unwrap();
+    let second=evaluate_completion(app.handle(),&mock.db,&mut c,&mut cp,"run","session",12,&w,&baseline,start,&routing,&mut rx,&inst,CompletionMode::Finish,true,false).await;
+    assert_eq!(mock.requests.lock().unwrap().len(),2);
+    assert!(!second.receipt.is_ready());
+}

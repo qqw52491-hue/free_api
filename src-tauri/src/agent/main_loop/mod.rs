@@ -816,7 +816,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
                 context.turns_history.push(crate::agent::context::ChatMessage {
                     role: "user".to_string(),
                     content: json!(format!(
-                        "【🧭 入口调查参考（入口分流给出）】\n{}\n{}\n【审查方式随方案确定】submit_plan 里额外填 final_review_mode（mechanical_only|artifact_quality|code_review|operational_verification|panel）与 stage_review_mode（none|milestone），按你摸底后确定的真实产物来选：视频/动画/PPT/页面/报表等成品用 artifact_quality（终审员可对视频抽帧、对页面/PPT 截图核对内容）；仅“可解析即正确”的纯结构产物才用 mechanical_only。\n【非代码产物（视频/PPT/表格/报告等）的方案要求】target_files 填真实产出文件的路径（不要留空）；方案须写明产物规格、分步清单、每步可核对的验证方式与关键假设；验证以真实打开/渲染/检查产物内容为准，不要只确认文件存在。",
+                        "【🧭 入口调查参考（入口分流给出）】\n{}\n{}\n【审查方式随方案确定】submit_plan 里额外填 final_review_mode（mechanical_only|artifact_quality|code_review|operational_verification|panel）与 stage_review_mode（none|milestone），按你摸底后确定的真实产物来选：视频/动画/PPT/页面/报表等成品用 artifact_quality（终审员可对视频抽帧、对页面/PPT 截图核对内容）；仅“可解析即正确”的纯结构产物才用 mechanical_only。\n【非代码产物（视频/PPT/表格/报告等）的方案要求】产出文件时 target_files 填真实产出路径；仅对话报告、只读调查或测试任务可填 []；方案须写明产物规格、分步清单、每步可核对的验证方式与关键假设；验证以真实打开/渲染/检查产物内容为准，不要只确认文件存在。",
                         brief, investigation_hint
                     )),
                 });

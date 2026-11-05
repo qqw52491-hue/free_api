@@ -23,6 +23,8 @@ pub(crate) fn review_retry_allowed() -> bool {
 
 mod baseline;
 mod evidence;
+mod execution_history;
+pub(crate) use execution_history::{review_history_tool, review_run_session};
 mod task_files;
 mod task_baselines;
 mod review_types;

@@ -936,3 +936,132 @@
         assert_eq!(checked, 720);
         std::fs::remove_dir_all(base).unwrap();
     }
+
+    #[test]
+    fn complex_readonly_milestone_can_review_in_auto_after_plan_approval() {
+        let c=SandwichContext::new("sys".into(),"跨模块测试".into());
+        let (root,db)=mk_db("readonly-milestone");
+        let mut cp=approved_checkpoint();cp.set_execution_mode(PlanExecutionMode::Auto);
+        let mut verdict=crate::agent::triage::TriageVerdict::fallback("fixture");verdict.fallback=None;
+        cp.triage_verdict=Some(verdict);
+        assert!(should_fire(&cp,&db,&c,&instruction_with_todo_done(),&default_routing()).is_some());
+        // No milestone transition, no periodic review just for reading.
+        assert!(should_fire(&cp,&db,&c,&AgentInstruction::default(),&default_routing()).is_none());
+        let mut completed = c.clone();
+        completed.todo_list = instruction_with_todo_done().todo_update;
+        let repeated = milestone_instruction(&completed, &instruction_with_todo_done());
+        assert!(should_fire(&cp,&db,&completed,&repeated,&default_routing()).is_none());
+        cp.stages.stage_review=Some(false);
+        assert!(should_fire(&cp,&db,&c,&instruction_with_todo_done(),&default_routing()).is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn audit_readonly_milestone_survives_inflight_review_and_checkpoint() {
+        let mut c=SandwichContext::new("sys".into(),"跨模块只读调查".into());
+        let (root,db)=mk_db("audit-inflight");
+        let mut cp=approved_checkpoint();cp.set_execution_mode(PlanExecutionMode::Auto);
+        let mut v=crate::agent::triage::TriageVerdict::fallback("fixture");v.fallback=None;cp.triage_verdict=Some(v);
+        cp.stage_review_batch_id=Some("previous-batch".into());
+        seed_stage_run(&db,"parent","previous-batch","previous","stage_review","running",false);
+        let update=instruction_with_todo_done();
+        let transition=milestone_instruction(&c,&update);
+        assert!(record_milestones(&mut cp,5,&transition));
+        c.todo_list=update.todo_update.clone();
+        assert!(should_fire(&cp,&db,&c,&transition,&default_routing()).is_none());
+        cp.refresh_context(&c);crate::agent::checkpoint::save_checkpoint(&db,&mut cp).unwrap();
+        cp=crate::agent::checkpoint::load_checkpoint(&db,&cp.run_id).unwrap().unwrap();
+        mark_consumed(&db,"previous","succeeded");
+        let next=milestone_instruction(&c,&update);
+        assert!(next.todo_update.is_empty());
+        assert!(should_fire(&cp,&db,&c,&next,&default_routing()).is_some());
+        // Failed dispatch/receipt leaves the event pending for an ordinary next step.
+        cp.stage_review_milestone_cutoff=Some(5);
+        mark_consumed(&db,"previous","failed");settle_milestones(&mut cp,&db);
+        assert_eq!(cp.stage_review_pending_milestones.len(),1);
+        assert!(should_fire(&cp,&db,&c,&AgentInstruction::default(),&default_routing()).is_some());
+        // A later milestone during review must not be consumed with the old one.
+        assert!(record_milestones(&mut cp,6,&transition));
+        mark_consumed(&db,"previous","succeeded");settle_milestones(&mut cp,&db);
+        assert_eq!(cp.stage_review_pending_milestones.iter().map(|(step,_)|*step).collect::<Vec<_>>(),vec![6]);
+        cp.stage_review_milestone_cutoff=Some(6);settle_milestones(&mut cp,&db);
+        assert!(cp.stage_review_pending_milestones.is_empty());
+        assert!(should_fire(&cp,&db,&c,&next,&default_routing()).is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn audit_explicit_stage_review_independent_of_plan_review() {
+        let c=SandwichContext::new("sys".into(),"只读调查".into());
+        let (root,db)=mk_db("audit-explicit");let mut cp=approved_checkpoint();
+        cp.stages.plan_review=Some(false);cp.stages.stage_review=Some(true);
+        assert!(should_fire(&cp,&db,&c,&instruction_with_todo_done(),&default_routing()).is_some());
+        cp.stages.stage_review=Some(false);
+        assert!(should_fire(&cp,&db,&c,&instruction_with_todo_done(),&default_routing()).is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn audit_successful_backup_settles_milestone_without_rewriting_failed_attempt() {
+        let c=SandwichContext::new("sys".into(),"复杂只读测试".into());
+        let (root,db)=mk_db("audit-backup");
+        let mut cp=approved_checkpoint();cp.set_execution_mode(PlanExecutionMode::Auto);
+        let mut v=crate::agent::triage::TriageVerdict::fallback("fixture");v.fallback=None;cp.triage_verdict=Some(v);
+        let instruction=instruction_with_todo_done();assert!(record_milestones(&mut cp,5,&instruction));
+        cp.stage_review_batch_id=Some("review-batch".into());cp.stage_review_milestone_cutoff=Some(5);
+        seed_stage_run(&db,"parent","review-batch","original","stage_review","failed",true);
+        seed_stage_run(&db,"parent","review-batch","backup","stage_review","succeeded",true);
+        {
+            let conn=db.0.lock().unwrap();
+            conn.execute("UPDATE agent_child_runs SET task_id='logical-review',attempt_id=1 WHERE id='original'",[]).unwrap();
+            conn.execute("UPDATE agent_child_runs SET task_id='logical-review',attempt_id=2,resumed_from='original' WHERE id='backup'",[]).unwrap();
+        }
+        assert!(!cp.stage_review_in_flight(&db));
+        assert!(settle_milestones(&mut cp,&db),"备用同一逻辑任务的新尝试成功后，应核销里程碑，不能要求重写原失败记录");
+        assert!(cp.stage_review_pending_milestones.is_empty());
+        assert!(should_fire(&cp,&db,&c,&AgentInstruction::default(),&default_routing()).is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn milestone_coverage_keeps_members_batches_and_pending_attempts_separate() {
+        let (root,db)=mk_db("milestone-members");
+        let mut cp=approved_checkpoint();
+        cp.stage_review_batch_id=Some("batch".into());cp.stage_review_milestone_cutoff=Some(5);
+        cp.stage_review_pending_milestones=vec![(5,instruction_with_todo_done().todo_update)];
+        seed_stage_run(&db,"parent","batch","failed","stage_review","failed",true);
+        seed_stage_run(&db,"parent","other-batch","foreign","stage_review","succeeded",true);
+        db.0.lock().unwrap().execute("UPDATE agent_child_runs SET task_id='member-a' WHERE id IN ('failed','foreign')",[]).unwrap();
+        assert!(!settle_milestones(&mut cp,&db),"other batch cannot cover this member");
+        seed_stage_run(&db,"parent","batch","unrelated","stage_review","succeeded",true);
+        assert!(!settle_milestones(&mut cp,&db),"another member cannot cover a failure");
+        seed_stage_run(&db,"parent","batch","backup","stage_review","running",false);
+        db.0.lock().unwrap().execute("UPDATE agent_child_runs SET task_id='member-a',attempt_id=2,resumed_from='failed' WHERE id='backup'",[]).unwrap();
+        assert!(!settle_milestones(&mut cp,&db));
+        db.0.lock().unwrap().execute("UPDATE agent_child_runs SET status='succeeded' WHERE id='backup'",[]).unwrap();
+        assert!(!settle_milestones(&mut cp,&db),"terminal but not received is still pending");
+        mark_consumed(&db,"backup","succeeded");
+        seed_stage_run(&db,"parent","batch","later-failure","rebuttal","failed",true);
+        db.0.lock().unwrap().execute("UPDATE agent_child_runs SET task_id='member-a',attempt_id=3,resumed_from='backup' WHERE id='later-failure'",[]).unwrap();
+        // Marking coverage does not resolve the review's effective blocking finding.
+        cp.stage_review_blockers_open=1;
+        assert!(settle_milestones(&mut cp,&db),"later technical failure retains earlier valid result");
+        assert_eq!(cp.stage_review_blockers_open,1);
+        assert!(cp.stage_review_pending_milestones.is_empty());
+        let status:String=db.reader().unwrap().query_row("SELECT status FROM agent_child_runs WHERE id='failed'",[],|r|r.get(0)).unwrap();
+        assert_eq!(status,"failed","audit history must stay unchanged");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn milestone_coverage_does_not_merge_unidentified_legacy_attempts() {
+        let (root,db)=mk_db("milestone-legacy");let mut cp=approved_checkpoint();
+        cp.stage_review_batch_id=Some("batch".into());cp.stage_review_milestone_cutoff=Some(5);
+        cp.stage_review_pending_milestones=vec![(5,instruction_with_todo_done().todo_update)];
+        seed_stage_run(&db,"parent","batch","legacy-failed","stage_review","failed",true);
+        seed_stage_run(&db,"parent","batch","legacy-success","stage_review","succeeded",true);
+        db.0.lock().unwrap().execute("UPDATE agent_child_runs SET task_id=NULL WHERE batch_id='batch'",[]).unwrap();
+        assert!(!settle_milestones(&mut cp,&db),"unknown legacy ownership cannot be guessed");
+        assert_eq!(cp.stage_review_pending_milestones.len(),1);
+        std::fs::remove_dir_all(root).unwrap();
+    }

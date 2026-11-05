@@ -735,6 +735,7 @@ pub(super) async fn turn_main<'a, 'b>(
             session_id: &final_session_id,
             run_id: &run_id,
         };
+        let stage_review_instruction = crate::agent::stage_review::milestone_instruction(&context, &instruction);
         let review_contract_started_this_turn =
             crate::agent::finish_guard::apply_instruction_state_updates_with_source(
                 &mut context,
@@ -778,11 +779,18 @@ pub(super) async fn turn_main<'a, 'b>(
             checkpoint.stage_review_budget_used,
             context.side_effects.len()
         );
+        // Reconcile only committed receipt statuses, including contract downgrades.
+        let milestones_settled=crate::agent::stage_review::settle_milestones(&mut checkpoint, state.inner());
+        let milestones_recorded=crate::agent::stage_review::record_milestones(&mut checkpoint, step_id, &stage_review_instruction);
+        if milestones_settled || milestones_recorded {
+            checkpoint.refresh_context(&context);
+            save_checkpoint(state.inner(), &mut checkpoint)?;
+        }
         if let Some(reason) = crate::agent::stage_review::should_fire(
             &checkpoint,
             state.inner(),
             &context,
-            &instruction,
+            &stage_review_instruction,
             &model_routing,
         ) {
             match crate::agent::stage_review::dispatch(

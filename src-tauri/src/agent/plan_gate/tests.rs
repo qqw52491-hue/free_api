@@ -1171,3 +1171,49 @@
         drop(guard);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn complex_readonly_discussion_uses_existing_batch_gate_and_switches_win() {
+        let context = SandwichContext::new("sys".into(), "跨模块测试".into());
+        let mut cp = AgentCheckpoint::new("owner".into(), &context);
+        let db = setup_test_db();
+        let mut verdict = crate::agent::triage::TriageVerdict::fallback("offline");
+        cp.triage_verdict = Some(verdict.clone());
+        assert!(!plan_discussion_required(&cp), "fallback is not a complex verdict");
+        verdict.fallback = None;
+        cp.triage_verdict = Some(verdict.clone());
+        assert!(plan_discussion_required(&cp));
+        assert!(configured_plan_missing(&cp));
+        let gate = cp.plan_gate_projection();
+        assert!(crate::agent::context::render::ContextRenderer::render_plan_gate(Some(&gate)).contains("submit_plan"));
+        let blocked = check_pre_write_gatekeeper(&mut cp, &context, &db, "parent", 10, false).unwrap();
+        assert_eq!(blocked.route, "plan_gatekeeper:configured_plan_required");
+        // A read-only plan is valid; saving it alone is not review approval.
+        let plan = serde_json::from_value(serde_json::json!({"plan_summary":"范围、方法与验收", "target_files":[],"evidence_refs":["src/a.rs:1"]})).unwrap();
+        assert!(validate_plan_submission(&plan, true).unwrap().0.is_empty());
+        cp.submitted_plan = Some(plan);
+        assert!(!configured_plan_missing(&cp));
+        assert!(check_pre_write_gatekeeper(&mut cp, &context, &db, "parent", 11, false).is_some());
+        cp.plan_phase = PlanPhase::Approved;
+        assert!(check_pre_write_gatekeeper(&mut cp, &context, &db, "parent", 12, false).is_none());
+        cp.stages.plan_review = Some(false);
+        assert!(!plan_discussion_required(&cp));
+        cp.stages.plan_review = None;
+        cp.stages.plan = Some(false);
+        assert!(!plan_discussion_required(&cp));
+        cp.stages = Default::default();
+        verdict.route = "direct".into();cp.triage_verdict=Some(verdict);
+        assert!(!plan_discussion_required(&cp));
+        assert!(!configured_plan_missing(&cp));
+    }
+
+    #[test]
+    fn audit_turning_off_review_does_not_turn_off_required_plan() {
+        let c=SandwichContext::new("sys".into(),"复杂测试".into());let mut cp=AgentCheckpoint::new("owner".into(),&c);
+        let mut v=crate::agent::triage::TriageVerdict::fallback("fixture");v.fallback=None;cp.triage_verdict=Some(v);
+        cp.stages.plan_review=Some(false);
+        assert!(cp.plan_gate_projection().plan_required);
+        assert!(configured_plan_missing(&cp));
+        assert!(!plan_discussion_required(&cp));
+        cp.stages.plan=Some(false);assert!(!configured_plan_missing(&cp));
+    }

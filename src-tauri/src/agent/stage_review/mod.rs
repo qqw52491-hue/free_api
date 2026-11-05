@@ -1,7 +1,7 @@
 //! 阶段级写入审查：补齐「方案批准后 → 收尾审查前」中段零独立审查的缺口。
 //!
 //! 双触发（取先到者）：
-//! 1. 语义触发：主 Agent 通过 todo_update 标记某阶段完成且该阶段有真实写入；
+//! 1. 语义触发：主 Agent 通过 todo_update 标记新阶段完成，且为已选方案讨论的复杂任务或存在真实写入；
 //! 2. 行为兜底：距上次阶段审查累计写入 N 个文件（防 todo 记账博弈——无论模型
 //!    怎么记账，写盘这个事实逃不掉）。
 //!
@@ -50,6 +50,52 @@ fn stage_review_max_files() -> u32 {
     )
 }
 
+/// Project milestone transitions before applying todo_update. Repeating an
+/// already-completed item does not schedule another read-only stage review.
+pub(crate) fn milestone_instruction(context: &SandwichContext, instruction: &AgentInstruction) -> AgentInstruction {
+    AgentInstruction {
+        tool: Some(instruction.get_tool()),
+        todo_update: instruction.todo_update.iter().filter(|incoming| {
+            !context.todo_list.iter().any(|old| old.id == incoming.id
+                && matches!(old.status.trim().to_ascii_lowercase().as_str(), "done" | "completed"))
+        }).cloned().collect(),
+        ..Default::default()
+    }
+}
+
+/// Record the transition, rather than consuming it just because a todo is done.
+pub(crate) fn record_milestones(cp: &mut AgentCheckpoint, step: usize, inst: &AgentInstruction) -> bool {
+    if cp.stages.stage_review == Some(false) { return false; }
+    if cp.stages.stage_review != Some(true) {
+        if cp.triage_verdict.as_ref().is_some_and(|v| !v.needs_stage_review()) || !stage_review_enabled() { return false; }
+        if cp.plan_mode == PlanExecutionMode::Auto && !crate::agent::plan_gate::formal_plan_required(cp) { return false; }
+    }
+    let done: Vec<_> = inst.todo_update.iter().filter(|t| matches!(t.status.trim().to_ascii_lowercase().as_str(), "done" | "completed")).cloned().collect();
+    if done.is_empty() || cp.stage_review_pending_milestones.iter().any(|(s,_)| *s==step) { return false; }
+    cp.stage_review_pending_milestones.push((step, done));
+    true
+}
+
+pub(crate) fn settle_milestones(cp: &mut AgentCheckpoint, db: &DbState) -> bool {
+    let (Some(batch), Some(cutoff)) = (&cp.stage_review_batch_id, cp.stage_review_milestone_cutoff) else { return false; };
+    let complete = db.reader().ok().and_then(|c| c.query_row(
+        // One logical member can have failed attempts and a successful backup.
+        // Wait for all in-flight/unconsumed attempts, then require a valid result
+        // for each member. A later technical failure does not revoke an old result.
+        // Legacy rows without task_id remain separate; never guess their owner.
+        "SELECT COUNT(*)>0 AND SUM(CASE WHEN pending>0 OR delivered=0 THEN 1 ELSE 0 END)=0
+         FROM (SELECT COALESCE(task_id,id) AS member,
+               SUM(CASE WHEN consumed_at IS NULL OR status IN ('queued','running') THEN 1 ELSE 0 END) AS pending,
+               SUM(CASE WHEN status='succeeded' AND consumed_at IS NOT NULL AND error_kind IS NULL THEN 1 ELSE 0 END) AS delivered
+               FROM agent_child_runs WHERE batch_id=?1 GROUP BY COALESCE(task_id,id))",
+        [batch], |r|r.get::<_,bool>(0)).ok()).unwrap_or(false);
+    if complete {
+        cp.stage_review_pending_milestones.retain(|(step,_)| *step>cutoff);
+        cp.stage_review_milestone_cutoff=None;
+    }
+    complete
+}
+
 /// 双触发判定。返回 Some(原因) 表示应派发阶段审查。
 pub fn should_fire(
     checkpoint: &AgentCheckpoint,
@@ -80,11 +126,12 @@ pub fn should_fire(
     if instruction.get_tool().eq_ignore_ascii_case("finish") {
         return None;
     }
-    // 仅在方案已批准后介入（批准前由方案审查负责），全自动模式保持原有行为
+    // 方案批准后介入；Auto 仅对已选方案讨论的复杂任务开放自动里程碑审查
     if !explicitly_enabled && !checkpoint.plan_phase.is_approved() {
         return None;
     }
-    if !explicitly_enabled && checkpoint.plan_mode == PlanExecutionMode::Auto {
+    if !explicitly_enabled && checkpoint.plan_mode == PlanExecutionMode::Auto
+        && !crate::agent::plan_gate::formal_plan_required(checkpoint) {
         return None;
     }
     if !explicitly_enabled && !stage_review_enabled() {
@@ -119,23 +166,23 @@ pub fn should_fire(
         .side_effects
         .len()
         .saturating_sub(checkpoint.stage_review_baseline_side_effects as usize) as u32;
-    if writes_since == 0 {
-        return None;
-    }
 
-    // 触发 1：todo 阶段推进且伴随真实写入
+    // 触发 1：todo 新阶段推进，复杂任务允许纯只读里程碑
     let todo_advanced = instruction.todo_update.iter().any(|t| {
         matches!(
             t.status.trim().to_ascii_lowercase().as_str(),
             "done" | "completed"
         )
     });
-    if todo_advanced {
+    if (todo_advanced || !checkpoint.stage_review_pending_milestones.is_empty())
+        && (writes_since > 0 || explicitly_enabled || crate::agent::plan_gate::formal_plan_required(checkpoint)) {
         return Some(format!(
-            "todo 阶段完成且自上次审查以来有 {} 个写入动作",
+            "todo 阶段推进（复杂任务讨论或真实写入）；自上次审查以来有 {} 个写入动作",
             writes_since
         ));
     }
+
+    if writes_since == 0 { return None; }
 
     // 触发 2：行为兜底——累计写入达到阈值
     if writes_since >= stage_review_max_files() {
@@ -287,6 +334,7 @@ pub async fn dispatch(
 
         // 批次锚点落 checkpoint：在途/收口此后全部由台账推导
         checkpoint.stage_review_batch_id = Some(stage_batch_id);
+        checkpoint.stage_review_milestone_cutoff=checkpoint.stage_review_pending_milestones.last().map(|(step,_)|*step);
         checkpoint.stage_review_budget_used += 1;
         checkpoint.stage_review_shell_baseline = checkpoint.uncovered_shell_mutations;
         checkpoint.stage_review_baseline_side_effects = context.side_effects.len() as u32;
@@ -397,6 +445,7 @@ pub async fn dispatch(
         return Err("本轮阶段审查没有启动可用成员；用户排除的模型未重新派发，尚无新的阶段审查结论。".into());
     }
     // 预算语义：整轮联合会审无论派发 1 位还是多位，仅计 1 轮
+    checkpoint.stage_review_milestone_cutoff=checkpoint.stage_review_pending_milestones.last().map(|(step,_)|*step);
     checkpoint.stage_review_budget_used += 1;
     checkpoint.stage_review_shell_baseline = checkpoint.uncovered_shell_mutations;
     checkpoint.stage_review_baseline_side_effects = context.side_effects.len() as u32;

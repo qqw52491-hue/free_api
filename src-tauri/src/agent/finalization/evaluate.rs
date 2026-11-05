@@ -54,7 +54,7 @@ pub(crate) fn acceptance_fingerprint(
 ) -> String {
     use sha2::{Digest, Sha256};
     let raw = json!({
-        "version": 6,
+        "version": 8,
         "current_goal": context.effective_goal(),
         "effects": context.side_effects,
         "inherited": context.inherited_side_effects_count,
@@ -192,13 +192,23 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
         db, session_id, workspace, context, baseline, run_started_at, &delivery_paths).0.hash;
     if let Err(error)=crate::agent::execution::runtime::validate_output(db,run_id,&request_payload) {blockers.push(format!("角色交付契约未通过：{error}"));}
     let registered_evidence = crate::agent::evidence_store::review_digest(db, session_id, run_started_at);
-    let state_fp = acceptance_fingerprint(context, checkpoint, &request_payload);
     if crate::agent::plan_gate::configured_plan_missing(checkpoint) {
         blockers.push(if checkpoint.plan_mode == crate::agent::checkpoint::PlanExecutionMode::PlanApproval {
             "当前配置要求正式方案，请先 submit_plan 提交；宿主自动调用 ask_human 呈报并取得人工批准。".into()
         } else {
             "当前配置要求正式方案，尚未保存方案。".into()
         });
+    }
+    // A selected discussion is a workflow fact, independent of writing files.
+    // Reuse the existing batch/rebuttal/human arbitration instead of a new gate.
+    if crate::agent::plan_gate::plan_discussion_required(checkpoint)
+        || crate::agent::plan_gate::submitted_review_active(checkpoint)
+    {
+        if let Some(pending) = crate::agent::plan_gate::check_pre_write_gatekeeper(
+            checkpoint, context, db, run_id, step_id, false,
+        ) {
+            blockers.push(pending.stderr);
+        }
     }
     if crate::agent::plan_gate::reviewed_human_plan(checkpoint)
         && (!checkpoint.plan_phase.is_approved() || checkpoint.approved_plan_summary.is_none()) {
@@ -208,14 +218,36 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
         Ok(config)=>{if let Some(blocker)=crate::agent::execution::runtime::workflow_blocker(&config,checkpoint.plan_phase.is_approved()) {blockers.push(blocker);}config.workflow.completion.as_deref()==Some("handoff")},
         Err(error)=>{blockers.push(error);false}
     };
+    notices.push(format!("【宿主方案与阶段状态】{}。方案讨论、执行结束与最终验收是不同事实；按用户要求及真实回执核验。", json!({
+        "plan_mode":checkpoint.plan_mode,"plan_phase":checkpoint.plan_phase,
+        "stages":checkpoint.stages,"submitted_plan":checkpoint.submitted_plan,
+        "plan_review_expected_count":checkpoint.plan_review_expected_count,
+        "plan_reviewer_consumed":checkpoint.plan_reviewer_consumed,
+        "stage_review_budget_used":checkpoint.stage_review_budget_used,
+        "pending_stage_milestones_count":checkpoint.stage_review_pending_milestones.len(),
+        "pending_stage_milestones":checkpoint.stage_review_pending_milestones.iter().take(20)
+            .map(|(step,todos)|json!({"step_id":step,"todo_ids":todos.iter().map(|t|t.id).collect::<Vec<_>>()})).collect::<Vec<_>>(),
+        "pending_stage_milestones_has_more":checkpoint.stage_review_pending_milestones.len()>20,
+    })));
+    let state_fp = acceptance_fingerprint(context, checkpoint, &request_payload);
     let review_policy_fingerprint = crate::agent::review_team::policy_fingerprint(db, model_routing);
-    let evidence_index_fingerprint = registered_evidence.as_ref().ok().and_then(|value| value.as_ref()).map(|digest| {
-        use sha2::{Digest, Sha256};
-        format!("{:x}", Sha256::digest(digest.as_bytes()))
-    });
+    let child_state = crate::agent::reviewer_gatekeeper::review_history_tool(
+        db, run_id, "list_child_runs", &json!({"limit":1}),
+    );
+    let parent_receipts=crate::agent::reviewer_gatekeeper::execution_receipt_fingerprint(db,session_id,run_started_at);
+    if let Err(error)=&parent_receipts {
+        notices.push(format!("父任务回执指纹读取失败：{error}；本次不复用就绪收据，已有证据及未知范围交终审核对。"));
+    }
+    let evidence_index_fingerprint = match (&registered_evidence, &child_state, &parent_receipts) {
+        (Ok(evidence), Ok(children), Ok(receipts)) => {
+            use sha2::{Digest, Sha256};
+            Some(format!("{:x}", Sha256::digest(json!([evidence, children, receipts]).to_string().as_bytes())))
+        }
+        _ => None,
+    };
     let contract_fp = contract_fingerprint(context.review_contract.as_ref());
     // 新增证据后应重新审查；索引无法读取时回到评估链并披露，不沿用未知版本的就绪收据。
-    if blockers.is_empty() && registered_evidence.is_ok() && !interrupted_since(interrupt_rx, generation) {
+    if blockers.is_empty() && registered_evidence.is_ok() && child_state.is_ok() && parent_receipts.is_ok() && !interrupted_since(interrupt_rx, generation) {
         if let Some(cached) = checkpoint.pending_finalization.as_ref().filter(|r| {
             r.is_ready()
                 && r.is_fresh(&initial_hash, context.resource_scope.revision, &contract_fp)
