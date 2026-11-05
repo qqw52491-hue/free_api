@@ -362,6 +362,8 @@ pub(crate) fn read_review_step_output(
     let end_offset = offset.saturating_add(content.chars().count());
     let mut result = json!({"output_id":output_id,"offset":offset,"next_offset":end_offset,
         "total_chars":total_chars,"has_more":end_offset<total_chars,"content":content});
+    result["read_scope"] = json!({"kind":"single_output", "output_id":output_id,
+        "notice":"本次只读取此 output_id；步骤描述中提到的其他回执未因此读取。has_more=true 时尚有后续原文。"});
     result["source"] = review_output_source(db, session_id, output_id, task_started_at)?;
     result["scope_notice"] = json!(crate::agent::run_trace::SAVED_OUTPUT_SCOPE_NOTICE);
     if let Some(selection) = selection { result["selection"] = selection; }

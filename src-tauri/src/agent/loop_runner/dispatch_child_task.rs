@@ -290,8 +290,7 @@ async fn dispatch_inner(
         if let Some(card)=&task_role {if !card.default_test_command.trim().is_empty(){params["test_command"]=json!(card.default_test_command);}}
     }
     if let Some(card)=&task_role {
-        let inputs=ctx.checkpoint.triage_verdict.as_ref().map(|v|crate::agent::triage::merge_brief_into_inputs(params.get("custom_inputs"),v));
-        if let Some(material)=crate::agent::context_collector::assemble_focus_context(&card.parse_focus_domains(),ctx.workspace_dir,params["last_verify_log"].as_str(),inputs.as_ref().or_else(||params.get("custom_inputs"))).await {
+        if let Some(material)=crate::agent::context_collector::assemble_focus_context(&card.parse_focus_domains(),ctx.workspace_dir,params["last_verify_log"].as_str(),None).await {
             params["specialized_context"]=json!(material);
         }
     }
@@ -378,20 +377,12 @@ async fn dispatch_inner(
         child_run: id.clone(),
     };
     let execution=crate::agent::execution::runtime::ExecutionConfig::parse(&params,profile)?;
-    let role_context=task_role.as_ref().map(|card|format!("{}\n{}\n{}\n本次角色输入材料：{}",crate::agent::tools::role_manager::persona_block(card),crate::agent::tools::role_manager::skills_block(ctx.state.inner(),card),card.parse_custom_schema().map(|s|s.render_prompt_instructions()).unwrap_or_default(),params.get("custom_inputs").unwrap_or(&Value::Null))).unwrap_or_default();
-    let mut task_material=params["context"].as_str().unwrap_or_default().to_string();
-    for key in ["context_excerpts","custom_inputs","focus_paths","specialized_context"] {
-        if let Some(value)=params.get(key) {task_material.push_str(&format!("\n本次 {key} 材料：{value}"));}
+    let mut role_context = task_role.as_ref().map(|card|format!("{}\n{}\n{}",crate::agent::tools::role_manager::persona_block(card),crate::agent::tools::role_manager::skills_block(ctx.state.inner(),card),card.parse_custom_schema().map(|s|s.render_prompt_instructions()).unwrap_or_default())).unwrap_or_default();
+    if let Some(brief) = ctx.checkpoint.triage_verdict.as_ref().and_then(|v|v.investigation_brief_text()) {
+        role_context.push_str(&format!("\n【入口调查参考（不是新增验收义务）】{brief}"));
     }
-    let test_command=params["test_command"].as_str().filter(|s|!s.trim().is_empty()).map(str::to_owned)
-        .or_else(||task_role.as_ref().and_then(|c|(!c.default_test_command.is_empty()).then(||c.default_test_command.clone())));
-    if let Some(command)=test_command {task_material.push_str(&format!("\n本次明确要求的验证命令：{command}。请按实际执行结果交回验证事实；未执行不得报告通过。"));}
-    let goal = format!(
-        "{}\n\n{}\n\n{role_context}\n\n【宿主提供的父会话证据目录】{}（只读引用请用绝对路径；你的 tmp/ 独立）。",
-        params["task"].as_str().unwrap_or_default(),
-        task_material,
-        crate::agent::path_guard::get_session_tmp_dir(ctx.final_session_id).display()
-    );
+    let goal = crate::agent::task_context::ordinary(&params, &role_context,
+        &crate::agent::path_guard::get_session_tmp_dir(ctx.final_session_id), &id);
     child_task::runtime::spawn(
         ctx.app.clone(),
         ctx.state.inner().clone(),

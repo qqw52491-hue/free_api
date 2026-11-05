@@ -12,6 +12,41 @@ use tauri::AppHandle;
 use tokio::sync::watch;
 mod team;
 
+/// Requested versus effective policy is part of the plan under review, not a
+/// hidden executor setting. A reviewer's approval does not grant self-waiver.
+fn review_policy_inputs(
+    cp: &AgentCheckpoint,
+    sub: &crate::agent::types::PlanSubmission,
+) -> serde_json::Value {
+    let mut effective = cp.triage_verdict.clone();
+    if let Some(v) = effective.as_mut() {
+        v.apply_plan_review_overrides(&sub.final_review_mode, &sub.stage_review_mode);
+    }
+    json!({
+        "requested": {
+            "final_review_mode": sub.final_review_mode,
+            "stage_review_mode": sub.stage_review_mode,
+        },
+        "before": cp.triage_verdict.as_ref().map(|v| json!({
+            "final_review_mode": v.final_review_mode,
+            "stage_review_mode": v.stage_review_mode,
+        })),
+        "effective": effective.as_ref().map(|v| json!({
+            "final_review_mode": v.final_review_mode,
+            "stage_review_mode": v.stage_review_mode,
+        })),
+        "stages": cp.stages,
+        "plan_mode": cp.plan_mode,
+        "entry_assessment": cp.triage_verdict.as_ref().map(|v| json!({
+            "route": v.route,
+            "quality_complexity": v.quality_complexity,
+            "coordination_scope": v.coordination_scope,
+            "evidence_policy": v.evidence_policy,
+        })),
+        "guidance": "请审查审查方式是否覆盖任务目标、实际验证与未覆盖项。模型提出的免终审/免阶段审查不自动生效；降低独立审查强度须由人类通过固定环节配置或已有仲裁入口决定，方案批准不代替该授权。",
+    })
+}
+
 /// submit_plan 编排：校验 → 组装 Tech Lead 证据包 → spawn（唯一可失败的外部副作用）
 /// → 成功后由 checkpoint.commit_plan_submission 一次合并全部状态。
 /// 人工审批与审查同时开启时，派发失败会保存明确标记的未审方案，供人工仲裁；其他失败不改变方案状态。
@@ -78,11 +113,7 @@ pub async fn handle_submit_plan(
         );
     }
 
-    // 审查方式随方案确定：方案制定者摸底后按真实产物声明终审/阶段审查方式，
-    // 覆盖入口分流的临时默认值（入口一次性判断时尚不知道最终会产出什么）。
-    if let Some(v) = checkpoint.triage_verdict.as_mut() {
-        v.apply_plan_review_overrides(&submission.final_review_mode, &submission.stage_review_mode);
-    }
+    let review_policy = review_policy_inputs(checkpoint, submission);
 
     // ---- Auto 模式策略预检：submit_plan 兼任「报方案拿判定」通道 ----
     // 判定前置为正常工具结果：FastPass 直接落账放行（不派审查——白名单文件
@@ -111,10 +142,20 @@ pub async fn handle_submit_plan(
             Err(reason) => return reject(reason, "plan_liveness:submit_plan_invalid"),
         };
 
-    // 专业卡缺失时用基础 reviewer + 方案协议；显式排除/停用不绕过。
-    let card = match crate::agent::tools::role_manager::resolve_plan_reviewer_card(
+    if let Some(v) = checkpoint.triage_verdict.as_mut() {
+        v.apply_plan_review_overrides(&submission.final_review_mode, &submission.stage_review_mode);
+    }
+    if review_policy["requested"] != review_policy["effective"] {
+        context.add_host_feedback(&format!("【审查配置】请求值与生效值见 {}。空值或非法值不覆盖，免审/减审申请不自动放宽已有配置；按生效值和固定开关执行，确需放宽时交人工决定。", review_policy));
+    }
+    // 优先使用入口推荐中获授权的角色；不可用时沿用 Tech Lead/基础卡策略，不绕过排除或停用。
+    let recommended = checkpoint.triage_verdict.as_ref()
+        .map(|v| v.pre_review_roles.as_slice()).unwrap_or(&[]);
+    let card = match crate::agent::review_team::recommended_primary(
+        db, recommended, &model_routing.disabled_role_cards,
+    ).map(Ok).unwrap_or_else(|| crate::agent::tools::role_manager::resolve_plan_reviewer_card(
         db, &model_routing.disabled_role_cards,
-    ) {
+    )) {
         Ok(card) => card,
         Err(error) => {
             let notice = format!("方案审查角色未启动：{error}");
@@ -157,7 +198,8 @@ pub async fn handle_submit_plan(
     .take(1900)
     .collect();
 
-    let mut evidence_excerpt = format!(
+    let mut evidence_excerpt = format!("【宿主审查配置（完整）】{}\n", review_policy);
+    evidence_excerpt.push_str(&format!(
         "方案摘要：{}\n根因假设：{}\n拟修改文件：{}",
         submission.plan_summary.trim(),
         if submission.root_cause.trim().is_empty() {
@@ -170,7 +212,7 @@ pub async fn handle_submit_plan(
         } else {
             target_files.join(", ")
         },
-    );
+    ));
     if !submission.assumptions.is_empty() {
         evidence_excerpt.push_str(&format!("\n关键假设：{}", submission.assumptions.join("；")));
     }
@@ -246,6 +288,9 @@ pub async fn handle_submit_plan(
         "open_questions": submission.open_questions,
         "intended_verification": submission.intended_verification.trim(),
         "risk_level": submission.risk_level.trim(),
+        "final_review_mode": submission.final_review_mode,
+        "stage_review_mode": submission.stage_review_mode,
+        "review_policy": review_policy,
         "is_plan_revision": is_revision,
         "revision_reason": submission.revision_reason.trim(),
         "superseded_plan_summary": superseded_summary,
@@ -292,6 +337,7 @@ pub async fn handle_submit_plan(
         "evidence_excerpt": evidence_excerpt,
         "evidence_refs": evidence_refs,
         "custom_inputs": custom_inputs,
+        "parent_workflow_context": crate::agent::review_team::parent_workflow_context(checkpoint),
         // 1v1 方案评审标记：授权审查输出 revised_* 定稿字段（见 child_reviewer 提示词条款）
         "plan_review": true,
     });

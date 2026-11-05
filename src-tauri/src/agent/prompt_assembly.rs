@@ -123,7 +123,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
             "status(child_run_id: string) / list(offset?: number) — 查真实状态、活动与协作登记；list.collaboration 返回消息原接收者、本次执行者和接收状态，每页100条并标注 has_more；不预测完成百分比",
             "send(target: string [任务ID或parent], message?: string, data?: any JSON, refs?: string[], idempotency_key?: string) — 至少一种内容，合计<=65536字符；保存后返回 message_id；父子和同树工兵可互发；成功结束的接收方由宿主新建只读收信执行，是否回复由接收者判断；失败或取消不自动唤醒；其他任务不可访问",
             "ask(target: string [同树已成功结束的成员ID], message?: string, data?: JSON, refs?: string[], idempotency_key?: string) — 明确受理一次只读答复，返回 request_id/reply_run_id；后台通知负责人，结果送回自己的信箱；用 wait() 等信，不自动修改原成果，不复活已关闭的主任务",
-            "read_agent_result(child_run_id: string, view?: string [result、history或checkpoint], offset?: number, limit?: number [最多8192字符]) — 同树成员历史结果/原历史分页；可查看只读答复，不授予权限",
+            "read_agent_result(child_run_id: string, view?: string [result、history、checkpoint或dispatch_input（原始派发输入）], offset?: number, limit?: number [最多8192字符]) — 同树成员历史结果/原历史分页；可查看只读答复，不授予权限",
             "inbox(child_run_id?: string, offset?: number, limit?: number [1..16]) — 省略 ID 收取自己的消息；指定已授权子任务/前次任务 ID 只分页查看其未投递材料，不核销对方信箱",
             "receipt(message_id: string) — 查自己的收发消息或宿主绑定前次任务的消息原文/投递状态；不代表模型理解或完成",
             "wait(child_run_id?: string, timeout_secs?: number [1..600，默认180]) — 挂起等目标结束或收到消息，无目标等自己的信箱；有真实人工请求时保持挂起直到回答/消息/停止，不消耗模型轮次；普通窗口结束不代表失败",

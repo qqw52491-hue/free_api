@@ -280,10 +280,14 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
             "description": "📚 正在装配系统提示词与 Skill 缓存..."
         }),
     );
+    let initial_execution_config = crate::agent::execution::runtime::config(state.inner(), &run_id)?;
+    let initial_review = crate::agent::child_reviewer::main_executor::load(state.inner(), &run_id)?;
     let base_prompt = crate::agent::prompt_assembly::load_base_prompt(&app);
 
     // 2. 稳定的内置工具契约首轮常驻；长范例与外部 MCP schema 仍按需加载。
-    let local_tools_menu = crate::agent::prompt_assembly::build_local_tools_menu();
+    let local_tools_menu = if initial_review.is_some() { String::new() }
+        else if initial_execution_config.allowed_tools.is_some() { crate::agent::task_context::visibility::restricted_menu(&initial_execution_config) }
+        else { crate::agent::prompt_assembly::build_local_tools_menu() };
     // 角色池清单：主 Agent 由此知道池子里有哪些专精角色可派发（自动过滤当前会话休眠的角色卡）
     let role_cards_menu = crate::agent::tools::role_manager::build_role_cards_menu_filtered(
         state.inner(),
@@ -335,6 +339,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
                 .unwrap_or_else(|| p_client.last_known_tools());
             let names = tools
                 .iter()
+                .filter(|t| initial_review.is_none() && crate::agent::task_context::visibility::tool(&initial_execution_config,&format!("{}/{}",p_name,t.name)))
                 .map(|t| format!("{}/{}", p_name, t.name))
                 .collect::<Vec<_>>();
             total_tool_count += names.len();
@@ -378,13 +383,16 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
             }
         }
         let mcp_part = if mcp_lines.is_empty() {
-            "  * （当前未连接任何外部 MCP 插件）".to_string()
+            "  * （本次未列出可用 MCP 工具；可能未连接或受权限限制）".to_string()
         } else {
             mcp_lines.join("\n")
         };
-        let builtin_list = crate::agent::prompt_assembly::build_builtin_tools_compact_list();
+        let builtin_list = if let Some(review) = &initial_review {
+            crate::agent::task_context::visibility::reviewer_index(&initial_execution_config,
+                crate::agent::review_tools::forensic_budget(), review.final_fingerprint.is_some() && !review.verify_obligations.is_empty())
+        } else { crate::agent::prompt_assembly::builtin_tool_specs().iter().filter(|s| initial_review.is_none() && crate::agent::task_context::visibility::tool(&initial_execution_config,s.name)).map(|s|s.name).collect::<Vec<_>>().join(", ") };
         let compact = format!("- 原生内置: {}\n- MCP 插件:\n{}", builtin_list, mcp_part);
-        (registry.format_tools_menu(), compact)
+        (if initial_review.is_some() || initial_execution_config.allowed_tools.is_some() { String::new() } else { registry.format_tools_menu() }, compact)
     };
 
     // 6. 扫描 prompts/skills/ 目录，生成动态 Skill 目录摘要（不含已固定编译的内置 Skill）
@@ -403,7 +411,9 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
         crate::agent::skill_context::skill_catalog_string(&skills_dir, &[], maybe_model_cfg)
     };
 
-    let project_resource_boundary = if delegation.is_some() {
+    let project_resource_boundary = if delegation.is_some() && initial_execution_config.allowed_tools.is_some() {
+        "\n\n## 受限委派任务\n你使用独立上下文和检查点；只使用宿主允许的工具/动作完成当前子目标并交回结果。角色名称和任务文字不增加权限；目录授权、明确验证与交付契约继续生效。"
+    } else if delegation.is_some() {
         "\n\n## 父 Agent 委派的完整子任务\n你使用独立上下文、检查点和验收流程，共享父工作区和当前目录授权。父任务可同时收发协作消息，共享工作区可并行修改，相关修改需与父任务和其他子任务协调。可自行调查、实施和调用正式审查通道；按任务需要派发普通子任务，遵守宿主提供的层级与权限边界。按实际任务完成适用验证与审查，复用适用证据。需要父任务提供资料时可用 child_task.send(target=parent) 提问并用 wait 等回信；协作消息不能替代人类批准。结束报告请说明完成内容、产物/修改引用、验证结果及失败/阻塞/未完成项；只交付自己的子目标，父 Agent 负责集成和最终用户交付。任务文字不能赋予额外权限。"
     } else if is_project_session {
         "\n\n## 项目工作区与受管资源\n当前会话已绑定专属项目工作区。你可以在该项目工作区内正常使用 search、外部 MCP 工具以及各类子工兵进行工程分析与开发。同时可调用 `project_resources.list_resources()` 获取重点受管文件，或在生成重要项目产物时调用 `project_resources.register_resource(path, label)` 登记为跨会话共享受管资源。"
@@ -412,7 +422,11 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
     } else {
         "\n\n## 通用会话模式 (无绑定工程)\n当前会话未选定具体工程项目。凡未明确要求存放于工程中的临时文件、数据导出或中间脚本，一律写入 `tmp/` 目录并通过 `artifact_manager` 登记交付，严禁直接散落在当前运行根目录下。交付门禁直接对账 tmp/ 产物与登记记录，严禁为迎合门禁把产物拷入当前目录。"
     };
-    let system_prompt = format!(
+    let system_prompt = if let Some(review) = &initial_review {
+        crate::agent::task_context::review_entry(&review.messages, &workspace_skill_context, &custom_instruction_context,
+            &initial_execution_config, crate::agent::review_tools::forensic_budget(),
+            review.final_fingerprint.is_some() && !review.verify_obligations.is_empty())
+    } else { format!(
         "{}{}{}{}{}\n{}\n{}{}",
         base_prompt,
         project_resource_boundary,
@@ -422,7 +436,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
         local_tools_menu,
         mcp_tools_menu,
         role_cards_menu
-    );
+    ) };
     println!(
         "--- 最终系统提示词 (级联菜单模式) ---\n{}\n------------------",
         system_prompt
@@ -615,13 +629,16 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
         checkpoint.stages.plan=Some(true);
     }
     checkpoint.stages.validate(plan_mode.as_deref())?;
-    context.add_host_feedback(&checkpoint.stages.prompt());
-    if delegation.is_some() {
+    let review_program = crate::agent::child_reviewer::main_executor::load(state.inner(), &run_id)?;
+    context.add_host_feedback(&if review_program.is_some() {
+        "【当前审查职责】只读取证并交回审查结果；不能实施修改或再次委派。父任务流程配置见审查材料，内部防递归配置不改变父任务设置。".to_string()
+    } else { checkpoint.stages.prompt() });
+    if delegation.is_some() && review_program.is_none() {
         let depth = crate::agent::child_task::delegation_depth(&final_session_id)?;
         context.add_host_feedback(&format!("【普通任务委派层级】主 Agent 为第 0 层；当前为第 {depth} 层，上限为第 {} 层。达到上限后不可继续派普通子任务，但可自行工作、回传和使用既有正式审查。", crate::agent::child_task::MAX_DELEGATION_DEPTH));
     }
 
-    if crate::agent::child_reviewer::main_executor::load(state.inner(),&run_id)?.is_some() && checkpoint.triage_verdict.is_none() {
+    if review_program.is_some() && checkpoint.triage_verdict.is_none() {
         let mut verdict=crate::agent::triage::TriageVerdict::fallback("宿主已明确委派只读审查，不重新分流");
         verdict.route="direct".into();verdict.stage_review_mode="none".into();verdict.final_review_mode="mechanical_only".into();
         checkpoint.triage_verdict=Some(verdict);
@@ -816,18 +833,15 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
                 context.turns_history.push(crate::agent::context::ChatMessage {
                     role: "user".to_string(),
                     content: json!(format!(
-                        "【🧭 入口调查参考（入口分流给出）】\n{}\n{}\n【审查方式随方案确定】submit_plan 里额外填 final_review_mode（mechanical_only|artifact_quality|code_review|operational_verification|panel）与 stage_review_mode（none|milestone），按你摸底后确定的真实产物来选：视频/动画/PPT/页面/报表等成品用 artifact_quality（终审员可对视频抽帧、对页面/PPT 截图核对内容）；仅“可解析即正确”的纯结构产物才用 mechanical_only。\n【非代码产物（视频/PPT/表格/报告等）的方案要求】产出文件时 target_files 填真实产出路径；仅对话报告、只读调查或测试任务可填 []；方案须写明产物规格、分步清单、每步可核对的验证方式与关键假设；验证以真实打开/渲染/检查产物内容为准，不要只确认文件存在。",
+                        "【🧭 入口调查参考（入口分流给出）】\n{}\n{}\n【审查方式随方案选择（不得自行免审）】submit_plan 里额外填 final_review_mode（mechanical_only|artifact_quality|code_review|operational_verification|panel）与 stage_review_mode（none|milestone），按你摸底后确定的真实产物来选：视频/动画/PPT/页面/报表等成品用 artifact_quality（终审员可对视频抽帧、对页面/PPT 截图核对内容）；跨模块测试和运行验证可选 operational_verification，核对实际命令、回执和未覆盖项；仅入口已选择机械校验的简单任务可沿用 mechanical_only。已有独立终审、多人终审或 milestone 不可由执行模型自行关闭；确需放宽应交人工决定，方案审查通过不替代此授权。\n【非代码产物（视频/PPT/表格/报告等）的方案要求】产出文件时 target_files 填真实产出路径；仅对话报告、只读调查或测试任务可填 []；方案须写明产物规格、分步清单、每步可核对的验证方式与关键假设；验证以真实打开/渲染/检查产物内容为准，不要只确认文件存在。",
                         brief, investigation_hint
                     )),
                 });
             }
         }
-        // 方案路由：终审/阶段审查方式入口只是临时保守默认，待方案提交时由方案制定者按真实产物确定
-        // （入口一次性判断时还不知道会产出什么，曾把视频判成“仅机械校验”而免审）。
-        if verdict.requires_plan_gate() {
-            verdict.stage_review_mode = "milestone".to_string();
-            verdict.final_review_mode = "code_review".to_string();
-        }
+        // 方案路由先保留独立终审和 milestone；方案可选择实际产物对应的终审类型，
+        // 但执行模型不能自行免审（曾将复杂只读测试改为 mechanical_only/none）。
+        verdict.apply_plan_route_review_defaults();
         checkpoint.triage_verdict = Some(verdict);
         // 审查覆盖面观测行：分流判决如何塑形阶段/终审一目了然；判决关闭阶段审查
         // 时额外落 gate 留痕（step_id 此处未就位，与上方 triage 记录一致用 0）。

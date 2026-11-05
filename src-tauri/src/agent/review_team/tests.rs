@@ -86,3 +86,39 @@ async fn review_policy_fingerprint_tracks_people_and_role_changes_without_changi
     .unwrap();
     assert_ne!(before, policy_fingerprint(&mock.db, &config));
 }
+
+#[test]
+fn recommendations_skip_missing_disabled_and_wrong_kind_without_increasing_headcount() {
+    let fixture = TestDb::new();
+    let cards = seed_cards(&fixture.db, 5);
+    crate::agent::tools::role_manager::upsert_card(
+        &fixture.db,
+        &json!({"name":"worker_only","label":"worker","enabled":true,"allowed_kinds":"worker"}),
+    )
+    .unwrap();
+    let names: Vec<String> = ["missing", "review_0", "worker_only", "review_2", "review_4"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let disabled = vec!["reviewer:review_0".into()];
+    let primary = recommended_primary(&fixture.db, &names, &disabled).unwrap();
+    assert_eq!(primary.name, "review_2");
+    let context = SandwichContext::new("sys".into(), "goal".into());
+    let single = review_team(
+        &fixture.db,
+        &context,
+        &[],
+        &disabled,
+        false,
+        Some(primary.clone()),
+    );
+    assert_eq!(single.len(), 1);
+    let committee = review_team(&fixture.db, &context, &[], &disabled, true, Some(primary));
+    assert_eq!(committee.len(), 3);
+    assert_eq!(committee[0].name, "review_2");
+    assert!(!committee.iter().any(|c| c.name == "review_0"));
+    assert!(
+        recommended_primary(&fixture.db, &["missing".into(), "worker_only".into()], &[]).is_none()
+    );
+    assert_eq!(cards.len(), 5);
+}

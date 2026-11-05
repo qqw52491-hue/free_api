@@ -65,8 +65,11 @@ pub(crate) fn read_result(db: &DbState, actor: &Actor, params: &Value) -> Result
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let (target, kind) = resolve(&conn, actor, id)?;
     let view = params["view"].as_str().unwrap_or("result");
-    if !matches!(view, "result" | "history" | "checkpoint") {
-        return Err("view 仅允许 result/history/checkpoint。".into());
+    if !matches!(view, "result" | "history" | "checkpoint" | "dispatch_input") {
+        return Err("view 仅允许 result/history/checkpoint/dispatch_input。".into());
+    }
+    if view == "dispatch_input" && kind == "main" {
+        return Err("主任务没有子任务派发输入快照；本次未读取交付结果替代该快照。".into());
     }
     let (status, mut text): (String, Option<String>) = if kind == "main" {
         conn.query_row(
@@ -76,7 +79,9 @@ pub(crate) fn read_result(db: &DbState, actor: &Actor, params: &Value) -> Result
         )
     } else {
         conn.query_row(
-            if view == "checkpoint" {
+            if view == "dispatch_input" {
+                "SELECT status,json_extract(execution_checkpoint_json,'$.state.dispatch_input') FROM agent_child_runs WHERE id=?1"
+            } else if view == "checkpoint" {
                 "SELECT status,execution_checkpoint_json FROM agent_child_runs WHERE id=?1"
             } else if view == "history" {
                 "SELECT status,message_history_json FROM agent_child_runs WHERE id=?1"
@@ -90,6 +95,8 @@ pub(crate) fn read_result(db: &DbState, actor: &Actor, params: &Value) -> Result
     .map_err(|e| e.to_string())?;
     let mut source = if kind == "main" {
         "agent_run_traces.completion_json"
+    } else if view == "dispatch_input" {
+        "agent_child_runs.execution_checkpoint_json.state.dispatch_input"
     } else if view == "checkpoint" {
         "agent_child_runs.execution_checkpoint_json"
     } else if view == "history" {

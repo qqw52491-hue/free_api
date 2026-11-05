@@ -10,6 +10,9 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Review advice, not a detector or a requirement to execute extra tests.
+pub(crate) const TEST_EVIDENCE_GUIDANCE: &str = "\n【测试证据的被测对象】核对测试脚本实际调用的项目函数、命令或 API，而不只看 PASS 文本。临时数据库、假模型可替代外部依赖；若锁、信箱、恢复或审查状态机本身被脚本重新实现，结果只说明模拟器通过，不能证明项目生产实现通过。语言不是判据：Python 可调用真实接口，Rust 也可只测替身。全库通过不自动证明报告列出的跨模块场景已覆盖。结合用户要求判断差异的实际影响，不因使用 mock、脚本语言或未换成 Rust 单独否决。步骤描述、已启动审查及其自述不是独立证据；单次 output_id 读取只覆盖该回执，不能代表描述中提到的其他步骤。\n";
+
 pub const MAX_TOOL_OUTPUT_CHARS: usize = 6000;
 const MAX_GREP_MATCHES: usize = 30;
 const MAX_READ_LINES: usize = 220;

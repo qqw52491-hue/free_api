@@ -412,6 +412,9 @@ async fn reviewer_navigates_middle_steps_and_child_results_with_scoped_output_al
     for name in ["read_step_output","get_step_output"] {
         let got=tool(&f.db,&f.id,&program,&run(json!({"tool":name,"params":{"output_id":proof}})),&mut rx).await;
         assert!(got.success,"{}",got.stderr);assert!(got.stdout.contains("1521 passed"));
+        let returned: Value = serde_json::from_str(&got.stdout).unwrap();
+        assert_eq!(returned["read_scope"]["kind"], "single_output");
+        assert_eq!(returned["read_scope"]["output_id"], proof);
     }
     let children=tool(&f.db,&f.id,&program,&run(json!({"tool":"list_child_runs"})),&mut rx).await;
     assert!(children.success,"{}",children.stderr);assert!(children.stdout.contains("descendant"));
@@ -430,4 +433,60 @@ async fn reviewer_navigates_middle_steps_and_child_results_with_scoped_output_al
     for req in [json!({"tool":"list_execution_steps","params":{"run_id":"outsider"}}),json!({"tool":"get_step_output","params":{"run_id":"outsider","output_id":proof}}),json!({"tool":"read_child_result","params":{"child_run_id":"outsider"}})] {
         assert!(!tool(&f.db,&f.id,&program,&run(req),&mut rx).await.success);
     }
+}
+
+#[tokio::test]
+async fn scalar_review_tool_parameters_return_error_without_panicking_or_spending_budget() {
+    let f = Fixture::new();
+    let (_tx, mut rx) = watch::channel(0);
+    for request in [
+        json!({"tool":"run_command","command":"git status --short"}),
+        json!({"tool":"run_command","params":"git status --short"}),
+        json!({"tool":"run_command","params":["bad"]}),
+        json!({"tool":"run_command","params":42}),
+    ] {
+        let inst: AgentInstruction = serde_json::from_value(request).unwrap();
+        let result = tool(&f.db, &f.id, &f.program, &inst, &mut rx).await;
+        assert!(!result.success);
+        assert!(result.stderr.contains("JSON 对象"));
+        let snapshot = Snapshot::load(&f.db, &f.id, "reviewer").unwrap().unwrap();
+        assert_eq!(snapshot.state["tool_steps"].as_u64().unwrap_or(0), 0);
+    }
+    assert_eq!(
+        std::fs::read_to_string(f.root.join("evidence.txt")).unwrap(),
+        "original evidence"
+    );
+}
+
+#[test]
+fn reviewer_handoff_stages_are_scoped_and_do_not_disable_the_parent_workflow() {
+    let f = Fixture::new();
+    let context = SandwichContext::new("sys".into(), "integration test".into());
+    let mut parent = AgentCheckpoint::new("owner".into(), &context);
+    parent.stages.stage_review = Some(true);
+    parent.stages.final_review = Some(true);
+    let mut verdict = crate::agent::triage::TriageVerdict::fallback("fixture");
+    verdict.final_review_mode = "operational_verification".into();
+    parent.triage_verdict = Some(verdict);
+    crate::agent::checkpoint::save_checkpoint(&f.db, &mut parent).unwrap();
+    let mut program = f.program.clone();
+    program.messages.push(json!({"role":"user","content":crate::agent::review_team::parent_workflow_context(&parent)}));
+    let goal = prepare(&f.db, &f.id, &program).unwrap();
+    assert!(goal.contains("被审查父任务的流程配置快照"));
+    assert!(goal.contains("operational_verification"));
+    let config = crate::agent::execution::runtime::config(&f.db, &f.id).unwrap();
+    let child_stages = config.stages.for_child(true, None);
+    assert_eq!(child_stages.final_review, Some(false));
+    let prompt = child_stages.reviewer_prompt();
+    assert!(prompt.contains("Reviewer 子任务的内部配置"));
+    assert!(!prompt.contains("【宿主固定环节配置】"));
+    let restored = crate::agent::checkpoint::load_checkpoint(&f.db, "owner")
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.stages.final_review, Some(true));
+    assert_eq!(restored.stages.stage_review, Some(true));
+    assert_eq!(
+        restored.triage_verdict.unwrap().final_review_mode,
+        "operational_verification"
+    );
 }

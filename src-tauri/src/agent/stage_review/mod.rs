@@ -203,9 +203,95 @@ pub fn should_fire(
 /// 2. 若为联合会审模式（is_committee = true）：
 ///    - 根据改动文件类型挑选匹配专家并发派发，硬性上限 3 位（防 Token 爆炸）。
 fn resolve_adaptive_reviewer_cards(
-    db: &DbState, context: &SandwichContext, disabled_cards: &[String], is_committee: bool,
+    db: &DbState,
+    context: &SandwichContext,
+    disabled_cards: &[String],
+    is_committee: bool,
+    recommended: &[String],
 ) -> Vec<crate::agent::tools::role_manager::RoleCard> {
-    crate::agent::review_team::select_review_cards(db, context, &[], disabled_cards, is_committee)
+    if let Some(primary) =
+        crate::agent::review_team::recommended_primary(db, recommended, disabled_cards)
+    {
+        crate::agent::review_team::review_team(
+            db,
+            context,
+            &[],
+            disabled_cards,
+            is_committee,
+            Some(primary),
+        )
+    } else {
+        crate::agent::review_team::select_review_cards(
+            db,
+            context,
+            &[],
+            disabled_cards,
+            is_committee,
+        )
+    }
+}
+
+fn select_stage_cards(
+    db: &DbState,
+    context: &SandwichContext,
+    checkpoint: &AgentCheckpoint,
+    model_routing: &ModelRoutingConfig,
+) -> Option<Vec<crate::agent::tools::role_manager::RoleCard>> {
+    if checkpoint.stages.stage_review == Some(false) {
+        return None;
+    }
+    // 1. 检查会话级是否有指定的审查官角色卡，未硬性指定时自适应从启用专家中匹配
+    let (is_explicit_override, explicit_card) =
+        if let Some(ref ovr) = model_routing.stage_reviewer_override {
+            let clean = ovr.trim();
+            if clean.eq_ignore_ascii_case("disabled") || clean.eq_ignore_ascii_case("none") {
+                if checkpoint.stages.stage_review == Some(true) {
+                    (false, None)
+                } else {
+                    return None;
+                }
+            } else if !clean.is_empty()
+                && !clean.eq_ignore_ascii_case("default")
+                && !clean.eq_ignore_ascii_case("follow_global")
+                && !clean.eq_ignore_ascii_case("auto")
+            {
+                if crate::agent::tools::role_manager::is_card_disabled_for(
+                    &model_routing.disabled_role_cards,
+                    clean,
+                    "reviewer",
+                ) {
+                    (false, None)
+                } else {
+                    match crate::agent::tools::role_manager::resolve_enabled_card(db, clean) {
+                        Ok(Some(card)) if card.allows_kind("reviewer") => (true, Some(card)),
+                        _ => (false, None),
+                    }
+                }
+            } else {
+                (false, None)
+            }
+        } else {
+            (false, None)
+        };
+
+    // 会话级硬性指定单张卡片时：指定单人优先，committee 自动失效
+    let role_cards = if is_explicit_override {
+        explicit_card.into_iter().collect()
+    } else {
+        resolve_adaptive_reviewer_cards(
+            db,
+            context,
+            &model_routing.disabled_role_cards,
+            model_routing.stage_review_committee,
+            checkpoint
+                .triage_verdict
+                .as_ref()
+                .map(|v| v.stage_review_roles.as_slice())
+                .unwrap_or(&[]),
+        )
+    };
+
+    Some(role_cards)
 }
 
 /// 派发一次阶段审查。证据包由宿主组装（任务目标 + 阶段计划 + 当前累计 diff），
@@ -222,44 +308,9 @@ pub async fn dispatch(
     step_id: usize,
     interrupt_rx: watch::Receiver<u64>,
 ) -> Result<(), String> {
-    if checkpoint.stages.stage_review == Some(false) { return Ok(()); }
-    // 1. 检查会话级是否有指定的审查官角色卡，未硬性指定时自适应从启用专家中匹配
-    let (is_explicit_override, explicit_card) = if let Some(ref ovr) = model_routing.stage_reviewer_override {
-        let clean = ovr.trim();
-        if clean.eq_ignore_ascii_case("disabled") || clean.eq_ignore_ascii_case("none") {
-            if checkpoint.stages.stage_review == Some(true) { (false, None) } else { return Ok(()); }
-        } else if !clean.is_empty()
-            && !clean.eq_ignore_ascii_case("default")
-            && !clean.eq_ignore_ascii_case("follow_global")
-            && !clean.eq_ignore_ascii_case("auto")
-        {
-            if crate::agent::tools::role_manager::is_card_disabled_for(&model_routing.disabled_role_cards, clean, "reviewer") {
-                (false, None)
-            } else {
-                match crate::agent::tools::role_manager::resolve_enabled_card(db, clean) {
-                    Ok(Some(card)) if card.allows_kind("reviewer") => (true, Some(card)),
-                    _ => (false, None),
-                }
-            }
-        } else {
-            (false, None)
-        }
-    } else {
-        (false, None)
+    let Some(role_cards) = select_stage_cards(db, context, checkpoint, model_routing) else {
+        return Ok(());
     };
-
-    // 会话级硬性指定单张卡片时：指定单人优先，committee 自动失效
-    let role_cards = if is_explicit_override {
-        explicit_card.into_iter().collect()
-    } else {
-        resolve_adaptive_reviewer_cards(
-            db,
-            context,
-            &model_routing.disabled_role_cards,
-            model_routing.stage_review_committee,
-        )
-    };
-
     let routing = AgentRouter::route_for_role(
         context,
         model_routing,
@@ -310,6 +361,8 @@ pub async fn dispatch(
             "model": &model_to_use,
             "question": question,
             "evidence_excerpt": evidence,
+            "parent_workflow_context": crate::agent::review_team::parent_workflow_context(checkpoint),
+            "parent_task_goal": context.effective_goal(),
         });
 
         let stage_batch_id = format!("stage-batch-{}-{}", checkpoint.step_id, uuid::Uuid::new_v4());
@@ -402,6 +455,8 @@ pub async fn dispatch(
             "model": &model_to_use,
             "question": question,
             "evidence_excerpt": evidence,
+            "parent_workflow_context": crate::agent::review_team::parent_workflow_context(checkpoint),
+            "parent_task_goal": context.effective_goal(),
         });
 
         let mut envelope = crate::agent::protocol::DispatchEnvelope::reviewer(
@@ -495,87 +550,20 @@ pub(crate) fn stage_extra_sections(db: &DbState, session_id: &str) -> Vec<String
     extras
 }
 
-/// 组装阶段审查证据包：任务目标 + 阶段计划 + 专项材料(如有) + diff 尾部。
-/// 硬约束：总长不得超过 child_reviewer 的 evidence_excerpt 预算（6000 字符），
-/// 超限会导致派发在解析层被静默拒绝（实测教训）。diff 取尾部——最近的变更与当前阶段最相关。
-/// extra_sections：tmp 产物清单/执行轨迹摘要等补充材料（阶段审查不止看 diff——
-/// 中途产物与"声称跑过的验证"也该进证据视野），计入同一 6000 字符预算，
-/// 挤占的是 diff 配额（全文 diff 审查者可经 git_diff 工具自取）。
+/// Collect production materials, then delegate budgeting to task_context.
+/// Goal, stage, each evidence index and diff have independent allocations within
+/// the existing 6000-character transport. Full parent goal is a separate message;
+/// raw logs and diffs remain available through scoped read-only evidence tools.
 fn build_stage_evidence(
     context: &SandwichContext,
     workspace: &Path,
     focus_context: Option<&str>,
     extra_sections: &[String],
 ) -> String {
-    const MAX_EVIDENCE_CHARS: usize = 6_000;
-
-    let mut evidence = String::new();
-    evidence.push_str(&format!("【任务目标】{}\n", context.effective_goal()));
-    let todos = context
-        .todo_list
-        .iter()
-        .map(|t| format!("- [{}] {} ({})", t.status, t.description, t.id))
-        .collect::<Vec<_>>()
-        .join("\n");
-    // 【实测死锁教训】oracle 会为未来阶段预生成占位存根（src/stage-XX.mjs 内容为
-    // "return value;"）。它们出现在累计 diff 里是设计内的未来工作，审查员曾把
-    // "存根未实现未来阶段义务"判成 blocking_regardless，拦截一切写入形成死锁
-    // （模型被迫 ask_human，整轮评测终止）。必须在证据包里显式豁免。
-    evidence.push_str(
-        "【占位存根豁免（重要）】宿主 oracle 会为尚未到达的未来阶段预生成占位文件          src/stage-XX.mjs（内容为 return value; 存根）。这些文件出现在 diff 中属于设计内          的未来工作，不属于任何当前阶段的缺陷：不得因此判出 blocking（无论 regardless          还是 final_only），最多作为一条 suggestion 提及。你的审查对象是已实现代码的          结构性质量与当前阶段义务的落实情况。\n\n",
-    );
-    evidence.push_str(&format!(
-        "【阶段计划（注意：这是中间态，非最终形态，final_only 级问题请如实标注）】\n{}\n\n",
-        todos
-    ));
-
-    // 中途产物清单与执行轨迹摘要：阶段审查不止于 diff——产物存在性、
-    // "声称测过但没跑"类谎报在阶段层就该被看见
-    for extra in extra_sections {
-        let trimmed = extra.trim();
-        if !trimmed.is_empty() {
-            evidence.push_str(trimmed);
-            evidence.push_str("\n\n");
-        }
-    }
-
-    // 如果角色卡提取了 focus_domains 材料，按预算（最多 1500 字符）安全注入
-    if let Some(focus) = focus_context {
-        let focus_clean = focus.trim();
-        if !focus_clean.is_empty() {
-            let focus_snippet: String = focus_clean.chars().take(1500).collect();
-            evidence.push_str(&format!("【审查专家专项关注材料】\n{}\n\n", focus_snippet));
-        }
-    }
-
-    let diff_block = match crate::agent::reviewer_gatekeeper::GitBaseline::capture(workspace)
-        .collect_git_diff(workspace)
-    {
-        Some((diff, _)) => format!(
-            "【当前累计变更 diff（按路径排序，含自上次阶段审查以来的全部写入；全文可经 git_diff 工具复核）】\n{}",
-            diff
-        ),
-        None => "【当前累计变更 diff】（无法获取 git diff，请基于方案与目标做结构性审查）\n".to_string(),
-    };
-
-    // 先按预算截断 diff 尾部，再拼入总包；总包兜底再截一次
-    let used = evidence.chars().count();
-    let diff_allowance = MAX_EVIDENCE_CHARS.saturating_sub(used + 64).max(200);
-    let diff_tail: String = {
-        let chars: Vec<char> = diff_block.chars().collect();
-        let allowance = diff_allowance.max(200);
-        if chars.len() > allowance {
-            let tail: String = chars[chars.len() - allowance..].iter().collect();
-            format!("…（前段截断，保留尾部）\n{}", tail)
-        } else {
-            diff_block
-        }
-    };
-    evidence.push_str(&diff_tail);
-    if evidence.chars().count() > MAX_EVIDENCE_CHARS {
-        evidence = evidence.chars().take(MAX_EVIDENCE_CHARS).collect();
-    }
-    evidence
+    let todos = context.todo_list.iter().map(|t|format!("- [{}] {} ({})",t.status,t.description,t.id)).collect::<Vec<_>>().join("\n");
+    let diff = crate::agent::reviewer_gatekeeper::GitBaseline::capture(workspace)
+        .collect_git_diff(workspace).map(|(diff,_)|diff).unwrap_or_else(||"（无法获取 git diff）".into());
+    crate::agent::task_context::stage(context.effective_goal(), &todos, extra_sections, focus_context, &diff)
 }
 
 /// 阶段审查回执处理结果：模型可见摘要 + 待结算退款标记。

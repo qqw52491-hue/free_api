@@ -48,17 +48,19 @@ pub struct TriageVerdict {
     /// 分流路由：direct|outline_review|technical_plan|expert_panel|user_clarification
     #[serde(default)]
     pub route: String,
-    /// 前置审查建议挂载的角色名（来自可调用的 reviewer 清单）
+    /// 前置审查按优先顺序建议的角色，不是必派名单；人数由独立会审配置决定。
     #[serde(default)]
     pub pre_review_roles: Vec<String>,
     /// 阶段审查模式：none|milestone（空串按 milestone）
     #[serde(default)]
     pub stage_review_mode: String,
+    /// 阶段审查候选角色；人工指定优先，未指定时选首个可用候选再回退自适应。
     #[serde(default)]
     pub stage_review_roles: Vec<String>,
     /// 终审模式：mechanical_only|artifact_quality|code_review|operational_verification|panel
     #[serde(default)]
     pub final_review_mode: String,
+    /// 终审候选角色；选择首个可用候选，列表长度不决定人数。
     #[serde(default)]
     pub final_review_roles: Vec<String>,
     /// 方案证据要求：none|source_refs|code_refs|operational_probes
@@ -163,17 +165,35 @@ impl TriageVerdict {
         )
     }
 
-    /// 方案提交时按真实产物重新确定审查方式（空串/非法值不覆盖，保留原值）。
+    /// Complex plan routes retain independent review; keep any stronger or
+    /// product-specific mode already selected at entry.
+    pub fn apply_plan_route_review_defaults(&mut self) {
+        if self.requires_plan_gate() {
+            self.stage_review_mode = "milestone".into();
+            if self.final_review_mode.eq_ignore_ascii_case("mechanical_only") {
+                self.final_review_mode = "code_review".into();
+            }
+        }
+    }
+
+    /// Models may select or strengthen review, but cannot approve their own reduction.
+    /// Explicit human stage settings are applied separately by the host.
     pub fn apply_plan_review_overrides(&mut self, final_mode: &str, stage_mode: &str) {
         let f = final_mode.trim().to_ascii_lowercase();
         if matches!(
             f.as_str(),
-            "mechanical_only" | "artifact_quality" | "code_review" | "operational_verification" | "panel"
-        ) {
+            "mechanical_only"
+                | "artifact_quality"
+                | "code_review"
+                | "operational_verification"
+                | "panel"
+        ) && !(f == "mechanical_only" && self.final_review_mode != "mechanical_only")
+            && !(self.final_review_mode == "panel" && f != "panel")
+        {
             self.final_review_mode = f;
         }
         let s = stage_mode.trim().to_ascii_lowercase();
-        if matches!(s.as_str(), "none" | "milestone") {
+        if matches!(s.as_str(), "none" | "milestone") && !(s == "none" && self.needs_stage_review()) {
             self.stage_review_mode = s;
         }
     }
@@ -440,8 +460,9 @@ pub async fn run_triage<R: tauri::Runtime>(
   - technical_plan：需要先取证再出详细方案（含代码修改与创意/生成类产物如视频、PPT、报告、表格——需求有模糊但可返工时，由方案阶段写明假设，不要先问用户）；需要 submit_plan 方案讨论审查（复杂调查、跨模块测试、长链路验证同样适用，与是否写文件无关；方案说明范围、做法、验证标准及未覆盖项）；
   - expert_panel：跨域高风险，需多专家联合会审；
   - user_clarification：需求歧义必须先问用户，澄清前不得写入。
+- pre_review_roles / stage_review_roles / final_review_roles：按优先顺序推荐候选，不是必派人员名单；宿主在显式角色设置和权限范围内优先选可用候选，人数由单人/会审配置另定。
 - stage_review_mode：none=中段无需阶段审查；milestone=按里程碑/写入阈值做阶段审查。
-- final_review_mode：mechanical_only=机械校验即可交付（简单产物）；artifact_quality=非代码产物按产物质量标准终审（需求覆盖/结构完整/可用性）；code_review=代码级终审；operational_verification=须运行验证证据的终审；panel=多专家终审。route 为 technical_plan/expert_panel 时，这两项只是临时默认，规划阶段提交方案时会由方案制定者按真实产物重新确定。
+- final_review_mode：mechanical_only=机械校验即可交付（简单产物）；artifact_quality=非代码产物按产物质量标准终审（需求覆盖/结构完整/可用性）；code_review=代码级终审；operational_verification=须运行验证证据的终审；panel=多专家终审。route 为 technical_plan/expert_panel 时保留独立终审与 milestone；规划阶段可按真实产物选择独立终审类型，但执行模型不能自行免审、取消 milestone 或减少 panel。放宽审查由人类通过固定环节配置或既有仲裁决定。
 - evidence_policy：none=方案不需证据引用；source_refs=资料/需求来源即可；code_refs=须引用已读代码证据；operational_probes=须命令输出/探针证据。
 - investigation_questions / required_evidence：仅当 route 为 technical_plan/expert_panel 时填写，其他路由留空数组——你负责定调查方向，规划阶段的主 Agent 会先摸底，按需要把互相独立的问题派给只读探针并行取证，再依据实际发现提交方案；此清单是调查先验，不是必须逐条核销的验收清单。
   问题须对任务类型通用，围绕“要做出什么、拿什么当素材/数据、环境里有什么能力、怎样算做对”：例如视频/PPT/表格类产物应覆盖产出规格（时长/页数/列含义/格式）、可用素材与数据来源、本机可用的工具与依赖、逐条可核对的验收标准；代码类则覆盖相关调用链与影响面。
@@ -672,6 +693,45 @@ mod tests {
         v.apply_plan_review_overrides("vibes", "");
         assert_eq!(v.final_review_mode, "artifact_quality");
         assert_eq!(v.stage_review_mode, "milestone");
+    }
+
+    #[test]
+    fn plan_route_defaults_preserve_independent_modes_and_simple_route_exemption() {
+        let mut v = TriageVerdict::fallback("fixture");
+        for mode in ["panel", "operational_verification", "artifact_quality", "code_review"] {
+            v.final_review_mode = mode.into();
+            v.stage_review_mode = "none".into();
+            v.apply_plan_route_review_defaults();
+            assert_eq!(v.final_review_mode, mode);
+            assert_eq!(v.stage_review_mode, "milestone");
+        }
+        v.final_review_mode = "mechanical_only".into();
+        v.apply_plan_route_review_defaults();
+        assert_eq!(v.final_review_mode, "code_review");
+        v.route = "direct".into();
+        v.final_review_mode = "mechanical_only".into();
+        v.stage_review_mode = "none".into();
+        v.apply_plan_route_review_defaults();
+        assert_eq!(v.final_review_mode, "mechanical_only");
+        assert_eq!(v.stage_review_mode, "none");
+    }
+
+    #[test]
+    fn model_cannot_disable_existing_review_or_reduce_panel() {
+        let mut v = TriageVerdict::fallback("fixture");
+        v.apply_plan_review_overrides("mechanical_only", "none");
+        assert_eq!(v.final_review_mode, "code_review");
+        assert_eq!(v.stage_review_mode, "milestone");
+        v.apply_plan_review_overrides("operational_verification", "milestone");
+        assert_eq!(v.final_review_mode, "operational_verification");
+        v.final_review_mode = "panel".into();
+        v.apply_plan_review_overrides("code_review", "none");
+        assert_eq!(v.final_review_mode, "panel");
+        v.final_review_mode = "mechanical_only".into();
+        v.stage_review_mode = "none".into();
+        v.apply_plan_review_overrides("mechanical_only", "none");
+        assert_eq!(v.final_review_mode, "mechanical_only");
+        assert_eq!(v.stage_review_mode, "none");
     }
 
     #[test]

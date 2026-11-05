@@ -124,12 +124,19 @@ impl StageSettings {
         }
     }
 
-    pub fn prompt(&self) -> String {
+    fn values_text(&self) -> String {
         let label = |value| match value {
-            Some(true) => "开启",
-            Some(false) => "关闭",
-            None => "自动",
+            Some(true) => "开启", Some(false) => "关闭", None => "自动",
         };
-        format!("【宿主固定环节配置】正式方案={}；方案审查={}；阶段审查={}；最终审查={}。关闭表示不自动触发该环节；仍可自行思考、核对结果。人工批准模式下用 submit_plan 提交正式方案；宿主按配置派审、收齐结果后自动呈报人工批准，Agent 审查不替代人工批准。权限、明确验证、人工批准和已有有效阻塞不因此撤销。",label(self.plan),label(self.plan_review),label(self.stage_review),label(self.final_review))
+        format!("正式方案={}；方案审查={}；阶段审查={}；最终审查={}",
+            label(self.plan), label(self.plan_review), label(self.stage_review), label(self.final_review))
+    }
+
+    pub fn reviewer_prompt(&self) -> String {
+        format!("【当前只读 Reviewer 子任务的内部配置】{}。\n以上只控制当前审查执行器，不是被审查父任务的设置。关闭内部方案/审查用于避免递归派审；你仍须完成本次已派发的方案、阶段或最终审查。父任务的策略见被审查材料中的父任务流程配置快照，不得用这些内部开关推断父任务已免审。", self.values_text())
+    }
+
+    pub fn prompt(&self) -> String {
+        format!("【宿主固定环节配置】{}。关闭表示不自动触发该环节；仍可自行思考、核对结果。人工批准模式下用 submit_plan 提交正式方案；宿主按配置派审、收齐结果后自动呈报人工批准，Agent 审查不替代人工批准。权限、明确验证、人工批准和已有有效阻塞不因此撤销。", self.values_text())
     }
 }

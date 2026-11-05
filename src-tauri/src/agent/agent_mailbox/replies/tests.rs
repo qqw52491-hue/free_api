@@ -469,3 +469,21 @@ fn ordinary_message_admission_and_root_success_share_the_terminal_transaction() 
         other => panic!("send/terminal ordering disagreed: {:?}", (other.0, other.1)),
     }
 }
+
+#[test]
+fn dispatch_input_reference_survives_active_checkpoint_projection_and_respects_owner() {
+    let f=Fixture::new();
+    let input=json!({"params":{"specialized_context":"FOCUS_ORIGINAL"}});
+    f.db.0.lock().unwrap().execute("UPDATE agent_child_runs SET kind='task',execution_checkpoint_json=?2 WHERE id=?1",params![f.b.run,json!({"state":{"dispatch_input":input}}).to_string()]).unwrap();
+    let context=SandwichContext::new("sys".into(),"task".into());
+    let mut cp=AgentCheckpoint::new(format!("task-{}",f.b.run),&context);
+    crate::agent::checkpoint::save_checkpoint(&f.db,&mut cp).unwrap();
+    let request=json!({"child_run_id":f.b.run,"view":"dispatch_input","offset":0,"limit":8192});
+    let result=read_result(&f.db,&f.root,&request).unwrap();
+    assert_eq!(result["source_field"],"agent_child_runs.execution_checkpoint_json.state.dispatch_input");
+    let payload:Value=serde_json::from_str(result["text"].as_str().unwrap()).unwrap();
+    assert_eq!(payload["params"]["specialized_context"],"FOCUS_ORIGINAL");
+    assert!(read_result(&f.db,&f.root,&json!({"child_run_id":"self","view":"dispatch_input"})).is_err());
+    let outsider=Actor::new("unrelated","unrelated");
+    assert!(read_result(&f.db,&outsider,&request).is_err());
+}

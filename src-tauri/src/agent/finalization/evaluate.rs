@@ -388,6 +388,7 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
             frozen.material_fingerprint = review_hash.clone();
         }
     }
+    notices.push(crate::agent::review_team::parent_workflow_context(checkpoint));
     let review_enabled = checkpoint.stages.final_review.unwrap_or(!handoff);
     if !review_enabled {
         review=ReceiptReview::NotRequired;

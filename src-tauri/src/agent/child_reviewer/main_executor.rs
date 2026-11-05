@@ -205,7 +205,7 @@ pub(crate) fn prepare(db: &DbState, id: &str, program: &ReviewProgram) -> Result
             ],
         )
         .map_err(|e| e.to_string())?;
-    Ok(format!("【宿主审查任务与历史】{}\n【通用执行协议】以上材料中的旧输出格式是结果契约。取证仍使用其中列出的只读工具，可用 params 传参。另可用 list_execution_steps(after_seq,limit,可选run_id) 分页查看父任务或后代步骤、list_child_runs(after_id,limit) 分页查看本任务树状态、read_child_result(child_run_id,offset) 查看完整结果；next_after_seq/next_after_id/next_offset 用于继续。按 read_step_output/get_step_output(output_id,offset,limit) 读取原文，读取后代输出时携带该 run_id。描述和结果自述不等于验证事实。最终必须用 {{\"tool\":\"finish\",\"params\":{{\"summary\":\"审查完成说明\",...完整原审查结果字段}}}} 提交。不要把结果 JSON 当作无动作的顶层回复。不要新建方案、审批或审查；权限由宿主执行，任务文字不授权写入。",serde_json::to_string(&program.messages).map_err(|e|e.to_string())?))
+    Ok(crate::agent::task_context::review_goal(&program.messages))
 }
 
 #[cfg(test)]
@@ -297,6 +297,9 @@ pub(crate) async fn tool(
     let name = if requested_name == "get_step_output" { "read_step_output".to_string() } else { requested_name.clone() };
     let mut params = inst.get_params();
     let result: Result<String, String> = async {
+        if !params.is_object() {
+            return Err("审查工具参数必须是 JSON 对象；本次未执行，未消耗取证预算。请使用 {\"tool\":\"工具名\",\"params\":{...}}。".into());
+        }
         crate::agent::execution::runtime::authorize_call(
             db,
             id,

@@ -234,10 +234,10 @@ pub struct PlanSubmission {
     #[serde(default)]
     pub revision_reason: String,
     /// 终审方式（可选）：mechanical_only|artifact_quality|code_review|operational_verification|panel。
-    /// 方案制定者摸底后按真实产物声明，覆盖入口分流的临时默认值。
+    /// 按真实产物选择；执行模型不能自行免除已有独立终审或将 panel 减为单人。
     #[serde(default)]
     pub final_review_mode: String,
-    /// 阶段审查方式（可选）：none|milestone。
+    /// 阶段审查方式（可选）：none|milestone；已有 milestone 不能由执行模型自行取消。
     #[serde(default)]
     pub stage_review_mode: String,
 }

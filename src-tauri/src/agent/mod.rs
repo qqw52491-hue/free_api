@@ -14,6 +14,7 @@ pub mod child_writer;
 pub mod checkpoint;
 pub mod context;
 pub mod context_collector;
+pub(crate) mod task_context;
 pub mod control;
 pub(crate) mod review_control;
 pub mod conversation;

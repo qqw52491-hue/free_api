@@ -188,6 +188,47 @@ pub(crate) fn select_review_cards(
     selected
 }
 
+/// Triage names are ordered recommendations, never a required roster or headcount.
+/// Session exclusions and reviewer permissions remain authoritative.
+pub(crate) fn recommended_primary(
+    db: &DbState,
+    names: &[String],
+    disabled: &[String],
+) -> Option<RoleCard> {
+    names.iter().find_map(|name| {
+        let name = name.trim();
+        if name.is_empty()
+            || crate::agent::tools::role_manager::is_card_disabled_for(disabled, name, "reviewer")
+        {
+            return None;
+        }
+        crate::agent::tools::role_manager::resolve_enabled_card(db, name)
+            .ok()
+            .flatten()
+            .filter(|card| card.allows_kind("reviewer"))
+    })
+}
+
+/// Shared parent workflow facts, separate from the review executor's own stages.
+/// Configuration values are not labelled as human decisions when their origin is unknown.
+pub(crate) fn parent_workflow_context(cp: &crate::agent::checkpoint::AgentCheckpoint) -> String {
+    format!("【被审查父任务的流程配置快照】{}\n这些值属于父任务；当前只读 Reviewer 的内部环节关闭用于避免递归审查，不改变父任务配置。固定配置的显式值优先，未设值沿用任务策略；候选角色不是必须全部派发的名单，人数另由会审配置决定。", serde_json::json!({
+        "fixed_settings_source": "parent_checkpoint.stages",
+        "fixed_settings": cp.stages,
+        "plan_mode": cp.plan_mode,
+        "triage": cp.triage_verdict.as_ref().map(|v| serde_json::json!({
+            "source": "parent_checkpoint.triage_verdict",
+            "final_review_mode": v.final_review_mode, "stage_review_mode": v.stage_review_mode,
+            "pre_review_role_candidates": v.pre_review_roles,
+            "stage_review_role_candidates": v.stage_review_roles,
+            "final_review_role_candidates": v.final_review_roles,
+        })),
+        "submitted_review_request": cp.submitted_plan.as_ref().map(|p| serde_json::json!({
+            "final_review_mode": p.final_review_mode, "stage_review_mode": p.stage_review_mode,
+        })),
+    }))
+}
+
 /// 保留本环节既有主审角色，其余名额从同一专家池中选择。
 pub(crate) fn review_team(
     db: &DbState,

@@ -407,3 +407,61 @@ async fn human_review_role_unavailable_preserves_failure_for_user() {
     assert!(resumed.contains("tech_lead"));
     assert!(!cp.plan_phase.is_approved());
 }
+
+#[tokio::test]
+async fn plan_reviewer_receives_requested_effective_modes_and_explicit_stage_settings() {
+    let mock = MockReviewer::new(vec![pass()]).await;
+    let c = crate::agent::context::SandwichContext::new("sys".into(), "跨模块测试报告".into());
+    let mut cp = AgentCheckpoint::new("owner".into(), &c);
+    let mut v = crate::agent::triage::TriageVerdict::fallback("fixture");
+    v.fallback = None;
+    cp.triage_verdict = Some(v);
+    let sub = crate::agent::types::PlanSubmission {
+        plan_summary: "验证测试范围".into(),
+        final_review_mode: "mechanical_only".into(),
+        stage_review_mode: "none".into(),
+        ..Default::default()
+    };
+    let policy = review_policy_inputs(&cp, &sub);
+    assert_eq!(policy["requested"]["final_review_mode"], "mechanical_only");
+    assert_eq!(policy["effective"]["final_review_mode"], "code_review");
+    assert_eq!(policy["effective"]["stage_review_mode"], "milestone");
+    let snapshot = PlanReviewerDispatchSnapshot::new(
+        "mock",
+        "pro",
+        "",
+        "",
+        json!({"question":"审查测试方案与审查配置","parent_task_goal":"完整目标标记".repeat(1300),"parent_workflow_context":crate::agent::review_team::parent_workflow_context(&cp),"evidence_excerpt":format!("宿主配置：{policy}"),"custom_inputs":{"final_review_mode":sub.final_review_mode,"stage_review_mode":sub.stage_review_mode,"review_policy":policy},"plan_review":true}),
+    );
+    let (_tx, rx) = watch::channel(0);
+    let id = snapshot
+        .spawn(None, &mock.db, "parent", "owner", &mock.root, rx, None)
+        .await
+        .unwrap();
+    assert_eq!(mock.wait_terminal(&id).await.0, "succeeded");
+    let requests = mock.requests.lock().unwrap();
+    let messages = requests[0]["messages"].to_string();
+    assert!(requests[0]["messages"].as_array().unwrap().iter().any(|m|m["content"].as_str().is_some_and(|s| s.starts_with("【完整父任务目标】") && s.contains(&"完整目标标记".repeat(1300)))));
+    assert!(requests[0]["messages"].as_array().unwrap().iter().any(|m|
+        m["content"].as_str().is_some_and(|s| s.starts_with("【被审查父任务的流程配置快照】"))));
+    assert!(requests[0]["messages"].as_array().unwrap().iter().any(|m|
+        m["content"].as_str().is_some_and(|s| s.contains(crate::agent::review_tools::TEST_EVIDENCE_GUIDANCE.trim()))));
+    for token in [
+        "mechanical_only",
+        "code_review",
+        "milestone",
+        "review_policy",
+        "effective",
+    ] {
+        assert!(
+            messages.contains(token),
+            "{token} missing from actual reviewer request"
+        );
+    }
+    drop(requests);
+    cp.stages.final_review = Some(false);
+    cp.stages.stage_review = Some(false);
+    let explicit = review_policy_inputs(&cp, &sub);
+    assert_eq!(explicit["stages"]["final_review"], false);
+    assert_eq!(explicit["stages"]["stage_review"], false);
+}

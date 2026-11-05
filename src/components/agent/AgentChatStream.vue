@@ -76,7 +76,7 @@
                                         <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
                                         <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
                                     </svg>
-                                    <span>{{ copiedMessageId === `legacy-${message.id}` ? "已复制" : "复制" }}</span>
+                                    <span>{{ copiedMessageId === `legacy-${message.id}` ? "已复制" : copyFailedMessageId === `legacy-${message.id}` ? "复制失败" : "复制" }}</span>
                                 </button>
                             </div>
                         </div>
@@ -85,21 +85,23 @@
                         </div>
                     </template>
                     <template v-else>
-                        <!-- 📎 附件缩略图与文件卡片预览托盘 (完全复用 AttachmentCard) -->
-                        <div v-if="parseUserMessageAttachments(message.content).attachments.length > 0" class="stream-attachments-tray">
-                            <AttachmentCard
-                                v-for="(att, aIdx) in parseUserMessageAttachments(message.content).attachments"
-                                :key="aIdx"
-                                :attachment="att"
-                                :session-id="sessionId"
-                                @preview-image="openImagePreview"
-                                @preview-doc="openDocPreview"
+                        <div class="user-message-bubble">
+                            <!-- 📎 附件缩略图与文件卡片预览托盘 (完全复用 AttachmentCard) -->
+                            <div v-if="parseUserMessageAttachments(message.content).attachments.length > 0" class="stream-attachments-tray">
+                                <AttachmentCard
+                                    v-for="(att, aIdx) in parseUserMessageAttachments(message.content).attachments"
+                                    :key="aIdx"
+                                    :attachment="att"
+                                    :session-id="sessionId"
+                                    @preview-image="openImagePreview"
+                                    @preview-doc="openDocPreview"
+                                />
+                            </div>
+                            <CollapsibleUserText
+                                v-if="parseUserMessageAttachments(message.content).cleanText"
+                                :text="parseUserMessageAttachments(message.content).cleanText"
                             />
                         </div>
-                        <CollapsibleUserText
-                            v-if="parseUserMessageAttachments(message.content).cleanText"
-                            :text="parseUserMessageAttachments(message.content).cleanText"
-                        />
                         <div class="msg-side-actions">
                             <time class="msg-clock">{{ formatConversationTime(message.created_at) }}</time>
                             <button
@@ -129,7 +131,7 @@
                                     <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
                                     <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
                                 </svg>
-                                <span>{{ copiedMessageId === `legacy-${message.id}` ? "已复制" : "复制" }}</span>
+                                <span>{{ copiedMessageId === `legacy-${message.id}` ? "已复制" : copyFailedMessageId === `legacy-${message.id}` ? "复制失败" : "复制" }}</span>
                             </button>
                         </div>
                     </template>
@@ -142,22 +144,24 @@
                 :scroll-element="streamElement" :view-active="viewActive" @before-expand="pauseLiveFollow">
             <template #default="{ entry }">
                 <article v-if="entry.type === 'user'" :ref="el => setQuestionAnchor(entry.id, el)" class="user-message" :data-tl="entry.id">
-                    <!-- 📎 附件缩略图与文件卡片预览托盘 (完全复用 AttachmentCard) -->
-                    <div v-if="parseUserMessageAttachments(entry.content).attachments.length > 0" class="stream-attachments-tray">
-                        <AttachmentCard
-                            v-for="(att, aIdx) in parseUserMessageAttachments(entry.content).attachments"
-                            :key="aIdx"
-                            :attachment="att"
-                            :session-id="sessionId"
-                            @preview-image="openImagePreview"
-                            @preview-doc="openDocPreview"
+                    <div class="user-message-bubble">
+                        <!-- 📎 附件缩略图与文件卡片预览托盘 (完全复用 AttachmentCard) -->
+                        <div v-if="parseUserMessageAttachments(entry.content).attachments.length > 0" class="stream-attachments-tray">
+                            <AttachmentCard
+                                v-for="(att, aIdx) in parseUserMessageAttachments(entry.content).attachments"
+                                :key="aIdx"
+                                :attachment="att"
+                                :session-id="sessionId"
+                                @preview-image="openImagePreview"
+                                @preview-doc="openDocPreview"
+                            />
+                        </div>
+                        <!-- 用户指令文本 -->
+                        <CollapsibleUserText
+                            v-if="parseUserMessageAttachments(entry.content).cleanText"
+                            :text="parseUserMessageAttachments(entry.content).cleanText"
                         />
                     </div>
-                    <!-- 用户指令文本 -->
-                    <CollapsibleUserText
-                        v-if="parseUserMessageAttachments(entry.content).cleanText"
-                        :text="parseUserMessageAttachments(entry.content).cleanText"
-                    />
                     <div class="msg-side-actions">
                         <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
                         <button
@@ -187,7 +191,7 @@
                                 <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
                                 <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
                             </svg>
-                            <span>{{ copiedMessageId === `user-${entry.id}` ? "已复制" : "复制" }}</span>
+                            <span>{{ copiedMessageId === `user-${entry.id}` ? "已复制" : copyFailedMessageId === `user-${entry.id}` ? "复制失败" : "复制" }}</span>
                         </button>
                     </div>
                 </article>
@@ -246,7 +250,7 @@
                                         <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
                                         <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
                                     </svg>
-                                    <span>{{ copiedMessageId === `entry-${entry.id}` ? "已复制" : "复制" }}</span>
+                                    <span>{{ copiedMessageId === `entry-${entry.id}` ? "已复制" : copyFailedMessageId === `entry-${entry.id}` ? "复制失败" : "复制" }}</span>
                                 </button>
                             </div>
                         </div>
@@ -255,22 +259,24 @@
                         </div>
                     </template>
                     <template v-else>
-                        <span v-if="entry.isHuman" class="intervention-indicator">人工干预输入</span>
-                        <!-- 📎 附件缩略图与文件卡片预览托盘 (完全复用 AttachmentCard) -->
-                        <div v-if="parseUserMessageAttachments(entry.content).attachments.length > 0" class="stream-attachments-tray">
-                            <AttachmentCard
-                                v-for="(att, aIdx) in parseUserMessageAttachments(entry.content).attachments"
-                                :key="aIdx"
-                                :attachment="att"
-                                :session-id="sessionId"
-                                @preview-image="openImagePreview"
-                                @preview-doc="openDocPreview"
+                        <div class="user-message-bubble">
+                            <span v-if="entry.isHuman" class="intervention-indicator">人工干预输入</span>
+                            <!-- 📎 附件缩略图与文件卡片预览托盘 (完全复用 AttachmentCard) -->
+                            <div v-if="parseUserMessageAttachments(entry.content).attachments.length > 0" class="stream-attachments-tray">
+                                <AttachmentCard
+                                    v-for="(att, aIdx) in parseUserMessageAttachments(entry.content).attachments"
+                                    :key="aIdx"
+                                    :attachment="att"
+                                    :session-id="sessionId"
+                                    @preview-image="openImagePreview"
+                                    @preview-doc="openDocPreview"
+                                />
+                            </div>
+                            <CollapsibleUserText
+                                v-if="parseUserMessageAttachments(entry.content).cleanText"
+                                :text="parseUserMessageAttachments(entry.content).cleanText"
                             />
                         </div>
-                        <CollapsibleUserText
-                            v-if="parseUserMessageAttachments(entry.content).cleanText"
-                            :text="parseUserMessageAttachments(entry.content).cleanText"
-                        />
                         <div class="msg-side-actions">
                             <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
                             <button
@@ -300,7 +306,7 @@
                                     <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
                                     <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
                                 </svg>
-                                <span>{{ copiedMessageId === `human-${entry.id}` ? "已复制" : "复制" }}</span>
+                                <span>{{ copiedMessageId === `human-${entry.id}` ? "已复制" : copyFailedMessageId === `human-${entry.id}` ? "复制失败" : "复制" }}</span>
                             </button>
                         </div>
                     </template>
@@ -1463,7 +1469,7 @@
                                     <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
                                     <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
                                 </svg>
-                                <span>{{ copiedMessageId === `comp-hdr-${entry.id}` ? "已复制" : "复制" }}</span>
+                                <span>{{ copiedMessageId === `comp-hdr-${entry.id}` ? "已复制" : copyFailedMessageId === `comp-hdr-${entry.id}` ? "复制失败" : "复制" }}</span>
                             </button>
                         </div>
                     </div>
@@ -1530,6 +1536,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowReactive, watch, type ComputedRef } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { copyPlainText } from "../../utils/clipboard";
 import { vDeferredHistory } from "../../directives/deferredHistory";
 import AttachmentCard from "./AttachmentCard.vue";
 import CollapsibleUserText from "./CollapsibleUserText.vue";
@@ -1754,26 +1761,20 @@ async function scrollToTimelineEntry(id: string) {
 const previewImageModal = ref<ParsedAttachment | null>(null);
 const previewDocModal = ref<ParsedAttachment | null>(null);
 const copiedMessageId = ref<string | null>(null);
+const copyFailedMessageId = ref<string | null>(null);
 let copyTimer: number | null = null;
 
 async function copyMessageContent(id: string, content: string) {
     if (!content) return;
-    try {
-        await navigator.clipboard.writeText(content);
-    } catch {
-        try {
-            const ta = document.createElement("textarea");
-            ta.value = content;
-            ta.style.position = "fixed";
-            ta.style.opacity = "0";
-            document.body.appendChild(ta);
-            ta.select();
-            document.execCommand("copy");
-            document.body.removeChild(ta);
-        } catch (e) {
-            console.warn("复制文本失败:", e);
-            return;
-        }
+    if (copyTimer !== null) {
+        clearTimeout(copyTimer);
+        copyTimer = null;
+    }
+    copyFailedMessageId.value = null;
+    copiedMessageId.value = null;
+    if (!await copyPlainText(content)) {
+        copyFailedMessageId.value = id;
+        return;
     }
     copiedMessageId.value = id;
     if (copyTimer !== null) clearTimeout(copyTimer);

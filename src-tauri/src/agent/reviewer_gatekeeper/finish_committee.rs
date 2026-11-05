@@ -29,18 +29,12 @@ pub(super) async fn evaluate_committee<R: tauri::Runtime>(
     finish_summary: Option<&str>,
     delivery_paths: &[String],
 ) -> ReviewResult {
-    let primary = triage
-        .and_then(|v| v.final_review_roles.iter().find(|r| !r.trim().is_empty()))
-        .and_then(|r| resolve_enabled_card(db, r).ok().flatten())
-        .filter(|c| c.allows_kind("reviewer"))
-        .or_else(|| resolve_enabled_card(db, "reviewer").ok().flatten())
-        .filter(|c| {
-            !crate::agent::tools::role_manager::is_card_disabled_for(
-                &model_routing.disabled_role_cards,
-                &c.name,
-                "reviewer",
-            )
-        });
+    let primary = crate::agent::review_team::recommended_primary(
+        db, triage.map(|v| v.final_review_roles.as_slice()).unwrap_or(&[]),
+        &model_routing.disabled_role_cards,
+    ).or_else(|| crate::agent::review_team::recommended_primary(
+        db, &["reviewer".into()], &model_routing.disabled_role_cards,
+    ));
     let cards = crate::agent::review_team::review_team(
         db,
         context,

@@ -1065,3 +1065,40 @@
         assert_eq!(cp.stage_review_pending_milestones.len(),1);
         std::fs::remove_dir_all(root).unwrap();
     }
+
+#[test]
+fn stage_role_recommendation_respects_explicit_role_off_switch_and_exclusions() {
+    let fixture = crate::agent::review_team::tests::TestDb::new();
+    crate::agent::review_team::tests::seed_cards(&fixture.db, 4);
+    let context = SandwichContext::new("sys".into(), "goal".into());
+    let mut cp = AgentCheckpoint::new("owner".into(), &context);
+    let mut verdict = crate::agent::triage::TriageVerdict::fallback("fixture");
+    verdict.stage_review_roles = vec!["missing".into(), "review_2".into(), "review_3".into()];
+    cp.triage_verdict = Some(verdict);
+    let mut config = ModelRoutingConfig::default();
+    let names = |cards: Vec<crate::agent::tools::role_manager::RoleCard>| {
+        cards.into_iter().map(|c| c.name).collect::<Vec<_>>()
+    };
+    assert_eq!(
+        names(select_stage_cards(&fixture.db, &context, &cp, &config).unwrap()),
+        vec!["review_2"]
+    );
+    config.stage_review_committee = true;
+    config.stage_reviewer_override = Some("review_1".into());
+    assert_eq!(
+        names(select_stage_cards(&fixture.db, &context, &cp, &config).unwrap()),
+        vec!["review_1"]
+    );
+    config.stage_reviewer_override = None;
+    config.disabled_role_cards = vec!["review_2".into()];
+    let cards = names(select_stage_cards(&fixture.db, &context, &cp, &config).unwrap());
+    assert_eq!(cards[0], "review_3");
+    assert_eq!(cards.len(), 3);
+    assert!(!cards.iter().any(|c| c == "review_2"));
+    config.stage_reviewer_override = Some("disabled".into());
+    assert!(select_stage_cards(&fixture.db, &context, &cp, &config).is_none());
+    cp.stages.stage_review = Some(true);
+    assert!(select_stage_cards(&fixture.db, &context, &cp, &config).is_some());
+    cp.stages.stage_review = Some(false);
+    assert!(select_stage_cards(&fixture.db, &context, &cp, &config).is_none());
+}

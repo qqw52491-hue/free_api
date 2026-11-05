@@ -28,7 +28,7 @@ async fn review(
     committee: bool,
     rx: &mut watch::Receiver<u64>,
 ) -> ReviewResult {
-    review_task(mock, committee, rx, true, false).await.0
+    review_task(mock, committee, rx, true, false, true).await.0
 }
 
 async fn review_task(
@@ -37,6 +37,7 @@ async fn review_task(
     rx: &mut watch::Receiver<u64>,
     writes: bool,
     mechanical_only: bool,
+    complex: bool,
 ) -> (ReviewResult, Vec<serde_json::Value>) {
     let mut context = SandwichContext::new("sys".into(), "完成当前任务".into());
     let baseline = GitBaseline::capture(&mock.root);
@@ -48,8 +49,9 @@ async fn review_task(
     routing.stage_review_committee = committee;
     routing.role_models.insert("reviewer".into(), "mock".into());
     let mut triage = crate::agent::triage::TriageVerdict::fallback("fixture");
+    if !complex { triage.route = "direct".into(); }
     triage.final_review_mode = if mechanical_only { "mechanical_only" } else { "artifact_quality" }.into();
-    triage.final_review_roles = vec!["review_0".into()];
+    triage.final_review_roles = vec!["missing_candidate".into(), "review_0".into()];
     let app = tauri::test::mock_app();
     let session_id = format!("committee-session-{}", uuid::Uuid::new_v4());
     use tauri::Listener;
@@ -98,7 +100,7 @@ async fn committee_choice_does_not_trigger_reviews_or_member_progress_for_exempt
     for committee in [false, true] {
         // 包含已有工作区改动时的只读新问答；mechanical_only 则即使有本轮写入仍走既有机械核验。
         for (writes, mechanical) in [(false, false), (false, true), (true, true)] {
-            let (result, events) = review_task(&mock, committee, &mut rx, writes, mechanical).await;
+            let (result, events) = review_task(&mock, committee, &mut rx, writes, mechanical, false).await;
             assert!(result.is_passed(), "{result:?}");
             assert!(result.summary.contains("已跳过"));
             assert_eq!(mock.requests.lock().unwrap().len(), 0, "人数开关不能新增审查请求");
@@ -129,7 +131,11 @@ async fn required_committee_reviews_have_three_independent_contexts() {
     crate::agent::review_team::tests::seed_cards(&single_mock.db, 3);
     let result = review(&single_mock, false, &mut rx).await;
     assert!(result.is_passed());
-    assert_eq!(single_mock.requests.lock().unwrap().len(), 1);
+    let requests = single_mock.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    let input = requests[0]["messages"].to_string();
+    assert!(input.contains("REVIEW_MEMBER_0"), "must try the next available recommended role");
+    assert!(input.contains(crate::agent::review_tools::TEST_EVIDENCE_GUIDANCE.trim()), "final reviewer must receive evidence-target advice");
 }
 
 #[tokio::test]
@@ -272,4 +278,20 @@ fn unit_committee_aggregation_preserves_blocker_and_service_failure() {
     out = aggregate_committee_results(vec![("A".into(), pass)]);
     assert!(out.is_passed());
     assert!(out.summary.contains("实际为单人"));
+}
+
+#[tokio::test]
+async fn complex_readonly_task_starts_independent_final_review() {
+    for committee in [false, true] {
+        let mock = MockReviewer::new(vec![passed()]).await;
+        crate::agent::review_team::tests::seed_cards(&mock.db, 3);
+        let (_tx, mut rx) = watch::channel(0);
+        let (result, _) = review_task(&mock, committee, &mut rx, false, false, true).await;
+        assert!(result.is_passed(), "{result:?}");
+        assert!(!result.summary.contains("已跳过"));
+        assert_eq!(
+            mock.requests.lock().unwrap().len(),
+            if committee { 3 } else { 1 }
+        );
+    }
 }

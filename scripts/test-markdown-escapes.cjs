@@ -49,3 +49,16 @@ const unfinished = '```js\n' + String.raw`const text = "a\nb";`;
 assert.equal(normalizeStreamingMarkdown(unfinished), unfinished + '\n```', 'streaming fence completion must preserve escapes');
 assert.equal(copiedCode(unfinished), String.raw`const text = "a\nb";`);
 console.log('PASS Markdown escapes: audit JSON, copy fidelity, regex, strings, Windows paths, diff, inline/prose, real newlines, unfinished streaming fences');
+
+// Real report shape: one literal backslash+n following a standalone separator.
+// Repair its visual block only; source, code and ordinary escape examples stay intact.
+for (const marker of ['---', '-----']) {
+  const source = '第一节\n\n' + marker + String.raw`\n` + '\n\n## 第二节\n正文';
+  assert.equal((renderMarkdown(source).match(/<hr\b/g) || []).length, 1);
+  assert.equal(normalizeStreamingMarkdown(source), source, 'transport data remains untouched');
+  assert.equal(copiedCode('```text\n' + marker + String.raw`\n` + '\n```'), marker + String.raw`\n`);
+}
+for (const source of [String.raw`解释 ---\n 的含义`, '`' + String.raw`---\n` + '`', String.raw`---\\n`, '    ' + String.raw`---\n`]) {
+  assert(!renderMarkdown(source).includes('<hr'), 'only a standalone non-code separator is repaired');
+}
+console.log('PASS standalone escaped separators: visible hr, raw source unchanged, code/inline/prose/indent/double escapes preserved');

@@ -8,6 +8,18 @@ import hljs from "highlight.js/lib/common";
 marked.use({
     extensions: [
         {
+            // Some reports contain an actual backslash+n after a standalone
+            // thematic break. Repair that block only, never decode body/code.
+            name: "escapedThematicBreak",
+            level: "block" as const,
+            tokenizer(src: string) {
+                const match = src.match(/^ {0,3}-{3,}\\n[ \t]*(?:\r?\n|$)/);
+                if (match) return { type: "escapedThematicBreak", raw: match[0] };
+                return undefined;
+            },
+            renderer() { return "<hr>\n"; },
+        },
+        {
             name: "inlineKatex",
             level: "inline" as const,
             start(src: string) {
