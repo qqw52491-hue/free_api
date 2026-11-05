@@ -208,6 +208,170 @@ const KNOWN_EXACT_FILENAMES = new Set([
     "makefile", "cmakelists.txt", "agents.md", "readme.md",
 ]);
 
+const STATUS_PILL_SUCCESS_RE = /^(?:[✓✔✅]\s*)?(?:.*?(?:已核实|校验通过|已制作完成|制作完成|验证通过|测试通过|构建通过|已完成|已就绪|已通过|核验通过|一致|正常|已生效|已启动|已连接)|PASS|VERIFIED|READY|OK)$/i;
+const STATUS_PILL_WARN_RE = /^(?:[⚠⏳]\uFE0F?\s*)?(?:.*?(?:待核实|处理中|进行中|待验证|校验中|等待中|构建中|排队中)|PENDING|WAITING|RUNNING)$/i;
+const STATUS_PILL_DANGER_RE = /^(?:[✗✘❌]\s*)?(?:.*?(?:校验失败|未通过|已中断|构建失败|验证失败|连接失败|异常)|FAILED|ERROR)$/i;
+const HERO_METRIC_RE = /^[+-]?\d[\d,]*(?:\.\d+)?\s*(?:GiB|GB|MiB|MB|KiB|KB|TiB|TB|bytes|B|ms|s|min|h|%|tok\/s|req\/s|ops\/s|FPS|QPS|个|项|步|次|行|文件)$/i;
+const BAR_SEGMENT_RE = /^[-*•]?\s*([^\d%\n:：|]+?)\s*[:：]?\s*(\d+(?:\.\d+)?)%\s*$/;
+const BAR_PALETTE = ["#3b82f6", "#10b981", "#f59e0b", "#8b5cf6", "#ec4899"];
+
+function classifyStatusPill(raw: string): "success" | "warning" | "danger" | null {
+    const t = raw.trim();
+    if (!t || t.length < 2 || t.length > 34) return null;
+    if (/[\/\\{};=()<>`"'$&|]/.test(t)) return null;
+    if (STATUS_PILL_SUCCESS_RE.test(t)) return "success";
+    if (STATUS_PILL_WARN_RE.test(t)) return "warning";
+    if (STATUS_PILL_DANGER_RE.test(t)) return "danger";
+    return null;
+}
+
+function escapeHtmlText(s: string): string {
+    return s
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+}
+
+/**
+ * 解析并渲染 Codex 风格数据指标卡 / 分段比例构成卡
+ */
+function tryRenderCodexMetricCard(rawText: string, forceCard: boolean): string | null {
+    const lines = rawText
+        .split(/\r?\n/)
+        .map((l) => l.replace(/^\s*>\s?/, "").trim())
+        .filter(Boolean);
+    if (lines.length === 0) return null;
+
+    if (lines[0] && /^\[!(?:METRIC|CARD|STAT)\]/i.test(lines[0])) {
+        lines[0] = lines[0].replace(/^\[!(?:METRIC|CARD|STAT)\]\s*/i, "").trim();
+        if (!lines[0]) lines.shift();
+        forceCard = true;
+    }
+    if (lines.length === 0) return null;
+
+    const segments: Array<{ label: string; pct: number; color: string }> = [];
+    let heroValue = "";
+    let heroTone: "green" | "default" = "default";
+    let heroSub = "";
+    let title = "";
+    const extraHtmlRows: string[] = [];
+
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const cleanLine = line.replace(/^\*\*|\*\*$/g, "").trim();
+
+        const segMatch = cleanLine.match(BAR_SEGMENT_RE);
+        if (segMatch) {
+            const pct = parseFloat(segMatch[2]);
+            if (pct > 0 && pct <= 100) {
+                segments.push({
+                    label: segMatch[1].trim(),
+                    pct,
+                    color: BAR_PALETTE[segments.length % BAR_PALETTE.length],
+                });
+                continue;
+            }
+        }
+
+        if (!heroValue && HERO_METRIC_RE.test(cleanLine)) {
+            heroValue = cleanLine;
+            if (lines.some((l) => /SHA256|已核实|校验通过|部署包/i.test(l)) && !segments.length) {
+                heroTone = "green";
+            }
+            const nextLine = lines[i + 1]?.replace(/^\*\*|\*\*$/g, "").trim() || "";
+            if (
+                nextLine &&
+                !HERO_METRIC_RE.test(nextLine) &&
+                !BAR_SEGMENT_RE.test(nextLine) &&
+                !nextLine.startsWith("`") &&
+                (/bytes|实际|约\s*\d|大小|占比|耗时/i.test(nextLine) || /^\d[\d,]*\s+bytes$/i.test(nextLine))
+            ) {
+                heroSub = nextLine;
+                i++;
+            }
+            continue;
+        }
+
+        if (!title && i === 0 && cleanLine.length <= 42 && !cleanLine.startsWith("`")) {
+            title = cleanLine;
+            continue;
+        }
+
+        const singleCodeMatch = cleanLine.match(/^`([^`]+)`$/);
+        if (singleCodeMatch) {
+            const pillKind = classifyStatusPill(singleCodeMatch[1]);
+            if (pillKind) {
+                extraHtmlRows.push(
+                    `<div class="codex-card-pill-row"><span class="codex-status-pill is-${pillKind}">${escapeHtmlText(singleCodeMatch[1].trim())}</span></div>`
+                );
+                continue;
+            }
+            extraHtmlRows.push(`<div class="codex-card-code-row"><code>${escapeHtmlText(singleCodeMatch[1])}</code></div>`);
+            continue;
+        }
+
+        const kvMatch = cleanLine.match(/^([^:：|]{1,24})\s*[:：|]\s*(.+)$/);
+        if (kvMatch) {
+            const k = kvMatch[1].trim();
+            const v = kvMatch[2].trim();
+            const vCode = v.match(/^`([^`]+)`$/);
+            if (vCode) {
+                extraHtmlRows.push(
+                    `<div class="codex-card-kv"><span class="codex-kv-k">${escapeHtmlText(k)}:</span><code>${escapeHtmlText(vCode[1])}</code></div>`
+                );
+            } else if (v) {
+                extraHtmlRows.push(
+                    `<div class="codex-card-kv is-split"><span class="codex-kv-k">${escapeHtmlText(k)}</span><span class="codex-kv-v">${escapeHtmlText(v)}</span></div>`
+                );
+            }
+            continue;
+        }
+
+        extraHtmlRows.push(`<div class="codex-card-text">${escapeHtmlText(cleanLine)}</div>`);
+    }
+
+    const hasValidBar = segments.length >= 2;
+    if (!forceCard && !heroValue && !hasValidBar) {
+        return null;
+    }
+    if (!forceCard && !hasValidBar && extraHtmlRows.length === 0 && !heroSub) {
+        return null;
+    }
+
+    let html = `<div class="codex-metric-card">`;
+    if (title) {
+        html += `<div class="codex-card-title">${escapeHtmlText(title)}</div>`;
+    }
+    if (hasValidBar) {
+        const total = segments.reduce((acc, s) => acc + s.pct, 0) || 100;
+        const barSpans = segments
+            .map((s) => {
+                const widthPct = Math.max(2, Math.round((s.pct / total) * 1000) / 10);
+                return `<span class="codex-bar-seg" style="width:${widthPct}%;background:${s.color}" title="${escapeHtmlText(s.label)} ${s.pct}%"></span>`;
+            })
+            .join("");
+        const legendSpans = segments
+            .map(
+                (s) =>
+                    `<span class="codex-legend-item"><i class="codex-legend-dot" style="background:${s.color}"></i><span>${escapeHtmlText(s.label)} ${s.pct}%</span></span>`
+            )
+            .join("");
+        html += `<div class="codex-stacked-bar">${barSpans}</div><div class="codex-bar-legend">${legendSpans}</div>`;
+    }
+    if (heroValue) {
+        html += `<div class="codex-hero-value ${heroTone === "green" ? "is-green" : ""}">${escapeHtmlText(heroValue)}</div>`;
+    }
+    if (heroSub) {
+        html += `<div class="codex-hero-sub">${escapeHtmlText(heroSub)}</div>`;
+    }
+    if (extraHtmlRows.length > 0) {
+        html += `<div class="codex-card-extras">${extraHtmlRows.join("")}</div>`;
+    }
+    html += `</div>`;
+    return html;
+}
+
 /**
  * 根据文件路径或文件名生成行内 14×14 语言/文件类型专属 SVG 图标
  */
@@ -434,6 +598,12 @@ export function renderMarkdown(content: string): string {
         renderer.code = function ({ text, lang }: { text: string; lang?: string }) {
             const normalizedLang = (lang || "").trim().toLowerCase();
 
+            // 0. Codex 风格指标卡 / 体积构成比例卡 (```metric / ```card / ```stat)
+            if (normalizedLang === "metric" || normalizedLang === "card" || normalizedLang === "stat") {
+                const cardHtml = tryRenderCodexMetricCard(text, true);
+                if (cardHtml) return cardHtml;
+            }
+
             // 1. 专业 Diff 代码变更对比代码块
             if (normalizedLang === "diff") {
                 const lines = text.split("\n");
@@ -537,6 +707,10 @@ export function renderMarkdown(content: string): string {
                     <div class="markdown-alert-body">${contentHtml}</div>
                 </div>`;
             }
+            if (!/<img\b|<video\b|<audio\b|<table\b|<pre\b/i.test(innerHtml) && typeof arg.raw === "string") {
+                const metricCard = tryRenderCodexMetricCard(arg.raw, false);
+                if (metricCard) return metricCard;
+            }
             return `<blockquote>${innerHtml}</blockquote>`;
         };
 
@@ -567,6 +741,10 @@ export function renderMarkdown(content: string): string {
                 if (iconSvg) {
                     return `<span class="markdown-file-ref">${iconSvg}<span class="markdown-file-ref-name">${escaped}</span></span>`;
                 }
+            }
+            const pillTone = classifyStatusPill(raw);
+            if (pillTone) {
+                return `<span class="codex-status-pill is-${pillTone}">${escaped}</span>`;
             }
             return `<code>${escaped}</code>`;
         };
@@ -631,11 +809,21 @@ export function renderMarkdown(content: string): string {
             return `<img src="${safeSrc}" alt="${safeText}"${titleAttr} class="md-img" loading="lazy" />`;
         };
 
-        const html = marked.parse(sanitizedContent, {
-            breaks: true,
-            gfm: true,
-            renderer,
-        }) as string;
+        const html = (
+            marked.parse(sanitizedContent, {
+                breaks: true,
+                gfm: true,
+                renderer,
+            }) as string
+        ).replace(/<td(\s[^>]*)?>\s*(✅|✓|✔|❌|✗|✘|⚠️|⏳)\s*<\/td>/g, (_m, attrs = "", sym) => {
+            if (sym === "✅" || sym === "✓" || sym === "✔") {
+                return `<td${attrs}><span class="codex-check-badge is-pass" aria-label="通过"><svg viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="7" fill="currentColor"/><path d="M5 8.2L7.1 10.3L11.2 5.8" stroke="#0b1410" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg></span></td>`;
+            }
+            if (sym === "❌" || sym === "✗" || sym === "✘") {
+                return `<td${attrs}><span class="codex-check-badge is-fail" aria-label="未通过"><svg viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="7" fill="currentColor"/><path d="M5.5 5.5L10.5 10.5M10.5 5.5L5.5 10.5" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round"/></svg></span></td>`;
+            }
+            return `<td${attrs}><span class="codex-check-badge is-warn" aria-label="注意"><svg viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="7" fill="currentColor"/><path d="M8 4.8V8.6M8 11.2H8.01" stroke="#18181b" stroke-width="1.9" stroke-linecap="round"/></svg></span></td>`;
+        });
         if (content.length <= MAX_CACHEABLE_LENGTH) {
             if (markdownCache.size >= MAX_MARKDOWN_CACHE_SIZE) {
                 const oldestKeys = Array.from(markdownCache.keys()).slice(0, 100);

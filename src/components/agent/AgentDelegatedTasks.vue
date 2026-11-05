@@ -1,5 +1,5 @@
 <template>
-  <section v-if="tasks.length || loadError" class="delegated-tasks-dock-wrap" aria-label="协同子 Agent 进度">
+  <section v-if="tasks.length || loadError" class="delegated-tasks-dock-wrap" aria-label="协同子 Agent 进度" @click.stop>
     <div class="subagent-dock" :class="{ 'is-active': runningCount > 0, 'is-waiting': waitingCount > 0 }">
       <button type="button" class="dock-header" :aria-expanded="dockOpen" @click="toggleDock">
         <div class="dock-header-left">
@@ -57,7 +57,7 @@
             </div>
             <div class="subagent-row-right">
               <span v-if="task.queued_messages" class="meta-chip queue-chip" title="待进入上下文的消息数">✉️ {{ task.queued_messages }}</span>
-              <span v-if="task.model_id" class="meta-chip model-chip" :title="task.model_id">{{ shortModel(task.model_id) }}</span>
+              <span v-if="task.model_id && shortModel(task.model_id)" class="meta-chip model-chip" :title="shortModel(task.model_id)">{{ shortModel(task.model_id) }}</span>
               <span v-if="stepCount(task)" class="meta-chip">{{ stepCount(task) }} 步</span>
               <span v-if="durationLabel(task)" class="meta-chip">{{ durationLabel(task) }}</span>
               <span class="status-badge" :class="`state-${stateKey(task)}`">{{ label(task) }}</span>
@@ -166,7 +166,7 @@ type Task = {
 };
 type Receipt = { message_id: string; delivery: string };
 
-const props = defineProps<{ sessionId: string; active: boolean }>();
+const props = defineProps<{ sessionId: string; active: boolean; allModels?: Array<{ id: string; name: string }> }>();
 const tasks = ref<Task[]>([]);
 const drafts = ref<Record<string, string>>({});
 const busy = ref<Record<string, boolean>>({});
@@ -269,7 +269,10 @@ function shortTool(tool: string): string {
 }
 
 function shortModel(model: string): string {
-  const clean = model.includes('/') ? (model.split('/').pop() || model) : model;
+  const matched = props.allModels?.find(m => m.id === model);
+  const resolved = matched?.name || model;
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(resolved)) return '';
+  const clean = resolved.includes('/') ? (resolved.split('/').pop() || resolved) : resolved;
   return clean.replace(/-\d{8}$/, '');
 }
 

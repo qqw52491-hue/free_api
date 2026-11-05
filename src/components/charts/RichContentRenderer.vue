@@ -439,44 +439,200 @@ function getBlockHtml(block: ContentBlock, idx: number): string {
   color: var(--theme-text-secondary, #a1a1aa);
 }
 
-/* 表格 (Obsidian 曜石暗色网格与悬停高亮) */
+/* 表格 (Codex 极简无竖线横表 + 双列右对齐 + 状态圆标) */
 .markdown-segment :deep(table) {
   width: 100%;
-  margin: 12px 0 16px;
-  border-collapse: separate;
+  margin: 14px 0 18px;
+  border-collapse: collapse;
   border-spacing: 0;
-  border: 1px solid rgba(var(--theme-foreground-rgb), 0.12);
-  border-radius: 8px;
-  overflow: hidden;
-  font-size: 13px;
+  border: none;
+  font-size: 13.5px;
 }
 .markdown-segment :deep(th) {
-  padding: 8px 12px;
-  background: var(--theme-bg-raised, #1f2026);
-  color: var(--theme-text-primary, #f4f4f5);
+  padding: 9px 12px 9px 0;
+  background: transparent;
+  color: var(--theme-text-secondary, #a1a1aa);
   font-weight: 600;
+  font-size: 12.5px;
   text-align: left;
-  border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.1);
-  border-right: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
-}
-.markdown-segment :deep(th:last-child) {
+  border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.12);
   border-right: none;
 }
 .markdown-segment :deep(td) {
-  padding: 7px 12px;
-  background: var(--theme-bg-base, #161619);
+  padding: 10px 12px 10px 0;
+  background: transparent;
   color: var(--theme-md-body, #d4d4d8);
-  border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.06);
-  border-right: 1px solid rgba(var(--theme-foreground-rgb), 0.06);
-}
-.markdown-segment :deep(td:last-child) {
+  border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.07);
   border-right: none;
+  vertical-align: middle;
 }
-.markdown-segment :deep(tr:last-child td) {
-  border-bottom: none;
+.markdown-segment :deep(th:last-child),
+.markdown-segment :deep(td:last-child) {
+  padding-right: 0;
+}
+/* 双列表格（如 内容 ↔ 大小）末列自动右对齐等宽数字 */
+.markdown-segment :deep(table tr > th:nth-child(2):last-child),
+.markdown-segment :deep(table tr > td:nth-child(2):last-child) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 .markdown-segment :deep(tr:hover td) {
-  background: var(--theme-bg-panel, #1e1e24);
+  background: rgba(var(--theme-foreground-rgb), 0.02);
+}
+
+/* Codex 表格状态矢量圆标 (✅ / ❌ / ⚠️) */
+.markdown-segment :deep(.codex-check-badge) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  vertical-align: middle;
+}
+.markdown-segment :deep(.codex-check-badge svg) {
+  width: 15px;
+  height: 15px;
+}
+.markdown-segment :deep(.codex-check-badge.is-pass) {
+  color: var(--theme-status-success, #22c55e);
+}
+.markdown-segment :deep(.codex-check-badge.is-fail) {
+  color: var(--theme-status-danger, #ef4444);
+}
+.markdown-segment :deep(.codex-check-badge.is-warn) {
+  color: var(--theme-status-warning, #f59e0b);
+}
+
+/* Codex 行内状态胶囊 (如 服务器文件已核实 / SHA256 校验通过) */
+.markdown-segment :deep(.codex-status-pill) {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  margin: 1px 2px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 550;
+  line-height: 1.45;
+  letter-spacing: 0.01em;
+  vertical-align: baseline;
+}
+.markdown-segment :deep(.codex-status-pill.is-success) {
+  color: var(--theme-status-success, #34d399);
+  background: color-mix(in srgb, var(--theme-status-success, #22c55e) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--theme-status-success, #22c55e) 26%, transparent);
+}
+.markdown-segment :deep(.codex-status-pill.is-warning) {
+  color: var(--theme-status-warning, #fbbf24);
+  background: color-mix(in srgb, var(--theme-status-warning, #f59e0b) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--theme-status-warning, #f59e0b) 26%, transparent);
+}
+.markdown-segment :deep(.codex-status-pill.is-danger) {
+  color: var(--theme-status-danger, #f87171);
+  background: color-mix(in srgb, var(--theme-status-danger, #ef4444) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--theme-status-danger, #ef4444) 26%, transparent);
+}
+
+/* Codex 数据指标卡 & 分段体积构成卡片 */
+.markdown-segment :deep(.codex-metric-card) {
+  margin: 14px 0 16px;
+  padding: 16px 18px;
+  border-radius: 14px;
+  border: 1px solid rgba(var(--theme-foreground-rgb), 0.1);
+  background: var(--theme-inset-bg, rgba(var(--theme-foreground-rgb), 0.025));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.markdown-segment :deep(.codex-card-title) {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--theme-text-primary, #f4f4f5);
+  line-height: 1.35;
+}
+.markdown-segment :deep(.codex-stacked-bar) {
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  height: 12px;
+  border-radius: 999px;
+  overflow: hidden;
+  gap: 2px;
+  background: rgba(var(--theme-foreground-rgb), 0.08);
+  margin-top: 2px;
+}
+.markdown-segment :deep(.codex-bar-seg) {
+  display: block;
+  height: 100%;
+  min-width: 4px;
+}
+.markdown-segment :deep(.codex-bar-legend) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  font-size: 12px;
+  color: var(--theme-text-secondary, #a1a1aa);
+}
+.markdown-segment :deep(.codex-legend-item) {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.markdown-segment :deep(.codex-legend-dot) {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.markdown-segment :deep(.codex-hero-value) {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  color: var(--theme-text-primary, #f4f4f5);
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+.markdown-segment :deep(.codex-hero-value.is-green) {
+  color: var(--theme-status-success, #34d399);
+}
+.markdown-segment :deep(.codex-hero-sub) {
+  font-size: 12px;
+  color: var(--theme-text-muted, #8b93a1);
+  line-height: 1.4;
+  margin-top: -2px;
+}
+.markdown-segment :deep(.codex-card-extras) {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 2px;
+}
+.markdown-segment :deep(.codex-card-kv) {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+.markdown-segment :deep(.codex-card-kv.is-split) {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.markdown-segment :deep(.codex-kv-k) {
+  color: var(--theme-text-secondary, #a1a1aa);
+}
+.markdown-segment :deep(.codex-kv-v) {
+  color: var(--theme-text-primary, #f4f4f5);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.markdown-segment :deep(.codex-card-pill-row) {
+  margin-top: 2px;
 }
 
 /* 行内代码（暖琥珀金微胶囊） */

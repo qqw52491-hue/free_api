@@ -22,11 +22,11 @@
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
 
-/* 居中阅读流容器 (彻底解决左侧靠边偏离问题，更宽敞大方) */
+/* 居中阅读流容器 (彻底解决左侧靠边偏离问题，与输入框/子任务栏同宽对齐) */
 .stream-centered-content {
     --stream-entry-gap: 8px;
     width: 100%;
-    max-width: 980px;
+    max-width: 820px;
     margin: 0 auto;
     display: flex;
     flex-direction: column;

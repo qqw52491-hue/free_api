@@ -327,9 +327,10 @@ export function computeFormatStepOperation(step: AgentStepItem): StepOperationDi
         const rawTask = String(p.task || p.message || "").replace(/\s+/g, " ").trim();
         const roleLabel = String(p.role_label || p.roleLabel || p.role || "").trim();
         const badgeLabel = subAct === "resume" ? "追问子任务" : profile === "reviewer" ? "子审查" : profile === "writer" ? "子写入" : profile === "worker" ? "子探针" : "协同子任务";
+        const descClean = (step.description && step.description !== "执行操作" ? step.description.replace(/\s+/g, " ").trim() : "派发协同子任务").replace(new RegExp(`^${badgeLabel}\\s*[:：]?\\s*`), "");
         const action = rawTask
-            ? `${badgeLabel}: "${rawTask.slice(0, 42)}${rawTask.length > 42 ? "…" : ""}"${roleLabel ? ` [${roleLabel}]` : ""}`
-            : (step.description && step.description !== "执行操作" ? step.description.replace(/\s+/g, " ") : "派发协同子任务");
+            ? `"${rawTask.slice(0, 42)}${rawTask.length > 42 ? "…" : ""}"${roleLabel ? ` [${roleLabel}]` : ""}`
+            : descClean;
         return {
             badgeIcon: profile === "writer" ? "✍️" : "🤖",
             badgeLabel,

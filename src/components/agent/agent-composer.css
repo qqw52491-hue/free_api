@@ -3062,7 +3062,7 @@ textarea::placeholder {
 .composer-actions { gap: 4px; }
 .composer-tools > .composer-shortcut-hint-wrap .shortcut-hint-btn { border: 0; background: transparent; }
 
-/* 圆形发送 / 停止键 */
+/* 圆形发送 / 停止键 / 运行中模式胶囊 */
 .submit-control {
     width: 30px !important;
     height: 30px !important;
@@ -3070,25 +3070,42 @@ textarea::placeholder {
     box-shadow: none;
 }
 .submit-control:hover:not(:disabled) { transform: none; opacity: 0.9; }
-.submit-control:disabled { opacity: 0.25 !important; }
-.stop-control {
-    height: 30px;
-    padding: 0 12px;
-    border-radius: 15px;
+.submit-control:disabled,
+.submit-control.is-queue-submit:disabled,
+.submit-control.is-interrupt-submit:disabled {
+    opacity: 1 !important;
+    background: rgba(var(--theme-foreground-rgb), 0.08) !important;
+    color: rgba(var(--theme-foreground-rgb), 0.35) !important;
+    box-shadow: none !important;
 }
-
-/* 遥测行：弱化 */
-.composer-telemetry-line { opacity: 0.55; font-size: 11px; margin-top: 5px; }
-.composer-telemetry-line:hover { opacity: 1; }
-.t-val { font-weight: 500; }
+.stop-control {
+    height: 28px;
+    padding: 0 11px;
+    border-radius: 999px;
+    font-size: 11.5px;
+    font-weight: 550;
+}
+.mode-switch-pill {
+    height: 28px;
+    padding: 0 10px;
+    border-radius: 999px;
+    font-size: 11.5px;
+    font-weight: 500;
+}
 
 /* 单层边框 + 收窄居中（覆盖上方双层样式） */
 .manus-composer {
-    max-width: 760px;
+    max-width: 820px;
     margin: 0 auto;
     padding: 10px 14px 8px !important;
     border-radius: 18px !important;
+    border: 1px solid var(--theme-border, rgba(var(--theme-foreground-rgb), 0.1));
     background: var(--theme-bg-panel, #1c1c1f);
+    box-shadow: var(--shadow-sm, 0 2px 10px rgba(0, 0, 0, 0.08));
+}
+.manus-composer:focus-within {
+    border-color: rgba(var(--theme-foreground-rgb), 0.2);
+    box-shadow: var(--shadow-md, 0 4px 18px rgba(0, 0, 0, 0.12));
 }
 .composer-input-surface {
     padding: 0;
@@ -3096,5 +3113,18 @@ textarea::placeholder {
     border-radius: 0;
     background: transparent;
 }
-.composer-telemetry-line { max-width: 760px; margin-left: auto; margin-right: auto; }
-.model-setup-hint { max-width: 760px; margin-left: auto; margin-right: auto; }
+.composer-telemetry-line {
+    max-width: 100%;
+    margin-top: 8px;
+    opacity: 1;
+    font-size: 11.5px;
+    flex-wrap: wrap;
+    row-gap: 4px;
+}
+.t-label {
+    color: var(--theme-text-secondary, #9ca3af);
+}
+.t-val {
+    font-weight: 600;
+}
+.model-setup-hint { max-width: 820px; margin-left: auto; margin-right: auto; }

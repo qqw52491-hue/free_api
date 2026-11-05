@@ -1,11 +1,11 @@
 <template>
-    <section class="outcome-notice" :class="`is-${kind}`" role="status" :aria-label="title">
+    <section class="outcome-notice" :class="[`is-${kind}`, { 'is-compact': isCompact }]" role="status" :aria-label="title">
         <header class="outcome-heading">
             <span class="outcome-icon" aria-hidden="true">
-                <svg v-if="kind === 'cancelled'" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+                <svg v-if="kind === 'cancelled'" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
                     <path d="M9 6v12M15 6v12" />
                 </svg>
-                <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M12 8v5m0 3h.01" /><circle cx="12" cy="12" r="9" />
                 </svg>
             </span>
@@ -39,6 +39,7 @@ const expanded = ref(false);
 const title = computed(() => props.kind === 'cancelled' ? '任务已停止' : '任务未能完成');
 const fullText = computed(() => props.content.trim() || (props.kind === 'cancelled' ? '任务已停止。' : '本次运行未能完成。'));
 const hasDetails = computed(() => fullText.value.length > 900 || fullText.value.split('\n').length > 12);
+const isCompact = computed(() => !hasDetails.value && !fullText.value.includes('\n') && !fullText.value.includes('```') && fullText.value.length <= 140);
 
 // Raw JSON and stack traces get code formatting; normal explanations retain Markdown.
 function formatted(text: string): string {
@@ -68,45 +69,98 @@ watch(() => [props.kind, props.content], () => { expanded.value = false; });
 
 <style scoped>
 .outcome-notice {
-    --outcome-accent: var(--theme-status-danger, #c7364d);
-    margin-top: 6px;
-    padding: 16px 18px;
+    --outcome-accent: var(--theme-status-danger, #f87171);
+    --outcome-border: color-mix(in srgb, var(--outcome-accent) 24%, transparent);
+    --outcome-bg: color-mix(in srgb, var(--outcome-accent) 5%, var(--theme-bg-panel, transparent));
+    margin-top: 4px;
+    padding: 10px 14px;
     min-width: 0;
-    border: 1px solid rgba(var(--theme-foreground-rgb), .10);
-    border-left: 3px solid var(--outcome-accent);
-    border-radius: 12px;
-    background: rgba(var(--theme-foreground-rgb), .025);
+    border: 1px solid var(--outcome-border);
+    border-radius: 10px;
+    background: var(--outcome-bg);
     color: var(--theme-text-primary);
 }
-.outcome-notice.is-cancelled { --outcome-accent: var(--theme-status-warning, #96600f); }
-.outcome-heading { display: flex; align-items: center; gap: 11px; margin-bottom: 12px; }
-.outcome-icon {
-    display: grid; place-items: center; flex: 0 0 34px; height: 34px;
-    border-radius: 10px; color: var(--outcome-accent);
-    background: rgba(var(--theme-foreground-rgb), .045);
+.outcome-notice.is-cancelled {
+    --outcome-accent: var(--theme-status-warning, #dfb575);
 }
-.outcome-labels { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px 12px; min-width: 0; }
-.outcome-labels h3 { margin: 0; font-size: 14px; font-weight: 600; line-height: 1.5; }
-.outcome-caption { color: var(--theme-text-muted); font-size: 12px; line-height: 1.5; }
-.outcome-body, .outcome-detail-body { min-width: 0; overflow-wrap: anywhere; font-size: 13px; line-height: 1.7; }
+.outcome-notice.is-compact {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 12px;
+    padding: 7px 12px;
+    border-radius: 9px;
+}
+.outcome-heading {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+.outcome-notice.is-compact .outcome-heading {
+    margin-bottom: 0;
+    flex-shrink: 0;
+    padding-right: 12px;
+    border-right: 1px solid rgba(var(--theme-foreground-rgb), .1);
+}
+.outcome-icon {
+    display: grid;
+    place-items: center;
+    flex: 0 0 20px;
+    height: 20px;
+    border-radius: 50%;
+    color: var(--outcome-accent);
+    background: color-mix(in srgb, var(--outcome-accent) 14%, transparent);
+}
+.outcome-labels {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    white-space: nowrap;
+}
+.outcome-labels h3 {
+    margin: 0;
+    font-size: 12.5px;
+    font-weight: 600;
+    line-height: 1.35;
+    color: var(--theme-text-primary, #e4e4e7);
+}
+.outcome-caption {
+    color: var(--theme-text-muted);
+    font-size: 11.5px;
+    line-height: 1.35;
+}
+.outcome-body, .outcome-detail-body {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--theme-text-secondary, #a9b1c1);
+}
+.outcome-notice.is-compact .outcome-body {
+    flex: 1;
+    font-size: 12.5px;
+}
 .outcome-notice :deep(.markdown-segment *) { animation: none; }
 .outcome-body :deep(.markdown-content > :first-child), .outcome-detail-body :deep(.markdown-content > :first-child) { margin-top: 0; }
 .outcome-body :deep(.markdown-content > :last-child), .outcome-detail-body :deep(.markdown-content > :last-child) { margin-bottom: 0; }
-.outcome-details { margin-top: 12px; border-top: 1px solid rgba(var(--theme-foreground-rgb), .08); }
+.outcome-details { margin-top: 8px; border-top: 1px solid rgba(var(--theme-foreground-rgb), .08); width: 100%; }
 .outcome-details > summary {
     display: flex; align-items: center; gap: 6px; width: fit-content;
-    padding: 11px 0 0; list-style: none; color: var(--theme-text-secondary);
-    cursor: pointer; font-size: 12px;
+    padding: 8px 0 0; list-style: none; color: var(--theme-text-secondary);
+    cursor: pointer; font-size: 11.5px;
 }
 .outcome-details > summary::-webkit-details-marker { display: none; }
 .outcome-details > summary svg { transition: transform .15s ease; }
 .outcome-details[open] > summary svg { transform: rotate(90deg); }
 .outcome-details > summary:hover { color: var(--theme-text-primary); }
 .outcome-details > summary:focus-visible { outline: 2px solid var(--outcome-accent); outline-offset: 4px; border-radius: 2px; }
-.outcome-detail-body { margin-top: 12px; max-height: 420px; overflow: auto; }
+.outcome-detail-body { margin-top: 8px; max-height: 420px; overflow: auto; }
 @media (max-width: 560px) {
-    .outcome-notice { padding: 14px; }
-    .outcome-labels { flex-direction: column; gap: 2px; }
+    .outcome-notice { padding: 10px 12px; }
+    .outcome-notice.is-compact .outcome-heading { border-right: 0; padding-right: 0; }
 }
 @media (prefers-reduced-motion: reduce) { .outcome-details > summary svg { transition: none; } }
 </style>

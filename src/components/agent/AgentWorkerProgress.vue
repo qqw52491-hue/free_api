@@ -90,21 +90,21 @@
             </details>
         </div>
         <div v-if="expanded && worker" class="review-live-body worker-live-body">
-            <div v-if="worker.steps?.length || workerModel || worker.currentTool" class="review-stats-grid" aria-label="已上报的子任务步骤">
+            <div v-if="worker.steps?.length || workerModel || visibleWorkerTool" class="review-stats-grid" aria-label="已上报的子任务步骤">
                 <span v-if="worker.steps?.length" class="stat-chip">
                     <span class="stat-k">记录</span>
                     <span class="stat-v">{{ worker.steps.length }} 步</span>
                 </span>
-                <span v-if="worker.currentTool" class="stat-chip">
+                <span v-if="visibleWorkerTool" class="stat-chip">
                     <span class="stat-k">当前工具</span>
-                    <span class="stat-v">{{ worker.currentTool }}</span>
+                    <span class="stat-v">{{ visibleWorkerTool }}</span>
                 </span>
                 <span v-if="workerModel" class="stat-chip" :title="`执行模型: ${workerModel}`">
                     <span class="stat-k">模型</span>
                     <span class="stat-v">{{ workerModel }}</span>
                 </span>
             </div>
-            <div ref="activityPane" class="review-activity-scroll worker-activity-scroll soft-scrollbar" role="region" :aria-label="`${label} · 实时动作与思考片段`" tabindex="0" @scroll.passive="onActivityScroll" @wheel.passive="followActivity = false" @touchmove.passive="followActivity = false">
+            <div v-if="hasWorkerActivityPane" ref="activityPane" class="review-activity-scroll worker-activity-scroll soft-scrollbar" role="region" :aria-label="`${label} · 实时动作与思考片段`" tabindex="0" @scroll.passive="onActivityScroll" @wheel.passive="followActivity = false" @touchmove.passive="followActivity = false">
                 <div v-for="row in workerActionRows" :key="row.step.stepNumber" class="review-activity-event worker-action-event">
                     <span class="worker-step-index">{{ row.step.stepNumber }}</span>
                     <div class="worker-action-content">
@@ -133,7 +133,7 @@
                 </summary>
                 <div class="review-diagnostic-content">
                     <p>执行模型：{{ workerModel }}</p>
-                    <p v-if="worker.currentTool">子任务类型：{{ worker.currentTool }}</p>
+                    <p v-if="visibleWorkerTool">子任务类型：{{ visibleWorkerTool }}</p>
                     <p v-if="worker.steps?.length">已上报步骤：{{ worker.steps.length }} 步</p>
                 </div>
             </details>
@@ -192,6 +192,10 @@ watch(() => [reviewActivities.value, expanded.value, workerThoughtPreview.value,
 }, { flush: 'post', immediate: true });
 const label = computed(() => props.review?.label || props.worker?.roleLabel || props.worker?.name || (props.review ? '终审成员' : '子 Agent'));
 const workerModel = computed(() => props.worker?.model || props.worker?.extra?.model || '');
+const visibleWorkerTool = computed(() => {
+    const tool = props.worker?.currentTool;
+    return tool && tool !== 'child_worker' && tool !== 'child_reviewer' && tool !== 'child_writer' ? tool : '';
+});
 const displayModel = computed(() => props.review?.model || workerModel.value || '');
 const durationMs = computed(() => props.review?.elapsedMs ?? props.worker?.durationMs);
 const diagnosis = computed(() => props.review ? reviewDiagnosis(props.review, props.isRunning) : null);
@@ -214,8 +218,14 @@ const activity = computed(() => {
     if (worker.status === 'running' && worker.livePreview) {
         return worker.livePreview.streamType === 'thinking' ? '正在思考' : '正在生成结论';
     }
-    return worker.currentStep || worker.currentTool || statusText.value;
+    return worker.currentStep || visibleWorkerTool.value || statusText.value;
 });
+const hasWorkerActivityPane = computed(() =>
+    memberActive.value ||
+    workerActionRows.value.length > 0 ||
+    !!workerThoughtPreview.value ||
+    (!!activity.value && activity.value !== statusText.value && activity.value !== '未完成')
+);
 </script>
 
 <style scoped>
@@ -429,16 +439,16 @@ button {
     transform: rotate(180deg);
 }
 
-/* 展开抽屉面板：深色毛玻璃科技感卡片 */
+/* 展开抽屉面板：自适应深浅主题卡片 */
 .review-live-body {
     margin: 4px 0 6px 14px;
     padding: 8px 10px;
-    border-left: 2px solid #818cf8;
-    background: rgba(var(--theme-rgb-panel, 15, 23, 42), 0.45);
+    border-left: 2px solid var(--theme-status-accent, #818cf8);
+    background: var(--theme-inset-bg, rgba(var(--theme-foreground-rgb), 0.025));
     border-radius: 0 6px 6px 0;
-    border-top: 1px solid rgba(var(--theme-foreground-rgb), 0.04);
-    border-right: 1px solid rgba(var(--theme-foreground-rgb), 0.04);
-    border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.04);
+    border-top: 1px solid rgba(var(--theme-foreground-rgb), 0.05);
+    border-right: 1px solid rgba(var(--theme-foreground-rgb), 0.05);
+    border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.05);
 }
 
 /* 统计微卡片网格 */

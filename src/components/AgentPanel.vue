@@ -8,6 +8,64 @@
                 <span class="spec-divider">·</span>
                 <span class="spec-tag policy-tag" data-testid="active-reasoning-policy">档位 · {{ activeReasoningProfileLabel }}</span>
             </div>
+
+            <!-- 顶置实时性能流式状态栏 (单色线性 SVG + 与左侧同构胶囊容器，融入顶栏视觉) -->
+            <div class="header-telemetry-bar" aria-label="实时性能指标">
+                <span class="telemetry-node" title="任务总运行耗时">
+                    <span v-if="session.isRunning.value" class="dot-running"></span>
+                    <svg v-else class="t-svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 15"/></svg>
+                    <span class="t-label">耗时</span>
+                    <span class="t-val">{{ telemetry?.elapsedLabel || '00:00' }}</span>
+                </span>
+                <span class="t-sep">·</span>
+                <span class="telemetry-node" title="模型实时生成速率 (tok/s)">
+                    <svg class="t-svg" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                    <span class="t-label">速率</span>
+                    <span class="t-val">{{ (telemetry?.tokensPerSecond && telemetry.tokensPerSecond > 0) ? `${telemetry.tokensPerSecond.toFixed(1)} tok/s` : '--' }}</span>
+                </span>
+                <span class="t-sep">·</span>
+                <span class="telemetry-node" title="首字到达延迟 (TTFT)">
+                    <svg class="t-svg" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                    <span class="t-label">首次</span>
+                    <span class="t-val">{{ (telemetry?.lastTtftMs && telemetry.lastTtftMs > 0) ? `${telemetry.lastTtftMs}ms` : '--' }}</span>
+                </span>
+                <span class="t-sep">·</span>
+                <span class="telemetry-node" title="前缀缓存命中率">
+                    <svg class="t-svg" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+                    <span class="t-label">缓存</span>
+                    <span class="t-val">{{ (telemetry?.cacheHitRate !== undefined && telemetry.cacheHitRate > 0) ? `${telemetry.cacheHitRate.toFixed(1)}%` : '--%' }}</span>
+                </span>
+                <span class="t-sep">·</span>
+                <span class="telemetry-node" title="当前上下文占用 / 窗口上限">
+                    <svg class="t-svg" viewBox="0 0 24 24"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+                    <span class="t-label">上下文</span>
+                    <span class="t-val">{{ (telemetry?.totalTokens && telemetry.totalTokens > 0) ? `${formatTokens(telemetry.totalTokens)}/${(telemetry?.contextWindow && telemetry.contextWindow > 0) ? formatTokens(telemetry.contextWindow) : '-'}` : '-/-' }}</span>
+                    <span v-if="telemetry?.totalTokens && telemetry.totalTokens > 0" class="t-tag" :class="headerContextLevelClass">({{ (telemetry?.contextUsagePercent ?? 0).toFixed(0) }}%)</span>
+                </span>
+                <span class="t-sep">·</span>
+                <span class="telemetry-node" title="工具执行耗时">
+                    <svg class="t-svg" viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+                    <span class="t-label">工具</span>
+                    <span class="t-val">{{ (telemetry?.lastToolDurationMs !== undefined && telemetry.lastToolDurationMs >= 0) ? formatMs(telemetry.lastToolDurationMs) : '--' }}</span>
+                </span>
+                <span class="t-sep">·</span>
+                <span
+                    class="telemetry-node"
+                    :title="`会话总体轮次：当前第 ${currentTurnIndex || 1} 回合 (总计开启 ${totalTurnsCount || 1} 轮任务)`"
+                >
+                    <svg class="t-svg" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                    <span class="t-val">{{ session.isRunning.value ? `第 ${currentTurnIndex || 1}/${totalTurnsCount || 1} 轮` : `共 ${totalTurnsCount || 1} 回合` }}</span>
+                </span>
+                <span class="t-sep">·</span>
+                <span
+                    class="telemetry-node"
+                    :title="`会话总体进度：累计执行 ${totalAllStepsCount || telemetry?.stepCount || 0} 个步骤，跨越 ${totalAllStagesCount || 1} 个大阶段`"
+                >
+                    <svg class="t-svg" viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                    <span class="t-val">{{ session.isRunning.value ? `第 ${telemetry?.stepCount || 1} 步 · 累${totalAllStepsCount || telemetry?.stepCount || 0}` : `累计 ${totalAllStepsCount || telemetry?.stepCount || 0} 步` }}</span>
+                </span>
+            </div>
+
             <div class="header-actions">
                 <span class="session-status" :class="`state-${session.runState.value}`"><i></i>{{ session.stateMeta.value.category }}</span>
                 <button v-if="session.isRunning.value" class="icon-control stop" type="button" :disabled="session.stopRequested.value" title="停止执行" @click="session.requestStop()"><span>■</span></button>
@@ -138,7 +196,6 @@
                         @fork="handleFork"
                     />
                 </div>
-                <AgentDelegatedTasks :session-id="session.activeSessionId.value" :active="session.isRunning.value" />
                 <AgentComposer
                     ref="composerRef"
                     :draft="composerDraft"
@@ -174,6 +231,7 @@
                     @stop="session.requestStop"
                 >
                     <template #deck>
+                        <AgentDelegatedTasks :session-id="session.activeSessionId.value" :active="session.isRunning.value" :all-models="allModels" />
                         <AgentProgressDeck
                             :steps="activeDeckSteps"
                             :is-running="session.isRunning.value"
@@ -273,6 +331,7 @@ import AgentInspector from "./agent/AgentInspector.vue";
 import AgentRecordPreview from "./agent/AgentRecordPreview.vue";
 import AgentSettingsDrawer from "./agent/AgentSettingsDrawer.vue";
 import type { AgentModelOption, FileDiffPayload } from "./agent/types";
+import { formatMs, formatTokens } from "./agent/formatUtils";
 import { useAgentSession } from "../composables/useAgentSession";
 import { stopReviewKey } from "./agent/reviewCancellation";
 
@@ -305,6 +364,14 @@ const session = useAgentSession(props.panelId, {
     },
 });
 provide(stopReviewKey, session.stopReview);
+
+const telemetry = computed(() => session.sessionTelemetry.value);
+const headerContextLevelClass = computed(() => {
+    const pct = telemetry.value?.contextUsagePercent ?? 0;
+    if (pct >= 85) return "badge-danger";
+    if (pct >= 65) return "badge-warn";
+    return "badge-safe";
+});
 
 async function openSettings() {
     try {
@@ -708,9 +775,80 @@ defineExpose({
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 12px;
     padding: 6px 18px 6px 16px;
     border-bottom: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
     background: var(--theme-bg-panel, #18181b);
+}
+
+.header-telemetry-bar {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: 8px;
+    padding: 4px 12px;
+    margin: 4px 0;
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
+    border-radius: 7px;
+    background: rgba(var(--theme-foreground-rgb), 0.025);
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--theme-text-secondary, #a1a1aa);
+    overflow-x: auto;
+    scrollbar-width: none;
+    white-space: nowrap;
+    user-select: none;
+    min-width: 0;
+}
+.header-telemetry-bar::-webkit-scrollbar {
+    display: none;
+}
+.header-telemetry-bar .telemetry-node {
+    display: inline-flex;
+    align-items: center;
+    gap: 4.5px;
+}
+.header-telemetry-bar .t-svg {
+    width: 12px;
+    height: 12px;
+    stroke: var(--theme-text-muted, #71717a);
+    stroke-width: 1.9;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    fill: none;
+    flex-shrink: 0;
+}
+.header-telemetry-bar .t-label {
+    color: var(--theme-text-muted, #71717a);
+    font-size: 11px;
+}
+.header-telemetry-bar .t-val {
+    color: var(--theme-text-secondary, #d4d4d8);
+    font-variant-numeric: tabular-nums;
+    font-weight: 500;
+    font-size: 11.5px;
+}
+.header-telemetry-bar .t-sep {
+    color: rgba(var(--theme-foreground-rgb), 0.18);
+    font-size: 11px;
+    margin: 0 1px;
+}
+.header-telemetry-bar .t-tag {
+    font-size: 10.5px;
+    font-variant-numeric: tabular-nums;
+    font-weight: 500;
+    margin-left: 1px;
+}
+.header-telemetry-bar .badge-safe { color: var(--theme-text-secondary, #a1a1aa); }
+.header-telemetry-bar .badge-warn { color: var(--theme-status-warning, #fbbf24); }
+.header-telemetry-bar .badge-danger { color: var(--theme-status-danger, #f87171); }
+.header-telemetry-bar .dot-running {
+    display: inline-block;
+    width: 6.5px;
+    height: 6.5px;
+    border-radius: 50%;
+    background: #38bdf8;
+    box-shadow: 0 0 6px rgba(56, 189, 248, 0.7);
 }
 
 .model-spec-info-row {

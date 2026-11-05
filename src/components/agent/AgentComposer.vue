@@ -1166,72 +1166,6 @@
             请先选择规划模型和执行模型，两处可以选择同一个已配置模型。
         </div>
 
-        <!-- 🚀 实时性能流式状态行 (连续字体排版 · 柔和间距 · 实时流式跳动) -->
-        <div class="composer-telemetry-line">
-            <!-- 1. 耗时 -->
-            <span class="telemetry-node" title="任务总运行耗时">
-                <span class="dot-running" v-if="isRunning"></span>
-                <span class="t-label">耗时</span>
-                <span class="t-val">{{ telemetry?.elapsedLabel || '00:00' }}</span>
-            </span>
-            <span class="t-sep">·</span>
-
-            <!-- 2. Token 实时生成速率 -->
-            <span class="telemetry-node" title="模型实时生成速率 (tok/s)">
-                <span class="t-label">速率</span>
-                <span class="t-val text-cyan">{{ (telemetry?.tokensPerSecond && telemetry.tokensPerSecond > 0) ? `${telemetry.tokensPerSecond.toFixed(1)} tok/s` : '--' }}</span>
-            </span>
-            <span class="t-sep">·</span>
-
-            <!-- 3. 首字延迟 (TTFT) -->
-            <span class="telemetry-node" title="首字到达延迟 (TTFT)">
-                <span class="t-label">首次</span>
-                <span class="t-val">{{ (telemetry?.lastTtftMs && telemetry.lastTtftMs > 0) ? `${telemetry.lastTtftMs}ms` : '--' }}</span>
-            </span>
-            <span class="t-sep">·</span>
-
-            <!-- 4. 前缀缓存命中率 -->
-            <span class="telemetry-node" title="前缀缓存命中率">
-                <span class="t-label">缓存</span>
-                <span class="t-val text-green">{{ (telemetry?.cacheHitRate !== undefined && telemetry.cacheHitRate > 0) ? `${telemetry.cacheHitRate.toFixed(1)}%` : '--%' }}</span>
-            </span>
-            <span class="t-sep">·</span>
-
-            <!-- 5. 上下文占用 / 窗口水位 -->
-            <span class="telemetry-node" title="当前上下文占用 / 窗口上限">
-                <span class="t-label">上下文</span>
-                <span class="t-val">{{ (telemetry?.totalTokens && telemetry.totalTokens > 0) ? `${formatTokens(telemetry.totalTokens)}/${(telemetry?.contextWindow && telemetry.contextWindow > 0) ? formatTokens(telemetry.contextWindow) : '-'}` : '- / -' }}</span>
-                <span v-if="telemetry?.totalTokens && telemetry.totalTokens > 0" class="t-tag" :class="contextLevelClass">({{ (telemetry?.contextUsagePercent ?? 0).toFixed(0) }}%)</span>
-            </span>
-            <span class="t-sep">·</span>
-
-            <!-- 6. 工具调用时间 -->
-            <span class="telemetry-node" title="工具执行耗时">
-                <span class="t-label">工具</span>
-                <span class="t-val">{{ (telemetry?.lastToolDurationMs !== undefined && telemetry.lastToolDurationMs >= 0) ? formatMs(telemetry.lastToolDurationMs) : '--' }}</span>
-            </span>
-            <span class="t-sep">·</span>
-
-            <!-- 7. 总体回合与轮次统计 (一共多少轮/一共多少回合总体数据统计) -->
-            <span
-                class="telemetry-node turns-stat-node"
-                :title="`会话总体轮次：当前第 ${currentTurn || 1} 回合 (总计开启 ${totalTurns || 1} 轮任务)`"
-            >
-                <span class="t-label">回合</span>
-                <span class="t-val text-indigo">{{ isRunning ? `第 ${currentTurn || 1}/${totalTurns || 1} 轮` : `共 ${totalTurns || 1} 回合` }}</span>
-            </span>
-            <span class="t-sep">·</span>
-
-            <!-- 8. 累计步骤与大阶段统计 -->
-            <span
-                class="telemetry-node steps-stat-node"
-                :title="`会话总体进度：累计执行 ${totalSteps || telemetry?.stepCount || 0} 个步骤，跨越 ${totalStages || 1} 个大阶段`"
-            >
-                <span class="t-label">步骤</span>
-                <span class="t-val">{{ isRunning ? `本轮第 ${telemetry?.stepCount || 1} 步 · 累${totalSteps || telemetry?.stepCount || 0}` : `累计 ${totalSteps || telemetry?.stepCount || 0} 步` }}</span>
-            </span>
-        </div>
-
         <!-- 📎 全局全屏附件预览弹窗 (Teleport 到 body，杜绝容器 backdrop-filter 遮挡) -->
         <AttachmentPreviewModal
             :image-modal="previewImageModal"
@@ -1247,7 +1181,7 @@
 <script setup lang="ts">
 import StageSettingsFields from "./StageSettingsFields.vue";
 import { stageReviewerIsDisabled, withStageTriggerMode } from "./stageSettings";
-import { formatFileSize, formatMs, formatTokens } from "./formatUtils";
+import { formatFileSize, formatTokens } from "./formatUtils";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
