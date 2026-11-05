@@ -62,50 +62,48 @@
                 </div>
             </div>
 
-            <textarea
-                ref="textareaRef"
-                :value="draft"
-                :disabled="isSending"
-                :placeholder="placeholderText"
-                rows="1"
-                @input="handleInput"
-                @paste="handlePaste"
-                @keydown.ctrl.enter.exact.prevent="submit('interrupt')"
-                @keydown.meta.enter.exact.prevent="submit('interrupt')"
-                @keydown.alt.enter.prevent="submit('queue')"
-                @keydown.ctrl.shift.enter.prevent="submit('queue')"
-                @keydown.meta.shift.enter.prevent="submit('queue')"
-            />
-            <div class="composer-bottom-row">
-                <div class="composer-tools">
-                    <button
-                        type="button"
-                        class="composer-tool-btn attach-btn"
-                        title="上传/附加数据文件 (图片、Excel、Word、PDF、代码...)"
-                        :disabled="isRunning"
-                        @click="promptAttachFiles"
-                    >
-                        <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
-                    </button>
-
-                    <span class="tool-divider"></span>
-
-                    <!-- 🤖 模型路由与工位装配浮层卡片 (左下角与上下文模式并排) -->
-                    <div class="model-picker-wrap" ref="modelPickerRef">
+            <div class="composer-input-surface">
+                <textarea
+                    ref="textareaRef"
+                    :value="draft"
+                    :disabled="isSending"
+                    :placeholder="placeholderText"
+                    rows="1"
+                    @input="handleInput"
+                    @paste="handlePaste"
+                    @keydown.ctrl.enter.exact.prevent="submit('interrupt')"
+                    @keydown.meta.enter.exact.prevent="submit('interrupt')"
+                    @keydown.alt.enter.prevent="submit('queue')"
+                    @keydown.ctrl.shift.enter.prevent="submit('queue')"
+                    @keydown.meta.shift.enter.prevent="submit('queue')"
+                />
+                <div class="composer-bottom-row">
+                    <div class="composer-tools">
                         <button
-                            class="model-chip"
                             type="button"
-                            :class="{ active: modelMenuOpen }"
-                            :title="modelChipTooltip"
+                            class="composer-tool-btn attach-btn"
+                            title="上传/附加数据文件 (图片、Excel、Word、PDF、代码...)"
                             :disabled="isRunning"
-                            @click="toggleModelMenu"
+                            @click="promptAttachFiles"
                         >
-                            <span class="model-icon">🤖</span>
-                            <span>{{ currentModelName }}</span>
-                            <span v-if="isStageReviewerDisabled" class="chip-gate-badge disabled" title="中途阶段审查关闭；方案审查和终审分别按配置执行">阶段审查关</span>
-                            <span v-else class="chip-gate-badge custom" :title="modelChipTooltip">{{ stageReviewerBadgeText }}</span>
-                            <svg viewBox="0 0 24 24" class="chevron-icon"><path d="m8 10 4 4 4-4"/></svg>
+                            <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
                         </button>
+
+                        <!-- 模型路由与工位装配浮层卡片 -->
+                        <div class="model-picker-wrap" ref="modelPickerRef">
+                            <button
+                                class="model-chip"
+                                type="button"
+                                :class="{ active: modelMenuOpen }"
+                                :title="modelChipTooltip"
+                                :disabled="isRunning"
+                                @click="toggleModelMenu"
+                            >
+                                <span class="model-name-text">{{ currentModelName }}</span>
+                                <span v-if="isStageReviewerDisabled" class="chip-gate-badge disabled" title="中途阶段审查关闭；方案审查和终审分别按配置执行">阶段审查关</span>
+                                <span v-else class="chip-gate-badge custom" :title="modelChipTooltip">{{ stageReviewerBadgeText }}</span>
+                                <svg viewBox="0 0 24 24" class="chevron-icon"><path d="m7 14 5-5 5 5"/></svg>
+                            </button>
 
                         <Teleport to="body">
                             <div
@@ -957,9 +955,8 @@
                             :title="currentBudgetTooltip"
                             @click="toggleBudgetMenu"
                         >
-                            <span class="budget-icon">{{ currentBudgetIcon }}</span>
-                            <span class="budget-label">{{ currentBudgetLabel }}</span>
-                            <svg viewBox="0 0 24 24" class="chevron-icon"><path d="m8 10 4 4 4-4"/></svg>
+                                                        <span class="budget-label">{{ currentBudgetLabel }}</span>
+                            <svg viewBox="0 0 24 24" class="chevron-icon"><path d="m7 14 5-5 5 5"/></svg>
                         </button>
 
                         <Teleport to="body">
@@ -1010,6 +1007,36 @@
                         </Teleport>
                     </div>
 
+                    <!-- ⌨️ 快捷键提示小问号 -->
+                    <div class="composer-shortcut-hint-wrap">
+                        <button
+                            type="button"
+                            class="composer-tool-btn shortcut-hint-btn"
+                            title="键盘快捷键与发送模式说明"
+                            @mouseenter="showShortcutTooltip = true"
+                            @mouseleave="showShortcutTooltip = false"
+                            @click="showShortcutTooltip = !showShortcutTooltip"
+                        >
+                            <svg viewBox="0 0 24 24" class="hint-q-icon"><circle cx="12" cy="12" r="9"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3M12 17h.01"/></svg>
+                        </button>
+                        <div v-if="showShortcutTooltip" class="shortcut-popover-card">
+                            <div class="shortcut-popover-title">⌨️ 发送与控制快捷键</div>
+                            <div class="shortcut-row">
+                                <div class="shortcut-keys"><kbd>Ctrl</kbd> + <kbd>↵</kbd></div>
+                                <div class="shortcut-desc"><strong class="text-red">⚡ 立即打断</strong>：中断前序，立即切换新任务</div>
+                            </div>
+                            <div class="shortcut-row">
+                                <div class="shortcut-keys"><kbd>Alt</kbd> + <kbd>↵</kbd></div>
+                                <div class="shortcut-desc"><strong class="text-amber">⏳ 排队执行</strong>：当前完成后自动无缝执行</div>
+                            </div>
+                            <div class="shortcut-row">
+                                <div class="shortcut-keys"><kbd>Shift</kbd> + <kbd>↵</kbd></div>
+                                <div class="shortcut-desc">在输入框中换行</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="composer-actions">
                     <!-- 🚀 全自动 vs 🔍 交叉审查 vs 🛡️ 方案审批 门禁模式下拉选择 -->
                     <div class="plan-mode-picker" ref="planPickerRef">
                         <button
@@ -1024,9 +1051,9 @@
                             :disabled="isRunning"
                             @click="togglePlanMenu"
                         >
-                            <span class="plan-mode-icon">{{ planModeIcon }}</span>
+                            <svg viewBox="0 0 24 24" class="plan-mode-svg"><path d="M12 3 5 6v5c0 4.5 3 8.2 7 10 4-1.8 7-5.5 7-10V6l-7-3z"/></svg>
                             <span class="plan-mode-label">{{ planModeLabel }}</span>
-                            <svg viewBox="0 0 24 24" class="chevron-icon"><path d="m8 10 4 4 4-4"/></svg>
+                            <svg viewBox="0 0 24 24" class="chevron-icon"><path d="m7 14 5-5 5 5"/></svg>
                         </button>
 
                         <Teleport to="body">
@@ -1064,36 +1091,6 @@
                     </div>
 
 
-                    <!-- ⌨️ 快捷键提示小问号 -->
-                    <div class="composer-shortcut-hint-wrap">
-                        <button
-                            type="button"
-                            class="composer-tool-btn shortcut-hint-btn"
-                            title="键盘快捷键与发送模式说明"
-                            @mouseenter="showShortcutTooltip = true"
-                            @mouseleave="showShortcutTooltip = false"
-                            @click="showShortcutTooltip = !showShortcutTooltip"
-                        >
-                            <svg viewBox="0 0 24 24" class="hint-q-icon"><circle cx="12" cy="12" r="9"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3M12 17h.01"/></svg>
-                        </button>
-                        <div v-if="showShortcutTooltip" class="shortcut-popover-card">
-                            <div class="shortcut-popover-title">⌨️ 发送与控制快捷键</div>
-                            <div class="shortcut-row">
-                                <div class="shortcut-keys"><kbd>Ctrl</kbd> + <kbd>↵</kbd></div>
-                                <div class="shortcut-desc"><strong class="text-red">⚡ 立即打断</strong>：中断前序，立即切换新任务</div>
-                            </div>
-                            <div class="shortcut-row">
-                                <div class="shortcut-keys"><kbd>Alt</kbd> + <kbd>↵</kbd></div>
-                                <div class="shortcut-desc"><strong class="text-amber">⏳ 排队执行</strong>：当前完成后自动无缝执行</div>
-                            </div>
-                            <div class="shortcut-row">
-                                <div class="shortcut-keys"><kbd>Shift</kbd> + <kbd>↵</kbd></div>
-                                <div class="shortcut-desc">在输入框中换行</div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <div class="composer-actions">
                     <!-- 上下文水位圆环：最近一次调用 prompt 占窗口比（悬浮看分桶明细，静默态回显上次值） -->
                     <div
                         v-if="ringPercent !== null"
@@ -1161,6 +1158,7 @@
                         <svg viewBox="0 0 24 24"><path d="m7 12 5-5 5 5M12 7v10"/></svg>
                     </button>
                 </div>
+                </div>
             </div>
         </div>
 
@@ -1173,35 +1171,35 @@
             <!-- 1. 耗时 -->
             <span class="telemetry-node" title="任务总运行耗时">
                 <span class="dot-running" v-if="isRunning"></span>
-                <span class="t-label">⏱️ 耗时</span>
+                <span class="t-label">耗时</span>
                 <span class="t-val">{{ telemetry?.elapsedLabel || '00:00' }}</span>
             </span>
             <span class="t-sep">·</span>
 
             <!-- 2. Token 实时生成速率 -->
             <span class="telemetry-node" title="模型实时生成速率 (tok/s)">
-                <span class="t-label">⚡ 速率</span>
+                <span class="t-label">速率</span>
                 <span class="t-val text-cyan">{{ (telemetry?.tokensPerSecond && telemetry.tokensPerSecond > 0) ? `${telemetry.tokensPerSecond.toFixed(1)} tok/s` : '--' }}</span>
             </span>
             <span class="t-sep">·</span>
 
             <!-- 3. 首字延迟 (TTFT) -->
             <span class="telemetry-node" title="首字到达延迟 (TTFT)">
-                <span class="t-label">⏳ 首次</span>
+                <span class="t-label">首次</span>
                 <span class="t-val">{{ (telemetry?.lastTtftMs && telemetry.lastTtftMs > 0) ? `${telemetry.lastTtftMs}ms` : '--' }}</span>
             </span>
             <span class="t-sep">·</span>
 
             <!-- 4. 前缀缓存命中率 -->
             <span class="telemetry-node" title="前缀缓存命中率">
-                <span class="t-label">🎯 缓存</span>
+                <span class="t-label">缓存</span>
                 <span class="t-val text-green">{{ (telemetry?.cacheHitRate !== undefined && telemetry.cacheHitRate > 0) ? `${telemetry.cacheHitRate.toFixed(1)}%` : '--%' }}</span>
             </span>
             <span class="t-sep">·</span>
 
             <!-- 5. 上下文占用 / 窗口水位 -->
             <span class="telemetry-node" title="当前上下文占用 / 窗口上限">
-                <span class="t-label">📦 上下文</span>
+                <span class="t-label">上下文</span>
                 <span class="t-val">{{ (telemetry?.totalTokens && telemetry.totalTokens > 0) ? `${formatTokens(telemetry.totalTokens)}/${(telemetry?.contextWindow && telemetry.contextWindow > 0) ? formatTokens(telemetry.contextWindow) : '-'}` : '- / -' }}</span>
                 <span v-if="telemetry?.totalTokens && telemetry.totalTokens > 0" class="t-tag" :class="contextLevelClass">({{ (telemetry?.contextUsagePercent ?? 0).toFixed(0) }}%)</span>
             </span>
@@ -1209,7 +1207,7 @@
 
             <!-- 6. 工具调用时间 -->
             <span class="telemetry-node" title="工具执行耗时">
-                <span class="t-label">🔧 工具</span>
+                <span class="t-label">工具</span>
                 <span class="t-val">{{ (telemetry?.lastToolDurationMs !== undefined && telemetry.lastToolDurationMs >= 0) ? formatMs(telemetry.lastToolDurationMs) : '--' }}</span>
             </span>
             <span class="t-sep">·</span>
@@ -1219,7 +1217,7 @@
                 class="telemetry-node turns-stat-node"
                 :title="`会话总体轮次：当前第 ${currentTurn || 1} 回合 (总计开启 ${totalTurns || 1} 轮任务)`"
             >
-                <span class="t-label">💬 回合</span>
+                <span class="t-label">回合</span>
                 <span class="t-val text-indigo">{{ isRunning ? `第 ${currentTurn || 1}/${totalTurns || 1} 轮` : `共 ${totalTurns || 1} 回合` }}</span>
             </span>
             <span class="t-sep">·</span>
@@ -1229,7 +1227,7 @@
                 class="telemetry-node steps-stat-node"
                 :title="`会话总体进度：累计执行 ${totalSteps || telemetry?.stepCount || 0} 个步骤，跨越 ${totalStages || 1} 个大阶段`"
             >
-                <span class="t-label">🔄 步骤</span>
+                <span class="t-label">步骤</span>
                 <span class="t-val">{{ isRunning ? `本轮第 ${telemetry?.stepCount || 1} 步 · 累${totalSteps || telemetry?.stepCount || 0}` : `累计 ${totalSteps || telemetry?.stepCount || 0} 步` }}</span>
             </span>
         </div>
@@ -1316,18 +1314,6 @@ const taskStartMode = computed<"resume" | "new" | undefined>(() =>
 const currentPlanMode = computed<PlanExecutionMode>(() => {
     if (props.planMode) return props.planMode;
     return props.autoPilot === false ? "plan_approval" : "auto";
-});
-
-const planModeIcon = computed(() => {
-    switch (currentPlanMode.value) {
-        case "cross_review":
-            return "🔍";
-        case "plan_approval":
-            return "🛡️";
-        case "auto":
-        default:
-            return "🚀";
-    }
 });
 
 const planModeLabel = computed(() => {
@@ -2018,7 +2004,7 @@ const activeReviewerCards = computed(() => {
     return reviewerRoleCards.value.filter((c) => !isCardHibernatedForSlot(c.name, "reviewer"));
 });
 
-const stageReviewerBadgeText = computed(() => isCommitteeMode.value ? "👥最多3位" : "👤单审");
+const stageReviewerBadgeText = computed(() => isCommitteeMode.value ? "多审" : "单审");
 
 const modelChipTooltip = computed(() => {
     const people = isCommitteeMode.value ? "多人审查，最多3位" : "自适应单审，1位";
@@ -2044,7 +2030,6 @@ const currentBudgetModeObj = computed(() => {
     const mode = props.modelRouting?.context_budget_mode || "deep_coding";
     return budgetModes.find((item) => item.id === mode) || budgetModes[0];
 });
-const currentBudgetIcon = computed(() => currentBudgetModeObj.value.icon);
 const currentBudgetLabel = computed(() => currentBudgetModeObj.value.label);
 const currentBudgetTooltip = computed(() => currentBudgetModeObj.value.tooltip);
 

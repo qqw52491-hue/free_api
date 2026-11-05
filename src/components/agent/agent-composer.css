@@ -2973,3 +2973,128 @@ textarea::placeholder {
 .cd-bar { display: block; height: 100%; background: #4ade80; border-radius: 2px; }
 .cd-val { color: var(--theme-text-secondary, #8e8e93); width: 28px; text-align: right; flex-shrink: 0; }
 .cd-empty { font-size: 10px; color: var(--theme-text-muted, #71717a); }
+
+/* ==========================================================================
+   Antigravity 风格输入框：外壳 + 内层输入卡片，底栏幽灵按钮，圆形发送键
+   ========================================================================== */
+.manus-composer {
+    padding: 6px !important;
+    border-radius: 22px !important;
+    background: rgba(var(--theme-foreground-rgb), 0.025);
+}
+.manus-composer > .composer-attachments-tray,
+.manus-composer > .composer-queue-tray,
+.manus-composer > .composer-mode-guide-banner { margin: 4px 8px 8px; }
+.manus-composer :deep(.agent-progress-deck),
+.manus-composer > .agent-progress-deck { padding: 4px 10px 8px; margin-bottom: 0; border-bottom: 0; }
+
+.composer-input-surface {
+    display: flex;
+    flex-direction: column;
+    padding: 12px 14px 8px;
+    border-radius: 16px;
+    background: var(--theme-bg-base, #141416);
+    border: 1px solid rgba(var(--theme-foreground-rgb), 0.07);
+}
+.composer-input-surface textarea {
+    min-height: 44px;
+    padding: 2px 2px 6px;
+    font-size: 14px;
+    line-height: 1.55;
+}
+.composer-bottom-row {
+    margin-top: 2px !important;
+    padding-top: 0 !important;
+    border-top: 0 !important;
+}
+.composer-tools { gap: 4px; }
+
+/* + 按钮：无边框 */
+.composer-tools > button.attach-btn,
+.attach-btn {
+    width: 28px !important;
+    height: 28px !important;
+    border: 0 !important;
+    background: transparent !important;
+    border-radius: 50% !important;
+    color: var(--theme-text-secondary, #a1a1aa) !important;
+}
+.attach-btn:hover:not(:disabled) { background: rgba(var(--theme-foreground-rgb), 0.08) !important; transform: none !important; }
+
+/* 幽灵触发器：模型 / 上下文 / 方案模式 */
+.model-chip, .budget-chip, .plan-mode-toggle-btn {
+    height: 28px !important;
+    padding: 0 8px !important;
+    gap: 5px !important;
+    border: 0 !important;
+    border-radius: 8px !important;
+    background: transparent !important;
+    color: var(--theme-text-secondary, #a1a1aa) !important;
+    font-size: 12px !important;
+    font-weight: 500 !important;
+}
+.model-chip:hover:not(:disabled), .budget-chip:hover:not(:disabled), .plan-mode-toggle-btn:hover:not(:disabled),
+.model-chip.active, .budget-chip.active, .plan-mode-toggle-btn.active,
+.plan-mode-toggle-btn.is-cross-review, .plan-mode-toggle-btn.is-plan-first {
+    background: rgba(var(--theme-foreground-rgb), 0.07) !important;
+    color: var(--theme-text-primary, #e4e4e7) !important;
+}
+.model-name-text { color: var(--theme-text-primary, #e4e4e7); }
+.chip-gate-badge, .chip-gate-badge.custom, .chip-gate-badge.disabled {
+    margin-left: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--theme-text-muted, #838d9f);
+}
+.chip-gate-badge.disabled { color: var(--theme-status-warning, #dfb575); }
+.model-chip .chevron-icon, .budget-chip .chevron-icon, .plan-mode-toggle-btn .chevron-icon {
+    width: 12px; height: 12px; opacity: 0.6; transform: none;
+}
+.plan-mode-toggle-btn.active .chevron-icon { transform: rotate(180deg); }
+.plan-mode-svg {
+    width: 13px; height: 13px;
+    stroke: currentColor; stroke-width: 1.8; fill: none;
+    stroke-linecap: round; stroke-linejoin: round;
+}
+.composer-actions { gap: 4px; }
+.composer-tools > .composer-shortcut-hint-wrap .shortcut-hint-btn { border: 0; background: transparent; }
+
+/* 圆形发送 / 停止键 */
+.submit-control {
+    width: 30px !important;
+    height: 30px !important;
+    border-radius: 50% !important;
+    box-shadow: none;
+}
+.submit-control:hover:not(:disabled) { transform: none; opacity: 0.9; }
+.submit-control:disabled { opacity: 0.25 !important; }
+.stop-control {
+    height: 30px;
+    padding: 0 12px;
+    border-radius: 15px;
+}
+
+/* 遥测行：弱化 */
+.composer-telemetry-line { opacity: 0.55; font-size: 11px; margin-top: 5px; }
+.composer-telemetry-line:hover { opacity: 1; }
+.t-val { font-weight: 500; }
+
+/* 单层边框 + 收窄居中（覆盖上方双层样式） */
+.manus-composer {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 10px 14px 8px !important;
+    border-radius: 18px !important;
+    background: var(--theme-bg-panel, #1c1c1f);
+}
+.composer-input-surface {
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+}
+.composer-telemetry-line { max-width: 760px; margin-left: auto; margin-right: auto; }
+.model-setup-hint { max-width: 760px; margin-left: auto; margin-right: auto; }

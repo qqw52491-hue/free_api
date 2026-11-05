@@ -550,3 +550,21 @@
 @keyframes subagent-spin {
     to { transform: rotate(360deg); }
 }
+
+/* 收窄居中，与输入框同宽；更轻盈的卡片观感 */
+.subagent-dock {
+    max-width: 760px;
+    margin: 0 auto;
+    border-radius: 14px;
+    border-color: rgba(var(--theme-foreground-rgb, 244, 244, 245), 0.08);
+    background: var(--theme-bg-panel, #18181b);
+    box-shadow: none;
+}
+.subagent-dock.is-active { border-color: rgba(56, 189, 248, 0.22); box-shadow: none; }
+.subagent-dock.is-waiting { border-color: rgba(251, 191, 36, 0.3); box-shadow: none; }
+.dock-header { padding: 9px 14px; background: transparent; }
+.dock-header:hover { background: rgba(var(--theme-foreground-rgb, 244, 244, 245), 0.04); }
+.dock-title { font-weight: 550; color: rgba(var(--theme-foreground-rgb, 244, 244, 245), 0.85); }
+.dock-pill { padding: 1px 7px; border-color: transparent !important; }
+.dock-ticker-preview { color: rgba(var(--theme-foreground-rgb, 244, 244, 245), 0.42); }
+.dock-toggle-label { opacity: 0.8; }
