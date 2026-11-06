@@ -112,6 +112,7 @@ mod tests {
         let first_key = key("task", 2, &original, Some(0));
         let first = f.register("parent", &first_key, &original).unwrap();
         for (field, value) in [
+            ("model_id", json!("another-model")),
             ("focus_paths", json!(["src/b.rs"])),
             ("context_excerpts", json!({"background":"another module"})),
             ("test_command", json!("cargo test module_b")),

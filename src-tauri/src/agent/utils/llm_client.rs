@@ -79,6 +79,18 @@ fn append_json_regeneration_feedback(api_values: &mut Vec<serde_json::Value>, pa
     append_final_json_output_anchor(api_values);
 }
 
+fn exhausted_instruction_recovery(failures: &[String]) -> StepExecutionError {
+    StepExecutionError::InstructionRecoveryExhausted {
+        attempts: failures.len(),
+        reason: failures
+            .iter()
+            .enumerate()
+            .map(|(index, reason)| format!("第 {} 次：{reason}", index + 1))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
 /// 将模型文本转换为“可执行”的 AgentInstruction。
 /// JSON 语法、serde 结构与可执行形状三层都通过，才允许进入主循环。
 /// 失败统一返回到既有 regeneration feedback，不能默默退化为 `core` 动作。
@@ -398,11 +410,14 @@ pub async fn call_llm(
         .iter()
         .map(|m| json!({"role": m.role, "content": &m.content}))
         .collect();
+    let original_context_len = api_values.len();
     append_final_json_output_anchor(&mut api_values);
 
-    // 4. JSON 解析重试循环 (最多 2 次：1 次初试 + 1 次纠偏)
+    // 4. 初试加一次纠偏。仅当纠偏只返回思考时，给原协议错误一次干净的重生成机会。
     let mut current_try = 0;
-    let max_retries = 2;
+    const STANDARD_ATTEMPTS: usize = 2;
+    let mut first_attempt_failed_protocol = false;
+    let mut failures = Vec::with_capacity(3);
     // 隔离 JSON 修复的短 prompt 不能覆盖完整 Agent 上下文的校准基线。
     let mut uses_primary_prompt = true;
 
@@ -571,6 +586,10 @@ pub async fn call_llm(
                         Some(&error),
                         None,
                     );
+                }
+                if current_try > STANDARD_ATTEMPTS && error != llm::STREAM_INTERRUPTED_ERROR {
+                    failures.push(error);
+                    return Err(exhausted_instruction_recovery(&failures));
                 }
                 return Err(error.into());
             }
@@ -746,15 +765,32 @@ pub async fn call_llm(
                     );
                 }
 
-                if current_try >= max_retries {
-                    return Err(StepExecutionError::InstructionRecoveryExhausted {
-                        reason: e,
-                        attempts: current_try,
-                    });
+                if current_try == 1 {
+                    first_attempt_failed_protocol = outcome == "parse_error";
+                }
+                failures.push(e.clone());
+
+                if current_try == STANDARD_ATTEMPTS
+                    && first_attempt_failed_protocol
+                    && final_json_str.trim().is_empty()
+                    && !result.thinking_text.trim().is_empty()
+                    && !matches!(result.finish_reason.as_deref(), Some("length" | "max_tokens"))
+                {
+                    // 真实续跑从原上下文生成成功。撤掉临时纠偏对话，保留本步的任务历史。
+                    api_values.truncate(original_context_len);
+                    api_values.push(json!({
+                        "role": "user",
+                        "content": format!("上次补正没有生成正式回复。保留当前进度，只提交下一项必要操作的完整指令。\n{FINAL_JSON_OUTPUT_ANCHOR}"),
+                    }));
+                    continue;
+                }
+
+                if current_try >= STANDARD_ATTEMPTS {
+                    return Err(exhausted_instruction_recovery(&failures));
                 }
                 println!(
                     "⚠️ 未获得有效工具指令，按既有额度重试 (第 {} 次 / 共 {} 次): {}",
-                    current_try, max_retries, e
+                    current_try, STANDARD_ATTEMPTS, e
                 );
 
                 // 将模型上一轮的原始回复作为 assistant turn 追加，保持对话轮次完整性

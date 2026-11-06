@@ -14,6 +14,8 @@ use tauri::AppHandle;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 
 pub struct DurableAgentContext {
+    #[serde(default)]
+    pub last_execution_model: Option<String>,
     pub user_goal: String,
     /// 当前轮次任务目标（与 M1 锚点 user_goal 分离；旧 checkpoint 缺字段时
     /// 恢复回退 user_goal，二者在单轮语义下本就一致）。
@@ -86,6 +88,7 @@ impl DurableAgentContext {
             user_goal: context.user_goal.clone(),
             current_goal: context.effective_goal().to_string(),
             history_task_id: context.history_task_id.clone(),
+            last_execution_model: context.last_execution_model.clone(),
             plan_state: context.plan_state.clone(),
             memories: context.memories.clone(),
             task_resources: context.task_resources.clone(),
@@ -132,6 +135,7 @@ impl DurableAgentContext {
             self.current_goal.clone()
         };
         context.history_task_id = self.history_task_id.clone();
+        context.last_execution_model = self.last_execution_model.clone();
         context.plan_state = self.plan_state.clone();
         context.memories = self.memories.clone();
         context.task_resources = self.task_resources.clone();

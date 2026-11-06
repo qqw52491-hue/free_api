@@ -825,9 +825,15 @@ function handleCloseDiff() {
     activeTab.value = "detail";
 }
 
+function selectWorker(workerId: string) {
+    activeTab.value = "team";
+    selectedAgentId.value = workerId || "master";
+}
+
 defineExpose({
     setTab: switchTab,
     switchTab,
+    selectWorker,
     openDiff,
     activeTab,
 });

@@ -19,6 +19,7 @@ const models = [{id:'model-a',name:'model-a',display_name:'模型 A',platform_na
 const props = {isRunning:false,allModels:models,modelRouting:{pro:'model-a',flash:'model-b',role_models:{unrelated:'keep'},reviewer_backup_model:''}};
 const events = [];
 const handlers = vm.runInNewContext(exportsCode, {props,emit:(name,value)=>{events.push({name,value});props.modelRouting=value;}});
+for(const slot of ['writer','reviewer','scout']) assert.equal(handlers.getSlotChoice(slot),'','unset child slots inherit parent');
 const root = compiler.baseParse(source.split('<script setup')[0].replace(/^<template>/,'').replace(/<\/template>\s*$/,''));
 const bars = []; const pickers = []; let native = 0;
 function walk(n) {
@@ -36,7 +37,7 @@ const Picker = vue.defineComponent({name:'ModelSelectDropdown',props:['modelValu
 async function renderBars(){seen.length=0;for(const bar of bars){const render=new Function('Vue',compiler.compile(bar.loc.source,{mode:'function'}).code)(vue);const ctx={...handlers,...props,getModelDisplayName:id=>id};await renderToString(vue.createSSRApp({components:{ModelSelectDropdown:Picker},render:()=>render(ctx,[])}));}}
 async function main(){
  await renderBars();assert.equal(seen.length,4);
- for(const [i,slot] of [[0,'writer'],[1,'reviewer'],[3,'scout']]){seen[i].choose('model-a');assert.equal(props.modelRouting.role_models[slot],'model-a');assert.equal(props.modelRouting.role_models.unrelated,'keep');handlers.onSlotSelectChange(slot,'');assert.equal(props.modelRouting.role_models[slot],slot==='reviewer'?undefined:'flash');}
+ for(const [i,slot] of [[0,'writer'],[1,'reviewer'],[3,'scout']]){seen[i].choose('model-a');assert.equal(props.modelRouting.role_models[slot],'model-a');assert.equal(props.modelRouting.role_models.unrelated,'keep');handlers.onSlotSelectChange(slot,'');assert.equal(props.modelRouting.role_models[slot],undefined);}
  seen[2].choose('model-b');assert.equal(props.modelRouting.reviewer_backup_model,'model-b');handlers.setReviewerBackup('');assert.equal(props.modelRouting.reviewer_backup_model,'');
  handlers.onSlotSelectChange('reviewer','model-a');await renderBars();assert.equal(seen[1].props.modelValue,'model-a');assert.equal(seen[1].props.size,'sm');
  props.isRunning=true;await renderBars();assert(seen.every(p=>p.props.disabled));const count=events.length;seen[1].choose('model-b');handlers.onSlotSelectChange('reviewer','');handlers.setReviewerBackup('model-b');assert.equal(events.length,count,'running guard must prevent model changes');

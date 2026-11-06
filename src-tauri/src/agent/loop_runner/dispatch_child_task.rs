@@ -54,6 +54,7 @@ async fn dispatch_inner(
     slot: Option<usize>,
 ) -> Result<DispatchResult, String> {
     let raw=inst.get_params();
+    let resume_inherits_model=child_task::request_action(&inst.get_action(),&raw)=="resume" && raw.get("model_id").is_none();
     let raw=if child_task::request_action(&inst.get_action(),&raw)=="resume" {child_task::presets::inherit_resume(ctx.state.inner(),ctx.final_session_id,raw)?}else{raw};
     let requested=child_task::presets::requested(raw,None)?;
     let key = child_task::dispatch::key(&ctx.context.history_task_id, ctx.step_id, &requested, slot);
@@ -111,6 +112,7 @@ async fn dispatch_inner(
                 false,
             )?));
         }
+        "models" => return Ok(output(child_task::models::catalog(ctx.state.inner(),params["offset"].as_u64().unwrap_or(0))?)),
         "list" => {
             return Ok(output(
                 json!({"tasks":crate::agent::agent_mailbox::family_list(ctx.state.inner(),&actor)?,"collaboration":crate::agent::agent_mailbox::coordination::list(ctx.state.inner(),&actor,params["offset"].as_u64().unwrap_or(0))?}),
@@ -279,12 +281,13 @@ async fn dispatch_inner(
         Some(card)
     }else{None};
     let mut child_routing=ctx.model_routing.clone();
-    if matches!(profile,"worker"|"writer") {
-        let slot=if profile=="worker" {crate::agent::router::roles::SCOUT}else{crate::agent::router::roles::WRITER};
-        let selected=crate::agent::router::AgentRouter::route_for_role(ctx.context,ctx.model_routing,ctx.step_id,slot);
-        crate::agent::execution::runtime::bind_primary_model(&mut child_routing,&selected.model_id);
-    }
-    if let Some(card)=&task_role {if !card.model_id.is_empty(){crate::agent::execution::runtime::bind_primary_model(&mut child_routing,&card.model_id);}}
+    let parent_model=ctx.context.last_execution_model.clone().unwrap_or_else(||
+        crate::agent::router::AgentRouter::route_for_step(ctx.context,ctx.model_routing,ctx.step_id).model_id);
+    let model_slot=match profile {"worker"=>Some("scout"),"writer"=>Some("writer"),_=>None};
+    let slot_model=model_slot.and_then(|slot|ctx.model_routing.role_override(slot)).map(|r|r.model_id);
+    let locked=task_role.as_ref().filter(|c|!c.model_id.is_empty()).map(|c|(c.model_id.as_str(),"role_card"))
+        .or_else(||slot_model.as_deref().map(|m|(m,"role_slot")));
+
     if params.get("test_command").is_some_and(|v|!v.is_string()) {return Err("test_command 类型错误：期望字符串；未派发。".into());}
     if params.get("test_command").is_none() {
         if let Some(card)=&task_role {if !card.default_test_command.trim().is_empty(){params["test_command"]=json!(card.default_test_command);}}
@@ -337,7 +340,17 @@ async fn dispatch_inner(
             return Ok(output(body));
         }
     }
-    ModelConfig::from_db_state(ctx.state.inner(),&child_routing.pro)?;
+    let mut model_selection=if existing.is_some() {child_task::models::Selection {model_id:String::new(),source:"registered_execution".into()}} else { child_task::models::select(&params,&parent_model,locked)? };
+    if resume_inherits_model { model_selection.source="previous_attempt".into(); }
+    else if model_selection.source=="parent_execution" && ctx.context.last_execution_model.is_none() { model_selection.source="legacy_parent_route".into(); }
+    child_task::models::pin(&mut child_routing,&model_selection.model_id);
+    if let Some(id)=&existing {
+        let conn=ctx.state.inner().0.lock().map_err(|e|e.to_string())?;
+        model_selection.model_id=conn.query_row("SELECT model_id FROM agent_child_runs WHERE id=?1 AND parent_session_id=?2",rusqlite::params![id,ctx.final_session_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+        model_selection.source="registered_execution".into();
+        child_task::models::pin(&mut child_routing,&model_selection.model_id);
+    }
+    child_task::models::validate(ctx.state.inner(),&model_selection)?;
     ctx.checkpoint.prepare_child_dispatch(inst, ctx.context, slot, true)?;
     save_checkpoint(ctx.state.inner(), ctx.checkpoint)?;
     let (workspace_session, workspace_run) = child_task::workspace_owner(ctx.final_session_id, ctx.parent_run_id)?;
@@ -364,7 +377,7 @@ async fn dispatch_inner(
                 contract_schema: task_role.as_ref().and_then(|card|card.parse_custom_schema()).filter(|schema|!schema.is_empty()).map(|schema|serde_json::to_string(&schema)).transpose().map_err(|e|e.to_string())?,
                 execution_config: params.get("execution").map(Value::to_string),
                 purpose: Some(profile.to_string()),
-                dispatch_input: Some(json!({"params":params}).to_string()),
+                dispatch_input: Some(json!({"params":params,"model_selection":model_selection}).to_string()),
                 task_id: key,
                 ..crate::agent::child_reviewer::ChildRunIdentity::fresh("task")
             },
@@ -394,7 +407,7 @@ async fn dispatch_inner(
         execution.workflow.plan_mode.unwrap_or_else(||"auto".into()),
         _workspace,
     )?;
-    Ok(DispatchResult {view:None,success:true,stdout:json!({"child_run_id":id,"execution_status":"running","delivery_accepted":false,"next":"可用 child_task.status / send / wait / cancel；共享工作区可并行使用，请协调相关修改。需要信息时子任务可给 parent 发消息，父任务等待会被消息唤醒。"}).to_string(),stderr:String::new(),route:"child_task:spawned".into()})
+    Ok(DispatchResult {view:None,success:true,stdout:json!({"child_run_id":id,"model_selection":model_selection,"execution_status":"running","delivery_accepted":false,"next":"可用 child_task.status / send / wait / cancel；共享工作区可并行使用，请协调相关修改。需要信息时子任务可给 parent 发消息，父任务等待会被消息唤醒。"}).to_string(),stderr:String::new(),route:"child_task:spawned".into()})
 }
 
 /// Legacy dispatch spellings select a preset; they do not own a second executor.

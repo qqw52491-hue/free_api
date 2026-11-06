@@ -140,6 +140,7 @@ pub(crate) fn validate_native(tool: &str, action: &str, params: &Value) -> Resul
             }
         }
         "child_task" => {
+            crate::agent::child_task::models::requested(params)?;
             let effective=crate::agent::child_task::request_action(act,params);
             match effective.as_str(){
                 "send"|"ask"=>crate::agent::agent_mailbox::validate_payload(params)?,
@@ -147,11 +148,11 @@ pub(crate) fn validate_native(tool: &str, action: &str, params: &Value) -> Resul
                 "result"|"status"|"cancel"=>{text(&tool,params,&["child_run_id"],false)?;optional(&tool,params,"output_id","string")?;},
                 "resume"=>{text(&tool,params,&["child_run_id"],false)?;text(&tool,params,&["message"],false)?;if params["message"].as_str().unwrap().chars().count()>65_536{return Err("追问超过 65536 字符，未执行。".into())}},
                 "receipt"=>text(&tool,params,&["message_id"],false)?,
-                "list"=>{optional(&tool,params,"offset","非负整数")?;},
+                "models"|"list"=>{optional(&tool,params,"offset","非负整数")?;},
                 "inbox"=>{optional(&tool,params,"child_run_id","string")?;optional(&tool,params,"offset","非负整数")?;optional(&tool,params,"limit","非负整数")?;},
                 "wait"=>{optional(&tool,params,"child_run_id","string")?;optional(&tool,params,"timeout_secs","非负整数")?;},
                 "dispatch"=>{crate::agent::execution::runtime::ExecutionConfig::parse(params,params["profile"].as_str().unwrap_or("task"))?;optional(&tool,params,"profile","string")?;text(&tool,params,&["task"],false)?;optional(&tool,params,"context","string")?;let size=params["task"].as_str().unwrap().chars().count()+params.get("context").and_then(Value::as_str).unwrap_or_default().chars().count();if size>65_536{return Err("child_task 的 task + context 超过 65536 字符；本次未执行。请用已有引用。".into())}},
-                _=>return Err(format!("未知 child_task action='{effective}'；允许 dispatch/result/resume/status/list/send/ask/read_agent_result/inbox/receipt/wait/cancel；本次未执行。")),
+                _=>return Err(format!("未知 child_task action='{effective}'；允许 dispatch/result/resume/status/list/models/send/ask/read_agent_result/inbox/receipt/wait/cancel；本次未执行。")),
             }
         }
         "wait_jobs" => {

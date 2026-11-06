@@ -391,6 +391,10 @@
                                                     <span>写入算力:</span>
                                                 </div>
                                                 <div class="station-model-picker">
+                                                    <button type="button" class="slot-choice-pill"
+                                                        :class="{ active: !getSlotChoice('writer') }"
+                                                        title="角色卡未绑定模型时，继承父 Agent 本次实际使用的模型"
+                                                        :disabled="isRunning" @click="setSlotChoice('writer', '')">继承父模型</button>
                                                     <button
                                                         type="button"
                                                         class="slot-choice-pill"
@@ -661,11 +665,11 @@
                                                         type="button"
                                                         class="slot-choice-pill heter"
                                                         :class="{ active: !getSlotChoice('reviewer') }"
-                                                        title="跟随角色卡及默认审查路由；不是故障备用模型"
+                                                        title="角色卡未绑定模型时，继承父 Agent 本次实际使用的模型；不是故障备用模型"
                                                         :disabled="isRunning"
                                                         @click="setSlotChoice('reviewer', '')"
                                                     >
-                                                        🌐 默认路由
+                                                        继承父模型
                                                     </button>
                                                     <button
                                                         type="button"
@@ -842,6 +846,10 @@
                                                     <span>探针算力:</span>
                                                 </div>
                                                 <div class="station-model-picker">
+                                                    <button type="button" class="slot-choice-pill"
+                                                        :class="{ active: !getSlotChoice('scout') }"
+                                                        title="角色卡未绑定模型时，继承父 Agent 本次实际使用的模型"
+                                                        :disabled="isRunning" @click="setSlotChoice('scout', '')">继承父模型</button>
                                                     <button
                                                         type="button"
                                                         class="slot-choice-pill"
@@ -855,7 +863,7 @@
                                                     <button
                                                         type="button"
                                                         class="slot-choice-pill"
-                                                        :class="{ active: getSlotChoice('scout') === 'flash' || !getSlotChoice('scout') }"
+                                                        :class="{ active: getSlotChoice('scout') === 'flash' }"
                                                         :title="`使用执行模型: ${getModelDisplayName(modelRouting.flash)}`"
                                                         :disabled="isRunning"
                                                         @click="setSlotChoice('scout', 'flash')"
@@ -1743,7 +1751,7 @@ function getSlotChoice(slotKey: string): string {
     if (roleModels[slotKey] !== undefined) {
         return roleModels[slotKey];
     }
-    if (slotKey === "reviewer") return "";
+    if (["reviewer", "writer", "scout"].includes(slotKey)) return "";
     if (slotKey === "planner") return "pro";
     return "flash";
 }
@@ -1776,7 +1784,7 @@ function setSlotChoice(slotKey: string, choice: string) {
 
 function onSlotSelectChange(slotKey: string, modelId: string) {
     if (!modelId) {
-        setSlotChoice(slotKey, slotKey === 'reviewer' ? '' : 'flash');
+        setSlotChoice(slotKey, ['reviewer', 'writer', 'scout'].includes(slotKey) ? '' : 'flash');
         return;
     }
     setSlotChoice(slotKey, modelId);

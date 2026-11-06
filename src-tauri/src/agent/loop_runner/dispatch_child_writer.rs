@@ -115,6 +115,7 @@ pub(super) async fn dispatch_child_writer(
             }
             let mut writer_persona: String;
             let mut writer_model = routing.model_id.clone();
+            let mut card_model_bound=false;
             let mut effective_params = writer_params.clone();
             if let Some(obj) = effective_params.as_object_mut() {
                 obj.remove("max_concurrency");
@@ -149,6 +150,7 @@ pub(super) async fn dispatch_child_writer(
                         }
                         if !card.model_id.is_empty() {
                             writer_model = card.model_id.clone();
+                            card_model_bound=true;
                         }
                         effective_params = crate::agent::tools::role_manager::merge_writer_defaults(&card, writer_params);
                         effective_params["role"] = json!(card.name);
@@ -208,6 +210,15 @@ pub(super) async fn dispatch_child_writer(
                     }
                 }
             }
+
+            let slot_bound=ctx.model_routing.role_override("writer").is_some();
+            let parent_model=ctx.context.last_execution_model.as_deref().unwrap_or(&routing.model_id);
+            let locked=if card_model_bound {Some((writer_model.as_str(),"role_card"))} else if slot_bound {Some((writer_model.as_str(),"role_slot"))} else {None};
+            let selection=crate::agent::child_task::models::select(&effective_params,parent_model,locked)
+                .and_then(|selection|{crate::agent::child_task::models::validate(ctx.state.inner(),&selection)?;Ok(selection)});
+            let selection=match selection {Ok(s)=>s,Err(e)=>{item_reports.push(format!("[{}/{}] {e}",item_num,total));fail_count+=1;continue;}};
+            writer_model=selection.model_id.clone();
+            effective_params["model_selection"]=json!(selection);
 
             let mut envelope = crate::agent::protocol::DispatchEnvelope::writer(
                 ctx.parent_run_id,

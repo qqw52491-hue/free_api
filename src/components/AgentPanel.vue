@@ -231,7 +231,7 @@
                     @stop="session.requestStop"
                 >
                     <template #deck>
-                        <AgentDelegatedTasks :session-id="session.activeSessionId.value" :active="session.isRunning.value" :all-models="allModels" />
+                        <AgentDelegatedTasks :session-id="session.activeSessionId.value" :active="session.isRunning.value" :all-models="allModels" @inspect-worker="handleInspectWorker" />
                         <AgentProgressDeck
                             :steps="activeDeckSteps"
                             :is-running="session.isRunning.value"
@@ -625,6 +625,11 @@ function handleOpenTeamDeck(stepId?: string) {
     if (stepId) {
         session.selectedStepId.value = stepId;
     }
+}
+function handleInspectWorker(workerId: string) {
+    session.selectedStepId.value = null;
+    inspectorCollapsed.value = false;
+    inspectorRef.value?.selectWorker(workerId);
 }
 function handleOpenDiff(payload: FileDiffPayload) {
     if (payload.stepId && !payload.viewAll) {

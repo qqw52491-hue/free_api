@@ -17,7 +17,7 @@ use tokio::sync::watch;
 
 
 // 验收语义变更时升版：旧裁决不能在新规则下继续复用；Git 基线保持原样。
-const FINISH_REVIEW_RULES_VERSION: &str = "review-search-v18-project-rules";
+const FINISH_REVIEW_RULES_VERSION: &str = "review-search-v19-inherited-model";
 const MAX_FINISH_FORMAT_RETRIES: u32 = 5;
 const MAX_FINISH_REQUEST_RETRIES: u32 = 5;
 
@@ -332,7 +332,8 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     // 防敷衍复用键包括 diff/摘要/契约/scope：补正任一审查输入必须允许重审，
     // 否则文本型交付一旦被打回就永久锁死在旧拦截上。
     // 证据补正/范围变化即使没有改代码，也不能复用旧驳回。
-    let contract_fp = crate::agent::finalization::contract_fingerprint(context.review_contract.as_ref());
+    let mut contract_fp = crate::agent::finalization::contract_fingerprint(context.review_contract.as_ref());
+    if let Some(model)=&context.last_execution_model {contract_fp.push_str(&format!(";parent_execution_model={model}"));}
     let base_review_fingerprint = compose_review_fingerprint(
         &diff_hash, finish_summary, &contract_fp, context.resource_scope.revision,
     );

@@ -512,6 +512,7 @@ pub async fn run_call_llm_and_run_tool_phases(
             Ok(r) => r,
         };
 
+        context.last_execution_model = Some(routing.model_id.clone());
         let model_tier = routing.tier.to_string();
         if crate::agent::child_reviewer::main_executor::load(state.inner(),run_id)?.is_some() {
             inst=crate::agent::child_reviewer::main_executor::restrict_instruction(inst);

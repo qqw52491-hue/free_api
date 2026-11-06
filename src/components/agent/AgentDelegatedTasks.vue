@@ -28,7 +28,7 @@
         </div>
       </button>
 
-      <div v-if="dockOpen" class="dock-tray">
+      <div v-if="dockOpen" class="dock-tray soft-scrollbar">
         <article
           v-for="task in tasks"
           :key="task.child_run_id"
@@ -36,7 +36,7 @@
           :class="[`state-${stateKey(task)}`, { 'is-expanded': isTaskOpen(task) }]"
           :style="{ marginLeft: `${Math.max(0, (task.depth || 1) - 1) * 14}px` }"
         >
-          <button type="button" class="subagent-row" :aria-expanded="isTaskOpen(task)" @click="toggleTask(task)">
+          <div class="subagent-row" role="button" tabindex="0" title="点击在右侧打开该子 Agent 详细执行工作台" @click="inspectTask(task)" @keydown.enter.prevent="inspectTask(task)">
             <div class="subagent-row-left">
               <span v-if="(task.depth || 1) > 1" class="tree-branch">↳</span>
               <span v-if="(task.depth || 1) > 1" class="depth-badge">L{{ task.depth }}</span>
@@ -61,9 +61,41 @@
               <span v-if="stepCount(task)" class="meta-chip">{{ stepCount(task) }} 步</span>
               <span v-if="durationLabel(task)" class="meta-chip">{{ durationLabel(task) }}</span>
               <span class="status-badge" :class="`state-${stateKey(task)}`">{{ label(task) }}</span>
-              <svg class="dock-chevron" :class="{ 'is-open': isTaskOpen(task) }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="6 9 12 15 18 9" /></svg>
+              <button
+                type="button"
+                class="subagent-context-toggle"
+                :class="{ 'is-open': isTaskOpen(task) }"
+                :aria-expanded="isTaskOpen(task)"
+                title="展开/收起子任务背景与结论摘要"
+                @click.stop="toggleTask(task)"
+              >
+                <span>{{ isTaskOpen(task) ? '收起背景' : '背景' }}</span>
+                <svg class="dock-chevron" :class="{ 'is-open': isTaskOpen(task) }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="6 9 12 15 18 9" /></svg>
+              </button>
             </div>
-          </button>
+          </div>
+
+          <div
+            v-if="task.recent_steps?.length"
+            class="trace-steps-list soft-scrollbar"
+            aria-label="最近执行步骤（点击查看详情）"
+          >
+            <div
+              v-for="st in task.recent_steps"
+              :key="st.seq"
+              class="trace-step-row"
+              role="button"
+              tabindex="0"
+              title="点击在右侧工作台查看该子 Agent 详细步骤与输出"
+              @click="inspectTask(task)"
+              @keydown.enter.prevent="inspectTask(task)"
+            >
+              <span class="trace-seq">#{{ st.seq }}</span>
+              <span class="trace-tool">{{ shortTool(st.tool) }}</span>
+              <span v-if="st.target" class="trace-target" :title="st.target">{{ st.target }}</span>
+              <span v-if="st.description" class="trace-desc" :title="st.description">{{ st.description }}</span>
+            </div>
+          </div>
 
           <div v-if="isTaskOpen(task)" class="subagent-detail">
             <div class="detail-meta-bar">
@@ -72,6 +104,7 @@
               <span v-if="task.phase">阶段 {{ task.phase }}</span>
               <span v-if="task.updated_at">更新于 {{ time(task.updated_at) }}</span>
               <span v-if="task.queued_messages">{{ task.queued_messages }} 条消息待投递</span>
+              <button type="button" class="link-btn" @click.stop="inspectTask(task)">在右侧打开完整工作台 ↗</button>
             </div>
 
             <div v-if="!fullFor(task) && (isTaskTruncated(task) || isSummaryTruncated(task))" class="truncation-bar">
@@ -85,15 +118,6 @@
             </div>
             <pre v-if="hasMultiLineGoal(task) || fullFor(task)?.goal" class="task-prompt-box">{{ fullFor(task)?.goal || task.task?.trim() }}</pre>
             <div v-if="fullFor(task)?.summary || task.summary" class="task-summary-box">{{ fullFor(task)?.summary || task.summary }}</div>
-
-            <div v-if="task.recent_steps?.length" class="trace-steps-list" aria-label="最近执行步骤">
-              <div v-for="st in task.recent_steps" :key="st.seq" class="trace-step-row">
-                <span class="trace-seq">#{{ st.seq }}</span>
-                <span class="trace-tool">{{ shortTool(st.tool) }}</span>
-                <span v-if="st.target" class="trace-target" :title="st.target">{{ st.target }}</span>
-                <span v-if="st.description" class="trace-desc" :title="st.description">{{ st.description }}</span>
-              </div>
-            </div>
 
             <AgentHumanInterventionCard
               v-if="task.human_request"
@@ -167,6 +191,7 @@ type Task = {
 type Receipt = { message_id: string; delivery: string };
 
 const props = defineProps<{ sessionId: string; active: boolean; allModels?: Array<{ id: string; name: string }> }>();
+const emit = defineEmits<{ 'inspect-worker': [childRunId: string] }>();
 const tasks = ref<Task[]>([]);
 const drafts = ref<Record<string, string>>({});
 const busy = ref<Record<string, boolean>>({});
@@ -220,6 +245,10 @@ function isTaskOpen(t: Task): boolean {
 
 function toggleTask(t: Task) {
   expandedMap.value[t.child_run_id] = !isTaskOpen(t);
+}
+
+function inspectTask(t: Task) {
+  emit('inspect-worker', t.child_run_id);
 }
 
 function isTaskTruncated(t: Task): boolean {

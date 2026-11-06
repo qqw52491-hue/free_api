@@ -124,6 +124,10 @@ fn read(path: &str) -> String {
     .to_string()
 }
 
+fn reasoning_only() -> Value {
+    json!({"choices":[{"delta":{"reasoning_content":"fixture reasoning"},"finish_reason":null}]})
+}
+
 #[tokio::test]
 async fn human_reply_decision_uses_the_normal_model_request_and_actual_host_application() {
     use crate::agent::checkpoint::AgentCheckpoint;
@@ -153,13 +157,16 @@ async fn human_reply_decision_uses_the_normal_model_request_and_actual_host_appl
 
 #[tokio::test]
 async fn generation_exhaustion_does_not_restart_the_inner_budget() {
-    let reasoning_only = json!({"choices":[{"delta":{"reasoning_content":"fixture reasoning"},"finish_reason":"stop"}]} );
-    for chunk in [
-        response(&read("evidence.txt"), Some("length")),
-        reasoning_only,
-        response("{", Some("stop")),
+    for responses in [
+        vec![response(&read("evidence.txt"), Some("length")), reasoning_only()],
+        vec![reasoning_only()],
+        vec![response("{", Some("stop"))],
+        vec![response("{", Some("stop")), response("", Some("stop"))],
+        vec![response("{", Some("stop")), json!({
+            "choices":[{"delta":{"reasoning_content":"truncated reasoning"},"finish_reason":"length"}]
+        })],
     ] {
-        let f = Fixture::new(vec![chunk]).await;
+        let f = Fixture::new(responses).await;
         let error = f.run().await.err().expect("不完整响应不得成为指令");
         assert!(
             error.instruction_recovery_exhausted(),
@@ -181,7 +188,62 @@ async fn generation_exhaustion_does_not_restart_the_inner_budget() {
         assert_eq!(calls.len(), 2);
         assert_eq!(calls.iter().map(|r| r.0).collect::<Vec<_>>(), vec![1, 2]);
         assert!(calls.iter().all(|r| r.1 != "instruction_ready"));
+        assert!(error.message().contains("第 1 次："));
+        assert!(error.message().contains("第 2 次："));
     }
+}
+
+#[tokio::test]
+async fn reasoning_only_correction_regenerates_once_from_original_context() {
+    let invalid = r#"{"plan_title":"invalid-candidate-marker"}"#;
+    let f = Fixture::new(vec![
+        response(invalid, None),
+        reasoning_only(),
+        response(&read("evidence.txt"), Some("stop")),
+    ])
+    .await;
+
+    let (instruction, _, _, calibration) = f.run().await.unwrap();
+    assert!(calibration.is_none());
+    let result = run_agent_step(
+        &f.data.db,
+        "fixture",
+        &instruction,
+        &PluginRegistry::new(),
+        Some(&f.data.root),
+    );
+    assert!(result.success && result.stdout.contains("existing evidence"));
+
+    let requests = f.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[1]["messages"].to_string().contains("invalid-candidate-marker"));
+    let first = requests[0]["messages"].as_array().unwrap();
+    let third = requests[2]["messages"].as_array().unwrap();
+    assert_eq!(&first[..first.len() - 1], &third[..third.len() - 1]);
+    assert!(third.last().unwrap()["content"].as_str().unwrap().contains("只提交下一项必要操作"));
+    assert!(!requests[2]["messages"].to_string().contains("fixture reasoning"));
+    assert_eq!(requests[2]["model"], requests[0]["model"]);
+    assert_eq!(requests[2]["max_tokens"], requests[0]["max_tokens"]);
+}
+
+#[tokio::test]
+async fn failed_clean_regeneration_stops_and_reports_all_three_attempts() {
+    let f = Fixture::new(vec![
+        response(r#"{"plan_title":"no tool"}"#, None),
+        reasoning_only(),
+        response("", Some("length")),
+    ])
+    .await;
+
+    let error = f.run().await.unwrap_err();
+    assert!(error.instruction_recovery_exhausted());
+    assert_eq!(f.requests.lock().unwrap().len(), 3);
+    let reasons: Vec<_> = error.message().lines().collect();
+    assert_eq!(reasons.len(), 3);
+    assert!(reasons[0].starts_with("第 1 次：") && reasons[0].contains("缺少可执行入口"));
+    assert!(reasons[1].starts_with("第 2 次：") && reasons[1].contains("正式回复为空"));
+    assert!(reasons[2].starts_with("第 3 次：") && reasons[2].contains("finish_reason=length"));
+    assert!(error.to_string().contains("3 次尝试"));
 }
 
 #[tokio::test]

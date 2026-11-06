@@ -45,6 +45,10 @@ pub(crate) fn inherit_resume(
     use rusqlite::OptionalExtension;
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let raw:Option<String>=conn.query_row("SELECT execution_checkpoint_json FROM agent_child_runs WHERE id=?1 AND parent_session_id=?2 AND kind='task'",rusqlite::params![params["child_run_id"].as_str().unwrap_or_default(),session],|r|r.get(0)).optional().map_err(|e|e.to_string())?.flatten();
+    if params.get("model_id").is_none() {
+        let model: Option<String> = conn.query_row("SELECT model_id FROM agent_child_runs WHERE id=?1 AND parent_session_id=?2 AND kind='task'", rusqlite::params![params["child_run_id"].as_str().unwrap_or_default(), session], |r| r.get(0)).optional().map_err(|e| e.to_string())?;
+        if let Some(model) = model.filter(|m| !m.is_empty()) { params["model_id"] = json!(model); }
+    }
     if let Some(raw) = raw {
         let snapshot: Value =
             serde_json::from_str(&raw).map_err(|e| format!("原派发输入快照损坏：{e}"))?;
@@ -91,6 +95,8 @@ mod tests {
         db.0.lock().unwrap().execute("INSERT INTO agent_child_runs(id,parent_run_id,parent_session_id,workspace_root,model_id,status,started_at,kind,execution_checkpoint_json) VALUES ('prior','parent','owner','/tmp','mock','succeeded','now','task',?1)",[original.to_string()]).unwrap();
         let args = json!({"child_run_id":"prior","message":"continue"});
         let inherited = inherit_resume(&db, "owner", args.clone()).unwrap();
+        assert_eq!(inherited["model_id"], "mock");
+        assert_eq!(inherit_resume(&db,"owner",json!({"child_run_id":"prior","message":"new attempt","model_id":"explicit-pro"})).unwrap()["model_id"],"explicit-pro");
         assert_eq!(inherited["role"], "investigator");
         assert_eq!(inherited["custom_inputs"]["scope"], "api");
         assert_eq!(

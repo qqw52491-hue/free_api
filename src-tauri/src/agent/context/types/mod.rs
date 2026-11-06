@@ -230,6 +230,9 @@ impl PlanState {
 /// 严格遵循三明治分层拓扑，将静态不可变前缀、只追加对话流水与动态尾部状态卡解耦。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandwichContext {
+    /// Host fact: model that produced the current instruction, saved in checkpoint data.
+    #[serde(default)]
+    pub last_execution_model: Option<String>,
     // ════════════════════════════════════════════════════════════════════
     // 🍞 1. 顶层面包 (Static Prefix Zone - 100% 静态，锁死前缀缓存)
     // ════════════════════════════════════════════════════════════════════
@@ -459,6 +462,7 @@ impl SandwichContext {
 
     pub fn new(system_prompt: String, user_goal: String) -> Self {
         Self {
+            last_execution_model: None,
             system_prompt,
             current_goal: user_goal.clone(),
             history_task_id: new_history_task_id(),

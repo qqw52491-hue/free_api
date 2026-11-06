@@ -111,7 +111,7 @@ Agent 的目标不是最大化工具调用、文件覆盖或搜索次数，而�
 5. **调查与实施角色**：互不依赖的调查问题可交给 worker 角色，实施任务可交给 writer 角色。普通 worker/writer 与 task 使用同一主循环、工具协议和独立检查点；角色职责及输入输出契约由派发内容和角色卡提供，不再按名称绑定固定命令白名单。按实际回执确认任务已受理，任务描述应自包含。
 6. **工作区选择**：默认共享父工作区，修改直接落在父工作区，完成后无需 apply；普通子任务可并行；由父 Agent 按实际依赖协调，相关修改避免互相覆盖。需要私有副本和补丁审阅时显式选择 writer 的 `execution.workspace=isolated`，按回执审阅并调用 `child_writer.apply`。隔离补丁结果不能冒充真实工程已合入，冲突仍由宿主按文件指纹核对。既有在途任务与旧隔离产物沿用原协议，不因角色名称被重新解释。
 
-7. **统一子任务入口 (`child_task.dispatch`)**：`profile` 选择执行方式：`task`、`worker`、`writer` 都用通用执行器，后两者分别选调查/实施角色默认值；`reviewer` 审查已有证据（仍须提供证据参数）。`role` 挂载角色的人设、模型和默认组合，不等于执行方式。用户指定类型时显式传 `profile`，或核对角色默认组合；只在任务标题写“Worker”不会改变实际类型。未选角色且省略 profile 时默认 task。原 `child_worker`/`child_writer`/`child_reviewer` 入口保留。
+7. **统一子任务入口 (`child_task.dispatch`)**：`profile` 选择执行方式：`task`、`worker`、`writer` 都用通用执行器，后两者分别选调查/实施角色默认值；`reviewer` 审查已有证据（仍须提供证据参数）。`role` 挂载角色的人设、模型和默认组合，不等于执行方式。用户指定类型时显式传 `profile`，或核对角色默认组合；只在任务标题写“Worker”不会改变实际类型。未选角色且省略 profile 时默认 task。原 `child_worker`/`child_writer`/`child_reviewer` 入口保留。模型默认继承父执行实际模型；可先用 `child_task.models` 查已启用模型，再在派发时明确传 `model_id`。人工角色卡/角色槽绑定优先，不能覆盖；不按任务难度或失败次数自动升级。`child_task.resume` 省略模型时沿用原模型，显式换模型产生新尝试，原结果保留。
    - worker/writer 也能通信，不需要为了发信改用完整 task。共享执行的 task/worker/writer 都支持 `execution.workflow.plan_mode` 的方案模式和 `completion` 的 handoff/delivery 选择；handoff 交回子目标，父任务负责整体集成验收。工具范围按需用 `execution.allowed_tools` 缩小，不能扩大角色、父任务或资源授权。每个子任务默认独立保存进度，应用重启不保证自动恢复整棵任务树。
    - **只读协作示例**（task 中的对象和问题替换为本次实际任务）：
      ```json

@@ -29,6 +29,9 @@ pub(super) async fn dispatch_resume_child(
 ) -> Result<ArmOutcome, String> {
     Ok(ArmOutcome::Done({
         let params = inst.get_params();
+        if params.get("model_id").is_some() {
+            return Ok(ArmOutcome::Done(DispatchResult {view:None,success:false,stdout:String::new(),stderr:"resume_child 沿用原执行模型；更换模型请用 child_task.dispatch(model_id=已配置模型ID)，附上原任务与结果引用以创建独立尝试。未启动续接。".into(),route:"host_rejection:model_change_requires_new_dispatch".into()}));
+        }
         let target_child_id = params
             .get("child_run_id")
             .or_else(|| params.get("id"))

@@ -435,10 +435,16 @@
 .trace-steps-list {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
+    margin: 0 8px 6px 24px;
     padding: 4px 6px;
+    max-height: 76px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
     border-radius: 6px;
     background: var(--theme-inset-bg, rgba(var(--theme-foreground-rgb, 244, 244, 245), 0.03));
+    border: 1px solid rgba(var(--theme-foreground-rgb, 244, 244, 245), 0.04);
 }
 
 .trace-step-row {
@@ -447,6 +453,42 @@
     gap: 6px;
     font-size: 11px;
     min-width: 0;
+    padding: 2px 4px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.12s ease;
+}
+
+.trace-step-row:hover {
+    background: rgba(var(--theme-foreground-rgb, 244, 244, 245), 0.06);
+}
+
+.subagent-context-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    border: 1px solid rgba(var(--theme-foreground-rgb, 244, 244, 245), 0.08);
+    background: rgba(var(--theme-foreground-rgb, 244, 244, 245), 0.03);
+    color: rgba(var(--theme-foreground-rgb, 244, 244, 245), 0.62);
+    font: inherit;
+    font-size: 10.5px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.12s ease;
+}
+
+.subagent-context-toggle:hover,
+.subagent-context-toggle.is-open {
+    color: rgba(var(--theme-foreground-rgb, 244, 244, 245), 0.92);
+    background: rgba(var(--theme-foreground-rgb, 244, 244, 245), 0.08);
+    border-color: rgba(var(--theme-foreground-rgb, 244, 244, 245), 0.15);
+}
+
+.subagent-context-toggle .dock-chevron {
+    width: 10px;
+    height: 10px;
 }
 
 .trace-seq {
@@ -581,6 +623,10 @@
 .dock-ticker-preview { color: rgba(var(--theme-foreground-rgb, 244, 244, 245), 0.45); }
 .dock-toggle-label { opacity: 0.8; }
 .dock-tray {
+    max-height: 185px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
     margin-top: 6px;
     padding: 6px 4px 2px;
     border-top: 1px solid rgba(var(--theme-foreground-rgb, 244, 244, 245), 0.06);

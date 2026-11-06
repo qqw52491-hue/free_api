@@ -3,6 +3,7 @@
 pub(crate) mod runtime;
 pub(crate) mod presets;
 pub(crate) mod dispatch;
+pub(crate) mod models;
 use crate::db::DbState;
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
@@ -466,6 +467,7 @@ pub(crate) fn status(db: &DbState, parent: &str, id: &str) -> Result<Value, Stri
         }
         if let Some(raw_cp) = cp_json {
             if let Ok(parsed) = serde_json::from_str::<Value>(&raw_cp) {
+                if let Some(selection)=parsed["state"]["dispatch_input"].get("model_selection") {body["model_selection"]=selection.clone();}
                 let params = &parsed["state"]["dispatch_input"]["params"];
                 if let Some(clean_task) = params["task"]
                     .as_str()

@@ -361,6 +361,18 @@ pub(super) async fn dispatch_child_reviewer(
                 }
             }
 
+            let slot_bound=ctx.model_routing.role_override("reviewer").is_some();
+            let parent_model=ctx.context.last_execution_model.as_deref().unwrap_or(&routing.model_id);
+            let locked=if card_model_bound {Some((reviewer_model.as_str(),"role_card"))} else if slot_bound {Some((reviewer_model.as_str(),"role_slot"))} else {None};
+            let configured_cross_family=ctx.model_routing.auto_cross_family_reviewer && locked.is_none() && effective_params.get("model_id").is_none();
+            let parent_model=if configured_cross_family {reviewer_model.as_str()}else{parent_model};
+            let selection=crate::agent::child_task::models::select(&effective_params,parent_model,locked)
+                .and_then(|selection|{crate::agent::child_task::models::validate(ctx.state.inner(),&selection)?;Ok(selection)});
+            let mut selection=match selection {Ok(s)=>s,Err(e)=>{item_reports.push(format!("[{}/{}] {e}",item_num,total));fail_count+=1;continue;}};
+            if configured_cross_family {selection.source="configured_cross_family".into();}
+            reviewer_model=selection.model_id.clone();
+            effective_params["model_selection"]=json!(selection);
+
             if is_batch {
                 // 与正式方案多人入口一致：成员审同一版本，不按到达先后独立定稿。
                 effective_params["plan_review_can_finalize"] = json!(false);

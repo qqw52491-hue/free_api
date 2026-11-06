@@ -119,7 +119,8 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         name: "child_task",
         summary: "统一子任务入口：profile=task/worker/writer 均使用通用执行器，worker/writer 选择调查/实施角色；reviewer 保留正式审查；role 挂载人设/模型/默认组合，任务标题不决定类型。worker/writer 也能直接通信，无需为通信改选 task。立即返回身份与结果回收方式；共享工作区可并行，相关变更需协调；普通任务最多五层（主任务为第零层）；消息不是人工授权，专用 Agent 原契约保留",
         actions: &[
-            "dispatch(task: string, context?: string [task+context <=65536 字符], role?: string, profile?: task|worker|writer|reviewer, custom_inputs?: object, execution?: {stages?: {plan?: boolean, plan_review?: boolean, stage_review?: boolean, final_review?: boolean} [省略自动，false 关闭自动触发；handoff 子任务默认关闭重复环节], workspace?: shared|isolated [缺省共享，isolated 仅 writer 的显式补丁模式], allowed_tools?: string[], workflow?: {plan_mode?: auto|cross_review|plan_approval, completion?: handoff|delivery}}) — 默认 task 使用通用阶段与独立检查点，可选择讨论模式及结果交接/完整交付；worker/writer 也使用相同主循环与流程配置；只有正式 reviewer 或显式 execution.workspace=isolated 的 writer 使用专用结果适配。权限可按工具或 tool.action 缩小；空数组禁用业务工具。返回 child_run_id，结果按各适配契约读取",
+            "dispatch(task: string, model_id?: string [已配置模型精确 ID；省略继承父执行模型，人工角色模型优先；不会按难度自动升级], context?: string [task+context <=65536 字符], role?: string, profile?: task|worker|writer|reviewer, custom_inputs?: object, execution?: {stages?: {plan?: boolean, plan_review?: boolean, stage_review?: boolean, final_review?: boolean} [省略自动，false 关闭自动触发；handoff 子任务默认关闭重复环节], workspace?: shared|isolated [缺省共享，isolated 仅 writer 的显式补丁模式], allowed_tools?: string[], workflow?: {plan_mode?: auto|cross_review|plan_approval, completion?: handoff|delivery}}) — 默认 task 使用通用阶段与独立检查点，可选择讨论模式及结果交接/完整交付；worker/writer 也使用相同主循环与流程配置；只有正式 reviewer 或显式 execution.workspace=isolated 的 writer 使用专用结果适配。权限可按工具或 tool.action 缩小；空数组禁用业务工具。返回 child_run_id，结果按各适配契约读取",
+            "models(offset?: number) — 分页列出已启用模型的精确 model_id、名称和平台；不返回凭据。派发可用 model_id 显式选择，人工角色配置优先",
             "status(child_run_id: string) / list(offset?: number) — 查真实状态、活动与协作登记；list.collaboration 返回消息原接收者、本次执行者和接收状态，每页100条并标注 has_more；不预测完成百分比",
             "send(target: string [任务ID或parent], message?: string, data?: any JSON, refs?: string[], idempotency_key?: string) — 至少一种内容，合计<=65536字符；保存后返回 message_id；父子和同树工兵可互发；成功结束的接收方由宿主新建只读收信执行，是否回复由接收者判断；失败或取消不自动唤醒；其他任务不可访问",
             "ask(target: string [同树已成功结束的成员ID], message?: string, data?: JSON, refs?: string[], idempotency_key?: string) — 明确受理一次只读答复，返回 request_id/reply_run_id；后台通知负责人，结果送回自己的信箱；用 wait() 等信，不自动修改原成果，不复活已关闭的主任务",
@@ -128,13 +129,13 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
             "receipt(message_id: string) — 查自己的收发消息或宿主绑定前次任务的消息原文/投递状态；不代表模型理解或完成",
             "wait(child_run_id?: string, timeout_secs?: number [1..600，默认180]) — 挂起等目标结束或收到消息，无目标等自己的信箱；有真实人工请求时保持挂起直到回答/消息/停止，不消耗模型轮次；普通窗口结束不代表失败",
             "result(child_run_id: string, output_id?: string [可分页读该子任务原始回执]) — 查交接与验收结果；最终用户交付仍由父 Agent 负责",
-            "resume(child_run_id: string, message: string) — 对已结束任务追问，新建带原交接与来源的独立后续尝试；send 可直接通信；已成功结束的接收方由新的只读执行收信，原交付不变",
+            "resume(child_run_id: string, message: string, model_id?: string [省略沿用原模型；指定其他模型创建新尝试，旧执行与结果保留]) — 对已结束任务追问，新建带原交接与来源的独立后续尝试；send 可直接通信；已成功结束的接收方由新的只读执行收信，原交付不变",
             "cancel(child_run_id: string) — 仅向自己派发的通用任务请求取消；实际终态随后查询",
         ],
     },
     BuiltinToolSpec {
         name: "child_worker",
-        summary: "调查角色兼容入口：等价 child_task.dispatch(profile=worker)，使用通用主循环、共享工具/Skill/MCP、独立检查点和角色契约；默认交回结果，模型沿用 scout 槽。共享工作区可并行，相关任务由主 Agent 协调；按每项实际回执确认受理；wait_jobs 或 child_task.wait 回收结果。用户要求只读时按任务执行，需要工具硬限制可显式配置 allowed_tools。",
+        summary: "调查角色兼容入口：等价 child_task.dispatch(profile=worker)，使用通用主循环、共享工具/Skill/MCP、独立检查点和角色契约；默认交回结果，模型默认继承父执行；人工 scout 槽或角色模型优先，可传 model_id 显式覆盖未锁定的选择。共享工作区可并行，相关任务由主 Agent 协调；按每项实际回执确认受理；wait_jobs 或 child_task.wait 回收结果。用户要求只读时按任务执行，需要工具硬限制可显式配置 allowed_tools。",
         actions: &[
             "dispatch(task: string [自包含侦察任务], focus_paths?: string[] <=5 [工作区内路径], role?: string, context_excerpts?: {background?: string, todo_slice?: string[], file_hints?: string[], prior_findings?: string[]}, custom_inputs?: object [专项业务参数；verified_facts/hard_constraints/definition_of_done 分节呈现，字段名不认证来源；入口分流另以可修正的 triage_reference 附带], dispatches?: Array<{task, focus_paths?, role?, ...}> [一步批量派发多个 worker])",
         ],

@@ -392,15 +392,12 @@ impl AgentRouter {
         if let Some(decision) = config.role_override(role) {
             return decision;
         }
-        // 探针（只读侦察）未显式配置时默认 Flash 档，不再跟随主 Agent 当前步的模型：
-        // 规划相位主 Agent 是 Pro，探针若跟随就会让“Flash 取证”落空。
-        // 与探针页“探针算力”默认高亮模型 2 的显示一致；角色卡自带 model_id 优先级更高（派发处处理）。
+        if let Some(model)=context.last_execution_model.as_ref().filter(|m|!m.is_empty()) {
+            return RoutingDecision {model_id:model.clone(),tier:if model==&config.flash {RoutingTier::Flash}else{RoutingTier::Pro},reason:"子任务默认继承父执行的实际模型；未自动升级".into()};
+        }
+        // Legacy snapshots have no actual model fact; retain their old fallback.
         if role == roles::SCOUT && !config.flash.trim().is_empty() {
-            return RoutingDecision {
-                model_id: config.flash.clone(),
-                tier: RoutingTier::Flash,
-                reason: "探针未配置算力，默认使用执行档（Flash）".to_string(),
-            };
+            return RoutingDecision {model_id:config.flash.clone(),tier:RoutingTier::Flash,reason:"旧快照无实际父模型，兼容使用 Flash 槽".into()};
         }
         Self::route_for_step(context, config, step_id)
     }
