@@ -446,16 +446,36 @@ fn progress_and_long_results_are_bounded_and_child_data_follows_parent_cleanup()
         json!({"type":"thinking_chunk","text":"x"})
     )
     .is_none());
+
+    let review_run = crate::agent::child_reviewer::begin_child_run(
+        &f.db,
+        &f.binding.child_run,
+        &f.binding.child_session,
+        &f.root,
+        "model",
+        0,
+        "review",
+        None,
+    )
+    .unwrap();
+    let review_session = format!("task-{review_run}");
+    crate::agent::conversation::begin_turn(
+        &f.db,
+        &review_session,
+        "model",
+        "【审查材料/历史：user】核对证据",
+    )
+    .unwrap();
     let conn = f.db.0.lock().unwrap();
     crate::db::delete_session_completely(&conn, &f.binding.parent_session, Some(&f.root)).unwrap();
     let remaining: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM chat_sessions WHERE id=?1",
-            [&f.binding.child_session],
+            "SELECT COUNT(*) FROM chat_sessions WHERE id IN (?1, ?2)",
+            [&f.binding.child_session, &review_session],
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(remaining, 0);
+    assert_eq!(remaining, 0, "删除父任务后，登记过的子会话不应遗留在普通列表");
     assert!(
         f.root.join("test.db").exists(),
         "共享工作区不得作为子会话数据删除"

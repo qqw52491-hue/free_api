@@ -16,8 +16,16 @@ use super::*;
 #[tauri::command]
 pub async fn get_sessions(state: State<'_, DbState>) -> Result<Vec<ChatSession>, String> {
     let conn = state.reader()?;
+    // Shared executors store an internal session for any registered child,
+    // including Reviewers. Match the registered identity, regardless of kind.
     let mut stmt = conn.prepare(
-        "SELECT id, title, model_id, created_at, updated_at, message_count FROM chat_sessions s WHERE NOT EXISTS (SELECT 1 FROM agent_child_runs c WHERE c.kind='task' AND s.id='task-' || c.id) ORDER BY updated_at DESC LIMIT 1000"
+        "SELECT s.id, s.title, s.model_id, s.created_at, s.updated_at, s.message_count
+         FROM chat_sessions s
+         WHERE NOT EXISTS (
+             SELECT 1 FROM agent_child_runs c
+             WHERE c.id = substr(s.id, 6) AND s.id = 'task-' || c.id
+         )
+         ORDER BY s.updated_at DESC LIMIT 1000",
     ).map_err(|e| e.to_string())?;
     let list = stmt
         .query_map([], |row| {
@@ -152,4 +160,46 @@ pub async fn rename_session(
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn session_list_hides_internal_review_and_task_sessions_by_registration() {
+        let conn = crate::db::init_db(&std::path::PathBuf::from(":memory:")).unwrap();
+        conn.execute_batch(
+            "INSERT INTO chat_sessions (id, title, model_id, created_at, updated_at) VALUES
+                ('parent', '用户任务', 'model', 'now', '1'),
+                ('task-review-run', '【审查材料/历史：user】 审查目标', 'model', 'now', '5'),
+                ('task-worker-run', '内部子任务', 'model', 'now', '4'),
+                ('task-unregistered', '【审查材料/历史：user】 用户标题', 'model', 'now', '3'),
+                ('chat-review-run', '普通对话', 'model', 'now', '2');
+             INSERT INTO agent_child_runs
+                (id, parent_run_id, parent_session_id, workspace_root, model_id, status, started_at, kind)
+             VALUES
+                ('review-run', 'run', 'parent', '/tmp', 'model', 'succeeded', 'now', 'review'),
+                ('worker-run', 'run', 'parent', '/tmp', 'model', 'succeeded', 'now', 'task');",
+        )
+        .unwrap();
+        let db = DbState(Arc::new(Mutex::new(conn)));
+        let app = tauri::test::mock_app();
+        app.manage(db.clone());
+
+        let sessions = get_sessions(app.state::<DbState>()).await.unwrap();
+        let visible_ids: Vec<_> = sessions.iter().map(|session| session.id.as_str()).collect();
+        assert_eq!(visible_ids, ["task-unregistered", "chat-review-run", "parent"]);
+
+        let conn = db.0.lock().unwrap();
+        let internal_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM chat_sessions s JOIN agent_child_runs c ON s.id = 'task-' || c.id",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(internal_count, 2);
+    }
 }

@@ -137,14 +137,20 @@ pub fn delete_session_completely(
         return Ok(());
     }
 
-    // 完整子任务拥有独立的会话账本，其物理工作区仍属于父任务，清理只走既有会话数据路径。
-    let task_sessions = {
-        let mut stmt = conn.prepare("SELECT s.id FROM chat_sessions s JOIN agent_child_runs c ON s.id='task-' || c.id WHERE c.parent_session_id=?1 AND c.kind='task' AND s.id!=?1")
+    // 按登记身份清理所有独立子会话，包括 Reviewer。共享工作区不属于子会话数据。
+    let child_sessions = {
+        let mut stmt = conn.prepare(
+            "SELECT s.id FROM agent_child_runs c
+             JOIN chat_sessions s ON s.id = 'task-' || c.id
+             WHERE c.parent_session_id = ?1 AND s.id != ?1",
+        )
             .map_err(|e| e.to_string())?;
         let rows = stmt.query_map([id], |r| r.get::<_,String>(0)).map_err(|e| e.to_string())?;
         rows.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())?
     };
-    for child in task_sessions { delete_session_completely(conn,&child,app_data_dir)?; }
+    for child in child_sessions {
+        delete_session_completely(conn, &child, app_data_dir)?;
+    }
 
     // 1. 清理该会话溢出落盘到本地 outputs/ 的 .log 大文本文件；
     //    cas_blob 是跨会话共享的内容寻址证据，先记下哈希，待本会话行删除后
