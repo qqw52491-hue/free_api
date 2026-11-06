@@ -117,17 +117,17 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "child_task",
-        summary: "统一子任务入口：profile=task/worker/writer 均使用通用执行器，worker/writer 选择调查/实施角色；reviewer 保留正式审查；role 挂载人设/模型/默认组合，任务标题不决定类型。worker/writer 也能直接通信，无需为通信改选 task。立即返回身份与结果回收方式；共享工作区可并行，相关变更需协调；普通任务最多五层（主任务为第零层）；消息不是人工授权，专用 Agent 原契约保留",
+        summary: "统一子任务入口：未指定动作时默认 dispatch，查询成员可用 params.action=list；各动作单步调用，逐次派发的任务在后台并行。profile=task/worker/writer 均使用通用执行器，worker/writer 选择调查/实施角色；reviewer 保留正式审查；role 挂载人设/模型/默认组合，任务标题不决定类型。worker/writer 也能直接通信，无需为通信改选 task。立即返回身份与结果回收方式；共享工作区可并行，相关变更需协调；普通任务最多五层（主任务为第零层）；消息不是人工授权，专用 Agent 原契约保留",
         actions: &[
             "dispatch(task: string, model_id?: string [已配置模型精确 ID；省略继承父执行模型，人工角色模型优先；不会按难度自动升级], context?: string [task+context <=65536 字符], role?: string, profile?: task|worker|writer|reviewer, custom_inputs?: object, execution?: {stages?: {plan?: boolean, plan_review?: boolean, stage_review?: boolean, final_review?: boolean} [省略自动，false 关闭自动触发；handoff 子任务默认关闭重复环节], workspace?: shared|isolated [缺省共享，isolated 仅 writer 的显式补丁模式], allowed_tools?: string[], workflow?: {plan_mode?: auto|cross_review|plan_approval, completion?: handoff|delivery}}) — 默认 task 使用通用阶段与独立检查点，可选择讨论模式及结果交接/完整交付；worker/writer 也使用相同主循环与流程配置；只有正式 reviewer 或显式 execution.workspace=isolated 的 writer 使用专用结果适配。权限可按工具或 tool.action 缩小；空数组禁用业务工具。返回 child_run_id，结果按各适配契约读取",
             "models(offset?: number) — 分页列出已启用模型的精确 model_id、名称和平台；不返回凭据。派发可用 model_id 显式选择，人工角色配置优先",
             "status(child_run_id: string) / list(offset?: number) — 查真实状态、活动与协作登记；list.collaboration 返回消息原接收者、本次执行者和接收状态，每页100条并标注 has_more；不预测完成百分比",
-            "send(target: string [任务ID或parent], message?: string, data?: any JSON, refs?: string[], idempotency_key?: string) — 至少一种内容，合计<=65536字符；保存后返回 message_id；父子和同树工兵可互发；成功结束的接收方由宿主新建只读收信执行，是否回复由接收者判断；失败或取消不自动唤醒；其他任务不可访问",
-            "ask(target: string [同树已成功结束的成员ID], message?: string, data?: JSON, refs?: string[], idempotency_key?: string) — 明确受理一次只读答复，返回 request_id/reply_run_id；后台通知负责人，结果送回自己的信箱；用 wait() 等信，不自动修改原成果，不复活已关闭的主任务",
+            "send(target: string [任务ID或parent], message?: string, data?: any JSON, refs?: string[], idempotency_key?: string) — 向同树主任务或 task/worker/writer 提问、回复、通知；至少一种内容，合计<=65536字符；保存后返回 message_id；成功结束的通用成员可安排只读收信，是否回复由接收者判断；失败或取消不自动唤醒；方案或阶段审查的对质用 resume_child，终审复审走正式交付入口",
+            "ask(target: string [同树已成功结束的子任务ID], message?: string, data?: JSON, refs?: string[], idempotency_key?: string) — 登记一次只读补充答复，返回 request_id/reply_run_id；后台通知负责人，结果送回自己的信箱；需要等答复时用 wait()，不自动修改原成果，不复活已关闭的主任务",
             "read_agent_result(child_run_id: string, view?: string [result、history、checkpoint或dispatch_input（原始派发输入）], offset?: number, limit?: number [最多8192字符]) — 同树成员历史结果/原历史分页；可查看只读答复，不授予权限",
             "inbox(child_run_id?: string, offset?: number, limit?: number [1..16]) — 省略 ID 收取自己的消息；指定已授权子任务/前次任务 ID 只分页查看其未投递材料，不核销对方信箱",
             "receipt(message_id: string) — 查自己的收发消息或宿主绑定前次任务的消息原文/投递状态；不代表模型理解或完成",
-            "wait(child_run_id?: string, timeout_secs?: number [1..600，默认180]) — 挂起等目标结束或收到消息，无目标等自己的信箱；有真实人工请求时保持挂起直到回答/消息/停止，不消耗模型轮次；普通窗口结束不代表失败",
+            "wait(child_run_id?: string, timeout_secs?: number [1..600，默认180]) — 省略 ID 等自己的信箱，收到消息后核对发送方与关联；指定 ID 也可在目标结束时返回；有真实人工请求时保持挂起直到回答/消息/停止，不消耗模型轮次；普通窗口结束不代表失败",
             "result(child_run_id: string, output_id?: string [可分页读该子任务原始回执]) — 查交接与验收结果；最终用户交付仍由父 Agent 负责",
             "resume(child_run_id: string, message: string, model_id?: string [省略沿用原模型；指定其他模型创建新尝试，旧执行与结果保留]) — 对已结束任务追问，新建带原交接与来源的独立后续尝试；send 可直接通信；已成功结束的接收方由新的只读执行收信，原交付不变",
             "cancel(child_run_id: string) — 仅向自己派发的通用任务请求取消；实际终态随后查询",
@@ -152,7 +152,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "resume_child",
-        summary: "追问/对质已完成的子任务：继承其脱水对话历史（writer 额外继承工作区副本），以半量步数预算继续攻坚；对 reviewer 的追问用于反驳指定 finding ID 并要求其 withdraw(撤回)/uphold(坚持)/revise(修正)；需提供 child_run_id 与追问 message",
+        summary: "追问既有专用子任务或对质审查结论：继承原对话历史（隔离 writer 另继承工作区副本）；对方案或阶段审查请指定 finding ID，审查员可裁定 withdraw(撤回) 或 maintain(维持)。终审复审走正式交付入口。需提供 child_run_id 与追问 message",
         actions: &[
             "dispatch(child_run_id: string, message: string, test_command?: string [writer 类可重设])",
         ],
@@ -327,21 +327,26 @@ mod tests {
     use super::{build_local_tools_menu, BUILTIN_TOOL_SPECS};
 
     #[test]
-    fn core_dispatch_examples_reach_real_parameter_and_profile_parsers() {
+    fn core_child_task_examples_reach_real_parameter_and_profile_parsers() {
         use crate::agent::{execution::runtime::ExecutionConfig, types::AgentInstruction};
         let core = include_str!("../../prompts/core_logic.md");
         let examples = core.split("```json").skip(1)
             .filter_map(|block| serde_json::from_str::<serde_json::Value>(block.split("```").next()?.trim()).ok())
             .filter(|value| value["tool"] == "child_task")
             .collect::<Vec<_>>();
-        assert_eq!(examples.len(), 2, "both child task examples must be valid JSON");
         let mut profiles = Vec::new();
+        let mut replies = 0;
         for value in examples {
             let inst: AgentInstruction = serde_json::from_value(value).unwrap();
             let params = inst.get_params();
             assert!(crate::agent::tools::input_validation::native_rejection(
                 "child_task", &inst.get_action(), &params,
             ).is_none());
+            if inst.get_action() == "send" {
+                assert_eq!(params["data"]["in_reply_to"], "原消息ID");
+                replies += 1;
+                continue;
+            }
             let profile = params["profile"].as_str().unwrap();
             let config = ExecutionConfig::parse(&params, profile).unwrap();
             if profile == "worker" {
@@ -355,6 +360,7 @@ mod tests {
             profiles.push(profile.to_string());
         }
         assert_eq!(profiles, ["worker", "task"]);
+        assert_eq!(replies, 1);
     }
 
     #[test]

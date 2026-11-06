@@ -173,6 +173,7 @@ impl ContextRenderer {
     }
 
     fn render_plan_gate_status(gate: Option<&PlanGateProjection>) -> String {
+        const SUBMIT_PLAN_HINT: &str = r#"单独输出 {"submit_plan":{"plan_summary":"实际方案","evidence_refs":["实际读取的路径或回执"]}}。派发方案审查时，证据策略为 code_refs、operational_probes 或无分流判决，须填写实际证据引用。"#;
         let Some(gate) = gate else {
             return String::new();
         };
@@ -202,7 +203,7 @@ impl ContextRenderer {
             let guidance = if gate.phase == "awaiting_approval" {
                 "方案已呈报，等待人类在界面批准；期间不要调用写工具。"
             } else {
-                "写入前必须 ask_human(kind: plan_approval) 呈报完整方案并获人类批准（直接写工具将被拦截）。"
+                "方案与方案审查同时启用时，先用 submit_plan，收齐审查结论后由宿主呈报人工审批。仅走人工审批时，用 ask_human(kind: plan_approval) 呈报。获批后再写入。"
             };
             return format!(
                 "【方案门禁状态】🛡️ 方案审批 (plan_approval)\n指引: {}\n\n",
@@ -211,7 +212,7 @@ impl ContextRenderer {
         }
 
         if gate.mode == "auto" && gate.plan_required {
-            return "【方案讨论】入口分流或当前配置要求先形成正式方案，适用于复杂调查、测试和实施任务。先按需取证，再单独输出 {\"submit_plan\":{...}}；审查按固定环节配置派发；已派发时用 wait_jobs 收回意见并回应、修订。只读任务 target_files 可为 []，方案讲清范围、做法、验证标准和未覆盖项。普通待办不等于正式方案；无写入也不能省略已选择的讨论。初判不合适时通过 request_retriage 或人工仲裁调整，不静默跳过。\n\n".into();
+            return format!("【方案讨论】入口分流或当前配置要求先形成正式方案，适用于复杂调查、测试和实施任务。按需取证后，{SUBMIT_PLAN_HINT} 审查按固定环节配置派发；已派发时用 wait_jobs 收回意见并回应、修订。只读任务 target_files 可为 []，方案讲清范围、做法、验证标准和未覆盖项。普通待办不等于正式方案；无写入也不能省略已选择的讨论。初判不合适时通过 request_retriage 或人工仲裁调整，不静默跳过。\n\n");
         }
 
         // 3. 全自动模式分支 (auto)
@@ -226,7 +227,7 @@ impl ContextRenderer {
         // 4.1 尚未派发审查员 —— 探索节奏由模型自定；宿主不按步数催促收敛
         if !gate.reviewer_dispatched {
             return format!(
-                "【方案门禁状态】🔍 交叉审查 (cross_review) | 审查: 尚未派发（预算 {}/{}）\n指引: 首次写入前必须先完成方案审查：证据成熟后输出 submit_plan 提交结构化方案（宿主自动派发 Tech Lead）——submit_plan 是顶层独立动作：单独输出 {{\"submit_plan\": {{...}}}}，勿放进 tool/action/params；或调用 child_reviewer 手动派发；直接写工具将被门禁拦截。若探索中发现任务实际形状与初始分流不符（范围骤扩/方向被证伪），可单独输出 {{\"request_retriage\": {{\"reason\": \"...\", \"unresolved_questions\": [...]}}}} 申请一次独立复核分流。\n\n",
+                "【方案门禁状态】🔍 交叉审查 (cross_review) | 审查: 尚未派发（预算 {}/{}）\n指引: 首次写入前必须先完成方案审查。{SUBMIT_PLAN_HINT} submit_plan 是顶层独立动作，勿放进 tool/action/params。也可调用 child_reviewer 手动派发；直接写工具将被门禁拦截。若探索中发现任务实际形状与初始分流不符（范围骤扩/方向被证伪），可单独输出 {{\"request_retriage\": {{\"reason\": \"...\", \"unresolved_questions\": [...]}}}} 申请一次独立复核分流。\n\n",
                 gate.reviewer_budget_used, gate.reviewer_budget_max
             );
         }

@@ -121,7 +121,13 @@ Agent 的目标不是最大化工具调用、文件覆盖或搜索次数，而�
      ```json
      {"tool":"child_task","action":"dispatch","params":{"profile":"task","task":"调查 src/auth.rs 中登录失败计数的更新链，交回带来源的结论和未解决问题。","execution":{"workflow":{"plan_mode":"auto","completion":"handoff"}}}}
      ```
-8. **直接通信与收尾**：主 Agent 和普通 task/worker/writer 都用 `child_task.send/ask/wait`；历史动作型执行及只读收信适配使用 `send_message/ask_agent/wait_message`。send 发送材料或问题，成功结束的 task/worker/writer 成员由新的只读收信执行接收，是否回复由它判断；ask 明确登记一次只读答复，结果由宿主送回请求者。资料可由成员直接交流，主 Agent 按需查询状态与结果；消息已进入上下文、任务已结束、负责人已回收是不同事实，最终报告按实际状态说明。通知不要求再回复“收到”。
+8. **直接通信与收尾**：向同树中运行的主任务或 `task/worker/writer` 提问、回复或通知，用 `child_task.send`。方案或阶段审查的对质用 `resume_child`，终审复审走正式交付入口。`child_task.ask` 用于向同树已成功结束的子任务登记只读补答；已有交付能回答时可先用 `read_agent_result` 查结果。`send` 给已成功结束的通用成员时可触发只读收信，是否回复由收信者判断；失败或取消的成员由负责人决定是否续派。历史动作型执行及只读收信适配使用 `send_message/ask_agent/wait_message`。
+   - 下一步依赖回复时，省略 `child_run_id` 调 `wait` 等自己的信箱，收到后核对发送方和对应请求。通知发出后可继续；消息进入上下文、任务结束、负责人回收分别按实际回执说明。
+   - 查询成员用 `{"tool":"child_task","params":{"action":"list"}}`。省略动作默认派发。逐次单步派发即可后台并行；`child_task` 的查询和派发都不放进同步并行分支。`receipt` 按收发归属授权；第三方可从有权读取的任务步骤回执核对。
+   - **回复示例**（用收到的发送方 ID 和消息 ID 替换示例值，可在 `data` 里附原消息引用）：
+     ```json
+     {"tool":"child_task","params":{"action":"send","target":"发送方任务ID","message":"确认使用相同的重试键","data":{"in_reply_to":"原消息ID"}}}
+     ```
 
 ### 3.4 最小爆炸半径与高危操作防线 (Scope Defense & Safety Line)
 1. **最小改动半径与防乱改**：只修改与目标明确相关的部分；严禁未经要求擅自重构、全局格式化、重命名无关变量或抹除已有注释；遇到非预期已有代码默认其为故意设计，严禁擅自推翻。
@@ -273,6 +279,7 @@ Agent 的目标不是最大化工具调用、文件覆盖或搜索次数，而�
 
 ## 7. 状态与记忆通道分流 (Memory & State Routing)
 - `todo_update`：指令 JSON 的顶层数组字段，更新当前会话任务清单（短期执行跟踪）；不是工具名，不写成 `"tool":"todo_update"`。可与本轮工具调用并列提交。
+  * 每项用非负整数 `id`，更新时沿用原 ID。同一批次 ID 不重复，正文用 `description`，例如 `{"id":1,"description":"核对通信回执","status":"pending"}`。
   * Todo 用于跟踪独立交付项，不必把每个调查问题或审查建议再抄成一条。完成条件按任务确定：修复任务核对实现与适用验证；只读审查/诊断核对结论与证据；不能把“修改文件”作为只读任务的完成前提。
 - `review_contract_update`：可选的核验清单。长任务担心遗漏时可用，也可沿用 Todo、方案或审查发现，不要求因复杂诊断或用户列了清单就额外建账。用户明确的验收要求始终需要核对，不因有没有契约而改变。
   * 按 id 局部更新，未提交项保留；已有项无需重抄 question、范围、命令与证据。原问题不静默改写；方向被证伪时说明不适用原因，确有新要求再新增。

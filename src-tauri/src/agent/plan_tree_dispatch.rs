@@ -157,7 +157,7 @@ where
             .any(|&c| t == c || t.ends_with(&format!(":{}", c)) || t.ends_with(&format!("/{}", c)))
         {
             if t == "child_task" || t.ends_with(":child_task") || t.ends_with("/child_task") {
-                return Err("❌ 「child_task」是异步后台子 Agent，不能放在 parallel 同步执行树中。请逐次使用 child_task 的 dispatch 派发；已派发任务仍可后台并行运行。".into());
+                return Err("❌ 本批未执行：并行分支不支持 child_task。请将原动作单独调用，例如查回执仍用 receipt。需要派发多个任务时可逐次 dispatch，已受理任务在后台并行运行。".into());
             }
             return Err(format!(
                 "❌ 「{}」是异步后台子 Agent，不能放在 parallel 同步执行树中。请直接使用对应工具的 dispatches 数组，例如：{{\"tool\":\"{}\",\"dispatches\":[{{\"task\":\"任务 A\"}},{{\"task\":\"任务 B\"}}]}}；也可逐次派发，任务会在后台并行运行。",
