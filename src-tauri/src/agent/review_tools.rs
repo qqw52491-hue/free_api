@@ -1371,9 +1371,11 @@ mod tests {
         assert!(sys.is_err() || sys.as_ref().unwrap().contains("PermissionError") || sys.as_ref().unwrap().contains("只读"),
             "os.system 应被拦截: {:?}", sys);
         assert!(!dir.join("hacked.txt").exists());
-        let sp = execute(&dir, None, None, "python", &json!({"code": "import subprocess"}));
-        assert!(sp.is_err() || sp.as_ref().unwrap().contains("ImportError") || sp.as_ref().unwrap().contains("import"),
+        let sp = execute(&dir, None, None, "python", &json!({"code": "import subprocess; print('SUBPROCESS_IMPORT_SUCCEEDED')"}));
+        assert!(sp.is_err() || sp.as_ref().unwrap().contains("ImportError") || sp.as_ref().unwrap().contains("ModuleNotFoundError"),
             "subprocess import 应被拦截: {:?}", sp);
+        assert!(sp.as_ref().map_or(true, |out| !out.contains("SUBPROCESS_IMPORT_SUCCEEDED")),
+            "被阻止的 import 之后不应继续执行: {:?}", sp);
         let pw = execute(&dir, None, None, "python",
             &json!({"code": "from pathlib import Path; Path('evil2.txt').open('w').write('x')"}));
         assert!(pw.is_err() || pw.as_ref().unwrap().contains("PermissionError") || pw.as_ref().unwrap().contains("只读"),
