@@ -507,12 +507,12 @@
 
                                     <!-- Station 3: 🛡️ 阶段审查工位 (Reviewer) -->
                                     <div v-else-if="activeRoutingTab === 'reviewer'" class="tab-pane-content station-pane">
-                                        <StageSettingsFields v-model="modelRouting.stages" :disabled="workflowLocked" :approval="currentPlanMode === 'plan_approval'" />
+                                        <StageSettingsFields :model-value="modelRouting.stages" :disabled="workflowLocked" :approval="currentPlanMode === 'plan_approval'" :legacy-stage-review-disabled="isStageReviewerDisabled" @stage-change="setFixedStage" />
                                         <p class="section-desc">{{ workflowLocked ? '当前显示的是界面上的新任务设置；续跑使用原任务检查点，不能修改流程。可切换模型，或选择新任务再调整。' : '新任务使用此配置。自动沿用已有策略，关闭不自动重开。' }}</p>
                                         <div class="squad-section gate-section">
                                             <div class="section-head">
                                                 <div class="section-title-wrap">
-                                                    <span class="section-title">🛡️ 审查人数与阶段策略</span>
+                                                    <span class="section-title">🛡️ 审查人数</span>
                                                     <span class="section-desc">方案与终审共用人数选择；阶段审查另按触发条件</span>
                                                 </div>
                                                 <div
@@ -529,34 +529,6 @@
                                             </div>
 
                                             <div class="gate-controls-row">
-                                                <div class="gate-config-group">
-                                                    <span class="gate-group-label">触发策略 (Trigger):</span>
-                                                    <div class="gate-mode-pills">
-                                                        <button
-                                                            type="button"
-                                                            class="gate-mode-pill-btn"
-                                                            :class="{ active: modelRouting.stages?.stage_review == null && !isStageReviewerDisabled }"
-                                                            title="恢复阶段审查的自动策略，不改变执行模式；具体触发仍取决于任务条件。"
-                                                            :disabled="workflowLocked"
-                                                            @click="setTriggerMode('auto')"
-                                                        >
-                                                            <span class="btn-icon">🎯</span>
-                                                            <span>自动策略</span>
-                                                        </button>
-                                                        <button
-                                                            type="button"
-                                                            class="gate-mode-pill-btn btn-disabled"
-                                                            :class="{ active: isStageReviewerDisabled }"
-                                                            title="仅关闭中途阶段审查，不关闭方案审查和终审"
-                                                            :disabled="workflowLocked"
-                                                            @click="setTriggerMode('disabled')"
-                                                        >
-                                                            <span class="btn-icon">⚡</span>
-                                                            <span>关闭阶段审查</span>
-                                                        </button>
-                                                    </div>
-                                                </div>
-                                                
                                                 <div class="gate-config-group">
                                                     <span class="gate-group-label">审查人数（方案 / 终审 / 已触发的阶段审查）:</span>
                                                     <div class="gate-mode-pills">
@@ -1185,7 +1157,7 @@
 
 <script setup lang="ts">
 import StageSettingsFields from "./StageSettingsFields.vue";
-import { stageReviewerIsDisabled, withStageTriggerMode } from "./stageSettings";
+import { stageReviewerIsDisabled, withFixedStageChange } from "./stageSettings";
 import { formatFileSize, formatTokens } from "./formatUtils";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
@@ -1205,6 +1177,7 @@ import {
     type ReasoningEffort,
     type RoleCard,
     type StateCardLevel,
+    type StageSettings,
     type TaskWorkflowSnapshot,
 } from "./types";
 
@@ -1258,7 +1231,9 @@ const workflowSnapshotText = computed(() => {
     const mode = ({ auto: '智能分发', cross_review: '交叉审查', plan_approval: '方案审批' } as Record<string, string>)[cp.plan_mode || ''] || '未记录';
     const stageValue = (value: boolean | undefined | null) => value === true ? '开启' : value === false ? '关闭' : '自动/未单独指定';
     const stages = cp.stages;
-    const stageText = stages ? `方案 ${stageValue(stages.plan)}，方案审查 ${stageValue(stages.plan_review)}，阶段审查 ${stageValue(stages.stage_review)}，最终审查 ${stageValue(stages.final_review)}` : '工作环节未读取到';
+    const legacyStage = cp.task_review_routing?.stage_reviewer_override?.trim().toLowerCase();
+    const effectiveStage = stages?.stage_review == null && (legacyStage === 'disabled' || legacyStage === 'none') ? '关闭（旧配置）' : stageValue(stages?.stage_review);
+    const stageText = stages ? `方案 ${stageValue(stages.plan)}，方案审查 ${stageValue(stages.plan_review)}，阶段审查 ${effectiveStage}，最终审查 ${stageValue(stages.final_review)}` : '工作环节未读取到';
     const routing = cp.task_review_routing;
     const reviewText = routing ? `审查人数：${routing.stage_review_committee ? '多人（最多3位）' : '自适应单人'}；旧阶段审查覆盖：${routing.stage_reviewer_override || '未指定'}` : '旧任务未保存审查人数和阶段审查覆盖，首次续跑将采用当前设置并记录';
     return `已记录模式：${mode}；${stageText}；${reviewText}。实际审查仍需满足触发条件。`;
@@ -1976,9 +1951,9 @@ const modelChipTooltip = computed(() => {
     return `当前规划: ${currentModelName.value} | ${people}，候选${activeReviewerCards.value.length}位 | ${stage}。人数选择适用于正式方案审查和终审；实际派发以运行回执为准。`;
 });
 
-function setTriggerMode(mode: "auto" | "disabled") {
+function setFixedStage(key: keyof StageSettings, mode: string, stages: StageSettings) {
     if (workflowLocked.value) return;
-    emit("update:model-routing", withStageTriggerMode(props.modelRouting, mode));
+    emit("update:model-routing", withFixedStageChange(props.modelRouting, key, mode, stages));
 }
 
 function setConcurrencyMode(mode: "adaptive" | "committee") {

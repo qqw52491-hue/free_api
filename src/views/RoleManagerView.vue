@@ -225,13 +225,14 @@
         </label>
 
         <div class="field">
-          <span class="field-label">绑定大模型 (可选，留空跟随全局路由)</span>
+          <span class="field-label">角色指定模型（可选）</span>
           <ModelSelectDropdown
             v-model="form.model_id"
             :models="models"
-            placeholder="跟随全局自动路由"
+            placeholder="不指定，沿用任务模型选择"
             size="md"
           />
+          <span class="field-hint">通用子任务不必选择角色或在这里设置模型；未指定时通常继承父任务当前模型，已有人工角色槽位等配置仍按原规则优先。</span>
         </div>
 
         <label class="field">
@@ -273,7 +274,7 @@
       </div>
 
       <div class="field wide">
-        <RoleExecutionSettings v-model="form.execution_defaults" @profile-change="ensureExecutionKind" />
+        <RoleExecutionSettings :key="isEditing ? form.name : 'new-role'" v-model="form.execution_defaults" :allowed-kinds="form.allowed_kinds" @profile-change="ensureExecutionKind" />
       </div>
 
       <label class="field wide">
@@ -615,9 +616,9 @@
 
           <div class="role-card-actions">
             <template v-if="card.is_system">
-              <ModelSelectDropdown :model-value="card.model_id" :models="models" placeholder="跟随档位路由"
+              <ModelSelectDropdown :model-value="card.model_id" :models="models" placeholder="按任务模型路由"
                 @update:model-value="saveBasicModel(card, $event)" />
-              <button v-if="card.model_id" class="btn btn-xs ghost" @click="saveBasicModel(card, '')">恢复跟随路由</button>
+              <button v-if="card.model_id" class="btn btn-xs ghost" @click="saveBasicModel(card, '')">恢复任务模型路由</button>
             </template>
             <button v-else class="btn btn-xs ghost" @click="editCard(card)">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
@@ -1030,7 +1031,7 @@ function extractEmoji(label: string) {
 }
 
 function getModelName(modelId: string) {
-  if (!modelId) return '跟随全局路由';
+  if (!modelId) return '沿用任务模型选择';
   const found = models.value.find((m) => m.id === modelId);
   return found ? found.name : modelId.slice(0, 10);
 }
@@ -1038,6 +1039,7 @@ function getModelName(modelId: string) {
 function toggleKind(kind: string) {
   const idx = form.allowed_kinds.indexOf(kind);
   if (idx >= 0) {
+    if (form.allowed_kinds.length === 1 && !window.confirm('取消最后一个类型限制后，该角色将可挂载到所有子任务类型。是否继续？')) return;
     form.allowed_kinds.splice(idx, 1);
   } else {
     form.allowed_kinds.push(kind);

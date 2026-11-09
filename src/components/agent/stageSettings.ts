@@ -1,4 +1,4 @@
-import type { ModelRouting } from './types';
+import type { ModelRouting, StageSettings } from './types';
 
 // Match the host: an explicit fixed-stage value takes precedence over the
 // legacy reviewer override. Missing values keep the existing automatic policy.
@@ -8,9 +8,10 @@ export function stageReviewerIsDisabled(routing: Pick<ModelRouting, 'stages' | '
     return legacy === 'disabled' || legacy === 'none';
 }
 
-export function withStageTriggerMode(routing: ModelRouting, mode: 'auto' | 'cross_review' | 'disabled'): ModelRouting {
-    const stages = { ...routing.stages };
-    if (mode === 'disabled') stages.stage_review = false;
-    else delete stages.stage_review;
-    return { ...routing, stages, stage_reviewer_override: mode === 'disabled' ? 'disabled' : undefined };
+// Only an explicit stage selection may retire the legacy disabled sentinel.
+// A named legacy reviewer is a separate selection and must survive changes.
+export function withFixedStageChange(routing: ModelRouting, key: keyof StageSettings, mode: string, stages: StageSettings): ModelRouting {
+    const legacy = routing.stage_reviewer_override?.trim().toLowerCase();
+    const clearLegacyClose = key === 'stage_review' && mode !== 'off' && (legacy === 'disabled' || legacy === 'none');
+    return { ...routing, stages, ...(clearLegacyClose ? { stage_reviewer_override: undefined } : {}) };
 }

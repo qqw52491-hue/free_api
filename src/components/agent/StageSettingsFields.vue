@@ -13,14 +13,15 @@
 </template>
 <script setup lang="ts">
 import type { StageSettings } from './types';
-const props = defineProps<{ modelValue?: StageSettings; disabled?: boolean; approval?: boolean }>();
-const emit = defineEmits<{ 'update:modelValue': [value: StageSettings] }>();
+const props = defineProps<{ modelValue?: StageSettings; disabled?: boolean; approval?: boolean; legacyStageReviewDisabled?: boolean }>();
+const emit = defineEmits<{ 'update:modelValue': [value: StageSettings]; 'stage-change': [key: keyof StageSettings, mode: string, value: StageSettings] }>();
 const fields: { key: keyof StageSettings; label: string }[] = [
   { key: 'plan', label: '正式方案' }, { key: 'plan_review', label: '方案审查' },
   { key: 'stage_review', label: '阶段审查' }, { key: 'final_review', label: '最终审查' },
 ];
 function mode(key: keyof StageSettings) {
   if (key === 'plan' && props.approval) return 'on';
+  if (key === 'stage_review' && props.modelValue?.stage_review == null && props.legacyStageReviewDisabled) return 'off';
   return props.modelValue?.[key] === true ? 'on' : props.modelValue?.[key] === false ? 'off' : 'auto';
 }
 function change(key: keyof StageSettings, mode: string) {
@@ -29,6 +30,7 @@ function change(key: keyof StageSettings, mode: string) {
   if (key === 'plan' && mode === 'off') value.plan_review = false;
   if (key === 'plan_review' && mode === 'on') value.plan = true;
   emit('update:modelValue', value);
+  emit('stage-change', key, mode, value);
 }
 </script>
 <style scoped>
