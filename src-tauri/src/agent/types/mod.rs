@@ -254,6 +254,9 @@ pub struct PrepareFinishRequest {
     /// 交付说明（可选）
     #[serde(default)]
     pub details: Option<String>,
+    /// 与 finish 同样的交付字段（例如 artifacts 和角色自定义输出）。
+    #[serde(default, flatten)]
+    pub extra_fields: serde_json::Map<String, serde_json::Value>,
 }
 
 /// 执行模型主动申请的重新分流（retriage）。

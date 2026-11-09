@@ -1246,12 +1246,17 @@ mod completion_todo_regressions {
     #[test]
     fn bare_prepare_and_action_finish_keep_nested_updates_and_legacy_todos_readable() {
         for raw in [
-            json!({"prepare_finish":{"summary":"报告", "todo_update":[{"id":"#1","status":"done","note":"已核验"}]}}),
+            json!({"prepare_finish":{"summary":"报告", "checked_files":3, "todo_update":[{"id":"#1","status":"done","note":"已核验"}]}}),
             json!({"action":"finish", "command":{"summary":"报告", "todo_update":"[{\"id\":\"1\",\"status\":\"done\"}]"}}),
         ] {
             let instruction = parse_executable_instruction(&raw.to_string()).unwrap();
             assert_eq!(instruction.todo_update.len(), 1);
             assert_eq!(instruction.todo_update[0].id, 1);
+            if instruction.prepare_finish.is_some() {
+                let payload = crate::agent::finalization::delivery_payload(&instruction);
+                assert_eq!(payload["checked_files"], 3);
+                assert!(payload.get("todo_update").is_none());
+            }
         }
         let legacy: TodoItem =
             serde_json::from_value(json!({"id":"old-id", "status":"done"})).unwrap();

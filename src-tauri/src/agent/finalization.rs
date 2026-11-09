@@ -28,7 +28,12 @@ pub(crate) use evaluate::*;
 /// 交付执行、评估和收据共用的有效参数；与步骤记录采用相同的 command/params 口径。
 pub(crate) fn delivery_payload(instruction: &crate::agent::types::AgentInstruction) -> Value {
     let mut value = if let Some(request) = instruction.prepare_finish.as_ref() {
-        let mut map = serde_json::Map::new();
+        let mut map = request.extra_fields.clone();
+        // 这三项是模型指令的状态更新，解析时已提升至顶层；它们不是预检交付字段。
+        // 保持旧预检行为，避免闭集输出契约把附带的状态更新误判为未知输出。
+        for key in ["todo_update", "review_contract_update", "change_verification_update"] {
+            map.remove(key);
+        }
         if let Some(s) = &request.summary {
             map.insert("summary".into(), json!(s));
         }

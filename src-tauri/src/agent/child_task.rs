@@ -226,6 +226,14 @@ pub(crate) fn settle(
     let receipt = checkpoint
         .as_ref()
         .and_then(|cp| cp.pending_finalization.as_ref());
+    // Reuse the registered contract and the original evaluated payload, not the
+    // later display projection (which adds host fields and resolves artifacts).
+    let contract_error = match (checkpoint.as_ref(), receipt) {
+        (Some(cp), Some(receipt)) if cp.phase == crate::agent::checkpoint::AgentPhase::Done && receipt.is_ready() => {
+            crate::agent::execution::runtime::validate_output(db, &binding.child_run, &receipt.finish_payload).err()
+        }
+        _ => None,
+    };
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let mut saved: Option<(String, Option<String>)> = conn
         .query_row(
@@ -254,7 +262,7 @@ pub(crate) fn settle(
     let config_raw:Option<String>=conn.query_row("SELECT execution_config_json FROM agent_child_runs WHERE id=?1",[&binding.child_run],|r|r.get(0)).map_err(|e|e.to_string())?;
     let execution_config=config_raw.map(|raw|serde_json::from_str::<crate::agent::execution::runtime::ExecutionConfig>(&raw).map_err(|e|e.to_string())).transpose()?.unwrap_or_default();
     let mode_matches=receipt.is_some_and(|r|r.handoff==(execution_config.workflow.completion.as_deref()==Some("handoff")));
-    let accepted = mode_matches && saved.as_ref().is_some_and(|(s, _)| s == "succeeded")
+    let accepted = contract_error.is_none() && mode_matches && saved.as_ref().is_some_and(|(s, _)| s == "succeeded")
         && checkpoint
             .as_ref()
             .is_some_and(|cp| cp.phase == crate::agent::checkpoint::AgentPhase::Done)
@@ -286,6 +294,7 @@ pub(crate) fn settle(
         "verification":receipt.map(|r| &r.verification),"review":receipt.map(|r| &r.review),
         "material_notices":receipt.map(|r| &r.material_notices),
         "host_error":outcome.as_ref().err(),
+        "contract_check_error":contract_error,
         "unfinished": if accepted { Value::Null } else { json!("子目标未取得正式成功交付；请结合交付正文、错误和子任务记录继续处理。已有修改保留。") },
         "integration":"父 Agent 负责检查集成、整体目标及最终用户交付。"
     });

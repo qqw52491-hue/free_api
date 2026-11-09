@@ -957,3 +957,88 @@ async fn audit_new_parent_output_invalidates_ready_receipt() {
     assert_eq!(mock.requests.lock().unwrap().len(),2);
     assert!(!second.receipt.is_ready());
 }
+
+#[tokio::test]
+async fn prepare_finish_preserves_role_outputs_and_matches_finish_contract_validation() {
+    use std::sync::{Arc, Mutex};
+    let workspace = std::env::temp_dir().join(format!("prepare-contract-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let db = DbState(Arc::new(Mutex::new(crate::db::init_db(&std::path::PathBuf::from(":memory:")).unwrap())));
+    let schema = json!({
+        "fields": [{"name":"checked_files", "field_type":"number", "required":true, "description":"count"}],
+        "strict_closed_set": true
+    }).to_string();
+    db.0.lock().unwrap().execute(
+        "INSERT INTO agent_child_runs(id,parent_run_id,parent_session_id,workspace_root,model_id,status,started_at,kind,contract_schema,execution_config_json) VALUES ('task','parent','session',?1,'mock','running','now','task',?2,'{\"workflow\":{\"completion\":\"handoff\"}}')",
+        rusqlite::params![workspace.to_string_lossy(), schema],
+    ).unwrap();
+    let baseline = GitBaseline::capture(&workspace);
+    let app = tauri::test::mock_app();
+    for (payload, rejected) in [
+        (json!({"summary":"done"}), true),
+        (json!({"summary":"done", "checked_files":"three"}), true),
+        (json!({"summary":"done", "checked_files":3}), false),
+    ] {
+        for prepare in [true, false] {
+            let mut c = context();
+            let mut cp = checkpoint(&c);
+            cp.stages.final_review = Some(false);
+            let (_tx, mut rx) = watch::channel(0);
+            let instruction = serde_json::from_value(if prepare {
+                json!({"prepare_finish":payload})
+            } else {
+                json!({"tool":"finish", "params":payload})
+            }).unwrap();
+            let evaluation = evaluate_completion(
+                app.handle(), &db, &mut c, &mut cp, "task", "session", 3,
+                &workspace, &baseline, Utc::now(), &ModelRoutingConfig::default(), &mut rx,
+                &instruction, if prepare { CompletionMode::Prepare } else { CompletionMode::Finish },
+                false, false,
+            ).await;
+            assert_eq!(evaluation.receipt.finish_payload, payload);
+            let blocked = evaluation.receipt.blockers.iter().any(|s| s.contains("角色交付契约未通过"));
+            assert_eq!(blocked, rejected, "prepare={prepare}, blockers={:?}", evaluation.receipt.blockers);
+            if rejected { assert!(!evaluation.receipt.is_ready()); }
+        }
+    }
+    // A ready precheck never exempts a later finish from validating its own payload.
+    let mut c = context();
+    let mut cp = checkpoint(&c);
+    cp.stages.final_review = Some(false);
+    let (_tx, mut rx) = watch::channel(0);
+    let prepared: AgentInstruction = serde_json::from_value(json!({"prepare_finish":{"summary":"done","checked_files":3}})).unwrap();
+    let first = evaluate_completion(app.handle(), &db, &mut c, &mut cp, "task", "session", 4,
+        &workspace, &baseline, Utc::now(), &ModelRoutingConfig::default(), &mut rx,
+        &prepared, CompletionMode::Prepare, false, false).await;
+    assert!(first.receipt.is_ready(), "{:?}", first.receipt.blockers);
+    cp.pending_finalization = Some(first.receipt);
+    let invalid: AgentInstruction = serde_json::from_value(json!({"tool":"finish","params":{"summary":"done","checked_files":"wrong"}})).unwrap();
+    let result = evaluate_completion(app.handle(), &db, &mut c, &mut cp, "task", "session", 5,
+        &workspace, &baseline, Utc::now(), &ModelRoutingConfig::default(), &mut rx,
+        &invalid, CompletionMode::Finish, false, false).await;
+    assert!(!result.receipt.is_ready());
+    assert!(result.receipt.blockers.iter().any(|s| s.contains("checked_files")));
+    let corrected: AgentInstruction = serde_json::from_value(json!({"tool":"finish","params":{"summary":"done","checked_files":4}})).unwrap();
+    let result = evaluate_completion(app.handle(), &db, &mut c, &mut cp, "task", "session", 6,
+        &workspace, &baseline, Utc::now(), &ModelRoutingConfig::default(), &mut rx,
+        &corrected, CompletionMode::Finish, false, false).await;
+    assert!(result.receipt.is_ready(), "{:?}", result.receipt.blockers);
+    assert_eq!(result.receipt.finish_payload["checked_files"], 4);
+    let _ = std::fs::remove_dir_all(workspace);
+}
+
+#[test]
+fn prepare_payload_preserves_outputs_for_both_entry_shapes_without_state_updates() {
+    let payload = json!({"summary":"done", "details":"details", "checked_files":3,
+        "artifacts":["report.md"], "todo_update":[{"id":1,"status":"done"}]});
+    let bare: AgentInstruction = serde_json::from_value(json!({"prepare_finish":payload})).unwrap();
+    let wrapped: AgentInstruction = serde_json::from_value(json!({"tool":"prepare_finish","params":payload})).unwrap();
+    let wrapped = wrapped.unwrap_standalone_tool_alias().unwrap();
+    for instruction in [&bare, &wrapped] {
+        assert_eq!(delivery_payload(instruction), json!({"summary":"done", "details":"details", "checked_files":3, "artifacts":["report.md"]}));
+        let round_trip: AgentInstruction = serde_json::from_value(serde_json::to_value(instruction).unwrap()).unwrap();
+        assert_eq!(delivery_payload(&round_trip), delivery_payload(instruction));
+    }
+    let legacy: AgentInstruction = serde_json::from_value(json!({"prepare_finish":{"summary":"old"}})).unwrap();
+    assert_eq!(delivery_payload(&legacy), json!({"summary":"old"}));
+}

@@ -57,7 +57,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "finish",
-        summary: "终态交付：工作完成后优先直接调用 finish，宿主会执行与 prepare_finish 相同的适用验收，复杂任务同样适用；直接交付不表示跳过验证或审查。summary 为简短结论，较长说明放在 command.details；两者正文均支持 Markdown，字符串按 JSON 规则转义。代码类任务先完成适用验证并处理已有待办与审查问题；文件产物路径放进 command.artifacts（支持 tmp/ 会话产物路径）。【直接交付示例】已取得服务状态查询结果时：{\"tool\":\"finish\",\"command\":{\"summary\":\"已确认目标服务正在运行\",\"details\":\"状态查询返回 active；该结论仅覆盖本次服务状态查询。\"}}。示例内容应替换为本次实际结果。【可选预检】需要先查看尚未满足的验收条件时，可单独调用 prepare_finish，并一次提交准备交付的完整 summary 与 details；就绪后沿用同一份正文调用 finish，材料与验收状态未变时复用收据。正文补充或修改后需要重新核验；未就绪时按具体反馈补正后可直接 finish。",
+        summary: "终态交付：工作完成后优先直接调用 finish，宿主会执行与 prepare_finish 相同的适用验收，复杂任务同样适用；直接交付不表示跳过验证或审查。summary 为简短结论，较长说明放在 command.details；两者正文均支持 Markdown，字符串按 JSON 规则转义。代码类任务先完成适用验证并处理已有待办与审查问题；文件产物路径放进 command.artifacts（支持 tmp/ 会话产物路径）。【直接交付示例】已取得服务状态查询结果时：{\"tool\":\"finish\",\"command\":{\"summary\":\"已确认目标服务正在运行\",\"details\":\"状态查询返回 active；该结论仅覆盖本次服务状态查询。\"}}。示例内容应替换为本次实际结果。【可选预检】需要先查看尚未满足的验收条件时，可单独调用 prepare_finish，并在 prepare_finish 对象内提交准备交付的 summary、details 及适用的产物和角色输出字段；就绪后将相同交付内容放入 finish 参数，材料与验收状态未变时复用收据。正文补充或修改后需要重新核验；未就绪时按具体反馈补正后可直接 finish。",
         actions: &["finish(summary: string, details?: string, artifacts?: string[])"],
     },
     BuiltinToolSpec {

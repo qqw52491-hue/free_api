@@ -490,3 +490,30 @@ fn reviewer_handoff_stages_are_scoped_and_do_not_disable_the_parent_workflow() {
         "operational_verification"
     );
 }
+
+#[tokio::test]
+async fn reviewer_prepare_receives_the_same_review_payload_as_finish() {
+    let f = Fixture::new();
+    let app = tauri::test::mock_app();
+    let baseline = crate::agent::reviewer_gatekeeper::GitBaseline::capture(&f.root);
+    for prepare in [true, false] {
+        let payload = f.payload();
+        let inst: AgentInstruction = serde_json::from_value(if prepare {
+            json!({"prepare_finish":payload})
+        } else {
+            json!({"tool":"finish", "params":payload})
+        }).unwrap();
+        let mut context = SandwichContext::new("system".into(), "review".into());
+        let mut checkpoint = AgentCheckpoint::new(format!("task-{}", f.id), &context);
+        let (_tx, mut rx) = tokio::sync::watch::channel(0);
+        let result = crate::agent::finalization::evaluate_completion(
+            app.handle(), &f.db, &mut context, &mut checkpoint, &f.id,
+            &format!("task-{}", f.id), 1, &f.root, &baseline, chrono::Utc::now(),
+            &crate::agent::router::ModelRoutingConfig::default(), &mut rx, &inst,
+            if prepare { crate::agent::finalization::CompletionMode::Prepare }
+            else { crate::agent::finalization::CompletionMode::Finish }, false, false,
+        ).await;
+        assert_eq!(result.receipt.finish_payload, payload);
+        assert!(result.receipt.is_ready(), "prepare={prepare}: {:?}", result.receipt.blockers);
+    }
+}

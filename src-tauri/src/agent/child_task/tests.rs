@@ -664,3 +664,29 @@ fn status_projects_rich_subagent_metadata_and_recent_steps() {
     assert_eq!(truncated_body["task_truncated"], true);
     assert_eq!(truncated_body["task"].as_str().unwrap().chars().count(), 300);
 }
+
+#[test]
+fn collection_rechecks_registered_contract_before_accepting_delivery() {
+    for (schema, payload, accepted) in [
+        (None, json!({"summary":"done"}), true),
+        (Some(json!({"fields":[{"name":"checked_files","field_type":"number","required":true,"description":"count"}],"strict_closed_set":false})), json!({"summary":"done"}), false),
+        (Some(json!({"fields":[{"name":"checked_files","field_type":"number","required":true,"description":"count"}],"strict_closed_set":false})), json!({"summary":"done","checked_files":"three"}), false),
+        (Some(json!({"fields":[{"name":"checked_files","field_type":"number","required":true,"description":"count"}],"strict_closed_set":false})), json!({"summary":"done","checked_files":3}), true),
+    ] {
+        let f=Fixture::new(); f.finish_readonly();
+        let mut cp=load_checkpoint(&f.db,&f.binding.child_session).unwrap().unwrap();
+        cp.pending_finalization.as_mut().unwrap().finish_payload=payload.clone();
+        crate::agent::checkpoint::save_checkpoint(&f.db,&mut cp).unwrap();
+        let mut completion=payload;
+        completion["finalization_receipt"]=json!("host-receipt");
+        completion["handoff"]=json!(false);
+        f.db.0.lock().unwrap().execute("UPDATE agent_run_traces SET completion_json=?2 WHERE id=?1",rusqlite::params![f.binding.child_run,completion.to_string()]).unwrap();
+        if let Some(schema)=schema { f.db.0.lock().unwrap().execute("UPDATE agent_child_runs SET contract_schema=?2 WHERE id=?1",rusqlite::params![f.binding.child_run,schema.to_string()]).unwrap(); }
+        let body=settle(&f.db,&f.binding,&Ok(()),1).unwrap();
+        assert_eq!(body["delivery_accepted"],accepted,"{body}");
+        if !accepted { assert!(body["contract_check_error"].as_str().unwrap().contains("checked_files"));assert_eq!(body["execution_status"],"failed"); }
+        assert!(body["delivery"].is_object());
+        let read=result(&f.db,&f.binding.parent_session,&f.binding.child_run).unwrap();
+        assert_eq!(read["delivery_accepted"],accepted);assert_eq!(read["contract_check_error"],body["contract_check_error"]);
+    }
+}
