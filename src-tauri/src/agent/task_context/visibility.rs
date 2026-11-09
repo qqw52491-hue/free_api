@@ -4,6 +4,13 @@ pub(crate) fn tool(config: &ExecutionConfig, name: &str) -> bool {
     let normalized = name.to_ascii_lowercase();
     let name = normalized.as_str();
     config.permits(name)
+        // Action aliases such as send_message map to child_task.send at runtime.
+        // Only check business actions here: wait is an always-available control
+        // and would expose the index even when no business tools were granted.
+        || (name == "child_task"
+            && ["send", "ask"]
+                .iter()
+                .any(|action| config.permits(&format!("{name}.{action}"))))
         || ["read", "list", "write", "edit", "execute"]
             .iter()
             .any(|action| config.permits(&format!("{name}.{action}")))

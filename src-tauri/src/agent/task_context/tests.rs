@@ -100,6 +100,30 @@ fn visible_tools_use_runtime_aliases_without_granting_dispatch() {
 }
 
 #[test]
+fn communication_aliases_show_the_same_index_without_granting_dispatch() {
+    use crate::agent::execution::runtime::ExecutionConfig;
+    for (allowed, action) in [
+        ("send_message", "child_task.send"),
+        ("child_task.send", "child_task.send"),
+        ("ask_agent", "child_task.ask"),
+        ("child_task.ask", "child_task.ask"),
+    ] {
+        let config = ExecutionConfig::parse(
+            &json!({"execution":{"allowed_tools":[allowed]}}),
+            "task",
+        )
+        .unwrap();
+        assert!(config.permits(action), "{allowed}");
+        assert!(visibility::tool(&config, "child_task"), "{allowed}");
+        assert!(!config.permits("child_task.dispatch"), "{allowed}");
+    }
+    let config = ExecutionConfig::parse(&json!({"execution":{"allowed_tools":[]}}), "task").unwrap();
+    assert!(!visibility::tool(&config, "child_task"));
+    assert!(!config.permits("child_task.send"));
+    assert!(!config.permits("child_task.ask"));
+}
+
+#[test]
 fn review_entry_keeps_project_rules_and_uses_effective_permissions() {
     use crate::agent::execution::runtime::ExecutionConfig;
     let config = ExecutionConfig::parse(
