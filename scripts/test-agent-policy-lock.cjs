@@ -17,7 +17,7 @@ const events = [];
 let confirmAnswer = true; let confirmations = [];
 const refs = {enabled:{value:true}, stages:{value:{plan:true, final_review:false}}, workspace:{value:'shared'}, profile:{value:'task'}, planMode:{value:'auto'}, completion:{value:'delivery'}, toolMode:{value:'allowlist'}, toolsText:{value:'read_file'}, parseError:{value:false}, specialized:{get value(){return refs.profile.value === 'reviewer' || refs.workspace.value === 'isolated';}}};
 const roleProps = {allowedKinds:[]};
-const role = extract('src/components/agent/RoleExecutionSettings.vue',['applyPreset','publish','toolNames','specialChangeWarning','approveChanges','changeProfile','changeWorkspace','kindExpansionWarning','changeEnabled','changeToolMode'],{...refs, props:roleProps, names:{task:'通用子任务',worker:'调查助手',writer:'实施助手',reviewer:'专用审查'}, lastEmitted:undefined, window:{confirm:(msg)=>{confirmations.push(msg);return confirmAnswer;}}, emit:(...args)=>events.push(args)});
+const role = extract('src/components/agent/RoleExecutionSettings.vue',['applyPreset','publish','toolNames','specialChangeWarning','approveChanges','changeProfile','changeWorkspace','kindExpansionWarning','changeEnabled','changeToolMode','resetInputs'],{...refs, props:roleProps, names:{task:'通用子任务',worker:'调查助手',writer:'实施助手',reviewer:'专用审查'}, lastEmitted:undefined, window:{confirm:(msg)=>{confirmations.push(msg);return confirmAnswer;}}, emit:(...args)=>events.push(args)});
 role.handlers.applyPreset({profile:'writer',planMode:'auto',completion:'handoff'});
 let saved = JSON.parse(events.find(e=>e[0]==='update:modelValue')[1]);
 assert.deepEqual(saved.execution.allowed_tools,['read_file']);
@@ -53,6 +53,7 @@ const enabledBox={checked:false}; role.handlers.changeEnabled({target:enabledBox
 assert.equal(enabledBox.checked,true); assert.equal(refs.enabled.value,true); assert.equal(events.length,0);
 confirmAnswer=true; role.handlers.changeEnabled({target:{checked:false}});
 assert.equal(refs.enabled.value,false); assert.equal(events[0][1],'');
+assert.equal(refs.toolMode.value,'inherit'); assert.equal(refs.toolsText.value,'', 're-enabling must not silently restore a removed restriction');
 // Corrupt saved defaults cannot be silently overwritten or claimed to preserve their restrictions.
 refs.parseError.value=true; confirmAnswer=false; events.length=0; confirmations.length=0;
 role.handlers.applyPreset({profile:'task',planMode:'auto',completion:'delivery'});

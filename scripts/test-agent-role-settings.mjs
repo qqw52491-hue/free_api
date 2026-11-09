@@ -38,6 +38,10 @@ try {
  await evalJS('testState.answer=false');await choose(roles,'worker'); assert.equal(await evalJS('JSON.parse(testState.raw).profile'),'task'); assert.deepEqual(await evalJS('JSON.parse(JSON.stringify(testState.allowed))'),['task']);
  await evalJS('testState.answer=true');await choose(roles,'worker'); assert.equal(await evalJS('JSON.parse(testState.raw).profile'),'worker'); assert.deepEqual(await evalJS('JSON.parse(JSON.stringify(testState.allowed))'),['task','worker']); assert.deepEqual(await evalJS('JSON.parse(testState.raw).execution.allowed_tools'),['read_file']);
  await choose(tools,'inherit'); assert.equal(await evalJS('Object.hasOwn(JSON.parse(testState.raw).execution,"allowed_tools")'),false); assert.equal(await evalJS('JSON.parse(testState.raw).execution.stages.plan'),false);
+ await choose(tools,'allowlist');
+ await evalJS(`(()=>{const e=document.querySelector('section[aria-label="工具权限"] textarea');e.value='read_file';e.dispatchEvent(new Event('input',{bubbles:true}))})()`);await new Promise(r=>setTimeout(r,30));
+ await evalJS('document.querySelector(".enable input").click()');await new Promise(r=>setTimeout(r,30));assert.equal(await evalJS('testState.raw'),'');
+ await evalJS('document.querySelector(".enable input").click()');await new Promise(r=>setTimeout(r,30));assert.equal(await evalJS('Object.hasOwn(JSON.parse(testState.raw).execution,"allowed_tools")'),false);
  await evalJS(`testState.raw='{broken';testState.answer=false`);await new Promise(r=>setTimeout(r,30)); await evalJS('document.querySelector(".enable input").click()');
  assert.equal(await evalJS('testState.raw'),'{broken'); assert.equal(await evalJS('document.querySelector(".enable input").checked'),false);
  console.log('PASS real role settings: independent workflow and permissions, cancelled/confirmed expansion, corrupted-config protection');

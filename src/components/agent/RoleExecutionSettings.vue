@@ -110,6 +110,7 @@ function changeEnabled(event: Event) {
   }
   enabled.value = input.checked;
   publish(true);
+  if (!input.checked) resetInputs();
 }
 function specialChangeWarning(nextProfile: Profile, nextWorkspace: 'shared' | 'isolated'): string[] {
   const changes: string[] = [];
