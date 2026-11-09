@@ -39,6 +39,7 @@ import {
     type ParsedAttachment,
     type ModelRouting,
     type PlanExecutionMode,
+    type TaskWorkflowSnapshot,
 } from "../components/agent/types";
 import { asRecord, numberOrUndefined, toText, toTimestamp } from "../components/agent/format";
 import { extractWorkerDetails, parseWorkerArtifacts } from "../components/agent/workerUtils";
@@ -261,6 +262,19 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     // 当前实时运行与已完成回合分开保存；新任务只重置实时数组。
     const steps = ref<AgentStepItem[]>([]);
     const historyRuns = ref<HistoryRunSnapshot[]>([]);
+    const taskWorkflowSnapshot = ref<TaskWorkflowSnapshot | null>(null);
+    let checkpointRequest = 0;
+    watch(activeSessionId, () => { checkpointRequest++; taskWorkflowSnapshot.value = null; });
+    async function refreshTaskWorkflowSnapshot(session: string) {
+        const request = ++checkpointRequest;
+        taskWorkflowSnapshot.value = null;
+        try {
+            const cp = await invoke<TaskWorkflowSnapshot | null>("get_agent_checkpoint", { sessionId: session });
+            if (request === checkpointRequest && session === activeSessionId.value) taskWorkflowSnapshot.value = cp;
+        } catch (error) {
+            if (request === checkpointRequest && session === activeSessionId.value) console.warn("读取原任务流程失败", error);
+        }
+    }
     const canResumeTask = computed(() => {
         const latest = historyRuns.value[historyRuns.value.length - 1];
         return !isRunning.value && !!latest && ["failed", "cancelled", "running", "waiting_human"].includes(latest.status);
@@ -336,7 +350,6 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
 
     const planMode = ref<PlanExecutionMode>(initialPlanMode);
     const autoPilot = ref<boolean>(initialPlanMode !== "plan_approval");
-    let planModeChangedByUser = false;
 
     watch(planMode, (val) => {
         try {
@@ -362,12 +375,10 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     });
 
     function setPlanMode(mode: PlanExecutionMode) {
-        planModeChangedByUser = true;
         planMode.value = mode;
     }
 
     function setAutoPilot(val: boolean) {
-        planModeChangedByUser = true;
         autoPilot.value = val;
     }
 
@@ -769,6 +780,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             return;
         }
         const session = activeSessionId.value;
+        void refreshTaskWorkflowSnapshot(session);
         try {
             const traces = await invoke<unknown[]>("get_session_run_traces", { sessionId: session });
             if (session !== activeSessionId.value) return;
@@ -2031,7 +2043,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     async function runAgent(nextGoal?: string, attachments?: ParsedAttachment[], taskStartMode?: "resume" | "new") {
         // 不按消息关键词猜意图；失败/取消后默认续跑，排队/目标替换显式新任务。
         const selectedTaskMode = taskStartMode ?? (canResumeTask.value ? "resume" : undefined);
-        const requestedPlanMode = selectedTaskMode === "resume" && !planModeChangedByUser ? undefined : planMode.value;
+        const requestedPlanMode = selectedTaskMode === "resume" ? undefined : planMode.value;
         const requestedGoal = (nextGoal ?? goalInput.value).trim();
         if (!requestedGoal || isRunning.value) return;
 
@@ -2059,7 +2071,6 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
 
         // 进入启动窗口：invoke 在途且 channel-run-started 未到达期间，迟到的旧代 run-done 不得重置运行态
         awaitingRunStart = true;
-        planModeChangedByUser = false;
         try {
             await invoke("run_agent_main_loop", {
                 modelRouting: modelRouting.value,
@@ -2381,6 +2392,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         goalInput,
         currentGoal,
         canResumeTask,
+        taskWorkflowSnapshot,
         sessionTitle,
         runState,
         statusDescription,

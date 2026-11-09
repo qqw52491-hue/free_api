@@ -39,6 +39,13 @@
                 </div>
             </div>
 
+            <div v-if="taskStartMode === 'resume'" class="composer-mode-guide-banner">
+                <div class="mode-guide-text">
+                    <span class="mode-guide-title">原任务已记录的流程（只读）</span>
+                    <span class="mode-guide-desc">{{ workflowSnapshotText }}</span>
+                </div>
+            </div>
+
             <!-- 💡 模式切换放行机制温和引导提示 -->
             <transition name="mode-guide-fade">
                 <div v-if="activeModeGuide" class="composer-mode-guide-banner" :class="`is-${activeModeGuide.mode}`">
@@ -100,7 +107,8 @@
                                 @click="toggleModelMenu"
                             >
                                 <span class="model-name-text">{{ currentModelName }}</span>
-                                <span v-if="isStageReviewerDisabled" class="chip-gate-badge disabled" title="中途阶段审查关闭；方案审查和终审分别按配置执行">阶段审查关</span>
+                                <span v-if="workflowLocked" class="chip-gate-badge custom" title="续跑时按原任务流程执行">原任务流程</span>
+                                <span v-else-if="isStageReviewerDisabled" class="chip-gate-badge disabled" title="中途阶段审查关闭；方案审查和终审分别按配置执行">阶段审查关</span>
                                 <span v-else class="chip-gate-badge custom" :title="modelChipTooltip">{{ stageReviewerBadgeText }}</span>
                                 <svg viewBox="0 0 24 24" class="chevron-icon"><path d="m7 14 5-5 5 5"/></svg>
                             </button>
@@ -499,8 +507,8 @@
 
                                     <!-- Station 3: 🛡️ 阶段审查工位 (Reviewer) -->
                                     <div v-else-if="activeRoutingTab === 'reviewer'" class="tab-pane-content station-pane">
-                                        <StageSettingsFields v-model="modelRouting.stages" :disabled="isRunning" :approval="currentPlanMode === 'plan_approval'" />
-                                        <p class="section-desc">新任务使用此配置；续跑沿用原检查点。自动沿用已有策略，关闭不自动重开。</p>
+                                        <StageSettingsFields v-model="modelRouting.stages" :disabled="workflowLocked" :approval="currentPlanMode === 'plan_approval'" />
+                                        <p class="section-desc">{{ workflowLocked ? '当前显示的是界面上的新任务设置；续跑使用原任务检查点，不能修改流程。可切换模型，或选择新任务再调整。' : '新任务使用此配置。自动沿用已有策略，关闭不自动重开。' }}</p>
                                         <div class="squad-section gate-section">
                                             <div class="section-head">
                                                 <div class="section-title-wrap">
@@ -527,31 +535,20 @@
                                                         <button
                                                             type="button"
                                                             class="gate-mode-pill-btn"
-                                                            :class="{ active: currentPlanMode === 'auto' && !isStageReviewerDisabled }"
-                                                            title="使用自动模式并恢复阶段审查的自动策略，默认不启动中途阶段审查。明确选择多人时，正式提交方案仍会派审。"
-                                                            :disabled="isRunning"
+                                                            :class="{ active: modelRouting.stages?.stage_review == null && !isStageReviewerDisabled }"
+                                                            title="恢复阶段审查的自动策略，不改变执行模式；具体触发仍取决于任务条件。"
+                                                            :disabled="workflowLocked"
                                                             @click="setTriggerMode('auto')"
                                                         >
                                                             <span class="btn-icon">🎯</span>
-                                                            <span>智能风控</span>
-                                                        </button>
-                                                        <button
-                                                            type="button"
-                                                            class="gate-mode-pill-btn"
-                                                            :class="{ active: currentPlanMode === 'cross_review' && !isStageReviewerDisabled }"
-                                                            title="使用交叉审查模式并恢复阶段审查的自动策略；阶段审查仍需满足写入或阶段推进等触发条件"
-                                                            :disabled="isRunning"
-                                                            @click="setTriggerMode('cross_review')"
-                                                        >
-                                                            <span class="btn-icon">🛡️</span>
-                                                            <span>严格把关</span>
+                                                            <span>自动策略</span>
                                                         </button>
                                                         <button
                                                             type="button"
                                                             class="gate-mode-pill-btn btn-disabled"
                                                             :class="{ active: isStageReviewerDisabled }"
                                                             title="仅关闭中途阶段审查，不关闭方案审查和终审"
-                                                            :disabled="isRunning"
+                                                            :disabled="workflowLocked"
                                                             @click="setTriggerMode('disabled')"
                                                         >
                                                             <span class="btn-icon">⚡</span>
@@ -568,7 +565,7 @@
                                                             class="gate-mode-pill-btn"
                                                             :class="{ active: !isCommitteeMode }"
                                                             title="每次审查使用 1 位，按角色与材料选择；不会自动升级多人"
-                                                            :disabled="isRunning"
+                                                            :disabled="workflowLocked"
                                                             @click="setConcurrencyMode('adaptive')"
                                                         >
                                                             <span class="btn-icon">👤</span>
@@ -579,7 +576,7 @@
                                                             class="gate-mode-pill-btn btn-committee"
                                                             :class="{ active: isCommitteeMode }"
                                                             title="明确选择多人：正式方案审查与终审最多 3 位；不额外触发阶段审查。可用专家不足时披露实际人数。"
-                                                            :disabled="isRunning"
+                                                            :disabled="workflowLocked"
                                                             @click="setConcurrencyMode('committee')"
                                                         >
                                                             <span class="btn-icon">👥</span>
@@ -1055,12 +1052,12 @@
                                 'is-cross-review': currentPlanMode === 'cross_review',
                                 active: planMenuOpen,
                             }"
-                            :title="planModeTooltip"
-                            :disabled="isRunning"
+                            :title="workflowLocked ? '原任务流程已固定；选择新任务后可调整' : planModeTooltip"
+                            :disabled="workflowLocked"
                             @click="togglePlanMenu"
                         >
                             <svg viewBox="0 0 24 24" class="plan-mode-svg"><path d="M12 3 5 6v5c0 4.5 3 8.2 7 10 4-1.8 7-5.5 7-10V6l-7-3z"/></svg>
-                            <span class="plan-mode-label">{{ planModeLabel }}</span>
+                            <span class="plan-mode-label">{{ workflowLocked ? '原任务流程' : planModeLabel }}</span>
                             <svg viewBox="0 0 24 24" class="chevron-icon"><path d="m7 14 5-5 5 5"/></svg>
                         </button>
 
@@ -1208,6 +1205,7 @@ import {
     type ReasoningEffort,
     type RoleCard,
     type StateCardLevel,
+    type TaskWorkflowSnapshot,
 } from "./types";
 
 const props = defineProps<{
@@ -1219,6 +1217,7 @@ const props = defineProps<{
     stopRequested: boolean;
     canStart: boolean;
     canResumeTask?: boolean;
+    taskWorkflowSnapshot?: TaskWorkflowSnapshot | null;
     pauseReason: string;
     humanForm: AgentHumanForm | null;
     allModels: AgentModelOption[];
@@ -1252,6 +1251,19 @@ watch(() => [props.sessionId, props.canResumeTask], () => { stoppedTaskMode.valu
 const taskStartMode = computed<"resume" | "new" | undefined>(() =>
     props.isRunning ? undefined : props.canResumeTask ? stoppedTaskMode.value : undefined,
 );
+const workflowLocked = computed(() => props.isRunning || taskStartMode.value === "resume");
+const workflowSnapshotText = computed(() => {
+    const cp = props.taskWorkflowSnapshot;
+    if (!cp) return '尚未读取到检查点配置；续跑以宿主检查点为准，不会使用下方的新任务流程设置。';
+    const mode = ({ auto: '智能分发', cross_review: '交叉审查', plan_approval: '方案审批' } as Record<string, string>)[cp.plan_mode || ''] || '未记录';
+    const stageValue = (value: boolean | undefined | null) => value === true ? '开启' : value === false ? '关闭' : '自动/未单独指定';
+    const stages = cp.stages;
+    const stageText = stages ? `方案 ${stageValue(stages.plan)}，方案审查 ${stageValue(stages.plan_review)}，阶段审查 ${stageValue(stages.stage_review)}，最终审查 ${stageValue(stages.final_review)}` : '工作环节未读取到';
+    const routing = cp.task_review_routing;
+    const reviewText = routing ? `审查人数：${routing.stage_review_committee ? '多人（最多3位）' : '自适应单人'}；旧阶段审查覆盖：${routing.stage_reviewer_override || '未指定'}` : '旧任务未保存审查人数和阶段审查覆盖，首次续跑将采用当前设置并记录';
+    return `已记录模式：${mode}；${stageText}；${reviewText}。实际审查仍需满足触发条件。`;
+});
+watch(workflowLocked, locked => { if (locked) planMenuOpen.value = false; });
 
 const currentPlanMode = computed<PlanExecutionMode>(() => {
     if (props.planMode) return props.planMode;
@@ -1263,6 +1275,7 @@ const planModeLabel = computed(() => {
         case "plan_approval":
             return "方案审批";
         case "cross_review":
+            return "交叉审查";
         case "auto":
         default:
             return "智能分发";
@@ -1274,9 +1287,10 @@ const planModeTooltip = computed(() => {
         case "plan_approval":
             return "当前模式: 🛡️ 方案审批 (Plan First) - 方案就绪后须经您确认方可写入代码。点击切换";
         case "cross_review":
+            return "当前模式：交叉审查；具体流程仍受工作环节配置和触发条件约束。点击切换";
         case "auto":
         default:
-            return "当前模式: 🚀 智能分发 (Auto Dispatch) - 执行流程全权交由 Agent 内部风控策略管理。点击切换";
+            return "当前模式：智能分发；执行仍受宿主权限和工作环节配置约束。点击切换";
     }
 });
 
@@ -1294,7 +1308,14 @@ const planModes: PlanModeOption[] = [
         icon: "🚀",
         label: "智能分发",
         tag: "推荐默认",
-        description: "默认推荐：执行流程全权交由内部审查卡片的风控策略管控",
+        description: "按任务与已有工作环节配置安排执行",
+    },
+    {
+        id: "cross_review",
+        icon: "🔍",
+        label: "交叉审查",
+        tag: "独立审查",
+        description: "采用交叉审查模式；具体行为受方案及审查环节配置约束",
     },
     {
         id: "plan_approval",
@@ -1306,7 +1327,8 @@ const planModes: PlanModeOption[] = [
 ];
 
 function selectPlanMode(mode: PlanExecutionMode) {
-    if (mode === 'plan_approval' && props.modelRouting.stages?.plan === false) props.modelRouting.stages = { ...props.modelRouting.stages, plan: true };
+    if (workflowLocked.value) return;
+    if (mode === 'plan_approval' && props.modelRouting.stages?.plan === false) emit('update:model-routing', { ...props.modelRouting, stages: { ...props.modelRouting.stages, plan: true } });
     emit("update:planMode", mode);
     emit("update:autoPilot", mode !== "plan_approval");
     planMenuOpen.value = false;
@@ -1954,12 +1976,13 @@ const modelChipTooltip = computed(() => {
     return `当前规划: ${currentModelName.value} | ${people}，候选${activeReviewerCards.value.length}位 | ${stage}。人数选择适用于正式方案审查和终审；实际派发以运行回执为准。`;
 });
 
-function setTriggerMode(mode: "auto" | "cross_review" | "disabled") {
-    if (mode !== "disabled") emit("update:planMode", mode);
+function setTriggerMode(mode: "auto" | "disabled") {
+    if (workflowLocked.value) return;
     emit("update:model-routing", withStageTriggerMode(props.modelRouting, mode));
 }
 
 function setConcurrencyMode(mode: "adaptive" | "committee") {
+    if (workflowLocked.value) return;
     emit("update:model-routing", {
         ...props.modelRouting,
         stage_review_committee: mode === "committee",
@@ -2198,7 +2221,7 @@ function toggleBudgetMenu() {
 }
 
 function togglePlanMenu() {
-    if (props.isRunning) return;
+    if (workflowLocked.value) return;
     if (!planMenuOpen.value) {
         calculatePlanPosition(planPickerRef.value);
         modelMenuOpen.value = false;

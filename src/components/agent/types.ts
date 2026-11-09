@@ -408,6 +408,11 @@ export interface ModelRouting {
 }
 
 export interface StageSettings { plan?: boolean; plan_review?: boolean; stage_review?: boolean; final_review?: boolean }
+export interface TaskWorkflowSnapshot {
+    plan_mode?: string | null;
+    stages?: StageSettings | null;
+    task_review_routing?: { stage_reviewer_override: string | null; stage_review_committee: boolean } | null;
+}
 
 export interface RoleCard {
     id: string;

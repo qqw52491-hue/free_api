@@ -12,12 +12,12 @@
     </div>
     <template v-if="enabled">
       <div class="controls">
-        <label>执行方式<select v-model="profile" @change="changeProfile"><option value="task">通用子任务</option><option value="worker">调查助手</option><option value="writer">实施助手</option><option value="reviewer">专用审查</option></select></label>
+        <label>执行方式<select :value="profile" @change="changeProfile($event)"><option value="task">通用子任务</option><option value="worker">调查助手</option><option value="writer">实施助手</option><option value="reviewer">专用审查</option></select></label>
         <label>方案安排<select v-model="planMode" :disabled="specialized" @change="publish()"><option value="auto">自动判断</option><option value="cross_review">先讨论并审查方案</option><option value="plan_approval">方案需要人工批准</option></select></label>
         <label>结果如何结束<select v-model="completion" :disabled="specialized" @change="publish()"><option value="delivery">完整交付，按任务验证和审查</option><option value="handoff">交回结果，由父任务集成验收</option></select></label>
       </div>
       <p class="hint">{{ !specialized ? '普通角色使用同一通用执行器，共享可用 Skill、MCP 和工具；自动模式仍按任务需要安排方案。' : '正式审查或显式隔离补丁使用专用结果契约；完整流程选择共享工作区。' }}</p>
-      <label v-if="profile === 'writer'" class="tool-mode">工作区方式<select v-model="workspace" @change="changeProfile"><option value="shared">共享父工作区，直接实施</option><option value="isolated">隔离补丁，审阅后 apply</option></select></label>
+      <label v-if="profile === 'writer'" class="tool-mode">工作区方式<select :value="workspace" @change="changeWorkspace($event)"><option value="shared">共享父工作区，直接实施</option><option value="isolated">隔离补丁，审阅后 apply</option></select></label>
       <StageSettingsFields v-if="!specialized" v-model="stages" :approval="planMode === 'plan_approval'" @update:model-value="publish()" />
       <p class="hint">结果交接子任务默认关闭重复环节；显式选择方案模式时沿用该模式。自动不代表关闭。</p>
       <details>
@@ -27,7 +27,7 @@
         <p class="hint">使用逗号或换行分隔，填写小写名称。列表为空时禁用业务工具；交回结果、方案流程、人工求助和只读通信查询仍可用。派发参数可进一步缩小范围，父任务、角色工具上限与资源授权始终生效。</p>
       </details>
       <div class="summary" aria-live="polite">{{ summary }}</div>
-      <p class="hint">每个子任务默认保存独立检查点，无需另行开启。流程可在派发时显式调整；工具权限按本配置限制。</p>
+      <p class="hint">每个子任务默认保存独立检查点，无需另行开启。切换推荐组合保留已有工具限制和兼容的工作环节；涉及执行方式、方案或交付方式变化时会提示确认。专用审查或隔离补丁不支持普通流程设置。</p>
     </template>
     <p v-else class="hint">沿用各派发入口的现有默认值。也可以直接点击上面的推荐组合。</p>
   </section>
@@ -74,17 +74,54 @@ function publish(includeProfile = false) {
   emit('update:modelValue', lastEmitted);
   if (includeProfile) emit('profile-change', profile.value);
 }
-function changeProfile() {
-  if (profile.value !== 'writer') workspace.value = 'shared';
-  if (specialized.value) { completion.value = 'handoff'; planMode.value = 'auto'; }
-  if (planMode.value === 'plan_approval' && stages.value.plan === false) stages.value = { ...stages.value, plan: true };
+function specialChangeWarning(nextProfile: Profile, nextWorkspace: 'shared' | 'isolated'): string[] {
+  const changes: string[] = [];
+  const nextSpecialized = nextProfile === 'reviewer' || nextWorkspace === 'isolated';
+  if (nextSpecialized && !specialized.value) {
+    if (Object.keys(stages.value).length) changes.push('清除当前普通工作环节设置');
+    if (planMode.value !== 'auto') changes.push('清除当前方案模式');
+    if (completion.value !== 'handoff') changes.push('结果改为交接');
+  }
+  return changes;
+}
+function approveChanges(changes: string[]): boolean {
+  return changes.length === 0 || window.confirm(`此操作将${changes.join('、')}。工具限制保留，已派发任务不受影响。是否继续？`);
+}
+function changeProfile(event: Event) {
+  const select = event.target as HTMLSelectElement;
+  const next = select.value as Profile;
+  const nextWorkspace = next === 'writer' ? workspace.value : 'shared';
+  const changes = specialChangeWarning(next, nextWorkspace);
+  if (nextWorkspace !== workspace.value) changes.push('工作区改为共享');
+  if (!approveChanges(changes)) { select.value = profile.value; return; }
+  profile.value = next; workspace.value = nextWorkspace;
+  if (specialized.value) { stages.value = {}; completion.value = 'handoff'; planMode.value = 'auto'; }
+  publish(true);
+}
+function changeWorkspace(event: Event) {
+  const select = event.target as HTMLSelectElement;
+  const next = select.value as 'shared' | 'isolated';
+  if (!approveChanges(specialChangeWarning(profile.value, next))) { select.value = workspace.value; return; }
+  workspace.value = next;
+  if (specialized.value) { stages.value = {}; completion.value = 'handoff'; planMode.value = 'auto'; }
   publish(true);
 }
 function applyPreset(preset: Preset) {
-  enabled.value = true; stages.value = {}; workspace.value = 'shared'; profile.value = preset.profile; planMode.value = preset.planMode; completion.value = preset.completion;
-  toolMode.value = preset.tools ? 'allowlist' : 'inherit'; toolsText.value = preset.tools?.join(', ') || ''; publish(true);
+  const changes: string[] = [];
+  if (enabled.value) {
+    if (profile.value !== preset.profile) changes.push('更改执行方式');
+    if (workspace.value !== 'shared') changes.push('工作区改为共享');
+    if (planMode.value !== preset.planMode) changes.push('更改方案模式');
+    if (completion.value !== preset.completion) changes.push('更改结果结束方式');
+    changes.push(...specialChangeWarning(preset.profile, 'shared').filter(c => !changes.includes(c)));
+  }
+  if (!approveChanges(changes)) return;
+  enabled.value = true; workspace.value = 'shared'; profile.value = preset.profile; planMode.value = preset.planMode; completion.value = preset.completion;
+  if (specialized.value) stages.value = {};
+  // Preserve tool restrictions and stage settings supported by the new profile.
+  publish(true);
 }
-function matches(preset: Preset) { return Object.keys(stages.value).length === 0 && enabled.value && workspace.value === 'shared' && profile.value === preset.profile && planMode.value === preset.planMode && completion.value === preset.completion && toolMode.value === 'inherit'; }
+function matches(preset: Preset) { return Object.keys(stages.value).length === 0 && enabled.value && workspace.value === 'shared' && profile.value === preset.profile && planMode.value === preset.planMode && completion.value === preset.completion; }
 watch(() => props.modelValue, raw => {
   if (raw === lastEmitted) return;
   if (!raw) { enabled.value = false; parseError.value = false; return; }

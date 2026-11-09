@@ -206,6 +206,7 @@
                     :stop-requested="session.stopRequested.value"
                     :can-start="session.canStart.value"
                     :can-resume-task="session.canResumeTask.value"
+                    :task-workflow-snapshot="session.taskWorkflowSnapshot.value"
                     :pauseReason="session.pauseReason.value"
                     :humanForm="session.humanForm.value"
                     :all-models="allModels"

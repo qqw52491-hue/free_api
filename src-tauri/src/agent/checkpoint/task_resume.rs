@@ -52,9 +52,29 @@ impl AgentCheckpoint {
         mode: Option<&str>,
         auto_pilot: bool,
     ) {
-        if !resuming || mode.is_some() {
+        // An explicit request cannot alter the policy of an existing task.
+        if !resuming {
             self.set_execution_mode(PlanExecutionMode::from_str_or_auto_pilot(mode, auto_pilot));
         }
+    }
+
+    /// Freeze review routing for a new task; restore it on resume. Legacy
+    /// checkpoints do not contain this snapshot, so adopt the current values once.
+    pub(crate) fn bind_task_review_routing(
+        &mut self, resuming: bool, routing: &mut crate::agent::router::ModelRoutingConfig,
+    ) -> bool {
+        let legacy = resuming && self.task_review_routing.is_none();
+        if !resuming || legacy {
+            self.task_review_routing = Some(TaskReviewRouting {
+                stage_reviewer_override: routing.stage_reviewer_override.clone(),
+                stage_review_committee: routing.stage_review_committee,
+            });
+        }
+        if let Some(snapshot) = &self.task_review_routing {
+            routing.stage_reviewer_override = snapshot.stage_reviewer_override.clone();
+            routing.stage_review_committee = snapshot.stage_review_committee;
+        }
+        legacy
     }
 
     pub(crate) fn resume_failed_task(&mut self, context: &mut SandwichContext, reply: &str) {

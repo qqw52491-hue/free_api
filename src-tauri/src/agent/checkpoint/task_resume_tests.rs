@@ -1,6 +1,27 @@
 use super::*;
 use serde_json::json;
 
+#[test]
+fn review_policy_snapshot_survives_resume_but_models_can_change() {
+    let (_, mut cp) = failed_fixture();
+    let mut initial = crate::agent::router::ModelRoutingConfig::default();
+    initial.pro = "model-a".into();
+    initial.stage_reviewer_override = Some("disabled".into());
+    initial.stage_review_committee = true;
+    assert!(!cp.bind_task_review_routing(false, &mut initial));
+    let raw = serde_json::to_string(&cp).unwrap();
+    let mut cp: AgentCheckpoint = serde_json::from_str(&raw).unwrap();
+    let mut resumed = crate::agent::router::ModelRoutingConfig::default();
+    resumed.pro = "model-b".into();
+    assert!(!cp.bind_task_review_routing(true, &mut resumed));
+    assert_eq!(resumed.pro, "model-b");
+    assert_eq!(resumed.stage_reviewer_override.as_deref(), Some("disabled"));
+    assert!(resumed.stage_review_committee);
+    let (_, mut legacy) = failed_fixture();
+    assert!(legacy.bind_task_review_routing(true, &mut resumed));
+    assert!(!legacy.bind_task_review_routing(true, &mut resumed));
+}
+
 fn failed_fixture() -> (SandwichContext, AgentCheckpoint) {
     let mut ctx = SandwichContext::new("system".into(), "原始缓存目标".into());
     ctx.current_goal = "简洁模式与详细模式保留相同子任务和审查内容".into();
@@ -93,7 +114,7 @@ fn real_rejections_and_stage_blockers_survive_retry() {
 }
 
 #[test]
-fn approved_plan_stays_approved_but_explicit_mode_change_is_honored() {
+fn approved_plan_and_mode_stay_on_resume_even_if_an_override_is_supplied() {
     let (_, mut cp) = failed_fixture();
     cp.plan_phase = PlanPhase::Approved;
     cp.approved_plan_summary = Some("人类已批准原方案".into());
@@ -108,9 +129,9 @@ fn approved_plan_stays_approved_but_explicit_mode_change_is_honored() {
     );
     assert!(cp.plan_reviewer_consumed);
     cp.apply_entry_execution_mode(true, Some("plan_approval"), false);
-    assert_eq!(cp.plan_mode, PlanExecutionMode::PlanApproval);
+    assert_eq!(cp.plan_mode, PlanExecutionMode::CrossReview);
     cp.apply_entry_execution_mode(true, Some("auto"), true);
-    assert_eq!(cp.plan_mode, PlanExecutionMode::Auto);
+    assert_eq!(cp.plan_mode, PlanExecutionMode::CrossReview);
 }
 
 #[test]

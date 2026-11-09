@@ -69,7 +69,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
     app: AppHandle,
     state: State<'_, DbState>,
     registry_state: State<'_, std::sync::Arc<tokio::sync::Mutex<PluginRegistry>>>,
-    model_routing: crate::agent::router::ModelRoutingConfig,
+    mut model_routing: crate::agent::router::ModelRoutingConfig,
     goal: String,
     auto_pilot: bool,
     final_session_id: String,
@@ -261,6 +261,21 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
         db: state.inner(),
         run_id: &run_id,
     };
+    // Resolve task identity and frozen review routing before building the tool/role context.
+    let existing_checkpoint = load_checkpoint(state.inner(), &final_session_id)?;
+    let is_resuming_existing = !crate::agent::conversation::should_start_new_turn(
+        existing_checkpoint.as_ref(), task_start_mode,
+    )?;
+    if is_resuming_existing {
+        if let Some(snapshot) = existing_checkpoint.as_ref().and_then(|cp| cp.task_review_routing.as_ref()) {
+            model_routing.stage_reviewer_override = snapshot.stage_reviewer_override.clone();
+            model_routing.stage_review_committee = snapshot.stage_review_committee;
+        }
+    }
+    let auto_pilot = if is_resuming_existing {
+        existing_checkpoint.as_ref().map_or(auto_pilot, |cp| cp.auto_pilot)
+    } else { auto_pilot };
+
     // 1. 智能 MCP 插件同步：首次任务全量初始化，后续任务仅增量保活（见 mcp/session_bootstrap.rs）
     crate::agent::mcp::session_bootstrap::sync_mcp_plugins_for_session(
         &app,
@@ -443,11 +458,6 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
     );
     // 每轮都是独立 Agent 运行，但同一 session_id 始终归属同一个长期对话。
     // 崩溃恢复会沿用既有 checkpoint，不能重复追加用户消息；只有新轮次才写入消息历史。
-    let existing_checkpoint = load_checkpoint(state.inner(), &final_session_id)?;
-    let is_resuming_existing = !crate::agent::conversation::should_start_new_turn(
-        existing_checkpoint.as_ref(),
-        task_start_mode,
-    )?;
     let resume_from_failed = is_resuming_existing
         && existing_checkpoint
             .as_ref()
@@ -625,10 +635,13 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
             execution_config.stages.for_child(execution_config.workflow.completion.as_deref()==Some("handoff"), execution_config.workflow.plan_mode.as_deref())
         } else { model_routing.stages.clone() };
     }
-    if is_resuming_existing && plan_mode.as_deref()==Some("plan_approval") {
-        checkpoint.stages.plan=Some(true);
+    let legacy_review_routing = checkpoint.bind_task_review_routing(is_resuming_existing, &mut model_routing);
+    if legacy_review_routing {
+        let _ = app.emit(&format!("agent-log-{}", final_session_id),
+            "⚠️ 旧任务未保存审查人数和旧审查覆盖的原始配置；本次沿用当前设置并记录，无法还原此前值。执行模式和固定环节仍沿用原检查点。");
     }
-    checkpoint.stages.validate(plan_mode.as_deref())?;
+    let validation_mode = if is_resuming_existing { Some(checkpoint.plan_mode.as_str()) } else { plan_mode.as_deref() };
+    checkpoint.stages.validate(validation_mode)?;
     let review_program = crate::agent::child_reviewer::main_executor::load(state.inner(), &run_id)?;
     context.add_host_feedback(&if review_program.is_some() {
         "【当前审查职责】只读取证并交回审查结果；不能实施修改或再次委派。父任务流程配置见审查材料，内部防递归配置不改变父任务设置。".to_string()
@@ -876,7 +889,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
     }
 
     // 模式切换守卫：按目标执行模式（全自动/交叉审查/方案审批）规范化方案阶段；人工确认过的方案永久保留。
-    // 续跑缺省保留自动升级的审查模式；显式配置才改变模式。
+    // 同任务续跑保留原执行模式；仅新任务应用入口配置。
     checkpoint.apply_entry_execution_mode(is_resuming_existing, plan_mode.as_deref(), auto_pilot);
     checkpoint.stages.validate(Some(checkpoint.plan_mode.as_str()))?;
     // 初始工作区是会话选择的已声明资源；恢复时保留 checkpoint 中已有的显式契约。

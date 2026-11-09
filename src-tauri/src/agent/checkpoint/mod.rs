@@ -31,6 +31,13 @@ pub(crate) use plan_batch::*;
 pub(crate) use types::*;
 pub(crate) use review_state::{ReviewDeliverySource, ReviewFindingTodo};
 
+/// Task-level review policy, separate from model routing; absent on old checkpoints.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskReviewRouting {
+    pub stage_reviewer_override: Option<String>,
+    pub stage_review_committee: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentCheckpoint {
     pub schema_version: u32,
@@ -137,6 +144,8 @@ pub struct AgentCheckpoint {
     pub plan_mode: PlanExecutionMode,
     #[serde(default)]
     pub stages: crate::agent::stage_settings::StageSettings,
+    #[serde(default)]
+    pub task_review_routing: Option<TaskReviewRouting>,
     /// 方案审查结果是否已被主循环或 wait_jobs 消费并注入上下文（“问过”且“听过”）
     #[serde(default)]
     pub plan_reviewer_consumed: bool,
@@ -431,6 +440,7 @@ impl AgentCheckpoint {
             policy_decision_summary: None,
             plan_mode: PlanExecutionMode::Auto,
             stages: Default::default(),
+            task_review_routing: None,
             plan_reviewer_consumed: false,
             plan_review_batch: PlanReviewBatchState::default(),
             plan_review_batch_id: None,
@@ -800,6 +810,10 @@ pub struct AgentCheckpointSummary {
     pub plan_mode: Option<String>,
     #[serde(default = "default_auto_pilot")]
     pub auto_pilot: bool,
+    #[serde(default)]
+    pub stages: crate::agent::stage_settings::StageSettings,
+    #[serde(default)]
+    pub task_review_routing: Option<TaskReviewRouting>,
     pub step_id: usize,
     pub user_goal: String,
     pub last_error: Option<String>,
@@ -840,6 +854,8 @@ pub async fn get_agent_checkpoint(
             plan_phase: Some(cp.plan_phase.as_str().to_string()),
             plan_mode: Some(cp.plan_mode.as_str().to_string()),
             auto_pilot: cp.auto_pilot,
+            stages: cp.stages,
+            task_review_routing: cp.task_review_routing,
             step_id: cp.step_id,
             user_goal: if cp.data.current_goal.is_empty() {
                 cp.data.user_goal

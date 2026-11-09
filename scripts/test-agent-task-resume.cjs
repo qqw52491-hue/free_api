@@ -12,7 +12,7 @@ let traceFixtures, messageFixtures = [];
 const storage = new Map();
 const handlers = new Map();
 global.localStorage = { getItem: k => storage.get(k) ?? null, setItem: (k,v) => storage.set(k,v) };
-global.window = { setInterval, clearInterval, setTimeout, clearTimeout };
+global.window = { setInterval, clearInterval, setTimeout, clearTimeout, addEventListener: () => {}, removeEventListener: () => {} };
 const noOp = () => {};
 const format = {
     asRecord: v => v && typeof v === 'object' && !Array.isArray(v) ? v : {},
@@ -95,7 +95,7 @@ async function main() {
     s.setPlanMode('plan_approval');
     await s.runAgent('继续');
     assert.equal(requests[0].taskStartMode, 'resume');
-    assert.equal(requests[0].planMode, 'plan_approval', 'explicit mode selection must be honored');
+    assert.equal(requests[0].planMode, undefined, 'resume must preserve original mode even after editing new-task settings');
     s = await session('succeeded');
     assert.equal(s.canResumeTask.value, false);
     await s.runAgent('继续');
