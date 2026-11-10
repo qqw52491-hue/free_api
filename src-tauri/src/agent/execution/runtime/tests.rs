@@ -7,6 +7,58 @@ fn fixture() -> DbState {
     db.0.lock().unwrap().execute("INSERT INTO agent_child_runs(id,parent_run_id,parent_session_id,workspace_root,model_id,status,started_at,kind) VALUES ('child','parent','session','/tmp','mock','running','now','worker')",[]).unwrap();
     db
 }
+
+#[test]
+fn supported_grants_intersect_the_same_way_as_runtime_authorization() {
+    let db=fixture();
+    let cases=[json!(null),json!([]),json!(["read_file"]),json!(["local_file"]),json!(["local_file.read"]),json!(["child_task"]),json!(["send_message"]),json!(["my_mcp/tool"]),json!(["my_mcp/other"])];
+    let calls=[("local_file","read"),("local_file","write"),("child_task","send"),("child_task","dispatch"),("child_task","result"),("my_mcp/tool","inspect"),("my_mcp/tool","change"),("my_mcp/tool_extra","inspect")];
+    let authorized=|config:&ExecutionConfig,tool:&str,action:&str| {
+        db.0.lock().unwrap().execute("UPDATE agent_child_runs SET execution_config_json=?1 WHERE id='child'",[serde_json::to_string(config).unwrap()]).unwrap();
+        authorize_call(&db,"child",tool,action,&json!({})).is_ok()
+    };
+    for requested in &cases {for limit in &cases {
+        let original=ExecutionConfig::parse(&json!({"execution":{"allowed_tools":requested}}),"task").unwrap();
+        let ceiling=ExecutionConfig::parse(&json!({"execution":{"allowed_tools":limit}}),"task").unwrap();
+        let mut result=original.clone();result.restrict_tools(&ceiling);
+        for (tool,action) in calls {
+            assert_eq!(authorized(&result,tool,action),authorized(&original,tool,action)&&authorized(&ceiling,tool,action),"requested={requested}, ceiling={limit}, call={tool}.{action}");
+        }
+    }}
+}
+
+#[test]
+fn nested_registration_cannot_regain_tools_and_does_not_copy_parent_workflow() {
+    let db=fixture();
+    db.0.lock().unwrap().execute("UPDATE agent_child_runs SET execution_config_json=?1 WHERE id='child'",[json!({"allowed_tools":["local_file","my_mcp/tool","send_message"],"workflow":{"plan_mode":"plan_approval"},"stages":{"final_review":true}}).to_string()]).unwrap();
+    let mut parent="child".to_string();
+    for (index,tools) in [json!(["read_file","my_mcp/tool","child_task"]),json!(["local_file","my_mcp/tool","my_mcp/other","run_command","child_task"]),json!([]),json!(null)].into_iter().enumerate() {
+        let mut identity=crate::agent::child_reviewer::ChildRunIdentity::fresh("task");
+        identity.execution_config=Some(json!({"allowed_tools":tools,"workflow":{"completion":"handoff"},"stages":{"final_review":false}}).to_string());
+        let id=crate::agent::child_reviewer::begin_child_run_extended(&db,&parent,"session",&std::env::temp_dir(),"mock",0,"task",None,None,None,&identity).unwrap();
+        let saved=config(&db,&id).unwrap();
+        assert_eq!(saved.workflow.completion.as_deref(),Some("handoff"));
+        assert!(saved.workflow.plan_mode.is_none(),"parent workflow is not a child default");
+        assert_eq!(saved.stages.final_review,Some(false));
+        assert_eq!(authorize(&db,&id,"read_file").is_ok(),index<2);
+        assert_eq!(authorize_call(&db,&id,"my_mcp/tool","inspect",&json!({})).is_ok(),index<2);
+        assert!(authorize(&db,&id,"write_file").is_err());
+        assert!(authorize(&db,&id,"run_command").is_err());
+        assert_eq!(authorize_call(&db,&id,"my_mcp/tool","change",&json!({})).is_ok(),index<2);
+        assert!(authorize_call(&db,&id,"my_mcp/other","inspect",&json!({})).is_err());
+        assert_eq!(authorize_call(&db,&id,"child_task","send",&json!({})).is_ok(),index<2);
+        assert!(authorize_call(&db,&id,"child_task","result",&json!({})).is_ok());
+        parent=id;
+    }
+}
+
+#[test]
+fn dotted_mcp_tool_names_are_not_expanded_as_native_action_aliases() {
+    let config=ExecutionConfig::parse(&json!({"execution":{"allowed_tools":["my_mcp/tool"]}}),"task").unwrap();
+    assert!(!config.permits("my_mcp/tool.inspect"));
+    assert!(!config.permits("my_mcp/tool_extra"));
+    assert!(config.permits("my_mcp/tool"));
+}
 #[test]
 fn dynamic_configuration_is_typed_and_unsupported_workflows_are_explicit() {
     assert!(ExecutionConfig::parse(

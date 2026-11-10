@@ -10,6 +10,86 @@ fn card() -> Value {
 }
 
 #[test]
+fn null_dispatch_fields_inherit_role_values_before_public_defaults() {
+    let db=db();
+    let mut role=card();
+    role["execution_defaults"]["execution"]["stages"]=json!({"final_review":false,"stage_review":true});
+    upsert_card(&db,&role).unwrap();
+    let merged=merge_execution_defaults(&db,&json!({"role":"configured_agent","execution":{"workflow":{"plan_mode":null,"completion":null},"stages":{"final_review":null,"stage_review":null}}}),None).unwrap();
+    let public=crate::agent::child_task::defaults::ChildWorkflowDefaults {plan_mode:Some("auto".into()),completion:Some("handoff".into()),stages:crate::agent::stage_settings::StageSettings {final_review:Some(true),stage_review:Some(false),..Default::default()}};
+    let effective=public.apply(&merged).unwrap();
+    assert_eq!(effective["execution"]["workflow"]["plan_mode"],"cross_review");
+    assert_eq!(effective["execution"]["workflow"]["completion"],"delivery");
+    assert_eq!(effective["execution"]["stages"]["final_review"],false);
+    assert_eq!(effective["execution"]["stages"]["stage_review"],true);
+}
+
+#[test]
+fn stage_merge_matrix_preserves_inherit_on_and_off_at_every_layer() {
+    let db=db();
+    for field in ["stage_review","final_review"] {
+        for public in [None,Some(false),Some(true)] {
+            for role in 0..4 {for dispatch in 0..4 {
+                let value=|state|match state {2=>json!(false),3=>json!(true),_=>Value::Null};
+                let mut role_stages=json!({});if role!=0 {role_stages[field]=value(role);}
+                upsert_card(&db,&json!({"name":"matrix","allowed_kinds":"task","execution_defaults":{"execution":{"stages":role_stages}}})).unwrap();
+                let mut stages=json!({});if dispatch!=0 {stages[field]=value(dispatch);}
+                let merged=merge_execution_defaults(&db,&json!({"role":"matrix","execution":{"stages":stages}}),None).unwrap();
+                let mut defaults=crate::agent::child_task::defaults::ChildWorkflowDefaults::default();
+                if field=="stage_review" {defaults.stages.stage_review=public;} else {defaults.stages.final_review=public;}
+                let effective=defaults.apply(&merged).unwrap();
+                let expected=value(dispatch).as_bool().or(value(role).as_bool()).or(public);
+                assert_eq!(effective["execution"]["stages"][field].as_bool(),expected,"field={field}, public={public:?}, role={role}, dispatch={dispatch}");
+            }}
+        }
+    }
+    // Skipping inheritance values must not hide malformed/unknown fields.
+    assert!(merge_execution_defaults(&db,&json!({"role":"matrix","execution":{"stages":{"typo":null}}}),None).is_err());
+    assert!(merge_execution_defaults(&db,&json!({"role":"matrix","execution":{"stages":{"final_review":"off"}}}),None).is_err());
+}
+
+#[test]
+fn null_workspace_inherits_isolation_instead_of_silently_switching_executor() {
+    let db=db();
+    upsert_card(&db,&json!({"name":"patcher","allowed_kinds":"writer","execution_defaults":{"profile":"writer","execution":{"workspace":"isolated","allowed_tools":["read_file"],"workflow":{"completion":"handoff"}}}})).unwrap();
+    let inherited=merge_execution_defaults(&db,&json!({"role":"patcher","execution":{"workspace":null,"allowed_tools":null}}),None).unwrap();
+    assert_eq!(inherited["execution"]["workspace"],"isolated");
+    assert!(!crate::agent::execution::runtime::uses_main_executor("writer",&inherited).unwrap());
+    let explicit=merge_execution_defaults(&db,&json!({"role":"patcher","execution":{"workspace":"shared"}}),None).unwrap();
+    assert!(crate::agent::execution::runtime::uses_main_executor("writer",&explicit).unwrap());
+}
+
+#[test]
+fn execution_profile_priority_is_entry_then_role_then_existing_fallback() {
+    let db=db();
+    for role_profile in [None,Some("task"),Some("worker")] {
+        let mut defaults=json!({});if let Some(profile)=role_profile {defaults["profile"]=json!(profile);}
+        upsert_card(&db,&json!({"name":"profile_matrix","allowed_kinds":"task,worker","execution_defaults":defaults})).unwrap();
+        for requested in [None,Some("task"),Some("worker")] {for fixed in [None,Some("worker")] {
+            let mut params=json!({"role":"profile_matrix","task":"inspect"});if let Some(profile)=requested {params["profile"]=json!(profile);}
+            let effective=merge_execution_defaults(&db,&params,fixed).unwrap();
+            assert_eq!(effective["profile"],fixed.or(requested).or(role_profile).unwrap_or("task"));
+        }}
+    }
+}
+
+#[test]
+fn role_human_approval_survives_ordinary_profile_changes_and_rejects_downgrades() {
+    let db=db();let mut role=card();
+    role["execution_defaults"]["execution"]["workflow"]["plan_mode"]=json!("plan_approval");
+    upsert_card(&db,&role).unwrap();
+    for fixed in [None,Some("worker")] {
+        for mode in [Value::Null,json!("plan_approval")] {
+            let merged=merge_execution_defaults(&db,&json!({"role":"configured_agent","profile":"worker","execution":{"workflow":{"plan_mode":mode}}}),fixed).unwrap();
+            assert_eq!(merged["execution"]["workflow"]["plan_mode"],"plan_approval");
+        }
+        for mode in ["auto","cross_review"] {
+            assert!(merge_execution_defaults(&db,&json!({"role":"configured_agent","profile":"worker","execution":{"workflow":{"plan_mode":mode}}}),fixed).is_err(),"cannot cancel role approval via {mode}");
+        }
+    }
+}
+
+#[test]
 fn independent_permissions_and_workflow_do_not_require_a_role_profile() {
     let db=db();
     let saved=upsert_card(&db,&json!({"name":"permissions_only","allowed_kinds":"worker","execution_defaults":{"execution":{"allowed_tools":["read_file"]}}})).unwrap();

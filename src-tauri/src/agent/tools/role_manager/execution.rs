@@ -97,6 +97,11 @@ pub(crate) fn merge_execution_defaults(
         base["workflow"] = json!({});
         base["stages"] = json!({});
     }
+    // Ordinary preset changes and dispatch overrides cannot cancel a configured
+    // human approval requirement. Formal read-only review keeps its own adapter.
+    let role_approval = defaults.execution.workflow.plan_mode.as_deref() == Some("plan_approval")
+        && matches!(profile, "task" | "worker" | "writer");
+    if role_approval { base["workflow"]["plan_mode"] = json!("plan_approval"); }
     if let Some(explicit) = params.get("execution") {
         let object = explicit.as_object().ok_or("execution 类型错误：期望对象")?;
         for (key, value) in object {
@@ -105,9 +110,22 @@ pub(crate) fn merge_execution_defaults(
                     .as_object()
                     .ok_or("execution.workflow 类型错误：期望对象")?;
                 for (field, value) in workflow {
+                    if role_approval && key == "workflow" && field == "plan_mode"
+                        && value.as_str().is_some_and(|mode| mode != "plan_approval") {
+                        return Err("角色配置要求人工批准，派发方案模式与其冲突；请保留 plan_approval，或由用户修改角色流程。未派发。".into());
+                    }
+                    // Null means no override at this layer, just like omission.
+                    // Keep unknown fields for the typed parser to reject.
+                    let nullable = if key == "workflow" {
+                        matches!(field.as_str(), "plan_mode" | "completion")
+                    } else {
+                        matches!(field.as_str(), "plan" | "plan_review" | "stage_review" | "final_review")
+                    };
+                    if nullable && value.is_null() { continue; }
                     base[key][field] = value.clone();
                 }
             } else {
+                if matches!(key.as_str(), "workspace" | "allowed_tools") && value.is_null() { continue; }
                 base[key] = value.clone();
             }
         }

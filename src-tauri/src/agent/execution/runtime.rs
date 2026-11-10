@@ -138,6 +138,9 @@ fn canonical_name(name: &str) -> &str {
 }
 fn permits_name(allowed: &str, requested: &str) -> bool {
     canonical_name(allowed) == canonical_name(requested)
+        // Only expand known native aliases; MCP tool IDs can themselves contain dots.
+        || (allowed == "child_task"
+            && matches!(canonical_name(requested), "send_message" | "ask_agent" | "wait_message"))
         || (allowed == "local_file"
             && matches!(
                 canonical_name(requested),
