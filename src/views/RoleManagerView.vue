@@ -8,6 +8,7 @@
         </p>
       </div>
       <div class="header-actions">
+        <button class="btn ghost" @click="emit('open-child-workflow')">子任务默认流程</button>
         <button class="btn primary" @click="startCreate">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
           新建专家角色
@@ -636,6 +637,8 @@
 </template>
 
 <script setup lang="ts">
+const emit = defineEmits<{ 'open-child-workflow': [] }>();
+
 import { ref, reactive, onMounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import ModelSelectDropdown from '../components/common/ModelSelectDropdown.vue';

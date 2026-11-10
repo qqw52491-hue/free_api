@@ -20,7 +20,7 @@
         <p class="hint">决定如何运行和交回结果，不自动授予工具权限。</p>
         <div class="controls">
           <label>执行方式<select :value="profile" @change="changeProfile($event)"><option value="task">通用子任务</option><option value="worker">调查助手</option><option value="writer">实施助手</option><option value="reviewer">专用审查</option></select></label>
-          <label>结果如何结束<select v-model="completion" :disabled="specialized" @change="publish()"><option value="delivery">完整交付，按任务验证和审查</option><option value="handoff">交回结果，由父任务集成验收</option></select></label>
+          <label>结果如何结束<select v-model="completion" :disabled="specialized" @change="publish()"><option value="">继承子任务默认流程</option><option value="delivery">完整交付，按任务验证和审查</option><option value="handoff">交回结果，由父任务集成验收</option></select></label>
         </div>
         <p class="hint">{{ !specialized ? '普通方式使用同一通用执行器；调查职责不自动保证只读，需要限制时请设置工具权限。' : '正式审查或显式隔离补丁使用专用结果契约；完整流程选择共享工作区。' }}</p>
         <label v-if="profile === 'writer'" class="tool-mode">工作区方式<select :value="workspace" @change="changeWorkspace($event)"><option value="shared">共享父工作区，直接实施</option><option value="isolated">隔离补丁，审阅后 apply</option></select></label>
@@ -35,14 +35,14 @@
       <section class="settings-block" aria-label="工作流程">
         <h5>工作流程</h5>
         <p class="hint">决定方案和审查如何安排，不授予或取消工具权限。自动沿用现有宿主策略，不等于由 Agent 完全自主决定。</p>
-        <div class="controls"><label>方案安排<select v-model="planMode" :disabled="specialized" @change="publish()"><option value="auto">自动 / 沿用现有策略</option><option value="cross_review">先讨论并审查方案</option><option value="plan_approval">方案需要人工批准</option></select></label></div>
+        <div class="controls"><label>方案安排<select v-model="planMode" :disabled="specialized" @change="publish()"><option value="">继承子任务默认流程</option><option value="auto">自动 / 沿用现有策略</option><option value="cross_review">先讨论并审查方案</option><option value="plan_approval">方案需要人工批准</option></select></label></div>
         <StageSettingsFields v-if="!specialized" v-model="stages" :approval="planMode === 'plan_approval'" @update:model-value="publish()" />
         <p class="hint">结果交接子任务默认关闭重复环节；显式选择方案模式时沿用该模式。关闭自动审查不等于禁止主动审查，仍受实际权限约束。</p>
       </section>
       <div class="summary" aria-live="polite">{{ summary }}</div>
       <p class="hint">每个子任务保存独立检查点。切换快捷组合保留工具限制和兼容的工作环节；涉及其他设置变化时会提示确认。</p>
     </template>
-    <p v-else class="hint">未启用时沿用派发入口的默认值和父任务权限；角色职责、模型及输入输出字段仍然有效。</p>
+    <p v-else class="hint">未启用时，流程沿用「子任务默认流程」及派发设置，工具权限继承父任务；角色职责、模型及输入输出字段仍然有效。</p>
   </section>
 </template>
 
@@ -52,8 +52,8 @@ import StageSettingsFields from './StageSettingsFields.vue';
 import type { StageSettings } from './types';
 const stages = ref<StageSettings>({});
 type Profile = 'task' | 'worker' | 'writer' | 'reviewer';
-type PlanMode = 'auto' | 'cross_review' | 'plan_approval';
-type Completion = 'handoff' | 'delivery';
+type PlanMode = '' | 'auto' | 'cross_review' | 'plan_approval';
+type Completion = '' | 'handoff' | 'delivery';
 interface Preset { id: string; label: string; description: string; profile: Profile; planMode: PlanMode; completion: Completion; tools?: string[] }
 const props = defineProps<{ modelValue: string; allowedKinds?: string[] }>();
 const emit = defineEmits<{ 'update:modelValue': [value: string]; 'profile-change': [profile: Profile] }>();
@@ -76,13 +76,13 @@ const presets: Preset[] = [
   { id: 'review', label: '专用审查', description: '按审查契约返回裁决与发现', profile: 'reviewer', planMode: 'auto', completion: 'handoff' },
 ];
 const names: Record<Profile, string> = { task: '通用子任务', worker: '调查助手', writer: '实施助手', reviewer: '专用审查' };
-const summary = computed(() => `${names[profile.value]} · ${!specialized.value ? ({ auto: '按固定环节配置', cross_review: '先审查方案', plan_approval: '方案人工批准' }[planMode.value]) + ' · ' : ''}${completion.value === 'delivery' ? '完整交付' : '结果交接'} · ${toolMode.value === 'inherit' ? '继承可用能力' : '限定工具范围'}`);
+const summary = computed(() => `${names[profile.value]} · ${!specialized.value ? ({ '': '继承默认流程', auto: '按固定环节配置', cross_review: '先审查方案', plan_approval: '方案人工批准' }[planMode.value]) + ' · ' : ''}${completion.value === 'delivery' ? '完整交付' : completion.value === 'handoff' ? '结果交接' : '继承交付方式'} · ${toolMode.value === 'inherit' ? '继承可用能力' : '限定工具范围'}`);
 function toolNames() { return [...new Set(toolsText.value.split(/[,，\n]/).map(s => s.trim()).filter(Boolean))]; }
 function publish(includeProfile = false) {
   parseError.value = false;
   if (planMode.value === 'plan_approval' && stages.value.plan === false) stages.value = { ...stages.value, plan: true };
   if (!enabled.value) { lastEmitted = ''; emit('update:modelValue', ''); return; }
-  const workflow = !specialized.value ? { plan_mode: planMode.value, completion: completion.value } : { completion: 'handoff' };
+  const workflow = !specialized.value ? { ...(planMode.value ? { plan_mode: planMode.value } : {}), ...(completion.value ? { completion: completion.value } : {}) } : { completion: 'handoff' };
   lastEmitted = JSON.stringify({ profile: profile.value, execution: { ...(!specialized.value ? { stages: stages.value } : {}), ...(workspace.value === 'isolated' ? { workspace: 'isolated' } : {}), ...(toolMode.value === 'allowlist' ? { allowed_tools: toolNames() } : {}), workflow } });
   emit('update:modelValue', lastEmitted);
   if (includeProfile) emit('profile-change', profile.value);
@@ -173,7 +173,7 @@ watch(() => props.modelValue, raw => {
     if (!['task', 'worker', 'writer', 'reviewer'].includes(value.profile)) throw new Error('profile');
     enabled.value = true; parseError.value = false; profile.value = value.profile; workspace.value = value.execution?.workspace || 'shared';
     stages.value = value.execution?.stages || {};
-    planMode.value = value.execution?.workflow?.plan_mode || 'auto'; completion.value = value.execution?.workflow?.completion || (profile.value === 'task' ? 'delivery' : 'handoff');
+    planMode.value = value.execution?.workflow?.plan_mode || ''; completion.value = value.execution?.workflow?.completion || '';
     toolMode.value = Array.isArray(value.execution?.allowed_tools) ? 'allowlist' : 'inherit'; toolsText.value = value.execution?.allowed_tools?.join(', ') || '';
   } catch { resetInputs(); parseError.value = true; enabled.value = false; }
 }, { immediate: true });

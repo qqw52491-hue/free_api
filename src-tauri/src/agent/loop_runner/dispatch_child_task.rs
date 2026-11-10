@@ -67,7 +67,8 @@ async fn dispatch_inner(
         }
         child_task::dispatch::PreparedDispatch::Params(params) => params,
     };
-    if matches!(params["profile"].as_str(),Some("worker"|"writer")) && params["execution"]["workflow"]["completion"].is_null() {
+    let implicit_handoff = matches!(params["profile"].as_str(),Some("worker"|"writer")) && params["execution"]["workflow"]["completion"].is_null();
+    if implicit_handoff {
         if params.get("execution").is_none() {params["execution"]=json!({});}
         if params["execution"].get("workflow").is_none() {params["execution"]["workflow"]=json!({});}
         params["execution"]["workflow"]["completion"]=json!("handoff");
@@ -358,6 +359,13 @@ async fn dispatch_inner(
         child_task::models::pin(&mut child_routing,&model_selection.model_id);
     }
     child_task::models::validate(ctx.state.inner(),&model_selection)?;
+    // Resolve all current/legacy registration identities before applying new defaults.
+    if effective_action == "dispatch" && existing.is_none() {
+        match crate::commands::child_workflow::path(ctx.app).and_then(|path| child_task::defaults::ChildWorkflowDefaults::load(&path)) {
+            Ok(defaults) => params = defaults.apply_after_entry_fallback(&params, implicit_handoff)?,
+            Err(error) => { let _ = ctx.app.emit(&format!("agent-log-{}",ctx.final_session_id),format!("{error}；本次沿用原有派发默认流程。")); }
+        }
+    }
     ctx.checkpoint.prepare_child_dispatch(inst, ctx.context, slot, true)?;
     save_checkpoint(ctx.state.inner(), ctx.checkpoint)?;
     let (workspace_session, workspace_run) = child_task::workspace_owner(ctx.final_session_id, ctx.parent_run_id)?;

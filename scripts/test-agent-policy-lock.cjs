@@ -126,4 +126,9 @@ function visit(n){ if(n.type===1){const click=n.props.find(p=>p.name==='on'&&p.a
 visit(ast); assert.equal(checked,2);
 assert(composer.source.includes(':disabled="workflowLocked" :approval='));
 assert(!composer.source.includes("setTriggerMode("), 'stage review has one control');
+// Inheriting workflow values must not clear an independent role tool restriction.
+refs.enabled.value=true; refs.profile.value='task'; refs.workspace.value='shared'; refs.planMode.value=''; refs.completion.value=''; refs.toolMode.value='allowlist'; refs.toolsText.value='read_file'; events.length=0;
+role.handlers.publish(); const inheritedWorkflow=JSON.parse(events[0][1]);
+assert.deepEqual(inheritedWorkflow.execution.workflow,{});
+assert.deepEqual(inheritedWorkflow.execution.allowed_tools,['read_file']);
 console.log('PASS: role preset preservation/confirmation; stage control decoupling; workflow lock');

@@ -8,6 +8,7 @@ pub mod projects;
 pub mod roles;
 pub mod skills;
 pub mod tasks;
+pub mod child_workflow;
 
 pub use chat::*;
 pub use mcp::*;

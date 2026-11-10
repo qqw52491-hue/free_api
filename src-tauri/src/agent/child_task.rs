@@ -4,6 +4,7 @@ pub(crate) mod runtime;
 pub(crate) mod presets;
 pub(crate) mod dispatch;
 pub(crate) mod models;
+pub(crate) mod defaults;
 use crate::db::DbState;
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};

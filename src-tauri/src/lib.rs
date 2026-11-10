@@ -130,6 +130,8 @@ pub fn run() {
             commands::preview_model_config,
             commands::import_model_config,
             commands::save_model_config_file,
+            commands::child_workflow::get_child_workflow_defaults,
+            commands::child_workflow::save_child_workflow_defaults,
             // 会话
             commands::get_sessions,
             commands::create_session,

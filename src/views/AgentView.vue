@@ -82,6 +82,10 @@
                     <svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
                     <span v-if="!sidebarCollapsed">Roles 角色</span>
                 </button>
+                <button type="button" class="nav-row" :class="{ active: currentNavView === 'child-workflow', 'icon-only': sidebarCollapsed }" title="子任务默认流程" @click="currentNavView = 'child-workflow'">
+                    <svg viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="5" rx="1"/><path d="M12 7v5M5 16v-4h14v4"/><rect x="2" y="16" width="6" height="5" rx="1"/><rect x="16" y="16" width="6" height="5" rx="1"/></svg>
+                    <span v-if="!sidebarCollapsed">子任务流程</span>
+                </button>
                 <button
                     type="button"
                     class="nav-row"
@@ -264,8 +268,10 @@
 
             <!-- 4. 🎭 专家工坊与角色卡配置 -->
             <div v-if="currentNavView === 'roles'" class="full-view-panel">
-                <RoleManagerView />
+                <RoleManagerView @open-child-workflow="currentNavView = 'child-workflow'" />
             </div>
+
+            <div v-if="currentNavView === 'child-workflow'" class="full-view-panel"><ChildWorkflowView /></div>
 
             <!-- 5. 🔌 插件 / 提示词与 Skill 库 -->
             <div v-if="currentNavView === 'plugins' || currentNavView === 'library'" class="full-view-panel">
@@ -337,6 +343,7 @@ const ApiManager = defineAsyncComponent(() => import("./ApiManager.vue"));
 const PluginView = defineAsyncComponent(() => import("./PluginView.vue"));
 const WeChatBindView = defineAsyncComponent(() => import("./WeChatBindView.vue"));
 const ScheduledView = defineAsyncComponent(() => import("./ScheduledView.vue"));
+const ChildWorkflowView = defineAsyncComponent(() => import("./ChildWorkflowView.vue"));
 const RoleManagerView = defineAsyncComponent(() => import("./RoleManagerView.vue"));
 
 interface ModelOption { id: string; name: string; display_name: string; platform_id: string; platform_name: string; }
@@ -344,7 +351,7 @@ interface ChatSessionRow { id: string; title: string; model_id: string; created_
 interface TabInfo { uid: string; id: string; label: string; running: boolean; projectId?: string; isDraft?: boolean; }
 interface FloatingToast { id: number; text: string; type: "success" | "info" | "warning"; }
 
-const currentNavView = ref<"agent" | "project" | "llm" | "roles" | "plugins" | "scheduled" | "library" | "wechat">("agent");
+const currentNavView = ref<"agent" | "project" | "llm" | "roles" | "child-workflow" | "plugins" | "scheduled" | "library" | "wechat">("agent");
 const selectedProjectId = ref<string>("");
 const allModels = ref<ModelOption[]>([]);
 const sidebarCollapsed = ref(false);
