@@ -162,7 +162,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         summary: "专精角色池维护：角色卡包含人设、模型、适用场景、输入输出契约和 execution_defaults 默认组合；派发时传 role 挂载，显式 profile/流程可调整默认值，工具列表仍是权限上限",
         actions: &[
             "list()",
-            "upsert(name: string, label?: string, model_id?: string, persona_prompt?: string, scope_hints?: string, default_test_command?: string, allowed_kinds?: string [逗号分隔 task/worker/writer/reviewer], execution_defaults?: {profile: task|worker|writer|reviewer, execution?: {stages?: {plan?: boolean, plan_review?: boolean, stage_review?: boolean, final_review?: boolean} [省略自动，false 关闭自动触发；handoff 子任务默认关闭重复环节], workspace?: shared|isolated [缺省共享，isolated 仅 writer 的显式补丁模式], allowed_tools?: string[], workflow?: {plan_mode?: auto|cross_review|plan_approval, completion?: handoff|delivery}}} [省略保留原值，空字符串撤下默认组合；正式审查/隔离补丁不填 plan_mode；共享 worker/writer 可选择完整流程])",
+            "upsert(name: string, label?: string, model_id?: string, persona_prompt?: string, scope_hints?: string, default_test_command?: string, allowed_kinds?: string [逗号分隔 task/worker/writer/reviewer], execution_defaults?: {profile?: task|worker|writer|reviewer [可省略，沿用派发入口], execution?: {stages?: {plan?: boolean, plan_review?: boolean, stage_review?: boolean, final_review?: boolean} [省略自动，false 关闭自动触发；handoff 子任务默认关闭重复环节], workspace?: shared|isolated [缺省共享，isolated 仅 writer 的显式补丁模式], allowed_tools?: string[], workflow?: {plan_mode?: auto|cross_review|plan_approval, completion?: handoff|delivery}}} [省略保留原值，空字符串撤下默认组合；正式审查/隔离补丁不填 plan_mode；共享 worker/writer 可选择完整流程])",
             "toggle(name: string)",
             "delete(name: string)",
         ],

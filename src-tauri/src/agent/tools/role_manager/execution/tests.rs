@@ -8,6 +8,35 @@ fn db() -> DbState {
 fn card() -> Value {
     json!({"name":"configured_agent","label":"configured","allowed_kinds":"task,worker","execution_defaults":{"profile":"task","execution":{"allowed_tools":["local_file.read","send_message"],"workflow":{"plan_mode":"cross_review","completion":"delivery"}}}})
 }
+
+#[test]
+fn independent_permissions_and_workflow_do_not_require_a_role_profile() {
+    let db=db();
+    let saved=upsert_card(&db,&json!({"name":"permissions_only","allowed_kinds":"worker","execution_defaults":{"execution":{"allowed_tools":["read_file"]}}})).unwrap();
+    let stored:Value=serde_json::from_str(&saved.execution_defaults).unwrap();
+    assert!(stored.get("profile").is_none());
+    let merged=merge_execution_defaults(&db,&json!({"role":"permissions_only","task":"inspect"}),None).unwrap();
+    assert_eq!(merged["profile"],"worker");
+    assert_eq!(merged["execution"]["allowed_tools"],json!(["read_file"]));
+    assert!(merged["execution"]["workflow"]["plan_mode"].is_null());
+    let global=crate::agent::child_task::defaults::ChildWorkflowDefaults {plan_mode:Some("plan_approval".into()),completion:Some("delivery".into()),..Default::default()};
+    let effective=global.apply(&merged).unwrap();
+    assert_eq!(effective["execution"]["workflow"]["plan_mode"],"plan_approval");
+    assert_eq!(effective["execution"]["allowed_tools"],json!(["read_file"]));
+}
+
+#[test]
+fn withdrawing_only_role_workflow_preserves_permission_ceiling_and_model() {
+    let db=db();let mut original=card();original["model_id"]=json!("chosen");
+    upsert_card(&db,&original).unwrap();
+    original["execution_defaults"]["execution"]["workflow"]=json!({});
+    let updated=upsert_card(&db,&original).unwrap();
+    assert_eq!(updated.model_id,"chosen");
+    let merged=merge_execution_defaults(&db,&json!({"role":"configured_agent","execution":{"allowed_tools":["read_file","write_file"]}}),None).unwrap();
+    assert_eq!(merged["execution"]["allowed_tools"],json!(["read_file"]));
+    assert!(merged["execution"]["workflow"]["plan_mode"].is_null());
+    assert!(upsert_card(&db,&json!({"name":"invalid","execution_defaults":{"profile":"unknown"}})).is_err());
+}
 #[test]
 fn page_defaults_round_trip_and_drive_effective_dispatch_values() {
     let db = db();

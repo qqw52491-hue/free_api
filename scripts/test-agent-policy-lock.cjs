@@ -13,82 +13,28 @@ function extract(file, names, context) {
   const js = ts.transpileModule(funcs.map(n => n.getText(ast)).join('\n') + '\n({' + names.join(',') + '});', {compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
   return { handlers: vm.runInNewContext(js, context), source };
 }
-const events = [];
-let confirmAnswer = true; let confirmations = [];
-const refs = {enabled:{value:true}, stages:{value:{plan:true, final_review:false}}, workspace:{value:'shared'}, profile:{value:'task'}, planMode:{value:'auto'}, completion:{value:'delivery'}, toolMode:{value:'allowlist'}, toolsText:{value:'read_file'}, parseError:{value:false}, specialized:{get value(){return refs.profile.value === 'reviewer' || refs.workspace.value === 'isolated';}}};
-const roleProps = {allowedKinds:[]};
-const role = extract('src/components/agent/RoleExecutionSettings.vue',['applyPreset','publish','toolNames','specialChangeWarning','approveChanges','changeProfile','changeWorkspace','kindExpansionWarning','changeEnabled','changeToolMode','resetInputs'],{...refs, props:roleProps, names:{task:'通用子任务',worker:'调查助手',writer:'实施助手',reviewer:'专用审查'}, lastEmitted:undefined, window:{confirm:(msg)=>{confirmations.push(msg);return confirmAnswer;}}, emit:(...args)=>events.push(args)});
-role.handlers.applyPreset({profile:'writer',planMode:'auto',completion:'handoff'});
-let saved = JSON.parse(events.find(e=>e[0]==='update:modelValue')[1]);
-assert.deepEqual(saved.execution.allowed_tools,['read_file']);
-assert.deepEqual(saved.execution.stages,{plan:true,final_review:false}, 'ordinary preset retains stage settings');
-assert.equal(saved.profile,'writer');
-assert(confirmations.length > 0, 'changing execution and handoff requires confirmation');
-refs.toolsText.value = '';
-events.length=0;
-role.handlers.applyPreset({profile:'task',planMode:'auto',completion:'delivery'});
-assert.deepEqual(JSON.parse(events[0][1]).execution.allowed_tools,[], 'an explicit empty restriction must remain empty');
-confirmAnswer=false; events.length=0;
-role.handlers.applyPreset({profile:'reviewer',planMode:'auto',completion:'handoff'});
-assert.equal(events.length,0,'cancel preset must not publish');
-assert.equal(refs.profile.value,'task'); assert.equal(refs.stages.value.plan,true);
-const dropdown={value:'reviewer'};
-role.handlers.changeProfile({target:dropdown});
-assert.equal(dropdown.value,'task'); assert.equal(events.length,0, 'cancel direct profile change preserves settings');
-confirmAnswer=true;
-role.handlers.changeProfile({target:{value:'reviewer'}});
-saved = JSON.parse(events[0][1]);
-assert.equal(saved.profile,'reviewer'); assert.equal(saved.execution.stages,undefined);
-assert.deepEqual(saved.execution.allowed_tools,[]);
-// Changing away from an isolated writer also changes workspace, so cancelling must restore the selector.
-refs.profile.value='writer'; refs.workspace.value='isolated'; confirmAnswer=false; events.length=0;
-const profileSelect={value:'task'}; role.handlers.changeProfile({target:profileSelect});
-assert.equal(profileSelect.value,'writer'); assert.equal(refs.workspace.value,'isolated'); assert.equal(events.length,0);
-// Turning off defaults or switching to inherited tools must not silently discard restrictions.
-refs.profile.value='task'; refs.workspace.value='shared'; refs.enabled.value=true; refs.toolMode.value='allowlist'; refs.toolsText.value='read_file';
-confirmAnswer=false; events.length=0;
-const inheritSelect={value:'inherit'}; role.handlers.changeToolMode({target:inheritSelect});
-assert.equal(inheritSelect.value,'allowlist'); assert.equal(refs.toolMode.value,'allowlist'); assert.equal(events.length,0);
-const enabledBox={checked:false}; role.handlers.changeEnabled({target:enabledBox});
-assert.equal(enabledBox.checked,true); assert.equal(refs.enabled.value,true); assert.equal(events.length,0);
-confirmAnswer=true; role.handlers.changeEnabled({target:{checked:false}});
-assert.equal(refs.enabled.value,false); assert.equal(events[0][1],'');
-assert.equal(refs.toolMode.value,'inherit'); assert.equal(refs.toolsText.value,'', 're-enabling must not silently restore a removed restriction');
-// Corrupt saved defaults cannot be silently overwritten or claimed to preserve their restrictions.
-refs.parseError.value=true; confirmAnswer=false; events.length=0; confirmations.length=0;
-role.handlers.applyPreset({profile:'task',planMode:'auto',completion:'delivery'});
-assert.equal(events.length,0); assert.match(confirmations[0],/工具限制可能无法保留/);
-const enableCorrupt={checked:true}; role.handlers.changeEnabled({target:enableCorrupt});
-assert.equal(enableCorrupt.checked,false); assert.equal(events.length,0);
-refs.parseError.value=false;
-// Loading an empty or damaged role must not reuse the previously edited role's settings.
-const roleScript=role.source.split('<script setup lang="ts">')[1].split('</script>')[0];
-const roleAst=ts.createSourceFile('role.ts',roleScript,ts.ScriptTarget.Latest,true,ts.ScriptKind.TS);
-const resetDecl=roleAst.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='resetInputs');
-const watchStmt=roleAst.statements.find(n=>ts.isExpressionStatement(n)&&ts.isCallExpression(n.expression)&&n.expression.expression.getText(roleAst)==='watch');
-assert(resetDecl && watchStmt);
-let watchCallback;
-const watcherJs=ts.transpileModule(resetDecl.getText(roleAst)+'\n'+watchStmt.getText(roleAst),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
-vm.runInNewContext(watcherJs,{...refs,props:{modelValue:''},lastEmitted:undefined,watch:(_get,cb)=>{watchCallback=cb;}});
-refs.profile.value='writer'; refs.toolMode.value='allowlist'; refs.toolsText.value='write_file'; refs.stages.value={final_review:true};
-watchCallback(''); assert.equal(refs.profile.value,'task'); assert.equal(refs.toolMode.value,'inherit'); assert.equal(refs.toolsText.value,''); assert.equal(Object.keys(refs.stages.value).length,0);
-refs.profile.value='writer'; refs.toolMode.value='allowlist'; watchCallback('{broken'); assert.equal(refs.parseError.value,true); assert.equal(refs.profile.value,'task'); assert.equal(refs.toolMode.value,'inherit');
-watchCallback(JSON.stringify({profile:'worker',execution:{allowed_tools:['read_file'],workflow:{completion:'handoff'}}}));
-assert.equal(refs.parseError.value,false); assert.equal(refs.profile.value,'worker'); assert.equal(refs.toolsText.value,'read_file');
-// Expanding allowed role types must be explicit; cancelling changes neither profile nor configuration.
-refs.enabled.value=true; refs.profile.value='task'; refs.workspace.value='shared'; refs.planMode.value='auto'; refs.completion.value='delivery'; refs.stages.value={plan:true}; refs.toolMode.value='allowlist'; refs.toolsText.value='read_file'; roleProps.allowedKinds=['task'];
-confirmAnswer=false; confirmations.length=0; events.length=0;
-const workerSelect={value:'worker'}; role.handlers.changeProfile({target:workerSelect});
-assert.equal(workerSelect.value,'task'); assert.equal(events.length,0); assert.match(confirmations[0],/加入角色允许挂载的类型/);
-confirmAnswer=true; events.length=0; role.handlers.changeProfile({target:{value:'worker'}});
-saved=JSON.parse(events.find(e=>e[0]==='update:modelValue')[1]);
-assert.equal(saved.profile,'worker'); assert.deepEqual(saved.execution.allowed_tools,['read_file']); assert.deepEqual(saved.execution.stages,{plan:true});
-assert(events.some(e=>e[0]==='profile-change' && e[1]==='worker'));
-// Changing workflow preserves tool limits, and changing tool limits preserves workflow.
-roleProps.allowedKinds=[]; refs.profile.value='task'; refs.planMode.value='cross_review'; refs.stages.value={plan:true,final_review:false}; events.length=0;
-role.handlers.publish(); saved=JSON.parse(events[0][1]); assert.deepEqual(saved.execution.allowed_tools,['read_file']);
-events.length=0; role.handlers.changeToolMode({target:{value:'inherit'}}); saved=JSON.parse(events[0][1]);
-assert.equal(saved.execution.allowed_tools,undefined); assert.equal(saved.execution.workflow.plan_mode,'cross_review'); assert.deepEqual(saved.execution.stages,{plan:true,final_review:false});
+const events=[]; let confirmAnswer=true; const confirmations=[];
+const refs={flowMode:{value:'custom'},stages:{value:{plan:true,final_review:false}},workspace:{value:'shared'},profile:{value:'task'},planMode:{value:'plan_approval'},completion:{value:'delivery'},toolMode:{value:'allowlist'},toolsText:{value:'read_file'},parseError:{value:false},specialized:{get value(){return refs.profile.value==='reviewer'||refs.workspace.value==='isolated';}}};
+const roleProps={allowedKinds:[]};
+const role=extract('src/components/agent/RoleExecutionSettings.vue',['applyPreset','publish','toolNames','specialChangeWarning','approveChanges','changeProfile','changeWorkspace','kindExpansionWarning','changeFlowMode','changeToolMode','resetInputs','repairConfig'],{...refs,props:roleProps,names:{task:'通用子任务',worker:'调查助手',writer:'实施助手',reviewer:'专用审查'},lastEmitted:undefined,window:{confirm:message=>{confirmations.push(message);return confirmAnswer;}},emit:(...args)=>events.push(args)});
+assert(!role.source.includes('使用角色默认值'),'the destructive master switch is removed');
+confirmAnswer=false;const flowSelect={value:'inherit'};role.handlers.changeFlowMode({target:flowSelect});
+assert.equal(flowSelect.value,'custom');assert.equal(events.length,0);assert.equal(refs.planMode.value,'plan_approval');
+confirmAnswer=true;role.handlers.changeFlowMode({target:{value:'inherit'}});
+let saved=JSON.parse(events[0][1]);assert.deepEqual(saved.execution.allowed_tools,['read_file']);assert.deepEqual(saved.execution.workflow,{});assert.equal(saved.execution.stages,undefined);assert.equal(saved.profile,'task');
+events.length=0;role.handlers.changeFlowMode({target:{value:'custom'}});saved=JSON.parse(events[0][1]);assert.equal(saved.execution.workflow.plan_mode,'plan_approval');assert.deepEqual(saved.execution.allowed_tools,['read_file']);
+confirmAnswer=false;events.length=0;const tools={value:'inherit'};role.handlers.changeToolMode({target:tools});assert.equal(tools.value,'allowlist');assert.equal(events.length,0);
+confirmAnswer=true;role.handlers.changeToolMode({target:{value:'inherit'}});saved=JSON.parse(events[0][1]);assert.equal(saved.execution.allowed_tools,undefined);assert.equal(saved.execution.workflow.plan_mode,'plan_approval');assert.deepEqual(saved.execution.stages,{plan:true,final_review:false});
+refs.toolMode.value='allowlist';refs.toolsText.value='';events.length=0;role.handlers.applyPreset({profile:'worker',planMode:'auto',completion:'handoff'});saved=JSON.parse(events[0][1]);assert.deepEqual(saved.execution.allowed_tools,[]);assert.deepEqual(saved.execution.stages,{plan:true,final_review:false});
+refs.profile.value='';refs.flowMode.value='inherit';refs.toolsText.value='read_file';events.length=0;role.handlers.publish();saved=JSON.parse(events[0][1]);assert.equal(saved.profile,undefined);assert.deepEqual(saved.execution.allowed_tools,['read_file']);assert.deepEqual(saved.execution.workflow,{});
+refs.parseError.value=true;events.length=0;role.handlers.publish();assert.equal(events.length,0,'damaged configurations cannot be silently replaced');confirmAnswer=false;role.handlers.repairConfig();assert.equal(events.length,0);confirmAnswer=true;role.handlers.repairConfig();assert.deepEqual(JSON.parse(events[0][1]).execution.workflow,{});
+// Load both legacy bundles and new independent configurations through the actual watcher.
+const roleScript=role.source.split('<script setup lang="ts">')[1].split('</script>')[0];const roleAst=ts.createSourceFile('role.ts',roleScript,ts.ScriptTarget.Latest,true,ts.ScriptKind.TS);
+const watchStmt=roleAst.statements.find(n=>ts.isExpressionStatement(n)&&ts.isCallExpression(n.expression)&&n.expression.expression.getText(roleAst)==='watch');let watchCallback;
+vm.runInNewContext(ts.transpileModule(watchStmt.getText(roleAst),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,{...refs,props:{modelValue:''},lastEmitted:undefined,resetInputs:role.handlers.resetInputs,watch:(_get,cb)=>watchCallback=cb});
+const legacy={profile:'writer',execution:{allowed_tools:['read_file'],stages:{final_review:true},workflow:{plan_mode:'plan_approval',completion:'handoff'}}};watchCallback(JSON.stringify(legacy));events.length=0;role.handlers.publish();saved=JSON.parse(events[0][1]);assert.deepEqual(saved,legacy,'editing preserves all configured legacy values');
+watchCallback(JSON.stringify({execution:{allowed_tools:[]}}));assert.equal(refs.profile.value,'');assert.equal(refs.flowMode.value,'inherit');assert.equal(refs.toolMode.value,'allowlist');assert.equal(refs.toolsText.value,'');
+watchCallback('');assert.equal(refs.flowMode.value,'inherit');assert.equal(refs.toolMode.value,'inherit');watchCallback('{broken');assert.equal(refs.parseError.value,true);
 // Removing the last allowed type would mean unrestricted, so that expansion needs confirmation.
 const roleForm={allowed_kinds:['task']}; confirmAnswer=false;
 const kindHandlers=extract('src/views/RoleManagerView.vue',['toggleKind'],{form:roleForm,window:{confirm:()=>confirmAnswer}}).handlers;
@@ -127,7 +73,7 @@ visit(ast); assert.equal(checked,2);
 assert(composer.source.includes(':disabled="workflowLocked" :approval='));
 assert(!composer.source.includes("setTriggerMode("), 'stage review has one control');
 // Inheriting workflow values must not clear an independent role tool restriction.
-refs.enabled.value=true; refs.profile.value='task'; refs.workspace.value='shared'; refs.planMode.value=''; refs.completion.value=''; refs.toolMode.value='allowlist'; refs.toolsText.value='read_file'; events.length=0;
+refs.parseError.value=false; refs.flowMode.value='custom'; refs.profile.value='task'; refs.workspace.value='shared'; refs.planMode.value=''; refs.completion.value=''; refs.toolMode.value='allowlist'; refs.toolsText.value='read_file'; events.length=0;
 role.handlers.publish(); const inheritedWorkflow=JSON.parse(events[0][1]);
 assert.deepEqual(inheritedWorkflow.execution.workflow,{});
 assert.deepEqual(inheritedWorkflow.execution.allowed_tools,['read_file']);

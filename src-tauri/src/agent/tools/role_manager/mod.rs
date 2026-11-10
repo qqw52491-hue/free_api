@@ -646,9 +646,9 @@ pub fn build_role_cards_menu_filtered(db: &DbState, disabled_names: &[String]) -
             String::new()
         } else {
             serde_json::from_str::<Value>(&card.execution_defaults).ok().map(|defaults| {
-                let profile = defaults["profile"].as_str().unwrap_or("未知");
+                let profile = defaults["profile"].as_str().unwrap_or("沿用派发入口");
                 let completion = defaults["execution"]["workflow"]["completion"]
-                    .as_str().unwrap_or(if profile == "task" { "delivery" } else { "handoff" });
+                    .as_str().unwrap_or(if profile == "task" { "delivery" } else if profile == "沿用派发入口" { "继承公共默认" } else { "handoff" });
                 format!("；默认执行组合 {} / {} / {}，可用 child_task.dispatch(role={})",
                     profile, defaults["execution"]["workflow"]["plan_mode"].as_str().unwrap_or("auto"), completion, card.name)
             }).unwrap_or_else(|| "；执行配置损坏，请先修订".into())

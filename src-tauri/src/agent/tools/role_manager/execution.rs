@@ -6,6 +6,7 @@ use crate::agent::execution::runtime::ExecutionConfig;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RoleExecutionDefaults {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub profile: String,
     #[serde(default)]
     pub execution: ExecutionConfig,
@@ -14,13 +15,13 @@ impl RoleExecutionDefaults {
     pub fn parse(value: &Value) -> Result<Self, String> {
         let defaults: Self =
             serde_json::from_value(value.clone()).map_err(|e| format!("执行组合参数错误：{e}"))?;
-        if !matches!(
+        if !defaults.profile.is_empty() && !matches!(
             defaults.profile.as_str(),
             "task" | "worker" | "writer" | "reviewer"
         ) {
             return Err("默认执行类型仅允许 task/worker/writer/reviewer".into());
         }
-        ExecutionConfig::parse(&json!({"execution":defaults.execution}), &defaults.profile)?;
+        ExecutionConfig::parse(&json!({"execution":defaults.execution}), if defaults.profile.is_empty() { "task" } else { &defaults.profile })?;
         Ok(defaults)
     }
 }
@@ -41,7 +42,7 @@ pub(super) fn normalize(params: &Value) -> Result<Option<String>, String> {
     }
     let defaults = RoleExecutionDefaults::parse(&value)?;
     let allowed = params["allowed_kinds"].as_str().unwrap_or("");
-    if !allowed.is_empty()
+    if !defaults.profile.is_empty() && !allowed.is_empty()
         && !(RoleCard {
             allowed_kinds: allowed.into(),
             ..Default::default()
@@ -82,14 +83,17 @@ pub(crate) fn merge_execution_defaults(
         &serde_json::from_str::<Value>(&card.execution_defaults)
             .map_err(|e| format!("角色执行组合损坏：{e}"))?,
     )?;
+    let inferred = ["task", "worker", "writer", "reviewer"].into_iter().filter(|kind|card.allows_kind(kind)).collect::<Vec<_>>();
     let profile = fixed_profile
         .or_else(|| params["profile"].as_str())
-        .unwrap_or(&defaults.profile);
+        .or_else(|| (!defaults.profile.is_empty()).then_some(defaults.profile.as_str()))
+        .or_else(|| (inferred.len()==1).then(||inferred[0]))
+        .unwrap_or("task");
     merged["profile"] = json!(profile);
     let mut base = serde_json::to_value(&defaults.execution).map_err(|e| e.to_string())?;
     // Shared role presets have the same workflow capabilities. Preserve the
     // configured plan/delivery defaults when selecting another ordinary preset.
-    if profile != defaults.profile && (fixed_profile.is_some() || profile=="reviewer" || defaults.profile=="reviewer" || defaults.execution.workspace.as_deref()==Some("isolated")) {
+    if !defaults.profile.is_empty() && profile != defaults.profile && (fixed_profile.is_some() || profile=="reviewer" || defaults.profile=="reviewer" || defaults.execution.workspace.as_deref()==Some("isolated")) {
         base["workflow"] = json!({});
         base["stages"] = json!({});
     }

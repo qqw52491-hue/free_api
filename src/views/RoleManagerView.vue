@@ -275,7 +275,7 @@
       </div>
 
       <div class="field wide">
-        <RoleExecutionSettings :key="isEditing ? form.name : 'new-role'" v-model="form.execution_defaults" :allowed-kinds="form.allowed_kinds" @profile-change="ensureExecutionKind" />
+        <RoleExecutionSettings :key="isEditing ? form.name : 'new-role'" v-model="form.execution_defaults" :allowed-kinds="form.allowed_kinds" @profile-change="ensureExecutionKind" @open-workflow="emit('open-child-workflow')" />
       </div>
 
       <label class="field wide">
@@ -832,7 +832,7 @@ const form = reactive({
   persona_prompt: '',
   scope_hints: '',
   default_test_command: '',
-  execution_defaults: JSON.stringify({ profile: 'task', execution: { workflow: { plan_mode: 'auto', completion: 'delivery' } } }),
+  execution_defaults: '',
   allowed_kinds: [] as string[],
   max_concurrency: 0,
   enabled: true,
@@ -1086,7 +1086,7 @@ function executionLabel(card: RoleCard) {
   try {
     const value = JSON.parse(card.execution_defaults);
     const names: Record<string, string> = { task: '通用任务', worker: '调查助手', writer: '实施助手', reviewer: '专用审查' };
-    return `${names[value.profile] || value.profile} · ${value.execution?.workflow?.completion === 'handoff' || (!value.execution?.workflow?.completion && value.profile !== 'task') ? '结果交接' : '完整交付'}`;
+    return `${names[value.profile] || value.profile || '沿用派发入口'} · ${value.execution?.workflow?.completion === 'handoff' ? '结果交接' : value.execution?.workflow?.completion === 'delivery' ? '完整交付' : '继承公共流程'}`;
   } catch { return '执行组合需修订'; }
 }
 
@@ -1100,7 +1100,7 @@ function startCreate() {
     persona_prompt: '',
     scope_hints: '',
     default_test_command: '',
-    execution_defaults: JSON.stringify({ profile: 'task', execution: { workflow: { plan_mode: 'auto', completion: 'delivery' } } }),
+    execution_defaults: '',
     allowed_kinds: [],
     max_concurrency: 0,
     enabled: true,
@@ -1129,7 +1129,7 @@ function applyPreset(tpl: typeof presetTemplates[0]) {
   form.default_test_command = tpl.default_test_command;
   form.allowed_kinds = tpl.allowed_kinds ? tpl.allowed_kinds.split(',').map((s) => s.trim()).filter(Boolean) : [];
   const executionProfile = form.allowed_kinds.length === 1 ? form.allowed_kinds[0] : 'task';
-  form.execution_defaults = JSON.stringify({ profile: executionProfile, execution: { workflow: executionProfile === 'task' ? { plan_mode: 'auto', completion: 'delivery' } : { completion: 'handoff' } } });
+  form.execution_defaults = JSON.stringify({ profile: executionProfile });
   form.max_concurrency = tpl.max_concurrency || 0;
   form.enabled = true;
   form.focus_domains = tpl.focus_domains ? [...tpl.focus_domains] : [];
