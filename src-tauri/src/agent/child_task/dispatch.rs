@@ -2,6 +2,40 @@
 //! collection. Replaying a registration must not depend on a changed workspace.
 use serde_json::{json, Value};
 
+pub(crate) enum PreparedDispatch {
+    Receipt(Value),
+    Params(Value),
+}
+
+pub(crate) fn prepare(
+    db: &crate::db::DbState,
+    session: &str,
+    parent_run: &str,
+    key: &str,
+    requested: Value,
+    action: &str,
+) -> Result<PreparedDispatch, String> {
+    if !matches!(action, "dispatch" | "resume") {
+        return Ok(PreparedDispatch::Params(requested));
+    }
+    // The declaration key and owner identify an existing execution. Returning
+    // its receipt/status must not reapply defaults intended for new tasks.
+    if let Some(id) = super::find_task(db, session, key)? {
+        let body = super::result(db, session, &id)?;
+        if body["execution_ended"] == true {
+            return Ok(PreparedDispatch::Receipt(body));
+        }
+        if super::runtime::attached(&id) {
+            return super::status(db, session, &id).map(PreparedDispatch::Receipt);
+        }
+        if let Some(body) = super::recover_finished(db, session, parent_run, &id)? {
+            return Ok(PreparedDispatch::Receipt(body));
+        }
+    }
+    let params = crate::agent::tools::role_manager::merge_execution_defaults(db, &requested, None)?;
+    Ok(PreparedDispatch::Params(params))
+}
+
 pub(crate) fn key(task: &str, step: usize, params: &Value, slot: Option<usize>) -> String {
     let identity = json!([params, slot]).to_string();
     format!(
@@ -103,6 +137,98 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    fn recorded_receipt_replay_does_not_depend_on_live_role_defaults_or_models() {
+        let f = Fixture::new();
+        let requested = json!({"task":"inspect","role":"original_role"});
+        crate::agent::tools::role_manager::upsert_card(
+            &f.db,
+            &json!({"name":"original_role","allowed_kinds":"task"}),
+        )
+        .unwrap();
+        let key = key("task", 1, &requested, None);
+        let id = f.register("parent", &key, &requested).unwrap();
+        f.db.0
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE agent_child_runs SET status='failed',result_json=?2 WHERE id=?1",
+                rusqlite::params![id, json!({"summary":"original failure"}).to_string()],
+            )
+            .unwrap();
+        crate::agent::tools::role_manager::toggle_card(&f.db, &json!({"name":"original_role"}))
+            .unwrap();
+        let PreparedDispatch::Receipt(body) = prepare(
+            &f.db,
+            "owner",
+            "resumed-parent",
+            &key,
+            requested.clone(),
+            "dispatch",
+        )
+        .unwrap() else {
+            panic!("expected the recorded receipt")
+        };
+        assert_eq!(body["child_run_id"], id);
+        assert_eq!(body["execution_status"], "failed");
+        assert_eq!(body["summary"], "original failure");
+        assert!(
+            prepare(
+                &f.db,
+                "outsider",
+                "resumed-parent",
+                &key,
+                requested.clone(),
+                "dispatch"
+            )
+            .is_err(),
+            "another owner cannot recover the receipt"
+        );
+        assert!(
+            prepare(
+                &f.db,
+                "owner",
+                "resumed-parent",
+                "new-key",
+                requested,
+                "dispatch"
+            )
+            .is_err(),
+            "new dispatches still validate the disabled role"
+        );
+        let count: i64 =
+            f.db.0
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM agent_child_runs", [], |r| r.get(0))
+                .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn unroled_task_keeps_default_permissions_and_routes_to_the_actual_parent_model() {
+        let f = Fixture::new();
+        let requested = super::super::presets::requested(json!({"task":"inspect"}), None).unwrap();
+        let PreparedDispatch::Params(params) =
+            prepare(&f.db, "owner", "parent", "new-key", requested, "dispatch").unwrap()
+        else {
+            panic!("new task must return dispatch params")
+        };
+        assert!(params.get("role").is_none());
+        let config = crate::agent::execution::runtime::ExecutionConfig::parse(&params, "task").unwrap();
+        assert!(config.allowed_tools.is_none());
+        assert!(config.stages.is_empty());
+        let selected = super::super::models::select(&params, "actual-parent", None).unwrap();
+        assert_eq!(selected.source, "parent_execution");
+        let mut routing = crate::agent::router::ModelRoutingConfig::default();
+        super::super::models::pin(&mut routing, &selected.model_id);
+        let context = SandwichContext::new("system".into(), "inspect".into());
+        assert_eq!(
+            crate::agent::router::AgentRouter::route_for_step(&context, &routing, 1).model_id,
+            "actual-parent"
+        );
     }
 
     #[test]

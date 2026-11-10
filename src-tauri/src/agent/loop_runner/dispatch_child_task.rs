@@ -59,7 +59,14 @@ async fn dispatch_inner(
     let requested=child_task::presets::requested(raw,None)?;
     let key = child_task::dispatch::key(&ctx.context.history_task_id, ctx.step_id, &requested, slot);
     if let Some(error)=crate::agent::tools::input_validation::native_rejection("child_task",&inst.get_action(),&requested) {return Ok(error);}
-    let mut params=if matches!(child_task::request_action(&inst.get_action(),&requested).as_str(),"dispatch"|"resume") {crate::agent::tools::role_manager::merge_execution_defaults(ctx.state.inner(),&requested,None)?}else{requested};
+    let effective_action = child_task::request_action(&inst.get_action(), &requested);
+    let mut params = match child_task::dispatch::prepare(ctx.state.inner(), ctx.final_session_id, ctx.parent_run_id, &key, requested, &effective_action)? {
+        child_task::dispatch::PreparedDispatch::Receipt(body) => {
+            if body["execution_ended"] == true { apply_return(ctx, body["child_run_id"].as_str().unwrap_or_default())?; }
+            return Ok(output(body));
+        }
+        child_task::dispatch::PreparedDispatch::Params(params) => params,
+    };
     if matches!(params["profile"].as_str(),Some("worker"|"writer")) && params["execution"]["workflow"]["completion"].is_null() {
         if params.get("execution").is_none() {params["execution"]=json!({});}
         if params["execution"].get("workflow").is_none() {params["execution"]["workflow"]=json!({});}
