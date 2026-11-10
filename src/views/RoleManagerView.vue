@@ -30,7 +30,7 @@
         </div>
         <div class="ai-head-actions">
           <div class="ai-model-select-wrap">
-            <span class="model-select-lbl">孵化模型:</span>
+            <span class="model-select-lbl" title="仅用于生成或微调角色草案，不更改角色指定模型">孵化模型:</span>
             <ModelSelectDropdown
               v-model="aiModelId"
               :models="models"
@@ -1115,10 +1115,12 @@ function cancelEdit() {
 }
 
 function applyPreset(tpl: typeof presetTemplates[0]) {
+  if ((isCreating.value || isEditing.value) && !window.confirm('载入专家模板将替换当前草案，包括工具权限和流程默认值；角色指定模型将恢复为沿用任务模型选择。已保存的角色和已派发任务不受影响。是否继续？')) return;
   isCreating.value = true;
   isEditing.value = false;
   form.name = tpl.name;
   form.label = tpl.label;
+  form.model_id = '';
   form.scope_hints = tpl.scope_hints;
   form.persona_prompt = tpl.persona_prompt;
   form.default_test_command = tpl.default_test_command;
@@ -1311,7 +1313,7 @@ async function generateWithAi() {
     // 表现为"改了没生效"。改名需求应走「另存新卡」而非编辑流。
     form.name = wasEditing ? form.name : (roleData.name || form.name || '');
     form.label = roleData.label || form.label || '';
-    form.model_id = aiModelId.value || form.model_id || '';
+    // The model editing this draft is independent of the optional runtime binding.
     form.persona_prompt = roleData.persona_prompt || form.persona_prompt || '';
     // 合并语义：AI 返回中「出现过的键」才覆盖（显式空串=用户要求清空，合法）；
     // 未返回的键一律保留现状——防止微调已有卡片时把 AI 没管的字段静默洗掉。
