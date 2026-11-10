@@ -204,6 +204,95 @@ fn child_registration_intersects_dynamic_permissions_and_preserves_role_bounds()
 }
 
 #[test]
+fn broad_child_tool_is_narrowed_to_the_parent_action_during_registration() {
+    let db = fixture();
+    db.0.lock()
+        .unwrap()
+        .execute(
+            "UPDATE agent_child_runs SET execution_config_json=?1 WHERE id='child'",
+            [json!({"allowed_tools":["local_file.read"]}).to_string()],
+        )
+        .unwrap();
+    let mut identity = crate::agent::child_reviewer::ChildRunIdentity::fresh("task");
+    identity.execution_config = Some(json!({"allowed_tools":["local_file"],"stages":{"plan":true,"final_review":false},"workflow":{"plan_mode":"plan_approval","completion":"delivery"}}).to_string());
+    let id = crate::agent::child_reviewer::begin_child_run_extended(
+        &db,
+        "child",
+        "session",
+        &std::env::temp_dir(),
+        "mock",
+        0,
+        "task",
+        None,
+        None,
+        None,
+        &identity,
+    )
+    .unwrap();
+    assert!(authorize_call(&db, &id, "local_file", "read", &json!({"path":"a"})).is_ok());
+    assert!(authorize_call(
+        &db,
+        &id,
+        "local_file",
+        "write",
+        &json!({"path":"a","content":"x"})
+    )
+    .is_err());
+    assert!(authorize(&db, &id, "run_command").is_err());
+    let saved = config(&db, &id).unwrap();
+    assert_eq!(saved.workflow.plan_mode.as_deref(), Some("plan_approval"));
+    assert_eq!(saved.stages.plan, Some(true));
+    assert_eq!(saved.stages.final_review, Some(false));
+}
+
+#[test]
+fn permission_intersection_preserves_aliases_empty_and_unrestricted_meanings() {
+    for (requested, ceiling, expected) in [
+        (json!(null), json!(["read_file"]), json!(["read_file"])),
+        (json!(["local_file"]), json!(null), json!(["local_file"])),
+        (json!([]), json!(["local_file"]), json!([])),
+        (json!(["local_file"]), json!([]), json!([])),
+        (
+            json!(["local_file"]),
+            json!(["read_file", "local_file.list"]),
+            json!(["read_file", "local_file.list"]),
+        ),
+        (
+            json!(["local_file.read"]),
+            json!(["local_file"]),
+            json!(["local_file.read"]),
+        ),
+        (
+            json!(["local_shell"]),
+            json!(["run_command"]),
+            json!(["run_command"]),
+        ),
+        (
+            json!(["send_message"]),
+            json!(["child_task.send"]),
+            json!(["send_message"]),
+        ),
+        (
+            json!(["my_mcp/read", "my_mcp/write"]),
+            json!(["my_mcp/read"]),
+            json!(["my_mcp/read"]),
+        ),
+    ] {
+        let mut config =
+            ExecutionConfig::parse(&json!({"execution":{"allowed_tools":requested}}), "task")
+                .unwrap();
+        let limit = ExecutionConfig::parse(&json!({"execution":{"allowed_tools":ceiling}}), "task")
+            .unwrap();
+        config.restrict_tools(&limit);
+        assert_eq!(
+            serde_json::to_value(config.allowed_tools).unwrap(),
+            expected,
+            "requested={requested}, ceiling={ceiling}"
+        );
+    }
+}
+
+#[test]
 fn inbox_snapshot_cannot_acknowledge_another_executions_messages() {
     let db = fixture();
     let mut snapshot = Snapshot::new("different-child", "worker", json!({}));

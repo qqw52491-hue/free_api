@@ -59,6 +59,24 @@ fn explicit_workflow_overrides_defaults_but_cannot_expand_role_tool_permissions(
     .unwrap();
     assert_eq!(empty["execution"]["allowed_tools"], json!([]));
 }
+
+#[test]
+fn broad_dispatch_tool_retains_only_actions_within_the_role_ceiling() {
+    let db = db();
+    upsert_card(&db, &card()).unwrap();
+    let effective = merge_execution_defaults(&db,
+        &json!({"role":"configured_agent","execution":{"allowed_tools":["local_file","run_command"]}}), None).unwrap();
+    let config = ExecutionConfig::parse(&effective, "task").unwrap();
+    assert!(
+        config.permits("read_file"),
+        "the intersection includes the role's read action"
+    );
+    assert!(!config.permits("write_file"));
+    assert!(!config.permits("run_command"));
+    assert!(!config.permits("send_message"));
+    assert_eq!(config.workflow.plan_mode.as_deref(), Some("cross_review"));
+}
+
 #[test]
 fn fixed_adapter_keeps_its_own_workflow_and_uses_the_same_role_permission_ceiling() {
     let db = db();

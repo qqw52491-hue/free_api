@@ -109,15 +109,7 @@ pub(crate) fn merge_execution_defaults(
         }
     }
     let mut effective = ExecutionConfig::parse(&json!({"execution":base}), profile)?;
-    if let Some(ceiling) = defaults.execution.allowed_tools.as_ref() {
-        effective.allowed_tools = Some(match effective.allowed_tools {
-            None => ceiling.clone(),
-            Some(tools) => tools
-                .into_iter()
-                .filter(|t| defaults.execution.permits(t))
-                .collect(),
-        });
-    }
+    effective.restrict_tools(&defaults.execution);
     merged["execution"] = serde_json::to_value(effective).map_err(|e| e.to_string())?;
     Ok(merged)
 }

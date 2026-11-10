@@ -31,6 +31,33 @@ pub struct Workflow {
     pub completion: Option<String>,
 }
 impl ExecutionConfig {
+    /// Keep the narrower spelling when a whole tool meets an action ceiling.
+    /// Only tool permissions are merged here; workflow and stages are untouched.
+    pub(crate) fn restrict_tools(&mut self, ceiling: &Self) {
+        let Some(limits) = &ceiling.allowed_tools else {
+            return;
+        };
+        let Some(requested) = &self.allowed_tools else {
+            self.allowed_tools = Some(limits.clone());
+            return;
+        };
+        let mut intersection = Vec::new();
+        for tool in requested {
+            if ceiling.permits(tool) {
+                if !intersection.contains(tool) {
+                    intersection.push(tool.clone());
+                }
+            } else {
+                for limit in limits {
+                    if permits_name(tool, limit) && !intersection.contains(limit) {
+                        intersection.push(limit.clone());
+                    }
+                }
+            }
+        }
+        self.allowed_tools = Some(intersection);
+    }
+
     pub fn parse(params: &Value, profile: &str) -> Result<Self, String> {
         if !matches!(profile,"task"|"worker"|"writer"|"reviewer"|"review"|"child_worker"|"child_writer"|"child_reviewer") {return Err("未知子任务 profile；允许 task/worker/writer/reviewer。".into());}
         let config: Self = match params.get("execution") {

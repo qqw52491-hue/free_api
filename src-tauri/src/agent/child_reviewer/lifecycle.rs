@@ -179,9 +179,9 @@ pub(crate) fn begin_child_run_extended(
     }
     let mut effective_identity=identity.clone();
     let parent_config=crate::agent::execution::runtime::config(db,parent_run_id)?;
-    if let Some(parent_tools)=parent_config.allowed_tools.clone() {
+    if parent_config.allowed_tools.is_some() {
         let mut child_config=match &identity.execution_config {Some(raw)=>serde_json::from_str::<crate::agent::execution::runtime::ExecutionConfig>(raw).map_err(|e|e.to_string())?,None=>Default::default()};
-        child_config.allowed_tools=Some(match child_config.allowed_tools {None=>parent_tools,Some(tools)=>tools.into_iter().filter(|t|parent_config.permits(t)).collect()});
+        child_config.restrict_tools(&parent_config);
         effective_identity.execution_config=Some(serde_json::to_string(&child_config).map_err(|e|e.to_string())?);
     }
     let identity=&effective_identity;
