@@ -34,6 +34,11 @@ mod tests {
             serde_json::from_value(json!({"plan":false,"plan_review":false})).unwrap();
         assert!(off.validate(Some("auto")).is_ok());
         assert!(off.validate(Some("plan_approval")).is_err());
+        assert!(off.validate_for_new_task(Some("auto")).is_ok());
+        assert!(off.validate_for_new_task(Some("cross_review")).is_err());
+        let legacy_spelling = PlanExecutionMode::from_str_or_auto_pilot(Some("cross-review"), true);
+        assert!(off.validate_for_new_task(Some(legacy_spelling.as_str())).is_err());
+        assert!(off.validate(Some("cross_review")).is_ok(), "legacy checkpoint can still resume");
         assert!(serde_json::from_value::<StageSettings>(json!({"final_review":"off"})).is_err());
     }
     #[test]
@@ -105,6 +110,14 @@ impl StageSettings {
             && (self.plan_review == Some(true) || plan_mode == Some("plan_approval"))
         {
             return Err("正式方案已关闭，不能同时开启方案审查或方案人工批准；请调整配置。".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_for_new_task(&self, plan_mode: Option<&str>) -> Result<(), String> {
+        self.validate(plan_mode)?;
+        if plan_mode == Some("cross_review") && self.plan == Some(false) {
+            return Err("先讨论并审查方案需要正式方案；请开启正式方案或调整方案模式。".into());
         }
         Ok(())
     }

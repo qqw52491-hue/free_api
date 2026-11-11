@@ -111,7 +111,7 @@ pub fn is_write_or_side_effect_tool(inst: &AgentInstruction) -> bool {
     let raw_tool = orig_tool.to_ascii_lowercase();
     let tool = raw_tool.rsplit('/').next().unwrap_or(&raw_tool);
     let mut action = inst.get_action().to_ascii_lowercase();
-    if action == tool || action.is_empty() {
+    if raw_tool != "local_file" && (action == tool || action.is_empty()) {
         if let Some(act) = inst.get_params().get("action").and_then(|v| v.as_str()) {
             action = act.to_ascii_lowercase();
         }

@@ -109,7 +109,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "child_writer",
-        summary: "实施角色兼容入口：默认等价 child_task.dispatch(profile=writer)，使用通用主循环并直接修改共享父工作区，不需要 apply。显式 execution.workspace=isolated 时使用隔离补丁适配并返回 diff，审阅后 apply 合入；旧 writer 隔离结果仍可 apply。模型沿用 writer 槽，指定测试命令进入现有验证契约。",
+        summary: "实施角色兼容入口：等价 child_task.dispatch(profile=writer)，使用通用主循环并直接修改共享父工作区。apply 仅用于已有的历史隔离补丁。模型沿用 writer 槽，指定测试命令进入现有验证契约。",
         actions: &[
             "dispatch(task: string, test_command?: string [可选单条命令；指定后须执行，未指定按实际任务选择验证], focus_paths?: string[] <=5, role?: string, context_excerpts?: {background?: string, todo_slice?: string[], file_hints?: string[], prior_findings?: string[]}, custom_inputs?: object [专项业务参数；verified_facts/hard_constraints/definition_of_done 分节呈现，字段名不认证来源；入口分流另以可修正的 triage_reference 附带], dispatches?: Array<{task, test_command?, ...}> [一步批量派发多个 writer])",
             "apply(child_run_id: string) [审阅 diff 后机械合入：宿主逐文件现算冲突指纹，全部干净才搬运，任何冲突整体拒绝；副本已回收时自动退化到补丁工件合入]",
@@ -119,7 +119,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         name: "child_task",
         summary: "统一子任务入口：未指定动作时默认 dispatch，查询成员可用 params.action=list；各动作单步调用，逐次派发的任务在后台并行。profile=task/worker/writer 均使用通用执行器，worker/writer 选择调查/实施角色；reviewer 保留正式审查；role 挂载人设/模型/默认组合，任务标题不决定类型。worker/writer 也能直接通信，无需为通信改选 task。立即返回身份与结果回收方式；共享工作区可并行，相关变更需协调；普通任务最多五层（主任务为第零层）；消息不是人工授权，专用 Agent 原契约保留",
         actions: &[
-            "dispatch(task: string, model_id?: string [已配置模型精确 ID；省略继承父执行模型，人工角色模型优先；不会按难度自动升级], context?: string [task+context <=65536 字符], role?: string, profile?: task|worker|writer|reviewer, custom_inputs?: object, execution?: {stages?: {plan?: boolean, plan_review?: boolean, stage_review?: boolean, final_review?: boolean} [省略自动，false 关闭自动触发；handoff 子任务默认关闭重复环节], workspace?: shared|isolated [缺省共享，isolated 仅 writer 的显式补丁模式], allowed_tools?: string[], workflow?: {plan_mode?: auto|cross_review|plan_approval, completion?: handoff|delivery}}) — 默认 task 使用通用阶段与独立检查点，可选择讨论模式及结果交接/完整交付；worker/writer 也使用相同主循环与流程配置；只有正式 reviewer 或显式 execution.workspace=isolated 的 writer 使用专用结果适配。权限可按工具或 tool.action 缩小；空数组禁用业务工具。返回 child_run_id，结果按各适配契约读取",
+            "dispatch(task: string, model_id?: string [已配置模型精确 ID；省略继承父执行模型，人工角色模型优先；不会按难度自动升级], context?: string [task+context <=65536 字符], role?: string, profile?: task|worker|writer|reviewer, custom_inputs?: object, execution?: {stages?: {plan?: boolean, plan_review?: boolean, stage_review?: boolean, final_review?: boolean} [省略自动，false 关闭自动触发；handoff 子任务默认关闭重复环节], allowed_tools?: string[], workflow?: {plan_mode?: auto|cross_review|plan_approval, completion?: handoff|delivery}}) — 默认 task 使用通用阶段与独立检查点，可选择讨论模式及结果交接/完整交付；worker/writer 也使用相同主循环与流程配置；正式 reviewer 使用专用结果适配。权限可按工具或 tool.action 缩小；空数组禁用业务工具。返回 child_run_id，结果按各适配契约读取",
             "models(offset?: number) — 分页列出已启用模型的精确 model_id、名称和平台；不返回凭据。派发可用 model_id 显式选择，人工角色配置优先",
             "status(child_run_id: string) / list(offset?: number) — 查真实状态、活动与协作登记；list.collaboration 返回消息原接收者、本次执行者和接收状态，每页100条并标注 has_more；不预测完成百分比",
             "send(target: string [任务ID或parent], message?: string, data?: any JSON, refs?: string[], idempotency_key?: string) — 向同树主任务或 task/worker/writer 提问、回复、通知；至少一种内容，合计<=65536字符；保存后返回 message_id；成功结束的通用成员可安排只读收信，是否回复由接收者判断；失败或取消不自动唤醒；方案或阶段审查的对质用 resume_child，终审复审走正式交付入口",
@@ -162,7 +162,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         summary: "专精角色池维护：角色卡包含人设、模型、适用场景、输入输出契约和 execution_defaults 默认组合；派发时传 role 挂载，显式 profile/流程可调整默认值，工具列表仍是权限上限",
         actions: &[
             "list()",
-            "upsert(name: string, label?: string, model_id?: string, persona_prompt?: string, scope_hints?: string, default_test_command?: string, allowed_kinds?: string [逗号分隔 task/worker/writer/reviewer], execution_defaults?: {profile?: task|worker|writer|reviewer [可省略，沿用派发入口], execution?: {stages?: {plan?: boolean, plan_review?: boolean, stage_review?: boolean, final_review?: boolean} [省略自动，false 关闭自动触发；handoff 子任务默认关闭重复环节], workspace?: shared|isolated [缺省共享，isolated 仅 writer 的显式补丁模式], allowed_tools?: string[], workflow?: {plan_mode?: auto|cross_review|plan_approval, completion?: handoff|delivery}}} [省略保留原值，空字符串撤下默认组合；正式审查/隔离补丁不填 plan_mode；共享 worker/writer 可选择完整流程])",
+            "upsert(name: string, label?: string, model_id?: string, persona_prompt?: string, scope_hints?: string, default_test_command?: string, allowed_kinds?: string [逗号分隔 task/worker/writer/reviewer], execution_defaults?: {profile?: task|worker|writer|reviewer [可省略，沿用派发入口], execution?: {stages?: {plan?: boolean, plan_review?: boolean, stage_review?: boolean, final_review?: boolean} [省略自动，false 关闭自动触发；handoff 子任务默认关闭重复环节], allowed_tools?: string[], workflow?: {plan_mode?: auto|cross_review|plan_approval, completion?: handoff|delivery}}} [省略保留原值，空字符串撤下默认组合；正式审查不填 plan_mode；共享 worker/writer 可选择完整流程])",
             "toggle(name: string)",
             "delete(name: string)",
         ],

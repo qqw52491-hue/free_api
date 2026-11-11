@@ -153,9 +153,12 @@ fn review_entry_keeps_project_rules_and_uses_effective_permissions() {
     assert!(!menu.contains("send_message"));
     assert!(menu.contains("read_file"));
     assert!(!menu.contains("write_file"));
+    assert!(menu.contains("{\"parallel\":"));
     let index = visibility::reviewer_index(&config, 30, false);
     assert!(menu.contains(&index));
-    assert!(visibility::reviewer_menu(&config, 0, false).contains("】finish\n"));
+    let no_budget = visibility::reviewer_menu(&config, 0, false);
+    assert!(no_budget.contains("】finish\n"));
+    assert!(!no_budget.contains("{\"parallel\":"));
 }
 #[test]
 fn unused_stage_capacity_is_lent_without_losing_required_sections() {

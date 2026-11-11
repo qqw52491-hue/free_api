@@ -534,7 +534,7 @@ pub fn ensure_default_role_cards(conn: &rusqlite::Connection) -> Result<(), Stri
     let now = chrono::Utc::now().to_rfc3339();
     for (name, kind, label, persona) in [
         (SYSTEM_WORKER, "worker", "基础只读侦察员", "根据任务与提供的证据进行只读调查，区分已核实事实与推测，使用通用 finish 交回结论、证据与未确认事项；角色职责不改变宿主工具授权。"),
-        (SYSTEM_WRITER, "writer", "基础写入执行员", "按明确的任务、范围和验收标准完成修改，保留无关内容，使用通用 finish 回报改动与验证结果；共享工作区修改直接生效，只有显式选择隔离补丁模式才使用 apply。"),
+        (SYSTEM_WRITER, "writer", "基础写入执行员", "按明确的任务、范围和验收标准完成修改，保留无关内容，使用通用 finish 回报改动与验证结果；共享工作区修改直接生效。"),
         (SYSTEM_REVIEWER, "reviewer", "基础综合审查员", "根据任务要求与证据独立审查，给出可定位的结论，区分缺陷、证据缺口与通道故障，按 reviewer 原生交付协议回报。"),
     ] {
         conn.execute(

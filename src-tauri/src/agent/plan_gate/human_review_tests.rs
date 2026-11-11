@@ -189,7 +189,13 @@ fn automatic_approval_reuses_saved_plan_and_waits_for_the_review_batch() {
     let mut cp = AgentCheckpoint::new("auto-approval".into(), &c);
     cp.set_execution_mode(PlanExecutionMode::PlanApproval);
     cp.stages.plan_review = Some(false);
-    let plan = serde_json::from_value(json!({"plan_summary":"inspect then change", "target_files":["src/a.rs"]})).unwrap();
+    cp.triage_verdict = Some(serde_json::from_value(json!({
+        "route": "technical_plan", "stage_review_mode": "none", "final_review_mode": "operational_verification",
+    })).unwrap());
+    let plan = serde_json::from_value(json!({
+        "plan_summary": "inspect then change", "target_files": ["src/a.rs"],
+        "stage_review_mode": "milestone", "final_review_mode": "mechanical_only",
+    })).unwrap();
     assert!(crate::agent::plan_submit::record_plan_without_review(&mut cp, &plan, 1).unwrap().success);
     assert!(!cp.plan_phase.is_approved());
     assert!(cp.approved_plan_summary.is_none());
@@ -197,6 +203,9 @@ fn automatic_approval_reuses_saved_plan_and_waits_for_the_review_batch() {
     cp.auto_plan_approval_pending = true;
     save_checkpoint(&db, &mut cp).unwrap();
     let mut cp = load_checkpoint(&db, "auto-approval").unwrap().unwrap();
+    let verdict = cp.triage_verdict.as_ref().unwrap();
+    assert_eq!(verdict.stage_review_mode, "milestone");
+    assert_eq!(verdict.final_review_mode, "operational_verification");
     let ask = automatic_plan_approval_instruction(&cp, &db).unwrap().unwrap();
     assert_eq!(ask.get_tool(), "ask_human");
     assert!(ask.get_params()["form"]["description"].as_str().unwrap().contains("inspect then change"));

@@ -34,6 +34,14 @@ const watchStmt=roleAst.statements.find(n=>ts.isExpressionStatement(n)&&ts.isCal
 vm.runInNewContext(ts.transpileModule(watchStmt.getText(roleAst),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,{...refs,props:{modelValue:''},lastEmitted:undefined,resetInputs:role.handlers.resetInputs,watch:(_get,cb)=>watchCallback=cb});
 const legacy={profile:'writer',execution:{allowed_tools:['read_file'],stages:{final_review:true},workflow:{plan_mode:'plan_approval',completion:'handoff'}}};watchCallback(JSON.stringify(legacy));events.length=0;role.handlers.publish();saved=JSON.parse(events[0][1]);assert.deepEqual(saved,legacy,'editing preserves all configured legacy values');
 watchCallback(JSON.stringify({execution:{allowed_tools:[]}}));assert.equal(refs.profile.value,'');assert.equal(refs.flowMode.value,'inherit');assert.equal(refs.toolMode.value,'allowlist');assert.equal(refs.toolsText.value,'');
+assert(!role.source.includes('<option value="isolated">'));
+watchCallback(JSON.stringify({profile:'writer',execution:{workspace:'isolated',allowed_tools:['read_file']}}));
+confirmAnswer=false; events.length=0; role.handlers.changeWorkspace();
+assert.equal(refs.workspace.value,'isolated'); assert.equal(events.length,0);
+confirmAnswer=true; role.handlers.changeWorkspace();
+saved=JSON.parse(events[0][1]);
+assert.equal(saved.execution.workspace,undefined);
+assert.deepEqual(saved.execution.allowed_tools,['read_file']);
 watchCallback('');assert.equal(refs.flowMode.value,'inherit');assert.equal(refs.toolMode.value,'inherit');watchCallback('{broken');assert.equal(refs.parseError.value,true);
 // Removing the last allowed type would mean unrestricted, so that expansion needs confirmation.
 const roleForm={allowed_kinds:['task']}; confirmAnswer=false;

@@ -236,6 +236,7 @@
                             @new-session="createNewTask"
                             @open-plugins="currentNavView = 'plugins'"
                             @open-roles="currentNavView = 'roles'"
+                            @refresh-models="loadAllModels"
                             @update:running="(val) => { tab.running = val; }"
                             @update:title="(title) => { updateTabTitle(tab.id, title); }"
                             @promoted="handleSessionPromoted"
@@ -258,6 +259,7 @@
                     @project-deleted="handleProjectDeleted"
                     @session-deleted="handleSessionDeleted"
                     @refresh-projects="projectTreeRef?.refreshProjects()"
+                    @refresh-models="loadAllModels"
                 />
             </div>
 
@@ -670,11 +672,14 @@ function selectTask(tabId: string) {
     currentNavView.value = "agent";
 }
 
+let modelLoadSequence = 0;
 async function loadAllModels() {
+    const sequence = ++modelLoadSequence;
     try {
-        allModels.value = await invoke<ModelOption[]>("get_all_models_with_platform");
+        const models = await invoke<ModelOption[]>("get_all_models_with_platform");
+        if (sequence === modelLoadSequence) allModels.value = models;
     } catch {
-        allModels.value = [];
+        // Keep the last successful catalog if a refresh fails.
     }
 }
 

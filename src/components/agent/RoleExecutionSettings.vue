@@ -4,11 +4,21 @@
     <p v-if="parseError" class="error">原配置无法解析，尚未修改。<button type="button" @click="repairConfig">重新设置</button></p>
     <fieldset class="independent-fields" :disabled="parseError">
       <section class="settings-block" aria-label="工具权限">
-        <h5>工具权限 <span class="section-tag">独立限制</span></h5>
-        <p class="hint">默认继承父任务可用工具。这里的限制不随流程设置的切换而清除。</p>
-        <label class="tool-mode">权限范围<select :value="toolMode" @change="changeToolMode($event)"><option value="inherit">继承父任务可用工具</option><option value="allowlist">仅允许指定工具</option></select></label>
-        <label v-if="toolMode === 'allowlist'" class="tool-list">允许的工具或动作<textarea v-model="toolsText" rows="3" placeholder="例如：read_file, list_dir, send_message" @input="publish()" /></label>
-        <p class="hint">仅允许指定工具时，空列表禁用业务工具；交付、人工求助与只读通信查询仍可用。父任务及宿主授权继续生效。</p>
+        <h5>工具权限</h5>
+        <label class="tool-mode">可选工具范围
+          <select :value="toolMode" @change="changeToolMode($event)">
+            <option value="inherit">由 AI 按需选择（默认）</option>
+            <option value="allowlist">仅允许指定工具</option>
+          </select>
+        </label>
+        <p v-if="toolMode === 'inherit'" class="hint">继承父任务可用工具，AI 自行决定每次用哪些。</p>
+        <template v-else>
+          <label class="tool-list">允许的工具或动作
+            <textarea v-model="toolsText" rows="3" placeholder="例如 local_file.read, search, my_plugin/lookup" @input="publish()" />
+          </label>
+          <p class="hint">AI 从列表中按需选择，父任务和宿主权限仍然生效。留空会禁用业务工具，交付、人工求助和只读通信查询仍可用。</p>
+        </template>
+        <p v-if="isReviewer" class="hint">正式审查可使用内置只读取证工具。外部 MCP 需先在「能力管理」的插件卡片上开启「审查工具」授权。</p>
       </section>
       <section class="settings-block" aria-label="工作流程">
         <h5>工作流程 <span class="section-tag">{{ flowMode === 'custom' && !specialized ? '角色自定义' : specialized ? '专用结果契约' : '继承公共默认' }}</span></h5>
@@ -26,7 +36,7 @@
       <section class="settings-block" aria-label="执行方式">
         <h5>执行方式 <span class="section-tag">高级选项</span></h5>
         <label class="tool-mode">默认执行方式<select :value="profile" @change="changeProfile($event)"><option value="">沿用派发入口</option><option value="task">通用子任务</option><option value="worker">调查助手</option><option value="writer">实施助手</option><option value="reviewer">专用审查</option></select></label>
-        <label v-if="profile === 'writer'" class="tool-mode">工作区方式<select :value="workspace" @change="changeWorkspace($event)"><option value="shared">共享父工作区</option><option value="isolated">隔离补丁，审阅后 apply</option></select></label>
+        <p v-if="workspace === 'isolated'" class="hint">此角色仍有历史隔离配置。请先改为共享工作区再派发新任务。<button type="button" class="workflow-link" @click="changeWorkspace()">改为共享工作区</button></p>
         <p class="hint">普通方式共用通用执行器；调查名称不自动保证只读。切到专用方式时会说明不兼容的流程变化。</p>
         <details class="preset-details"><summary>快捷组合（同时调整执行方式与流程）</summary><div class="presets"><button v-for="preset in presets" :key="preset.id" type="button" :aria-pressed="matches(preset)" :class="{selected:matches(preset)}" @click="applyPreset(preset)"><strong>{{ preset.label }}</strong><span>{{ preset.description }}</span></button></div></details>
       </section>
@@ -52,6 +62,9 @@ const profile = ref<Profile>('');
 const planMode = ref<PlanMode>('');
 const completion = ref<Completion>('');
 const workspace = ref<'shared' | 'isolated'>('shared');
+const isReviewer = computed(() => profile.value === 'reviewer' || (
+  !profile.value && props.allowedKinds?.length === 1 && props.allowedKinds[0] === 'reviewer'
+));
 const specialized = computed(() => profile.value === 'reviewer' || workspace.value === 'isolated');
 const toolMode = ref<'inherit' | 'allowlist'>('inherit');
 const toolsText = ref('');
@@ -66,7 +79,7 @@ const presets: Preset[] = [
   { id: 'review', label: '专用审查', description: '按审查契约返回裁决与发现', profile: 'reviewer', planMode: 'auto', completion: 'handoff' },
 ];
 const names: Record<Profile, string> = { '': '沿用派发入口', task: '通用子任务', worker: '调查助手', writer: '实施助手', reviewer: '专用审查' };
-const summary = computed(() => `${names[profile.value]} · ${specialized.value ? '专用结果契约' : flowMode.value === 'inherit' ? '继承公共流程' : '角色自定义流程'} · ${toolMode.value === 'inherit' ? '继承工具权限' : '限定工具范围'}`);
+const summary = computed(() => `${names[profile.value]} · ${specialized.value ? '专用结果契约' : flowMode.value === 'inherit' ? '继承公共流程' : '角色自定义流程'} · ${toolMode.value === 'inherit' ? 'AI 按需选择工具' : '限定工具范围'}`);
 function toolNames() { return [...new Set(toolsText.value.split(/[,，\n]/).map(s => s.trim()).filter(Boolean))]; }
 function publish(includeProfile = false) {
   if (planMode.value === 'plan_approval' && stages.value.plan === false) stages.value = { ...stages.value, plan: true };
@@ -79,7 +92,7 @@ function publish(includeProfile = false) {
 function changeToolMode(event: Event) {
   const select = event.target as HTMLSelectElement;
   const next = select.value as 'inherit' | 'allowlist';
-  if (toolMode.value === 'allowlist' && next === 'inherit' && !window.confirm('切换到继承将移除角色当前的工具列表限制；父任务和宿主权限仍然生效。是否继续？')) {
+  if (toolMode.value === 'allowlist' && next === 'inherit' && !window.confirm('切换后，AI 可从父任务和宿主允许的工具中按需选择。是否移除这个角色的工具列表限制？')) {
     select.value = toolMode.value; return;
   }
   toolMode.value = next;
@@ -124,13 +137,10 @@ function changeProfile(event: Event) {
   if (specialized.value) { stages.value = {}; completion.value = 'handoff'; planMode.value = ''; flowMode.value = 'inherit'; }
   publish(true);
 }
-function changeWorkspace(event: Event) {
-  const select = event.target as HTMLSelectElement;
-  const next = select.value as 'shared' | 'isolated';
-  if (!approveChanges([...specialChangeWarning(profile.value, next), ...kindExpansionWarning(profile.value)])) { select.value = workspace.value; return; }
-  workspace.value = next;
-  if (specialized.value) { stages.value = {}; completion.value = 'handoff'; planMode.value = ''; flowMode.value = 'inherit'; }
-  publish(true);
+function changeWorkspace() {
+  if (!approveChanges(['将后续任务改为直接修改共享父工作区'])) return;
+  workspace.value = 'shared';
+  publish();
 }
 function applyPreset(preset: Preset) {
   if (parseError.value && !window.confirm('原执行配置无法解析，继续将用快捷组合替换，原工具限制可能无法保留。是否继续？')) return;

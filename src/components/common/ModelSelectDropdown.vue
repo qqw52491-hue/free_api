@@ -27,7 +27,7 @@
           type="button"
           class="btn-trigger-clear"
           @click.stop="clearSelection"
-          title="恢复默认跟随"
+          :title="clearOptionLabel || '恢复默认跟随'"
         >
           ✕
         </button>
@@ -102,9 +102,9 @@
                 <div class="option-text-group">
                   <div class="option-title-line">
                     <span class="option-display-name">🌐 {{ clearOptionLabel || placeholder || '跟随全局自动路由' }}</span>
-                    <span class="badge-default-tag">默认</span>
+                    <span v-if="!clearOptionLabel" class="badge-default-tag">默认</span>
                   </div>
-                  <div class="option-id-line">
+                  <div v-if="!clearOptionLabel" class="option-id-line">
                     不锁定特定模型，根据任务分流策略动态路由
                   </div>
                 </div>
@@ -227,6 +227,7 @@ const props = withDefaults(
 const emit = defineEmits<{
   'update:modelValue': [value: string];
   'change': [value: string, model: ModelOptionItem | null];
+  'open': [];
 }>()
 
 const isOpen = ref(false)
@@ -436,6 +437,7 @@ async function fetchModels() {
 
 watch(isOpen, async (val) => {
   if (val) {
+    emit('open')
     calculatePlacement()
     searchQuery.value = ''
     await nextTick()

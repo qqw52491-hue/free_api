@@ -51,7 +51,13 @@ fn stage_merge_matrix_preserves_inherit_on_and_off_at_every_layer() {
 #[test]
 fn null_workspace_inherits_isolation_instead_of_silently_switching_executor() {
     let db=db();
-    upsert_card(&db,&json!({"name":"patcher","allowed_kinds":"writer","execution_defaults":{"profile":"writer","execution":{"workspace":"isolated","allowed_tools":["read_file"],"workflow":{"completion":"handoff"}}}})).unwrap();
+    upsert_card(&db,&json!({"name":"patcher","allowed_kinds":"writer"})).unwrap();
+    let defaults = json!({"profile":"writer","execution":{"workspace":"isolated","allowed_tools":["read_file"],"workflow":{"completion":"handoff"}}});
+    assert!(upsert_card(&db,&json!({"name":"patcher","execution_defaults":defaults})).is_err());
+    db.0.lock().unwrap().execute(
+        "UPDATE agent_role_cards SET execution_defaults=?1 WHERE name='patcher'",
+        [defaults.to_string()],
+    ).unwrap();
     let inherited=merge_execution_defaults(&db,&json!({"role":"patcher","execution":{"workspace":null,"allowed_tools":null}}),None).unwrap();
     assert_eq!(inherited["execution"]["workspace"],"isolated");
     assert!(!crate::agent::execution::runtime::uses_main_executor("writer",&inherited).unwrap());
@@ -300,9 +306,11 @@ fn role_menu_uses_the_actual_completion_default_for_each_profile() {
 #[test]
 fn writer_alias_resolves_role_workspace_before_executor_selection() {
     let db = db();
-    upsert_card(&db, &json!({"name":"isolated_writer", "allowed_kinds":"writer",
-        "execution_defaults":{"profile":"writer","execution":{"workspace":"isolated",
-            "workflow":{"completion":"handoff"}}}})).unwrap();
+    upsert_card(&db, &json!({"name":"isolated_writer","allowed_kinds":"writer"})).unwrap();
+    db.0.lock().unwrap().execute(
+        "UPDATE agent_role_cards SET execution_defaults=?1 WHERE name='isolated_writer'",
+        [json!({"profile":"writer","execution":{"workspace":"isolated","workflow":{"completion":"handoff"}}}).to_string()],
+    ).unwrap();
     let request = crate::agent::child_task::presets::requested(
         json!({"role":"isolated_writer","task":"implement"}), Some("writer")).unwrap();
     let effective = merge_execution_defaults(&db, &request, None).unwrap();

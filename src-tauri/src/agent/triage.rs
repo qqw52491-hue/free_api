@@ -165,14 +165,11 @@ impl TriageVerdict {
         )
     }
 
-    /// Complex plan routes retain independent review; keep any stronger or
-    /// product-specific mode already selected at entry.
-    pub fn apply_plan_route_review_defaults(&mut self) {
-        if self.requires_plan_gate() {
-            self.stage_review_mode = "milestone".into();
-            if self.final_review_mode.eq_ignore_ascii_case("mechanical_only") {
-                self.final_review_mode = "code_review".into();
-            }
+    /// Complex plan routes require independent final review. Stage review is
+    /// selected separately by triage or by an explicit stage setting.
+    pub fn apply_plan_route_final_review_default(&mut self) {
+        if self.requires_plan_gate() && self.final_review_mode.eq_ignore_ascii_case("mechanical_only") {
+            self.final_review_mode = "code_review".into();
         }
     }
 
@@ -461,8 +458,8 @@ pub async fn run_triage<R: tauri::Runtime>(
   - expert_panel：跨域高风险，需多专家联合会审；
   - user_clarification：需求歧义必须先问用户，澄清前不得写入。
 - pre_review_roles / stage_review_roles / final_review_roles：按优先顺序推荐候选，不是必派人员名单；宿主在显式角色设置和权限范围内优先选可用候选，人数由单人/会审配置另定。
-- stage_review_mode：none=中段无需阶段审查；milestone=按里程碑/写入阈值做阶段审查。
-- final_review_mode：mechanical_only=机械校验即可交付（简单产物）；artifact_quality=非代码产物按产物质量标准终审（需求覆盖/结构完整/可用性）；code_review=代码级终审；operational_verification=须运行验证证据的终审；panel=多专家终审。route 为 technical_plan/expert_panel 时保留独立终审与 milestone；规划阶段可按真实产物选择独立终审类型，但执行模型不能自行免审、取消 milestone 或减少 panel。放宽审查由人类通过固定环节配置或既有仲裁决定。
+- stage_review_mode：独立于方案路由选择。若中途复核能在后续操作前发现具体风险或避免返工，选 milestone，宿主按里程碑/写入阈值派审。若中途复核只会重复交付时的核对，选 none。用户明确的阶段审查设置优先。
+- final_review_mode：mechanical_only=机械校验即可交付（简单产物）；artifact_quality=非代码产物按产物质量标准终审（需求覆盖/结构完整/可用性）；code_review=代码级终审；operational_verification=须运行验证证据的终审；panel=多专家终审。route 为 technical_plan/expert_panel 时保留独立终审。规划阶段可按实际产物选择独立终审类型，或加强阶段审查。放宽已选的独立终审、milestone 或 panel 由人类通过固定环节配置或既有仲裁决定。
 - evidence_policy：none=方案不需证据引用；source_refs=资料/需求来源即可；code_refs=须引用已读代码证据；operational_probes=须命令输出/探针证据。
 - investigation_questions / required_evidence：仅当 route 为 technical_plan/expert_panel 时填写，其他路由留空数组——你负责定调查方向，规划阶段的主 Agent 会先摸底，按需要把互相独立的问题派给只读探针并行取证，再依据实际发现提交方案；此清单是调查先验，不是必须逐条核销的验收清单。
   问题须对任务类型通用，围绕“要做出什么、拿什么当素材/数据、环境里有什么能力、怎样算做对”：例如视频/PPT/表格类产物应覆盖产出规格（时长/页数/列含义/格式）、可用素材与数据来源、本机可用的工具与依赖、逐条可核对的验收标准；代码类则覆盖相关调用链与影响面。
@@ -696,22 +693,23 @@ mod tests {
     }
 
     #[test]
-    fn plan_route_defaults_preserve_independent_modes_and_simple_route_exemption() {
-        let mut v = TriageVerdict::fallback("fixture");
-        for mode in ["panel", "operational_verification", "artifact_quality", "code_review"] {
-            v.final_review_mode = mode.into();
-            v.stage_review_mode = "none".into();
-            v.apply_plan_route_review_defaults();
-            assert_eq!(v.final_review_mode, mode);
-            assert_eq!(v.stage_review_mode, "milestone");
+    fn plan_routes_keep_the_selected_stage_mode_and_require_independent_final_review() {
+        for route in ["technical_plan", "expert_panel"] {
+            for stage in ["none", "milestone"] {
+                for final_mode in ["mechanical_only", "panel", "operational_verification", "artifact_quality", "code_review"] {
+                    let mut verdict = parse(&json!({
+                        "route": route, "stage_review_mode": stage, "final_review_mode": final_mode,
+                    }).to_string());
+                    verdict.apply_plan_route_final_review_default();
+                    let expected_final = if final_mode == "mechanical_only" { "code_review" } else { final_mode };
+                    assert_eq!(verdict.final_review_mode, expected_final);
+                    assert_eq!(verdict.stage_review_mode, stage);
+                }
+            }
         }
-        v.final_review_mode = "mechanical_only".into();
-        v.apply_plan_route_review_defaults();
-        assert_eq!(v.final_review_mode, "code_review");
-        v.route = "direct".into();
-        v.final_review_mode = "mechanical_only".into();
-        v.stage_review_mode = "none".into();
-        v.apply_plan_route_review_defaults();
+
+        let mut v = parse(r#"{"route":"direct","final_review_mode":"mechanical_only","stage_review_mode":"none"}"#);
+        v.apply_plan_route_final_review_default();
         assert_eq!(v.final_review_mode, "mechanical_only");
         assert_eq!(v.stage_review_mode, "none");
     }

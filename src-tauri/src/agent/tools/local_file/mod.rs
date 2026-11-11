@@ -17,7 +17,7 @@ use std::sync::{LazyLock, Mutex};
 
 const MAX_READ_BYTES: usize = 2 * 1024 * 1024; // 2MB 单次读取上限
 
-/// 有效动作归一（dispatcher 的分类器与本地 dispatch 共用同一口径）：
+/// 参数预检、权限、分类与实际执行共用的文件动作。
 /// 外层 action 槽被误填写动词（edit/write）但 params.action 显式声明只读
 /// （read/list）且不带任何内容字段时，以内层真实意图为准降级为只读。
 /// 实测复现：模型发出 {"action":"edit","command":{"action":"read",path..}} 的
@@ -25,13 +25,21 @@ const MAX_READ_BYTES: usize = 2 * 1024 * 1024; // 2MB 单次读取上限
 /// target_content/replacement_content 失败，纠错为 read 无损安全。
 /// 带内容字段时写意图与只读声明矛盾——不猜，保留外层交由门禁/缺参报错判定。
 pub fn resolve_act<'a>(act: &'a str, params: &'a serde_json::Value) -> &'a str {
-    if !act.eq_ignore_ascii_case("write") && !act.eq_ignore_ascii_case("edit") {
-        return act;
-    }
+    let act = if act.is_empty() {
+        params["action"]
+            .as_str()
+            .filter(|action| !action.is_empty())
+            .unwrap_or("read")
+    } else {
+        act
+    };
     let write_shaped = params.get("content").is_some()
         || params.get("target_content").is_some()
         || params.get("replacement_content").is_some();
-    if write_shaped {
+    if act.eq_ignore_ascii_case("local_file") && !write_shaped {
+        return "read";
+    }
+    if write_shaped || (!act.eq_ignore_ascii_case("write") && !act.eq_ignore_ascii_case("edit")) {
         return act;
     }
     match params.get("action").and_then(|v| v.as_str()) {
@@ -63,17 +71,7 @@ pub fn dispatch(
         }
     };
 
-    let act = resolve_act(
-        if !action.is_empty() {
-            action
-        } else {
-            params
-                .get("action")
-                .and_then(|v| v.as_str())
-                .unwrap_or("read")
-        },
-        params,
-    );
+    let act = resolve_act(action, params);
 
     match act {
         "read" => execute_read(ws_root, session_id, params),
@@ -81,31 +79,19 @@ pub fn dispatch(
         "edit" => execute_edit(ws_root, session_id, params),
         "list" => execute_list(ws_root, session_id, params),
         unknown => {
-            // 模型常见格式错误（多模型实测复现）：把工具名误填进 action 槽
-            // （action='local_file'）。该形状可机械判定——没有任何工具的 action
-            // 等于自己的名字。参数呈纯读形状（有行窗或无内容字段）时按缺省 read
-            // 处置：read 非破坏且本就是 action 缺省值，纠错比回错省一整轮往返；
-            // 带内容字段（写/改意图不明）不猜，回错并附正确范例。
-            let write_shaped = params.get("content").is_some()
-                || params.get("target_content").is_some()
-                || params.get("replacement_content").is_some();
-            if unknown == "local_file" && !write_shaped {
-                execute_read(ws_root, session_id, params)
+            let hint = if unknown == "local_file" {
+                "（收到的 action 与工具名相同，本次未执行。若需读取：action='read'；写入：action='write'+content；替换：action='edit'+target_content+replacement_content；列目录：action='list'）"
             } else {
-                let hint = if unknown == "local_file" {
-                    "（收到的 action 与工具名相同，本次未执行。若需读取：action='read'；写入：action='write'+content；替换：action='edit'+target_content+replacement_content；列目录：action='list'）"
-                } else {
-                    ""
-                };
-                DispatchResult { view: None,
-                    stdout: String::new(),
-                    stderr: format!(
-                        "❌ [非法动作] local_file 不支持 action='{}'。允许的 action 必须严格为：read、write、edit、list 之一。{}",
-                        unknown, hint
-                    ),
-                    success: false,
-                    route: "local_file:invalid_action".to_string(),
-                }
+                ""
+            };
+            DispatchResult { view: None,
+                stdout: String::new(),
+                stderr: format!(
+                    "❌ [非法动作] local_file 不支持 action='{}'。允许的 action 必须严格为：read、write、edit、list 之一。{}",
+                    unknown, hint
+                ),
+                success: false,
+                route: "local_file:invalid_action".to_string(),
             }
         }
     }

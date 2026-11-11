@@ -1,6 +1,6 @@
 
     #[tokio::test]
-    async fn missing_model_rejects_all_child_kinds_without_creating_running_rows_or_copies() {
+    async fn preflight_rejects_without_creating_running_rows_or_copies() {
         let root = std::env::temp_dir().join(format!("child-preflight-{}", Uuid::new_v4()));
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
@@ -16,10 +16,13 @@
                     "missing-model", "pro", "auto",
                     &json!({"question":"核对当前调用逻辑是否正确", "evidence_excerpt":"本地合成证据"}),
                     "", None, rx.clone(), &identity).await,
-                "writer" => crate::agent::child_writer::spawn_child_writer(None, &db,
-                    "parent", "session", &workspace, "missing-model", "auto",
-                    &json!({"task":"修改本地合成调用", "test_command":"cargo test"}),
-                    String::new(), rx.clone(), &identity).await,
+                "writer" => {
+                    let result = crate::agent::protocol::DispatchEnvelope::writer(
+                        "parent", "session", "missing-model", json!({"task":"修改本地合成调用"}),
+                    ).dispatch(None, &db, &workspace, rx.clone()).await;
+                    assert_eq!(result.as_ref().unwrap_err(), crate::agent::child_writer::ISOLATED_WRITER_RETIRED);
+                    result
+                },
                 _ => crate::agent::child_worker::spawn_child_worker(None, &db,
                     "parent", "session", &workspace, "missing-model", "auto",
                     &json!({"task":"读取本地调用证据"}), String::new(), rx.clone(), &identity).await,

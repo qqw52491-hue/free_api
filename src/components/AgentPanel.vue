@@ -226,6 +226,7 @@
                     @update:plan-mode="session.setPlanMode($event)"
                     @open-settings="openSettings"
                     @open-roles="emit('open-roles')"
+                    @refresh-models="emit('refresh-models')"
                     @attach-files="handleAttachFiles"
                     @submit="submitComposer"
                     @cancel-queue="session.removeQueuedGoal"
@@ -322,7 +323,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, provide, ref, watch } from "vue";
+import { computed, nextTick, provide, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import AgentChatStream from "./agent/AgentChatStream.vue";
 import AgentComposer from "./agent/AgentComposer.vue";
@@ -347,6 +348,7 @@ const emit = defineEmits<{
     "new-session": [];
     "open-plugins": [];
     "open-roles": [];
+    "refresh-models": [];
     "update:running": [running: boolean];
     "update:title": [title: string];
     "promoted": [oldId: string, newId: string, title: string, projectId?: string];
@@ -493,18 +495,17 @@ async function handleAttachFiles(filePaths: string[]) {
     }
 }
 
-onMounted(() => session.ensureModelRouting(props.allModels));
-watch(() => props.allModels, (models) => session.ensureModelRouting(models), { deep: true });
+watch(() => props.allModels, session.ensureModelRouting, { immediate: true });
 
 const activeProModelName = computed(() => {
     const id = session.modelRouting.value.pro;
     const model = props.allModels.find((item) => item.id === id);
-    return model?.display_name || model?.name || "未配置模型";
+    return model?.display_name || model?.name || (id ? "所选模型不可用" : "未配置");
 });
 const activeFlashModelName = computed(() => {
     const id = session.modelRouting.value.flash;
     const model = props.allModels.find((item) => item.id === id);
-    return model?.display_name || model?.name || "未配置";
+    return model?.display_name || model?.name || (id ? "所选模型不可用" : "未配置");
 });
 const hasStartModels = computed(() =>
     [session.modelRouting.value.pro, session.modelRouting.value.flash].every((id) =>

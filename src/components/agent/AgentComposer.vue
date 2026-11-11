@@ -258,8 +258,11 @@
                                                 <ModelSelectDropdown
                                                     :model-value="modelRouting.pro"
                                                     :models="allModels"
+                                                    :auto-fetch="false"
                                                     :disabled="isRunning"
                                                     placeholder="请选择用于规划的模型"
+                                                    clear-option-label="清除模型选择"
+                                                    @open="emit('refresh-models')"
                                                     @update:model-value="updateRouteValue('pro', $event)"
                                                     size="md"
                                                 />
@@ -295,8 +298,11 @@
                                                 <ModelSelectDropdown
                                                     :model-value="modelRouting.flash"
                                                     :models="allModels"
+                                                    :auto-fetch="false"
                                                     :disabled="isRunning"
                                                     placeholder="请选择用于执行的模型"
+                                                    clear-option-label="清除模型选择"
+                                                    @open="emit('refresh-models')"
                                                     @update:model-value="updateRouteValue('flash', $event)"
                                                     size="md"
                                                 />
@@ -307,7 +313,7 @@
                                         <div class="route-item vision-tier">
                                             <div class="route-item-head">
                                                 <div class="head-left">
-                                                    <span class="route-badge vision">👁️ 多模态视觉模型 (Vision)</span>
+                                                    <span class="route-badge vision">👁️ 视觉模型（可选）</span>
                                                     <small>截图分析与图表识别</small>
                                                 </div>
                                                 <div class="effort-segmented-wrap" title="思考档位切换">
@@ -332,8 +338,11 @@
                                                 <ModelSelectDropdown
                                                     :model-value="modelRouting.vision"
                                                     :models="allModels"
+                                                    :auto-fetch="false"
                                                     :disabled="isRunning"
                                                     placeholder="选择视觉模型..."
+                                                    clear-option-label="清除模型选择"
+                                                    @open="emit('refresh-models')"
                                                     @update:model-value="updateRouteValue('vision', $event)"
                                                     size="md"
                                                 />
@@ -507,7 +516,7 @@
 
                                     <!-- Station 3: 🛡️ 阶段审查工位 (Reviewer) -->
                                     <div v-else-if="activeRoutingTab === 'reviewer'" class="tab-pane-content station-pane">
-                                        <StageSettingsFields :model-value="modelRouting.stages" :disabled="workflowLocked" :approval="currentPlanMode === 'plan_approval'" :legacy-stage-review-disabled="isStageReviewerDisabled" @stage-change="setFixedStage" />
+                                        <StageSettingsFields :model-value="modelRouting.stages" :disabled="workflowLocked" :approval="currentPlanMode === 'plan_approval'" :requires-plan="currentPlanMode === 'cross_review'" :legacy-stage-review-disabled="isStageReviewerDisabled" @stage-change="setFixedStage" />
                                         <p class="section-desc">{{ workflowLocked ? '当前显示的是界面上的新任务设置；续跑使用原任务检查点，不能修改流程。可切换模型，或选择新任务再调整。' : '新任务使用此配置。自动沿用已有策略，关闭不自动重开。' }}</p>
                                         <div class="squad-section gate-section">
                                             <div class="section-head">
@@ -1129,7 +1138,7 @@
                         }"
                         type="button"
                         :disabled="!canSubmit || isSending"
-                        :title="!isRunning && !hasSelectedModel ? '请先选择规划模型和执行模型，两处可以选择同一个模型' : isRunning ? (isWaitingForHuman ? '回答当前请求' : (submitMode === 'interrupt' ? '⚡ 立即打断当前任务并切换为新目标' : '⏳ 加入队列，等当前任务完成后自动执行')) : (taskStartMode === 'resume' ? '继续原任务，保留审查状态' : '开始新任务')"
+                        :title="!isRunning && modelSetupHint ? modelSetupHint : isRunning ? (isWaitingForHuman ? '回答当前请求' : (submitMode === 'interrupt' ? '⚡ 立即打断当前任务并切换为新目标' : '⏳ 加入队列，等当前任务完成后自动执行')) : (taskStartMode === 'resume' ? '继续原任务，保留审查状态' : '开始新任务')"
                         @click="submit"
                     >
                         <svg viewBox="0 0 24 24"><path d="m7 12 5-5 5 5M12 7v10"/></svg>
@@ -1139,8 +1148,8 @@
             </div>
         </div>
 
-        <div v-if="!isRunning && !hasSelectedModel" class="model-setup-hint" role="status">
-            请先选择规划模型和执行模型，两处可以选择同一个已配置模型。
+        <div v-if="!isRunning && modelSetupHint" class="model-setup-hint" role="status">
+            {{ modelSetupHint }}
         </div>
 
         <!-- 📎 全局全屏附件预览弹窗 (Teleport 到 body，杜绝容器 backdrop-filter 遮挡) -->
@@ -1216,6 +1225,7 @@ const emit = defineEmits<{
     stop: [];
     "open-settings": [];
     "open-roles": [];
+    "refresh-models": [];
     "attach-files": [paths: string[]];
 }>();
 
@@ -1303,7 +1313,7 @@ const planModes: PlanModeOption[] = [
 
 function selectPlanMode(mode: PlanExecutionMode) {
     if (workflowLocked.value) return;
-    if (mode === 'plan_approval' && props.modelRouting.stages?.plan === false) emit('update:model-routing', { ...props.modelRouting, stages: { ...props.modelRouting.stages, plan: true } });
+    if (mode !== 'auto' && props.modelRouting.stages?.plan === false) emit('update:model-routing', { ...props.modelRouting, stages: { ...props.modelRouting.stages, plan: true } });
     emit("update:planMode", mode);
     emit("update:autoPilot", mode !== "plan_approval");
     planMenuOpen.value = false;
@@ -2160,6 +2170,7 @@ const planFixedStyle = computed(() => {
 function toggleModelMenu() {
     if (props.isRunning) return;
     if (!modelMenuOpen.value) {
+        emit("refresh-models");
         void loadAllRoleCards();
         calculatePopoverPosition(modelPickerRef.value);
         budgetMenuOpen.value = false;
@@ -2327,16 +2338,18 @@ function handleInput(e: Event) {
 watch(() => props.draft, autoResizeTextarea);
 onMounted(autoResizeTextarea);
 
-const currentModelName = computed(() => {
-    const proId = props.modelRouting?.pro;
-    const model = props.allModels.find((m) => m.id === proId);
-    return model?.display_name || model?.name || "未配置模型";
-});
-const hasSelectedModel = computed(() =>
-    [props.modelRouting?.pro, props.modelRouting?.flash].every((id) =>
-        !!id && props.allModels.some((model) => model.id === id),
-    ),
+const selectedProModel = computed(() => props.allModels.find((model) => model.id === props.modelRouting.pro));
+const selectedFlashModel = computed(() => props.allModels.find((model) => model.id === props.modelRouting.flash));
+const currentModelName = computed(() =>
+    selectedProModel.value?.display_name || selectedProModel.value?.name
+    || (props.modelRouting.pro ? "规划模型不可用" : "未配置规划模型"),
 );
+const modelSetupHint = computed(() => {
+    const missing = [];
+    if (!selectedProModel.value) missing.push("规划模型");
+    if (!selectedFlashModel.value) missing.push("执行模型");
+    return missing.length ? `请选择${missing.join("和")}。` : "";
+});
 const placeholderText = computed(() => props.isRunning
     ? props.isWaitingForHuman
         ? "补充自定义说明后按回车提交…"
@@ -2346,7 +2359,7 @@ const placeholderText = computed(() => props.isRunning
     : taskStartMode.value === "resume" ? "补充说明或输入继续，将保留原任务与审查状态…" : "想让 Agent 帮你做什么？",
 );
 const canSubmit = computed(() => {
-    return (props.isRunning || hasSelectedModel.value)
+    return (props.isRunning || Boolean(selectedProModel.value && selectedFlashModel.value))
         && (Boolean(props.draft.trim()) || attachments.value.length > 0);
 });
 

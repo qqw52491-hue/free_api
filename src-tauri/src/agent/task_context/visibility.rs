@@ -64,5 +64,10 @@ pub(crate) fn reviewer_index(config: &ExecutionConfig, budget: u32, verify: bool
     reviewer_tools(config, budget, verify).join(", ")
 }
 pub(crate) fn reviewer_menu(config: &ExecutionConfig, budget: u32, verify: bool) -> String {
-    format!("\n【当前 Reviewer 可执行工具（配置上限与只读适配器的交集）】{}\n只使用上述工具；执行时仍由宿主检查权限和预算，不提供实施或委派能力。",reviewer_index(config,budget,verify))
+    let names = reviewer_tools(config, budget, verify);
+    let mut menu = format!("\n【当前 Reviewer 可执行工具（配置上限与只读适配器的交集）】{}\n只使用上述工具；执行时仍由宿主检查权限和预算，不提供实施或委派能力。", names.join(", "));
+    if names.iter().any(|name| !matches!(*name, "finish" | "verify")) {
+        menu.push_str("\n可自行将互不依赖的取证调用放进同一个 {\"parallel\":[{\"tool\":\"工具名\",\"params\":{...}},...]}；每个分支单独校验和计入取证预算。verify 和 finish 单独调用。");
+    }
+    menu
 }

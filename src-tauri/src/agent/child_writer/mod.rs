@@ -1,6 +1,5 @@
 use crate::db::DbState;
 use crate::llm::{self, ModelConfig};
-use uuid::Uuid;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -22,23 +21,21 @@ pub(crate) use fingerprint::*;
 pub(crate) use workspace::*;
 /// L3 隔离写入 worker 预算：比侦察 worker 更宽，但仍受步数/时长/写入量硬顶约束。
 pub const MAX_WRITER_STEPS: usize = 14;
-/// step_budget 覆盖的宿主硬上限：模型可声称"这活复杂"，但不许无限膨胀。
-pub const WRITER_STEP_BUDGET_CAP: usize = 40;
 pub const WRITER_TIMEOUT_SECS: u64 = 300;
 const WRITER_MAX_OUTPUT_TOKENS: i64 = 1_200;
-const MAX_TASK_CHARS: usize = 2_000;
-const MAX_FOCUS_PATHS: usize = 5;
 const MAX_OBSERVATION_CHARS: usize = 60_000;
 const MAX_ACTION_OUTPUT_CHARS: usize = 8_000;
 const MAX_WRITES: usize = 20;
 const MAX_WRITE_FILE_BYTES: usize = 400_000;
 const COMMAND_TIMEOUT_SECS: u64 = 60;
 const MAX_COMMAND_OUTPUT_BYTES: usize = 200_000;
+#[cfg(test)]
 const MAX_COPY_FILES: usize = 4_000;
+#[cfg(test)]
 const MAX_COPY_BYTES: u64 = 200_000_000;
 const MAX_DIFF_TOTAL_CHARS: usize = 48_000;
-/// 每个父运行只允许 1 个写入 worker（副本成本高 + 收敛责任单一）
-pub const MAX_WRITERS_PER_RUN: usize = 1;
+pub(crate) const ISOLATED_WRITER_RETIRED: &str =
+    "隔离 Writer 已停止新建；本次未派发。请由用户确认是否改用共享工作区。旧任务可用 resume_child 续接。";
 
 /// 写入 worker 允许的命令：只读侦察集 + 在副本内运行的构建/测试执行器。
 /// 所有命令的 cwd 都被钉在隔离副本内，写入副作用只落副本。
@@ -151,67 +148,6 @@ pub struct WriterResult {
     pub workspace_copy: String,
     #[serde(default)]
     pub patch_ref: Option<String>,
-}
-
-pub fn parse_writer_request(params: &Value) -> Result<WriterRequest, String> {
-    let task = params
-        .get("task")
-        .and_then(|v| v.as_str())
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .ok_or_else(|| "child_writer 缺少 task（自包含的修改任务：目标文件、预期行为、约束）。".to_string())?;
-    if task.chars().count() > MAX_TASK_CHARS {
-        return Err(format!("child_writer.task 最多 {} 个字符。", MAX_TASK_CHARS));
-    }
-    let test_command = match params.get("test_command") {
-        None => String::new(),
-        Some(Value::String(command)) => command.trim().to_string(),
-        Some(_) => return Err("child_writer.test_command 类型错误：期望 string。".into()),
-    };
-    if test_command.chars().count() > 200
-        || test_command.chars().any(|c| [';', '|', '&', '>', '<', '`', '$', '(', ')', '\n'].contains(&c))
-    {
-        return Err("child_writer.test_command 必须是单条命令且不含控制/拼接字符。".to_string());
-    }
-    let mut focus_paths = Vec::new();
-    if let Some(paths) = params.get("focus_paths").and_then(|v| v.as_array()) {
-        for path in paths {
-            let path = path
-                .as_str()
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty())
-                .ok_or_else(|| "child_writer.focus_paths 必须是字符串数组。".to_string())?;
-            if focus_paths.len() >= MAX_FOCUS_PATHS {
-                return Err(format!(
-                    "child_writer.focus_paths 最多 {} 个。\n💡 建议：写入工兵需聚焦核心目标，请只传入 1~{} 个关键文件路径（如 [\"src/a.js\", \"src/b.js\"]）。",
-                    MAX_FOCUS_PATHS,
-                    MAX_FOCUS_PATHS
-                ));
-            }
-            focus_paths.push(path);
-        }
-    }
-    let context_excerpts = crate::agent::types::parse_dispatch_context(params.get("context_excerpts"))?;
-    let hard_scope = params
-        .get("hard_scope")
-        .and_then(|v| v.as_str())
-        .map(|v| v.trim().to_string())
-        .unwrap_or_default();
-    // step_budget：非正整数或非法类型一律按缺省处理（fail-open 到默认预算），
-    // 超限钳位到硬上限——复杂度判断是模型的，边界是宿主的。
-    let step_budget = params
-        .get("step_budget")
-        .and_then(|v| v.as_u64())
-        .map(|v| (v as usize).min(WRITER_STEP_BUDGET_CAP))
-        .filter(|v| *v > 0);
-    Ok(WriterRequest {
-        task,
-        test_command,
-        focus_paths,
-        context_excerpts,
-        hard_scope,
-        step_budget,
-    })
 }
 
 fn truncate_chars(text: &str, max_chars: usize) -> String {
@@ -685,105 +621,6 @@ pub fn render_writer_initial_prompt(
             request.task
         )
     }
-}
-
-/// 异步派发 L3 写入 worker：复制工作区为私有副本 → 动作-观测循环 → diff 回执。
-#[allow(clippy::too_many_arguments)]
-pub async fn spawn_child_writer(
-    app: Option<AppHandle>,
-    db: &DbState,
-    parent_run_id: &str,
-    parent_session_id: &str,
-    workspace_root: &Path,
-    model_id: &str,
-    reasoning_effort: &str,
-    params: &Value,
-    persona: String,
-    interrupt_rx: watch::Receiver<u64>,
-    identity: &crate::agent::child_reviewer::ChildRunIdentity,
-) -> Result<String, String> {
-    crate::agent::execution::runtime::ExecutionConfig::parse(params,"writer")?;
-    let mut effective_identity=identity.clone();
-    effective_identity.dispatch_input=Some(json!({"params":params,"persona":persona}).to_string());
-    if let Some(value)=params.get("execution") {effective_identity.execution_config=Some(value.to_string());}
-    let identity=&effective_identity;
-    let request = parse_writer_request(params)?;
-    let parent = workspace_root
-        .canonicalize()
-        .map_err(|error| format!("child_writer 工作区不可用: {}", error))?;
-    // 配置失败时尚未登记任务或创建写入副本。
-    let mut config = ModelConfig::from_db_state(db, model_id)?;
-    let custom_cap = params.get("max_concurrency").and_then(|v| v.as_i64());
-    let effective_writer_cap = match custom_cap {
-        Some(cap) if cap > 0 => cap,
-        _ => MAX_WRITERS_PER_RUN as i64,
-    };
-    {
-        let conn = db.0.lock().map_err(|error| error.to_string())?;
-        // 配额语义=并发上限：只统计仍在运行中的工兵，已终态（succeeded/failed/
-        // cancelled/interrupted/timed_out）的不得继续占用额度，否则第二个工兵永远派不出去。
-        let existing: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM agent_child_runs WHERE parent_run_id = ?1 AND kind = 'writer' AND status = 'running'",
-                rusqlite::params![parent_run_id],
-                |row| row.get(0),
-            )
-            .map_err(|error| error.to_string())?;
-        if existing >= effective_writer_cap {
-            return Err(format!(
-                "每个父运行最多 {} 个写入 worker；请先回收现有 worker 的 diff 再由你自己落实修改。",
-                effective_writer_cap
-            ));
-        }
-    }
-
-    let child_nonce = Uuid::new_v4().to_string();
-    let child8 = child_nonce.get(..8).unwrap_or(&child_nonce).to_string();
-    let copy_root = parent.join(format!(".writer-{}", child8));
-    let (files, bytes) = create_isolated_workspace(&parent, &copy_root)?;
-
-    let child_run_id = crate::agent::child_reviewer::begin_child_run_extended(
-        db,
-        parent_run_id,
-        parent_session_id,
-        &parent,
-        model_id,
-        0,
-        "writer",
-        custom_cap,
-        Some(copy_root.to_string_lossy().as_ref()),
-        None,
-        identity,
-    )?;
-
-    config.max_tokens = if config.max_tokens <= 0 {
-        WRITER_MAX_OUTPUT_TOKENS
-    } else {
-        config.max_tokens.min(WRITER_MAX_OUTPUT_TOKENS)
-    };
-
-    let db_clone = DbState(db.0.clone());
-    let child_clone = child_run_id.clone();
-    let session_clone = parent_session_id.to_string();
-    let reasoning = reasoning_effort.to_string();
-    let step_budget = request.step_budget;
-    let _ = (files, bytes); // 副本规模仅作日志观测，超预算在复制阶段已拒绝
-    tokio::spawn(run_writer(
-        db_clone,
-        app,
-        session_clone,
-        child_clone,
-        parent.clone(),
-        copy_root.clone(),
-        config,
-        reasoning,
-        request,
-        persona,
-        interrupt_rx,
-        None,
-        step_budget,
-    ));
-    Ok(child_run_id)
 }
 
 #[cfg(test)]

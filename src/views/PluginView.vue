@@ -138,6 +138,7 @@
               {{ refreshingName === p.name ? '⏳' : '🔄' }} 连接
             </button>
             <button class="text-btn" @click="openEditPlugin(p)">编辑/提炼</button>
+            <button class="text-btn" :disabled="!p.enabled" @click="openReviewTools(p.name)">审查工具</button>
             <button class="delete-btn" @click="confirmDelete(p.name)">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
                 <polyline points="3 6 5 6 21 6"></polyline>
@@ -146,6 +147,28 @@
               删除
             </button>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="reviewToolPlugin" class="modal-overlay" @click.self="closeReviewTools">
+      <div class="modal-content plugin-modal" role="dialog" aria-modal="true" aria-labelledby="review-tools-title">
+        <h2 id="review-tools-title">{{ reviewToolPlugin }} 的审查工具</h2>
+        <p class="modal-hint">只勾选这个连接确实限制为只读的工具。方案、阶段和最终审查可以按需调用。</p>
+        <div v-if="reviewToolsLoading" role="status">正在读取工具目录…</div>
+        <div v-else class="form-group">
+          <p v-if="!reviewToolChoices.length" class="form-tip">工具目录为空。请先刷新此插件的连接。</p>
+          <label v-for="name in reviewToolChoices" :key="name" class="review-tool-option">
+            <input v-model="reviewToolSelection" type="checkbox" :value="name">
+            {{ name }}
+          </label>
+        </div>
+        <p v-if="reviewToolsError" class="refresh-error" role="alert">{{ reviewToolsError }}</p>
+        <div class="form-actions">
+          <button class="cancel-btn" type="button" :disabled="reviewToolsSaving" @click="closeReviewTools">取消</button>
+          <button class="save-btn" type="button" :disabled="!reviewToolsReady || reviewToolsSaving" @click="saveReviewTools">
+            {{ reviewToolsSaving ? '保存中…' : '保存' }}
+          </button>
         </div>
       </div>
     </div>
@@ -638,6 +661,60 @@ const refSecretsSaved = ref(false);
 const catalogMap = ref({});
 const refreshError = ref({});
 const refreshingName = ref('');
+const reviewToolPlugin = ref('');
+const reviewToolChoices = ref([]);
+const reviewToolSelection = ref([]);
+const reviewToolsLoading = ref(false);
+const reviewToolsSaving = ref(false);
+const reviewToolsReady = ref(false);
+const reviewToolsError = ref('');
+let reviewToolsRequest = 0;
+
+const openReviewTools = async (name) => {
+  const request = ++reviewToolsRequest;
+  reviewToolPlugin.value = name;
+  reviewToolChoices.value = [];
+  reviewToolSelection.value = [];
+  reviewToolsError.value = '';
+  reviewToolsLoading.value = true;
+  reviewToolsReady.value = false;
+  try {
+    const [selection, catalog] = await Promise.all([
+      invoke('get_mcp_review_tools', { name }),
+      invoke('get_mcp_tool_catalog', { name }),
+    ]);
+    if (request !== reviewToolsRequest) return;
+    reviewToolSelection.value = selection;
+    reviewToolChoices.value = [...new Set([...selection, ...(catalog[0]?.tools ?? []).map(tool => tool.name)])].sort();
+    reviewToolsReady.value = true;
+  } catch (error) {
+    if (request === reviewToolsRequest) reviewToolsError.value = String(error);
+  } finally {
+    if (request === reviewToolsRequest) reviewToolsLoading.value = false;
+  }
+};
+
+const closeReviewTools = () => {
+  if (reviewToolsSaving.value) return;
+  reviewToolsRequest++;
+  reviewToolPlugin.value = '';
+};
+
+const saveReviewTools = async () => {
+  reviewToolsSaving.value = true;
+  reviewToolsError.value = '';
+  try {
+    await invoke('set_mcp_review_tools', {
+      name: reviewToolPlugin.value,
+      tools: reviewToolSelection.value,
+    });
+    reviewToolPlugin.value = '';
+  } catch (error) {
+    reviewToolsError.value = String(error);
+  } finally {
+    reviewToolsSaving.value = false;
+  }
+};
 
 const quickForm = ref({
   name: '',
@@ -1546,6 +1623,8 @@ input:checked + .slider::before { background: var(--control-thumb); transform: t
 .modal-hint { color: var(--theme-text-secondary, #8e8e93); font-size: 12px; margin: 0 0 18px 0; }
 .form-group { margin-bottom: 14px; }
 .form-group label { display: block; margin-bottom: 4px; font-size: 11.5px; color: var(--theme-text-secondary, #a1a1aa); font-weight: 500; }
+.form-group .review-tool-option { display: flex; align-items: center; gap: 8px; padding: 4px 0; overflow-wrap: anywhere; }
+.review-tool-option input { width: auto; flex: none; }
 .label-with-action { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
 .ai-gen-toolbar { display: flex; gap: 6px; align-items: center; }
 .compact-model-select { width: auto; padding: 3px 8px; font-size: 11px; border-radius: 4px; }

@@ -167,6 +167,8 @@ pub fn run() {
             // MCP 插件管理
             commands::get_mcp_plugins,
             commands::get_mcp_tool_catalog,
+            commands::get_mcp_review_tools,
+            commands::set_mcp_review_tools,
             commands::refresh_mcp_plugin_connection,
             commands::generate_mcp_capability_card,
             commands::quick_connect_and_save_mcp,

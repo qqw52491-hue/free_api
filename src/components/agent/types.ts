@@ -384,9 +384,10 @@ export const STATE_CARD_LEVELS: StateCardLevelOption[] = [
 export interface ModelRouting {
     stages?: StageSettings;
     reasoning_effort_version: 2;
-    pro: string;
-    flash: string;
-    vision: string;
+    // 缺省允许初始化推荐值，空串表示用户清空了这个槽位。
+    pro?: string;
+    flash?: string;
+    vision?: string;
     pro_reasoning_effort: ReasoningEffort;
     flash_reasoning_effort: ReasoningEffort;
     vision_reasoning_effort: ReasoningEffort;

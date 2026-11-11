@@ -4,7 +4,7 @@
     <label v-for="field in fields" :key="field.key">
       <span>{{ field.label }}</span>
       <select :value="mode(field.key)" :disabled="field.key === 'plan' && approval" @change="change(field.key, ($event.target as HTMLSelectElement).value)">
-        <option value="auto">自动 / 沿用默认</option><option value="on">开启</option><option value="off">关闭</option>
+        <option value="auto">自动 / 沿用默认</option><option value="on">开启</option><option value="off" :disabled="field.key === 'plan' && requiresPlan">关闭</option>
       </select>
     </label>
     <p>关闭后不自动触发。正式方案关闭时方案审查也关闭；人工批准仍要求正式方案。最终审查开启后仍按材料适用条件派审。已有阻塞、权限和明确验证要求继续生效。</p>
@@ -13,7 +13,7 @@
 </template>
 <script setup lang="ts">
 import type { StageSettings } from './types';
-const props = defineProps<{ modelValue?: StageSettings; disabled?: boolean; approval?: boolean; legacyStageReviewDisabled?: boolean }>();
+const props = defineProps<{ modelValue?: StageSettings; disabled?: boolean; approval?: boolean; requiresPlan?: boolean; legacyStageReviewDisabled?: boolean }>();
 const emit = defineEmits<{ 'update:modelValue': [value: StageSettings]; 'stage-change': [key: keyof StageSettings, mode: string, value: StageSettings] }>();
 const fields: { key: keyof StageSettings; label: string }[] = [
   { key: 'plan', label: '正式方案' }, { key: 'plan_review', label: '方案审查' },
@@ -25,6 +25,7 @@ function mode(key: keyof StageSettings) {
   return props.modelValue?.[key] === true ? 'on' : props.modelValue?.[key] === false ? 'off' : 'auto';
 }
 function change(key: keyof StageSettings, mode: string) {
+  if (key === 'plan' && mode === 'off' && (props.approval || props.requiresPlan)) return;
   const value = { ...props.modelValue };
   if (mode === 'auto') delete value[key]; else value[key] = mode === 'on';
   if (key === 'plan' && mode === 'off') value.plan_review = false;

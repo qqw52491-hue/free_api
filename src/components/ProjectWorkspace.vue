@@ -209,7 +209,10 @@
                             <ModelSelectDropdown
                               :model-value="modelRouting.pro"
                               :models="allModels || []"
+                              :auto-fetch="false"
                               placeholder="请选择用于规划的模型"
+                              clear-option-label="清除模型选择"
+                              @open="emit('refresh-models')"
                               @update:model-value="updateRouteValue('pro', $event)"
                               size="md"
                             />
@@ -245,7 +248,10 @@
                             <ModelSelectDropdown
                               :model-value="modelRouting.flash"
                               :models="allModels || []"
+                              :auto-fetch="false"
                               placeholder="请选择用于执行的模型"
+                              clear-option-label="清除模型选择"
+                              @open="emit('refresh-models')"
                               @update:model-value="updateRouteValue('flash', $event)"
                               size="md"
                             />
@@ -281,7 +287,10 @@
                             <ModelSelectDropdown
                               :model-value="modelRouting.vision"
                               :models="allModels || []"
+                              :auto-fetch="false"
                               placeholder="选择视觉模型..."
+                              clear-option-label="清除模型选择"
+                              @open="emit('refresh-models')"
                               @update:model-value="updateRouteValue('vision', $event)"
                               size="md"
                             />
@@ -656,6 +665,7 @@ const emit = defineEmits<{
   (event: "project-deleted", projectId: string): void;
   (event: "session-deleted", sessionId: string): void;
   (event: "refresh-projects"): void;
+  (event: "refresh-models"): void;
 }>();
 
 const project = ref<AgentProject | null>(null);
@@ -798,6 +808,7 @@ const budgetFixedStyle = computed(() => {
 
 function toggleModelMenu() {
   if (!modelMenuOpen.value) {
+    emit("refresh-models");
     calculatePopoverPosition(modelPickerRef.value);
     budgetMenuOpen.value = false;
     modelMenuOpen.value = true;
@@ -874,9 +885,6 @@ function loadModelRouting(): ModelRouting {
   }
   return {
     reasoning_effort_version: 2,
-    pro: "",
-    flash: "",
-    vision: "",
     pro_reasoning_effort: "auto",
     flash_reasoning_effort: "auto",
     vision_reasoning_effort: "auto",
@@ -957,14 +965,8 @@ function syncAllToPro() {
 
 const currentProModelName = computed(() => {
   const currentId = modelRouting.value.pro;
-  if (currentId && props.allModels) {
-    const m = props.allModels.find((item) => item.id === currentId);
-    if (m) return m.display_name || m.name;
-  }
-  if (props.allModels && props.allModels.length > 0) {
-    return props.allModels[0].display_name || props.allModels[0].name;
-  }
-  return "配置模型路由";
+  const model = props.allModels?.find((item) => item.id === currentId);
+  return model?.display_name || model?.name || (currentId ? "规划模型不可用" : "未配置规划模型");
 });
 
 const previewModal = reactive<{

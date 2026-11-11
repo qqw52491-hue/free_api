@@ -4,6 +4,17 @@ use crate::agent::{
 };
 use std::sync::{Arc, Mutex};
 
+async fn tool(
+    db: &DbState,
+    id: &str,
+    program: &ReviewProgram,
+    inst: &AgentInstruction,
+    interrupt: &mut watch::Receiver<u64>,
+) -> crate::agent::types::DispatchResult {
+    let registry = tokio::sync::Mutex::new(crate::agent::mcp::PluginRegistry::new());
+    super::tool(db, id, program, inst, &registry, interrupt).await
+}
+
 struct Fixture {
     db: DbState,
     root: std::path::PathBuf,
@@ -436,6 +447,88 @@ async fn reviewer_navigates_middle_steps_and_child_results_with_scoped_output_al
 }
 
 #[tokio::test]
+async fn parallel_review_reads_share_permissions_budget_and_branch_receipts() {
+    let f = Fixture::new();
+    let mut program = f.program.clone();
+    program.evidence_since = Some(chrono::Utc::now() - chrono::Duration::seconds(1));
+    program.final_fingerprint = Some("final-review".into());
+    let mut config = crate::agent::execution::runtime::config(&f.db, &f.id).unwrap();
+    config.allowed_tools = Some(vec!["read_file".into(), "get_step_output".into(), "verify".into()]);
+    f.db.0.lock().unwrap().execute(
+        "UPDATE agent_child_runs SET execution_config_json=?2 WHERE id=?1",
+        params![f.id, serde_json::to_string(&config).unwrap()],
+    ).unwrap();
+    let proof = crate::agent::run_trace::save_step_output_with_meta(
+        &f.db, "owner", 2, "read_file", "parent proof", "succeeded", "parent evidence",
+    ).unwrap();
+    let (_tx, mut rx) = watch::channel(0);
+    let inst: AgentInstruction = serde_json::from_value(json!({"parallel":[
+        {"id":"file","tool":"read_file","params":{"path":"evidence.txt"}},
+        {"action":"get_step_output","args":{"output_id":proof}},
+        {"tool":"get_step_output","params":{"run_id":"outsider","output_id":proof}},
+        {"tool":"local_file","action":"write","params":{"path":"evidence.txt","content":"changed"}},
+        {"tool":"verify"}
+    ]})).unwrap();
+    let mut result = tool(&f.db, &f.id, &program, &inst, &mut rx).await;
+    assert!(!result.success);
+    let durable = crate::agent::dispatcher::take_tool_durable_output(&mut result, "");
+    let select = |id| crate::agent::plan_tree::output::select_branch(
+        &durable, &json!({"branch_id":id}),
+    ).unwrap().unwrap().text;
+    assert!(select("file").contains("original evidence"));
+    assert_eq!(
+        serde_json::from_str::<Value>(&select("$1")).unwrap()["content"],
+        "parent evidence"
+    );
+    assert!(select("$2").contains("不能读取其他任务的回执"));
+    assert!(select("$3").contains("执行配置未允许"));
+    assert!(select("$4").contains("复验和提交结果需单独调用"));
+    assert_eq!(std::fs::read_to_string(f.root.join("evidence.txt")).unwrap(), "original evidence");
+    let snapshot = Snapshot::load(&f.db, &f.id, "reviewer").unwrap().unwrap();
+    assert_eq!(snapshot.state["tool_steps"], 3);
+    assert_ne!(snapshot.state["verification_pending"], true);
+
+    let binding = f.binding();
+    let now = chrono::Utc::now().to_rfc3339();
+    f.db.0.lock().unwrap().execute(
+        "INSERT INTO agent_run_traces(id,session_id,goal,status,steps_json,started_at,updated_at) VALUES (?1,?2,'review','running','[]',?3,?3)",
+        params![binding.child_run, binding.child_session, now],
+    ).unwrap();
+    assert!(durable.contains(&format!("run_id={:?}", binding.child_run)));
+    let batch_receipt = crate::agent::run_trace::save_step_output_with_meta(
+        &f.db, &binding.child_session, 1, "parallel", "review batch", "failed", &durable,
+    ).unwrap();
+    let branch = serde_json::from_value(json!({"tool":"get_step_output","params":{
+        "output_id":batch_receipt,"run_id":binding.child_run,"branch_id":"file"
+    }})).unwrap();
+    let result = tool(&f.db, &f.id, &program, &branch, &mut rx).await;
+    assert!(result.success, "{}", result.stderr);
+    assert!(result.stdout.contains("original evidence"));
+
+    let read = json!({"tool":"read_file","params":{"path":"evidence.txt"}});
+    let batch = serde_json::from_value(json!({"parallel":[read,read]})).unwrap();
+    let result = tool(&f.db, &f.id, &program, &batch, &mut rx).await;
+    assert!(result.success);
+    assert!(result.stdout.contains("成功: 2, 失败: 0"));
+
+    let budget = crate::agent::review_tools::forensic_budget();
+    let mut snapshot = Snapshot::load(&f.db, &f.id, "reviewer").unwrap().unwrap();
+    snapshot.state["tool_steps"] = json!(budget - 1);
+    snapshot.save(&f.db).unwrap();
+    let oversized = vec![read.clone(); crate::agent::plan_tree_dispatch::MAX_CONTROLLED_PARALLEL_BRANCHES + 1];
+    let rejected = serde_json::from_value(json!({"parallel":oversized})).unwrap();
+    let result = tool(&f.db, &f.id, &program, &rejected, &mut rx).await;
+    assert!(result.stderr.contains("单批最多"));
+    let result = tool(&f.db, &f.id, &program, &batch, &mut rx).await;
+    assert!(result.stdout.contains("成功: 1, 失败: 1"));
+    assert!(result.stdout.contains("只读取证预算已用尽"));
+    assert_eq!(
+        Snapshot::load(&f.db, &f.id, "reviewer").unwrap().unwrap().state["tool_steps"],
+        budget
+    );
+}
+
+#[tokio::test]
 async fn scalar_review_tool_parameters_return_error_without_panicking_or_spending_budget() {
     let f = Fixture::new();
     let (_tx, mut rx) = watch::channel(0);
@@ -516,4 +609,121 @@ async fn reviewer_prepare_receives_the_same_review_payload_as_finish() {
         assert_eq!(result.receipt.finish_payload, payload);
         assert!(result.receipt.is_ready(), "prepare={prepare}: {:?}", result.receipt.blockers);
     }
+}
+
+#[tokio::test]
+async fn configured_mcp_tools_are_shared_by_single_and_parallel_review_calls() {
+    use crate::agent::mcp::{McpClient, PluginRegistry, PluginSource};
+
+    let f = Fixture::new();
+    let name = format!("review-test-{}", Uuid::new_v4());
+    let calls = f.root.join("mcp-calls");
+    let server = r#"
+import json, sys
+for line in sys.stdin:
+    req = json.loads(line)
+    if 'id' not in req: continue
+    if req['method'] == 'initialize':
+        result = {'protocolVersion':'2024-11-05','capabilities':{'tools':{}},'serverInfo':{'name':'review-fixture','version':'1'}}
+    elif req['method'] == 'tools/list':
+        result = {'tools':[
+            {'name':'lookup','inputSchema':{'type':'object'}},
+            {'name':'unapproved','inputSchema':{'type':'object'},'annotations':{'readOnlyHint':True}},
+        ]}
+    elif req['method'] == 'tools/call':
+        with open(sys.argv[1], 'a') as log: log.write(req['params']['name']+'\n')
+        result = {'structuredContent':{'evidence':'MCP-REVIEW-EVIDENCE','args':req['params']['arguments']}}
+    else:
+        result = {}
+    print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':result}), flush=True)
+"#;
+    let args = vec!["-c", server, calls.to_str().unwrap()];
+    f.db.0.lock().unwrap().execute(
+        "INSERT INTO mcp_plugins (id,name,command,args,created_at) VALUES (?1,?1,'python3',?2,'test')",
+        params![name, serde_json::to_string(&args).unwrap()],
+    ).unwrap();
+    let config = crate::commands::mcp::enabled_mcp_config(&f.db, &name).unwrap();
+    let client = Arc::new(McpClient::spawn(config.clone()).unwrap());
+    client.list_tools().await.unwrap();
+    let mut registry = PluginRegistry::new();
+    registry.insert_with_source(name.clone(), client, PluginSource::ManagedDb).unwrap();
+    let lookup = format!("{name}/lookup");
+    let unapproved = format!("{name}/unapproved");
+    let mut execution = crate::agent::execution::runtime::config(&f.db, &f.id).unwrap();
+    let registry = tokio::sync::Mutex::new(registry);
+    let (_tx, mut rx) = watch::channel(0);
+    let single: AgentInstruction = serde_json::from_value(json!({
+        "tool":lookup,"params":{"query":"record"}
+    })).unwrap();
+    let result = super::tool(&f.db, &f.id, &f.program, &single, &registry, &mut rx).await;
+    assert!(!result.success && result.stderr.contains("未获审查取证授权"));
+    assert!(!calls.exists());
+    assert!(mcp_tools::set_configured_tools(&f.db, &config, vec!["nonexistent".into()]).is_err());
+    mcp_tools::set_configured_tools(&f.db, &config, vec!["lookup".into()]).unwrap();
+
+    {
+        let registry = registry.lock().await;
+        let (index, menu) = mcp_tools::menu(&f.db, &registry, &execution);
+        assert_eq!(index, lookup);
+        assert!(menu.contains(&lookup));
+        assert!(!menu.contains(&unapproved));
+        execution.allowed_tools = Some(vec!["read_file".into()]);
+        assert_eq!(mcp_tools::menu(&f.db, &registry, &execution), (String::new(), String::new()));
+    }
+    let save_execution = |execution: &crate::agent::execution::runtime::ExecutionConfig| {
+        f.db.0.lock().unwrap().execute(
+            "UPDATE agent_child_runs SET execution_config_json=?2 WHERE id=?1",
+            params![f.id, serde_json::to_string(execution).unwrap()],
+        ).unwrap();
+    };
+    save_execution(&execution);
+    let result = super::tool(&f.db, &f.id, &f.program, &single, &registry, &mut rx).await;
+    assert!(!result.success && result.stderr.contains("执行配置未允许"));
+    assert!(!calls.exists());
+    execution.allowed_tools.as_mut().unwrap().push(format!("{lookup}.read"));
+    save_execution(&execution);
+    let action_alias = serde_json::from_value(json!({"tool":lookup,"action":"read"})).unwrap();
+    let result = super::tool(&f.db, &f.id, &f.program, &action_alias, &registry, &mut rx).await;
+    assert!(!result.success && result.stderr.contains("执行配置未允许"));
+    assert!(!calls.exists());
+    execution.allowed_tools.as_mut().unwrap().push(lookup.clone());
+    save_execution(&execution);
+
+    let result = super::tool(&f.db, &f.id, &f.program, &single, &registry, &mut rx).await;
+    assert!(result.success, "{}", result.stderr);
+    let payload: Value = serde_json::from_str(&result.stdout).unwrap();
+    assert_eq!(payload["structuredContent"]["args"]["query"], "record");
+
+    let batch = serde_json::from_value(json!({"parallel":[
+        {"tool":lookup,"params":{"query":"batch"}},
+        {"tool":unapproved},
+        {"tool":"read_file","params":{"path":"evidence.txt"}}
+    ]})).unwrap();
+    let result = super::tool(&f.db, &f.id, &f.program, &batch, &registry, &mut rx).await;
+    assert!(!result.success);
+    assert!(result.stdout.contains("MCP-REVIEW-EVIDENCE"));
+    assert!(result.stdout.contains("original evidence"));
+    assert!(result.stdout.contains("未获审查取证授权"));
+
+    mcp_tools::set_configured_tools(&f.db, &config, vec![]).unwrap();
+    let result = super::tool(&f.db, &f.id, &f.program, &single, &registry, &mut rx).await;
+    assert!(!result.success && result.stderr.contains("未获审查取证授权"));
+    mcp_tools::set_configured_tools(&f.db, &config, vec!["lookup".into()]).unwrap();
+    f.db.0.lock().unwrap().execute("UPDATE mcp_plugins SET enabled=0 WHERE name=?1", [&name]).unwrap();
+    let result = super::tool(&f.db, &f.id, &f.program, &single, &registry, &mut rx).await;
+    assert!(!result.success);
+    f.db.0.lock().unwrap().execute("UPDATE mcp_plugins SET enabled=1 WHERE name=?1", [&name]).unwrap();
+    let mut changed_config = config.clone();
+    changed_config.args.push("changed".into());
+    f.db.0.lock().unwrap().execute(
+        "UPDATE mcp_plugins SET args=?2 WHERE name=?1",
+        params![name, serde_json::to_string(&changed_config.args).unwrap()],
+    ).unwrap();
+    let result = super::tool(&f.db, &f.id, &f.program, &single, &registry, &mut rx).await;
+    assert!(!result.success && result.stderr.contains("未获审查取证授权"));
+    mcp_tools::set_configured_tools(&f.db, &changed_config, vec![]).unwrap();
+    assert!(mcp_tools::configured_tools(&f.db, &changed_config).unwrap().is_empty());
+    assert_eq!(std::fs::read_to_string(calls).unwrap(), "lookup\nlookup\n");
+    let snapshot = Snapshot::load(&f.db, &f.id, "reviewer").unwrap().unwrap();
+    assert_eq!(snapshot.state["tool_steps"], 3);
 }

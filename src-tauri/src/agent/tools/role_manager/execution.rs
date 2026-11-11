@@ -41,6 +41,9 @@ pub(super) fn normalize(params: &Value) -> Result<Option<String>, String> {
         return Err("执行组合超过 16384 字符；未保存。".into());
     }
     let defaults = RoleExecutionDefaults::parse(&value)?;
+    if defaults.execution.workspace.as_deref() == Some("isolated") {
+        return Err("隔离 Writer 已停止新建；请先将角色工作区改为共享再保存。".into());
+    }
     let allowed = params["allowed_kinds"].as_str().unwrap_or("");
     if !defaults.profile.is_empty() && !allowed.is_empty()
         && !(RoleCard {

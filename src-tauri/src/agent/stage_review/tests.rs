@@ -942,9 +942,24 @@
         let c=SandwichContext::new("sys".into(),"跨模块测试".into());
         let (root,db)=mk_db("readonly-milestone");
         let mut cp=approved_checkpoint();cp.set_execution_mode(PlanExecutionMode::Auto);
-        let mut verdict=crate::agent::triage::TriageVerdict::fallback("fixture");verdict.fallback=None;
+        let mut verdict: crate::agent::triage::TriageVerdict = serde_json::from_value(serde_json::json!({
+            "route": "technical_plan",
+            "final_review_mode": "operational_verification",
+            "stage_review_mode": "none",
+        })).unwrap();
+        verdict.apply_plan_route_final_review_default();
         cp.triage_verdict=Some(verdict);
+        let instruction = instruction_with_todo_done();
+        assert!(crate::agent::plan_gate::plan_discussion_required(&cp));
+        assert!(!record_milestones(&mut cp, 1, &instruction));
+        assert!(should_fire(&cp,&db,&c,&instruction,&default_routing()).is_none());
+        cp.stages.stage_review = Some(true);
+        assert!(should_fire(&cp,&db,&c,&instruction,&default_routing()).is_some());
+        cp.stages.stage_review = None;
+        cp.triage_verdict.as_mut().unwrap().apply_plan_review_overrides("", "milestone");
+        assert!(record_milestones(&mut cp, 1, &instruction));
         assert!(should_fire(&cp,&db,&c,&instruction_with_todo_done(),&default_routing()).is_some());
+        cp.stage_review_pending_milestones.clear();
         // No milestone transition, no periodic review just for reading.
         assert!(should_fire(&cp,&db,&c,&AgentInstruction::default(),&default_routing()).is_none());
         let mut completed = c.clone();

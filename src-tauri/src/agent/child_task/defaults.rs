@@ -16,9 +16,6 @@ pub struct ChildWorkflowDefaults {
 }
 impl ChildWorkflowDefaults {
     pub fn validate(&self) -> Result<(), String> {
-        if self.plan_mode.as_deref() == Some("cross_review") && self.stages.plan == Some(false) {
-            return Err("先讨论并审查方案需要正式方案；请开启正式方案或调整方案模式。".into());
-        }
         ExecutionConfig::parse(&json!({"execution":{"workflow":{"plan_mode":self.plan_mode,"completion":self.completion},"stages":self.stages}}), "task").map(|_| ())
     }
     pub fn load(path: &Path) -> Result<Self, String> {
@@ -57,11 +54,8 @@ impl ChildWorkflowDefaults {
     }
 
     pub(crate) fn apply(&self, params: &Value) -> Result<Value, String> {
-        if self == &Self::default() {
-            return Ok(params.clone());
-        }
         let profile = params["profile"].as_str().unwrap_or("task");
-        if !crate::agent::execution::runtime::uses_main_executor(profile, params)? {
+        if !crate::agent::execution::runtime::uses_main_executor(profile, params)? || self == &Self::default() {
             return Ok(params.clone());
         }
         let mut config = ExecutionConfig::parse(params, profile)?;
@@ -82,14 +76,7 @@ impl ChildWorkflowDefaults {
             stage_review: config.stages.stage_review.or(self.stages.stage_review),
             final_review: config.stages.final_review.or(self.stages.final_review),
         };
-        config
-            .stages
-            .validate(config.workflow.plan_mode.as_deref())?;
-        if config.workflow.plan_mode.as_deref() == Some("cross_review")
-            && config.stages.plan == Some(false)
-        {
-            return Err("有效子任务流程同时要求方案讨论与关闭正式方案；请调整角色、派发或默认流程。未派发。".into());
-        }
+        config.validate_for_profile(profile)?;
         let mut result = params.clone();
         result["execution"] = serde_json::to_value(config).map_err(|e| e.to_string())?;
         Ok(result)
@@ -99,6 +86,24 @@ impl ChildWorkflowDefaults {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn conflicting_plan_is_rejected_with_empty_or_unrelated_defaults_and_after_merge() {
+        let conflict = json!({"execution":{
+            "workflow":{"plan_mode":"cross_review"},
+            "stages":{"plan":false},
+        }});
+        let empty = ChildWorkflowDefaults::default();
+        let delivery = ChildWorkflowDefaults { completion: Some("delivery".into()), ..Default::default() };
+        let expected = empty.apply(&conflict).unwrap_err();
+        assert!(expected.contains("需要正式方案"));
+        assert_eq!(delivery.apply(&conflict).unwrap_err(), expected);
+
+        let discussion = ChildWorkflowDefaults { plan_mode: Some("cross_review".into()), ..Default::default() };
+        let plan_off = json!({"execution":{"stages":{"plan":false}}});
+        assert!(empty.apply(&plan_off).is_ok());
+        assert_eq!(discussion.apply(&plan_off).unwrap_err(), expected);
+    }
+
     #[test]
     fn defaults_roundtrip_and_invalid_save_preserves_previous_configuration() {
         let root = std::env::temp_dir().join(format!("child-defaults-{}", uuid::Uuid::new_v4()));

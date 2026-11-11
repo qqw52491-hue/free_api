@@ -189,7 +189,7 @@ fn plugin_health_map(
     rows.flatten().collect()
 }
 
-fn enabled_mcp_config(db: &DbState, name: &str) -> Result<PluginConfig, String> {
+pub(crate) fn enabled_mcp_config(db: &DbState, name: &str) -> Result<PluginConfig, String> {
     load_managed_mcp_plugins(db)?
         .into_iter()
         .find(|plugin| plugin.enabled && plugin.config.name == name)
@@ -234,6 +234,18 @@ pub async fn get_mcp_plugins(state: State<'_, DbState>) -> Result<Vec<McpPluginR
         })
         .collect();
     Ok(rows)
+}
+
+#[tauri::command]
+pub fn get_mcp_review_tools(state: State<'_, DbState>, name: String) -> Result<Vec<String>, String> {
+    let config = enabled_mcp_config(state.inner(), &name)?;
+    crate::agent::child_reviewer::main_executor::mcp_tools::configured_tools(state.inner(), &config)
+}
+
+#[tauri::command]
+pub fn set_mcp_review_tools(state: State<'_, DbState>, name: String, tools: Vec<String>) -> Result<(), String> {
+    let config = enabled_mcp_config(state.inner(), &name)?;
+    crate::agent::child_reviewer::main_executor::mcp_tools::set_configured_tools(state.inner(), &config, tools)
 }
 
 #[tauri::command]

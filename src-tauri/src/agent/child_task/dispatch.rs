@@ -33,6 +33,9 @@ pub(crate) fn prepare(
         }
     }
     let params = crate::agent::tools::role_manager::merge_execution_defaults(db, &requested, None)?;
+    if params["execution"]["workspace"] == "isolated" {
+        return Err(crate::agent::child_writer::ISOLATED_WRITER_RETIRED.into());
+    }
     Ok(PreparedDispatch::Params(params))
 }
 
@@ -140,6 +143,35 @@ mod tests {
     }
 
     #[test]
+    fn retired_isolated_writer_is_rejected_after_role_resolution_without_shared_fallback() {
+        let f = Fixture::new();
+        let requested = json!({"task":"prepare patch","profile":"writer","execution":{"workspace":"isolated"}});
+        let error = prepare(&f.db, "owner", "parent", "patch-key", requested, "dispatch")
+            .err().expect("fresh isolated dispatch must fail");
+        assert_eq!(error, crate::agent::child_writer::ISOLATED_WRITER_RETIRED);
+        let legacy_batch = serde_json::from_value(json!({
+            "tool":"child_writer","params":{"execution":{"workspace":"isolated"}},
+            "dispatches":[{"task":"prepare patch"}]
+        })).unwrap();
+        let rejected = crate::agent::tools::input_validation::instruction_rejection(&f.db, &legacy_batch)
+            .expect("top-level isolation must not be dropped before processing batch items");
+        assert_eq!(rejected.stderr, crate::agent::child_writer::ISOLATED_WRITER_RETIRED);
+        crate::agent::tools::role_manager::upsert_card(&f.db, &json!({
+            "name":"patch_writer","allowed_kinds":"writer","execution_defaults":{"profile":"writer"}
+        })).unwrap();
+        f.db.0.lock().unwrap().execute(
+            "UPDATE agent_role_cards SET execution_defaults=?1 WHERE name='patch_writer'",
+            [json!({"profile":"writer","execution":{"workspace":"isolated"}}).to_string()],
+        ).unwrap();
+        let error = prepare(&f.db, "owner", "parent", "role-key", json!({"task":"prepare patch","role":"patch_writer"}), "dispatch")
+            .err().expect("inherited isolation must also fail");
+        assert_eq!(error, crate::agent::child_writer::ISOLATED_WRITER_RETIRED);
+        let shared = prepare(&f.db, "owner", "parent", "shared-key", json!({"task":"implement","profile":"writer"}), "dispatch").unwrap();
+        assert!(matches!(shared, PreparedDispatch::Params(params) if params["profile"]=="writer"));
+        assert_eq!(f.db.0.lock().unwrap().query_row("SELECT COUNT(*) FROM agent_child_runs", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
     fn recorded_receipt_replay_does_not_depend_on_live_role_defaults_or_models() {
         let f = Fixture::new();
         let requested = json!({"task":"inspect","role":"original_role"});
@@ -229,6 +261,66 @@ mod tests {
             crate::agent::router::AgentRouter::route_for_step(&context, &routing, 1).model_id,
             "actual-parent"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn saved_role_tool_choices_control_single_and_parallel_file_actions() {
+        use crate::agent::{child_reviewer, dispatcher, execution::runtime, mcp::PluginRegistry};
+
+        let f = Fixture::new();
+        std::fs::write(f.root.join("evidence.txt"), "role permission evidence").unwrap();
+        let register = |parent: &str, key: &str, params: &Value| {
+            child_reviewer::begin_child_run_extended(
+                &f.db, parent, "owner", &f.root, "mock", 0, "task",
+                Some(i64::from(child_reviewer::MAX_TOTAL_CHILDREN_PER_RUN)), None, None,
+                &child_reviewer::ChildRunIdentity {
+                    task_id: key.into(),
+                    execution_config: params.get("execution").map(Value::to_string),
+                    dispatch_input: Some(json!({"params":params}).to_string()),
+                    ..child_reviewer::ChildRunIdentity::fresh("task")
+                },
+            ).unwrap()
+        };
+        let parent = register("root", "parent", &json!({"execution":{"allowed_tools":["local_file"]}}));
+        let new_child = |name, tools: Option<&str>| {
+            let mut card = json!({"name":name,"allowed_kinds":"worker","execution_defaults":{"profile":"worker","execution":{}}});
+            if let Some(tool) = tools {
+                card["execution_defaults"]["execution"]["allowed_tools"] = json!([tool]);
+            }
+            crate::agent::tools::role_manager::upsert_card(&f.db, &card).unwrap();
+            let request = json!({"task":"check evidence","role":name});
+            let PreparedDispatch::Params(params) =
+                prepare(&f.db, "owner", &parent, name, request, "dispatch").unwrap()
+            else {
+                panic!("a new role dispatch must return parameters");
+            };
+            register(&parent, name, &params)
+        };
+        let inherit = new_child("inherit_tools", None);
+        let read_only = new_child("read_only_tools", Some("local_file.read"));
+        let write_only = new_child("write_only_tools", Some("local_file.write"));
+        assert_eq!(runtime::config(&f.db, &inherit).unwrap().allowed_tools, Some(vec!["local_file".into()]));
+
+        let execute = |id: &str, input: Value| {
+            let inst = serde_json::from_value(input).unwrap();
+            dispatcher::run_agent_step_with_images(
+                &f.db, &format!("task-{id}"), &inst, &PluginRegistry::new(),
+                Some(&f.root), &Default::default(), Some(id), None,
+            )
+        };
+        let legacy_read = json!({"tool":"local_file","action":"write","params":{"action":"read","path":"evidence.txt"}});
+        let write = json!({"tool":"local_file","params":{"action":"write","path":"chosen.txt","content":"written"}});
+        assert!(execute(&inherit, write.clone()).success);
+        assert!(execute(&read_only, legacy_read.clone()).stdout.contains("role permission evidence"));
+        assert!(!execute(&write_only, legacy_read.clone()).success);
+        assert!(execute(&read_only, json!({"commands":[legacy_read.clone()]}))
+            .stdout.contains("role permission evidence"));
+        assert!(!execute(&write_only, json!({"commands":[legacy_read.clone()]})).success);
+
+        let batch = execute(&read_only, json!({"parallel":[legacy_read,write]}));
+        assert!(!batch.success);
+        assert!(batch.stdout.contains("role permission evidence"));
+        assert!(batch.stdout.contains("执行配置未允许工具/动作 local_file.write"));
     }
 
     #[test]

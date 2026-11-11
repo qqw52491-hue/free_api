@@ -13,29 +13,8 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::watch;
 
 
-/// 把父工作区准备为 writer 的私有沙箱（优先尝试 git worktree 秒级创建；非 git 项目平滑降级为物理拷贝）。
-pub fn create_isolated_workspace(parent_root: &Path, copy_root: &Path) -> Result<(usize, u64), String> {
-    // 1. 优先尝试 Git Worktree（毫秒级、0 拷贝、天然分支隔离）
-    let is_git_repo = parent_root.join(".git").exists();
-    if is_git_repo {
-        let worktree_res = std::process::Command::new("git")
-            .args(&["worktree", "add", "--detach"])
-            .arg(copy_root)
-            .arg("HEAD")
-            .current_dir(parent_root)
-            .output();
-        if let Ok(out) = worktree_res {
-            if out.status.success() && copy_root.exists() {
-                return Ok((1, 0));
-            }
-        }
-    }
-
-    // 2. 降级走物理拷贝
-    create_isolated_copy(parent_root, copy_root)
-}
-
 /// 把父工作区复制为 writer 的私有副本（跳过 .git 与既有 writer 副本；预算硬顶防失控）。
+#[cfg(test)]
 pub fn create_isolated_copy(parent_root: &Path, copy_root: &Path) -> Result<(usize, u64), String> {
     let mut files = 0usize;
     let mut bytes: u64 = 0;
@@ -43,7 +22,8 @@ pub fn create_isolated_copy(parent_root: &Path, copy_root: &Path) -> Result<(usi
     Ok((files, bytes))
 }
 
-pub(crate) fn copy_recursive(src: &Path, dst: &Path, files: &mut usize, bytes: &mut u64) -> Result<(), String> {
+#[cfg(test)]
+fn copy_recursive(src: &Path, dst: &Path, files: &mut usize, bytes: &mut u64) -> Result<(), String> {
     std::fs::create_dir_all(dst).map_err(|error| format!("创建副本目录失败: {}", error))?;
     for entry in std::fs::read_dir(src).map_err(|error| format!("读取源目录失败: {}", error))? {
         let entry = entry.map_err(|error| error.to_string())?;

@@ -31,6 +31,7 @@ try {
  for(let i=0;i<150 && !await evalJS('!!document.querySelector(".execution-settings select")');i++) await new Promise(r=>setTimeout(r,50));
  const choose=async(selector,value)=>{await evalJS(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e)throw Error('missing select');e.value=${JSON.stringify(value)};e.dispatchEvent(new Event('change',{bubbles:true}))})()`);await new Promise(r=>setTimeout(r,30))};
  const tools='section[aria-label="工具权限"] select'; const stages='section[aria-label="工作流程"] fieldset select'; const roles='section[aria-label="执行方式"] select';
+ assert.equal(await evalJS(`document.querySelector(${JSON.stringify(tools)}).options[0].textContent`),'由 AI 按需选择（默认）');
  await evalJS('testState.answer=false'); await choose(tools,'inherit');
  assert.equal(await evalJS(`document.querySelector(${JSON.stringify(tools)}).value`),'allowlist'); assert.deepEqual(await evalJS('JSON.parse(testState.raw).execution.allowed_tools'),['read_file']);
  await evalJS('testState.answer=true');await choose(stages,'off');
@@ -52,6 +53,9 @@ try {
  assert.equal(await evalJS(`document.querySelector(${JSON.stringify(flow)}).value`),'inherit');
  await evalJS(`testState.raw='{broken';testState.answer=false`);await new Promise(r=>setTimeout(r,50));await evalJS('document.querySelector(".error button").click()');assert.equal(await evalJS('testState.raw'),'{broken');
  await evalJS(`testState.answer=true;document.querySelector('.error button').click()`);await new Promise(r=>setTimeout(r,50));assert.deepEqual(await evalJS('JSON.parse(testState.raw).execution.workflow'),{});
+ assert.equal(await evalJS(`document.querySelector(${JSON.stringify(tools)}).value`),'inherit');
+ await evalJS(`testState.raw=JSON.stringify({profile:'reviewer'})`);
+ assert.match(await evalJS(`document.querySelector('section[aria-label="工具权限"]').textContent`), /外部 MCP.*审查工具/);
  await call('Emulation.setDeviceMetricsOverride',{width:1100,height:1050,deviceScaleFactor:1,mobile:false});
  const shot=await call('Page.captureScreenshot',{format:'png'});await writeFile('/tmp/role-independent-settings.png',Buffer.from(shot.data,'base64'));
  console.log('PASS real role settings: independent workflow and permissions, cancelled/confirmed expansion, corrupted-config protection');

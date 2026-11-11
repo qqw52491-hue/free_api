@@ -84,16 +84,10 @@ pub(crate) fn validate_native(tool: &str, action: &str, params: &Value) -> Resul
             }
         }
         "local_file" => {
-            let act = if act.is_empty() { "read" } else { act };
             let act = super::local_file::resolve_act(act, params);
             let write_shaped = ["content", "target_content", "replacement_content"]
                 .iter()
                 .any(|k| params.get(*k).is_some());
-            let act = if act == "local_file" && !write_shaped {
-                "read"
-            } else {
-                act
-            };
             if act == "read" && write_shaped {
                 return Err("❌ local_file 的有效 action 为 'read'（省略动作时默认 read），但参数含 content/target_content/replacement_content 写入字段。本次参数预检拒绝，文件未修改；请显式指定 action='write' 或 action='edit' 及对应参数。".to_string());
             }
@@ -151,7 +145,17 @@ pub(crate) fn validate_native(tool: &str, action: &str, params: &Value) -> Resul
                 "models"|"list"=>{optional(&tool,params,"offset","非负整数")?;},
                 "inbox"=>{optional(&tool,params,"child_run_id","string")?;optional(&tool,params,"offset","非负整数")?;optional(&tool,params,"limit","非负整数")?;},
                 "wait"=>{optional(&tool,params,"child_run_id","string")?;optional(&tool,params,"timeout_secs","非负整数")?;},
-                "dispatch"=>{crate::agent::execution::runtime::ExecutionConfig::parse(params,params["profile"].as_str().unwrap_or("task"))?;optional(&tool,params,"profile","string")?;text(&tool,params,&["task"],false)?;optional(&tool,params,"context","string")?;let size=params["task"].as_str().unwrap().chars().count()+params.get("context").and_then(Value::as_str).unwrap_or_default().chars().count();if size>65_536{return Err("child_task 的 task + context 超过 65536 字符；本次未执行。请用已有引用。".into())}},
+                "dispatch" => {
+                    optional(&tool, params, "profile", "string")?;
+                    crate::agent::execution::runtime::ExecutionConfig::parse_declaration(params)?;
+                    text(&tool, params, &["task"], false)?;
+                    optional(&tool, params, "context", "string")?;
+                    let size = params["task"].as_str().unwrap().chars().count()
+                        + params.get("context").and_then(Value::as_str).unwrap_or_default().chars().count();
+                    if size > 65_536 {
+                        return Err("child_task 的 task + context 超过 65536 字符；本次未执行。请用已有引用。".into());
+                    }
+                }
                 _=>return Err(format!("未知 child_task action='{effective}'；允许 dispatch/result/resume/status/list/models/send/ask/read_agent_result/inbox/receipt/wait/cancel；本次未执行。")),
             }
         }
@@ -163,6 +167,9 @@ pub(crate) fn validate_native(tool: &str, action: &str, params: &Value) -> Resul
         "job_cancel" => text(&tool, params, &["job_id", "id"], false)?,
         "child_writer" if matches!(act, "apply" | "apply_diff" | "apply_changes") => {
             text(&tool, params, &["child_run_id"], false)?;
+        }
+        "child_writer" if params["execution"]["workspace"] == "isolated" => {
+            return Err(crate::agent::child_writer::ISOLATED_WRITER_RETIRED.into());
         }
         _ => {}
     }
@@ -211,7 +218,7 @@ pub(crate) fn validate_child_item(db: &DbState, tool: &str, params: &Value) -> R
         validate_native("child_task","dispatch",&normalized)?;
     }
     if tool == "child_writer" && effective["execution"]["workspace"]=="isolated" {
-        crate::agent::child_writer::parse_writer_request(&effective)?;
+        return Err(crate::agent::child_writer::ISOLATED_WRITER_RETIRED.into());
     }
     Ok(())
 }
@@ -254,6 +261,9 @@ pub(crate) fn instruction_rejection(
         return native_rejection(tool, &action, &params);
     }
     if matches!(tool, "child_writer" | "child_worker" | "child_reviewer") {
+        if let Some(error) = native_rejection(tool, &action, &params) {
+            return Some(error);
+        }
         if let Err(error) = inst.checked_dispatches() { return Some(rejection(error)); }
         let items = inst.get_dispatch_items();
         let errors: Vec<_> = items

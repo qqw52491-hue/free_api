@@ -68,9 +68,6 @@ function migrateReasoningEffort(value: unknown, fallback: ReasoningEffort, isLeg
 function loadModelRouting(): ModelRouting {
     const fallback: ModelRouting = {
         reasoning_effort_version: 2,
-        pro: "",
-        flash: "",
-        vision: "",
         pro_reasoning_effort: "auto",
         flash_reasoning_effort: "auto",
         vision_reasoning_effort: "auto",
@@ -237,6 +234,10 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     watch(modelRouting, (value) => {
         try { localStorage.setItem(MODEL_ROUTING_STORAGE_KEY, JSON.stringify(value)); } catch { /* 存储不可用时继续使用当前会话配置 */ }
     }, { deep: true });
+    function modelRoutingForRun() {
+        const { pro = "", flash = "", vision = "", ...options } = modelRouting.value;
+        return { ...options, pro, flash, vision };
+    }
     const logContext = ref(false);
     const latestContext = ref<Record<string, unknown> | null>(null);
     const goalInput = ref("");
@@ -821,7 +822,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             return found ? found.id : first;
         };
 
-        if (!modelRouting.value.pro) {
+        if (modelRouting.value.pro === undefined) {
             const deepSeekPro = availableModels.find(m => /deepseek.*v4.*pro|v4.*pro.*deepseek/i.test(`${m.display_name} ${m.name}`));
             modelRouting.value.pro = deepSeekPro?.id || findModel(m => {
                 const label = `${m.display_name} ${m.name}`;
@@ -829,11 +830,11 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                     && /pro|opus|claude-3-5|gpt-4o|deepseek/i.test(label);
             });
         }
-        if (!modelRouting.value.flash) {
+        if (modelRouting.value.flash === undefined) {
             const deepSeekFlash = availableModels.find(m => /deepseek.*v4.*flash|v4.*flash.*deepseek/i.test(`${m.display_name} ${m.name}`));
             modelRouting.value.flash = deepSeekFlash?.id || findModel(m => /flash|mini|haiku|speed|turbo/i.test(`${m.display_name} ${m.name}`));
         }
-        if (!modelRouting.value.vision) {
+        if (modelRouting.value.vision === undefined) {
             modelRouting.value.vision = findModel(m => /vision|vl|multimodal|gpt-4o/i.test(`${m.display_name} ${m.name}`));
         }
     }
@@ -2073,7 +2074,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         awaitingRunStart = true;
         try {
             await invoke("run_agent_main_loop", {
-                modelRouting: modelRouting.value,
+                modelRouting: modelRoutingForRun(),
                 goal: currentGoal.value,
                 autoPilot: autoPilot.value,
                 planMode: requestedPlanMode,
@@ -2144,7 +2145,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         if (isRunning.value) return;
         try {
             const started = asRecord(await invoke<unknown>("start_background_agent_evaluation", {
-                modelRouting: modelRouting.value,
+                modelRouting: modelRoutingForRun(),
             }));
             const backgroundSessionId = toText(started.session_id || started.sessionId);
             const evaluationId = toText(started.evaluation_id || started.evaluationId);

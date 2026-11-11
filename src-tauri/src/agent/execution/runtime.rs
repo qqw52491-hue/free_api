@@ -59,13 +59,17 @@ impl ExecutionConfig {
     }
 
     pub fn parse(params: &Value, profile: &str) -> Result<Self, String> {
-        if !matches!(profile,"task"|"worker"|"writer"|"reviewer"|"review"|"child_worker"|"child_writer"|"child_reviewer") {return Err("未知子任务 profile；允许 task/worker/writer/reviewer。".into());}
+        let config = Self::parse_declaration(params)?;
+        config.validate_for_profile(profile)?;
+        Ok(config)
+    }
+
+    pub(crate) fn parse_declaration(params: &Value) -> Result<Self, String> {
         let config: Self = match params.get("execution") {
             None => Self::default(),
             Some(value) => serde_json::from_value(value.clone())
                 .map_err(|e| format!("execution 参数错误：{e}；未启动执行。"))?,
         };
-        config.stages.validate(config.workflow.plan_mode.as_deref())?;
         if config.allowed_tools.as_ref().is_some_and(|tools| {
             tools
                 .iter()
@@ -94,16 +98,22 @@ impl ExecutionConfig {
         if config.workspace.as_deref().is_some_and(|mode| !matches!(mode,"shared"|"isolated")) {
             return Err("execution.workspace 仅允许 shared/isolated。".into());
         }
-        if config.workspace.as_deref()==Some("isolated") && !matches!(profile,"writer"|"child_writer") {
+        Ok(config)
+    }
+
+    pub(crate) fn validate_for_profile(&self, profile: &str) -> Result<(), String> {
+        if !matches!(profile,"task"|"worker"|"writer"|"reviewer"|"review"|"child_worker"|"child_writer"|"child_reviewer") {return Err("未知子任务 profile；允许 task/worker/writer/reviewer。".into());}
+        self.stages.validate_for_new_task(self.workflow.plan_mode.as_deref())?;
+        if self.workspace.as_deref()==Some("isolated") && !matches!(profile,"writer"|"child_writer") {
             return Err("隔离补丁模式使用 writer 角色；未启动执行。".into());
         }
-        if (matches!(profile,"reviewer"|"review"|"child_reviewer") || config.workspace.as_deref()==Some("isolated"))
-            && (config.workflow.plan_mode.is_some()
-                || config.workflow.completion.as_deref() == Some("delivery") || !config.stages.is_empty())
+        if (matches!(profile,"reviewer"|"review"|"child_reviewer") || self.workspace.as_deref()==Some("isolated"))
+            && (self.workflow.plan_mode.is_some()
+                || self.workflow.completion.as_deref() == Some("delivery") || !self.stages.is_empty())
         {
             return Err("当前审查/隔离补丁适配交回专用结果；完整方案流程请使用共享工作区的通用执行方式。".into());
         }
-        Ok(config)
+        Ok(())
     }
     pub fn permits(&self, tool: &str) -> bool {
         matches!(
@@ -178,9 +188,10 @@ pub fn authorize_call(
     params: &Value,
 ) -> Result<(), String> {
     let config = config(db, id)?;
-    let effective = if action.is_empty() || action.eq_ignore_ascii_case(tool) {
+    let effective = if tool.eq_ignore_ascii_case("local_file") {
+        crate::agent::tools::local_file::resolve_act(action, params)
+    } else if action.is_empty() || action.eq_ignore_ascii_case(tool) {
         params["action"].as_str().unwrap_or(match tool {
-            "local_file" => "read",
             "local_shell" => "execute",
             "artifact_manager" => "create_document",
             _ => "",

@@ -286,38 +286,178 @@ pub(crate) fn start(
     Ok(())
 }
 
+fn reserve_tool_step(
+    db: &DbState,
+    id: &str,
+    name: &str,
+    action: &str,
+    params: &Value,
+) -> Result<Snapshot, String> {
+    if !params.is_object() {
+        return Err("审查工具参数必须是 JSON 对象；本次未执行，未消耗取证预算。请使用 {\"tool\":\"工具名\",\"params\":{...}}。".into());
+    }
+    if name.contains('/') {
+        // A qualified MCP name identifies the entire tool. A model-supplied
+        // action or argument cannot narrow its remote capabilities.
+        if !crate::agent::execution::runtime::config(db, id)?.permits(&name.to_ascii_lowercase()) {
+            return Err(format!("执行配置未允许 MCP 工具 {name}；本次未执行。"));
+        }
+    } else {
+        crate::agent::execution::runtime::authorize_call(db, id, name, action, params)?;
+    }
+    let mut snapshot = Snapshot::load(db, id, "reviewer")?.ok_or("审查执行检查点缺失")?;
+    let used = snapshot.state["tool_steps"].as_u64().unwrap_or(0);
+    let budget = u64::from(crate::agent::review_tools::forensic_budget());
+    if used >= budget {
+        return Err(format!(
+            "只读取证预算已用尽（{used}/{budget}），本次未执行；请用 finish 提交完整审查结果。"
+        ));
+    }
+    snapshot.state["tool_steps"] = json!(used + 1);
+    snapshot.save(db)?;
+    Ok(snapshot)
+}
+
+fn read_tool(
+    db: &DbState,
+    id: &str,
+    program: &ReviewProgram,
+    name: &str,
+    mut params: Value,
+) -> Result<String, String> {
+    let name = if name == "get_step_output" { "read_step_output" } else { name };
+    let parent: String = db.reader()?.query_row(
+        "SELECT parent_run_id FROM agent_child_runs WHERE id=?1", [id], |r| r.get(0),
+    ).map_err(|e|e.to_string())?;
+    if matches!(name, "list_execution_steps" | "list_child_runs" | "read_child_result") {
+        return crate::agent::reviewer_gatekeeper::review_history_tool(db, &parent, name, &params);
+    }
+    params["tool"] = json!(name);
+    if matches!(
+        name,
+        "read_step_output"
+            | "search_step_output"
+            | "evidence_find"
+            | "evidence_inspect"
+            | "evidence_compare"
+    ) {
+        let since = program
+            .evidence_since
+            .or(
+                crate::agent::checkpoint::load_checkpoint(db, &program.parent_session)?
+                    .and_then(|cp| cp.task_started_at),
+            )
+            .ok_or("未取得父任务时间边界，无法核对证据范围。")?;
+        if params.get("run_id").is_some_and(|v|v.as_str().is_none_or(|s|s.trim().is_empty())) {
+            return Err("run_id 必须是非空字符串；未读取回执。".into());
+        }
+        let evidence_session = if let Some(run) = params["run_id"].as_str() {
+            crate::agent::reviewer_gatekeeper::review_run_session(db, &parent, run)?
+        } else { program.parent_session.clone() };
+        return match name {
+            "read_step_output" => crate::agent::reviewer_gatekeeper::read_review_step_output(
+                db,
+                &evidence_session,
+                &params,
+                since,
+            ),
+            "search_step_output" => {
+                crate::agent::reviewer_gatekeeper::search_review_step_output(
+                    db,
+                    &evidence_session,
+                    &params,
+                    since,
+                )
+            }
+            _ => crate::agent::reviewer_gatekeeper::read_registered_evidence(
+                db,
+                &evidence_session,
+                name,
+                &params,
+                &program.workspace,
+                since,
+            ),
+        };
+    }
+    if name == "git_diff" {
+        if let Some(baseline) = crate::agent::reviewer_gatekeeper::GitBaseline::git_for_session(
+            &program.parent_session,
+        ) {
+            return Ok(baseline
+                .collect_git_diff(&program.workspace)
+                .map(|(diff, _)| diff)
+                .unwrap_or_else(|| "任务起点以来无 Git 改动".into()));
+        }
+    }
+    crate::agent::review_tools::execute(
+        &program.workspace,
+        Some(&crate::agent::path_guard::get_session_tmp_dir(
+            &program.parent_session,
+        )),
+        Some(&program.parent_session),
+        name,
+        &params,
+    )
+}
+
+pub(crate) mod mcp_tools;
+mod parallel;
+
+async fn invoke_read_tool(
+    db: &DbState,
+    id: &str,
+    program: &ReviewProgram,
+    registry: &tokio::sync::Mutex<crate::agent::mcp::PluginRegistry>,
+    name: &str,
+    action: &str,
+    params: Value,
+    interrupt: &watch::Receiver<u64>,
+) -> Result<String, String> {
+    if interrupt.has_changed().unwrap_or(true) {
+        return Err("审查已收到停止信号，本次取证未执行。".into());
+    }
+    let plugin = if name.contains('/') {
+        Some(mcp_tools::resolve(db, registry, name).await?)
+    } else {
+        None
+    };
+    // Charge on the parent task before starting I/O. Workers do not write the checkpoint.
+    reserve_tool_step(db, id, name, action, &params)?;
+    if let Some((client, tool)) = plugin {
+        if interrupt.has_changed().unwrap_or(true) {
+            return Err("审查已收到停止信号，本次取证未执行。".into());
+        }
+        return mcp_tools::call(&client, &format!("task-{id}"), &tool, params).await;
+    }
+    let (db, id, program, name, interrupt) = (
+        db.clone(), id.to_owned(), program.clone(), name.to_owned(), interrupt.clone(),
+    );
+    tokio::task::spawn_blocking(move || {
+        if interrupt.has_changed().unwrap_or(true) {
+            return Err("审查已收到停止信号，本次取证未执行。".into());
+        }
+        read_tool(&db, &id, &program, &name, params)
+    }).await.map_err(|error| format!("审查取证未返回结果：{error}"))?
+}
+
+
 pub(crate) async fn tool(
     db: &DbState,
     id: &str,
     program: &ReviewProgram,
     inst: &crate::agent::types::AgentInstruction,
+    registry: &tokio::sync::Mutex<crate::agent::mcp::PluginRegistry>,
     interrupt: &mut watch::Receiver<u64>,
 ) -> crate::agent::types::DispatchResult {
-    let requested_name = inst.get_tool();
-    let name = if requested_name == "get_step_output" { "read_step_output".to_string() } else { requested_name.clone() };
-    let mut params = inst.get_params();
+    if let Some(branches) = &inst.parallel {
+        return parallel::run(db, id, program, branches, registry, interrupt).await;
+    }
     let result: Result<String, String> = async {
-        if !params.is_object() {
-            return Err("审查工具参数必须是 JSON 对象；本次未执行，未消耗取证预算。请使用 {\"tool\":\"工具名\",\"params\":{...}}。".into());
-        }
-        crate::agent::execution::runtime::authorize_call(
-            db,
-            id,
-            &requested_name,
-            &inst.get_action(),
-            &params,
-        )?;
-        let mut snapshot = Snapshot::load(db, id, "reviewer")?.ok_or("审查执行检查点缺失")?;
-        let used = snapshot.state["tool_steps"].as_u64().unwrap_or(0);
-        let budget = u64::from(crate::agent::review_tools::forensic_budget());
-        if used >= budget {
-            return Err(format!(
-                "只读取证预算已用尽（{used}/{budget}），本次未执行；请用 finish 提交完整审查结果。"
-            ));
-        }
-        snapshot.state["tool_steps"] = json!(used + 1);
-        snapshot.save(db)?;
-        if name == "verify" && program.final_fingerprint.is_some() {
+        let requested_name = inst.get_tool();
+        let params = inst.get_params();
+        let action = inst.get_action();
+        if requested_name == "verify" && program.final_fingerprint.is_some() {
+            let snapshot = reserve_tool_step(db, id, &requested_name, &action, &params)?;
             if snapshot.state["verification_pending"] == true {
                 return Err(
                     "此前宿主复验的结果未知，未自动重跑；请核对已有证据并披露未确认事项。".into(),
@@ -364,78 +504,7 @@ pub(crate) async fn tool(
             snapshot.save(db)?;
             return serde_json::to_string(&results).map_err(|e| e.to_string());
         }
-        let parent: String = db.reader()?.query_row(
-            "SELECT parent_run_id FROM agent_child_runs WHERE id=?1", [id], |r| r.get(0),
-        ).map_err(|e|e.to_string())?;
-        if matches!(name.as_str(), "list_execution_steps" | "list_child_runs" | "read_child_result") {
-            return crate::agent::reviewer_gatekeeper::review_history_tool(db, &parent, &name, &params);
-        }
-        params["tool"] = json!(name);
-        if matches!(
-            name.as_str(),
-            "read_step_output"
-                | "search_step_output"
-                | "evidence_find"
-                | "evidence_inspect"
-                | "evidence_compare"
-        ) {
-            let since = program
-                .evidence_since
-                .or(
-                    crate::agent::checkpoint::load_checkpoint(db, &program.parent_session)?
-                        .and_then(|cp| cp.task_started_at),
-                )
-                .ok_or("未取得父任务时间边界，无法核对证据范围。")?;
-            if params.get("run_id").is_some_and(|v|v.as_str().is_none_or(|s|s.trim().is_empty())) {
-                return Err("run_id 必须是非空字符串；未读取回执。".into());
-            }
-            let evidence_session = if let Some(run) = params["run_id"].as_str() {
-                crate::agent::reviewer_gatekeeper::review_run_session(db, &parent, run)?
-            } else { program.parent_session.clone() };
-            return match name.as_str() {
-                "read_step_output" => crate::agent::reviewer_gatekeeper::read_review_step_output(
-                    db,
-                    &evidence_session,
-                    &params,
-                    since,
-                ),
-                "search_step_output" => {
-                    crate::agent::reviewer_gatekeeper::search_review_step_output(
-                        db,
-                        &evidence_session,
-                        &params,
-                        since,
-                    )
-                }
-                _ => crate::agent::reviewer_gatekeeper::read_registered_evidence(
-                    db,
-                    &evidence_session,
-                    &name,
-                    &params,
-                    &program.workspace,
-                    since,
-                ),
-            };
-        }
-        if name == "git_diff" {
-            if let Some(baseline) = crate::agent::reviewer_gatekeeper::GitBaseline::git_for_session(
-                &program.parent_session,
-            ) {
-                return Ok(baseline
-                    .collect_git_diff(&program.workspace)
-                    .map(|(diff, _)| diff)
-                    .unwrap_or_else(|| "任务起点以来无 Git 改动".into()));
-            }
-        }
-        crate::agent::review_tools::execute(
-            &program.workspace,
-            Some(&crate::agent::path_guard::get_session_tmp_dir(
-                &program.parent_session,
-            )),
-            Some(&program.parent_session),
-            &name,
-            &params,
-        )
+        invoke_read_tool(db, id, program, registry, &requested_name, &action, params, interrupt).await
     }
     .await;
     match result {

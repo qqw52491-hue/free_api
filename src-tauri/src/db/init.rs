@@ -256,7 +256,8 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             enabled INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL,
             url TEXT NOT NULL DEFAULT '',
-            headers TEXT NOT NULL DEFAULT '{}'
+            headers TEXT NOT NULL DEFAULT '{}',
+            review_read_tools TEXT NOT NULL DEFAULT ''
         );
 
         -- 用户维护的自定义提示词与 Skill。它们作为普通上下文追加，不能替换内置系统约束。
@@ -582,6 +583,10 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
     );
     let _ = conn.execute(
         "ALTER TABLE mcp_plugins ADD COLUMN headers TEXT NOT NULL DEFAULT '{}';",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE mcp_plugins ADD COLUMN review_read_tools TEXT NOT NULL DEFAULT '';",
         [],
     );
     // 健康持久化：最近一次握手成功时间/失败原因/工具数——

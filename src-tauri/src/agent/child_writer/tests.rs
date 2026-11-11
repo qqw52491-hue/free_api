@@ -18,43 +18,6 @@
     }
 
     #[test]
-    fn parse_writer_request_accepts_optional_test_command() {
-        let ok = parse_writer_request(&json!({"task": "修复 sum", "test_command": "npm test"})).unwrap();
-        assert_eq!(ok.test_command, "npm test");
-        assert!(ok.context_excerpts.is_none());
-        assert!(parse_writer_request(&json!({"task": "修复 sum"})).unwrap().test_command.is_empty());
-        assert!(parse_writer_request(&json!({"task":"x", "test_command":42})).is_err());
-        assert!(parse_writer_request(&json!({"task":"x", "test_command":null})).is_err());
-        assert!(parse_writer_request(&json!({"task": "x", "test_command": "a; b"})).is_err());
-        assert!(parse_writer_request(&json!({"task": "x", "test_command": "npm test", "focus_paths": ["1","2","3","4","5","6"]})).is_err());
-
-        // step_budget：合法值钳位到硬顶；非法类型/零/负数 fail-open 到 None（默认预算）
-        let with_budget = parse_writer_request(&json!({"task": "x", "test_command": "t", "step_budget": 30})).unwrap();
-        assert_eq!(with_budget.step_budget, Some(30));
-        let over_cap = parse_writer_request(&json!({"task": "x", "test_command": "t", "step_budget": 999})).unwrap();
-        assert_eq!(over_cap.step_budget, Some(crate::agent::child_writer::WRITER_STEP_BUDGET_CAP));
-        let bad_type = parse_writer_request(&json!({"task": "x", "test_command": "t", "step_budget": "30"})).unwrap();
-        assert_eq!(bad_type.step_budget, None);
-        let zero = parse_writer_request(&json!({"task": "x", "test_command": "t", "step_budget": 0})).unwrap();
-        assert_eq!(zero.step_budget, None);
-
-        // 带有 context_excerpts
-        let with_ctx = parse_writer_request(&json!({
-            "task": "修复 sum 函数边界",
-            "test_command": "npm test",
-            "context_excerpts": {
-                "background": "sum.mjs 未对负数做容错",
-                "todo_slice": ["修复负数逻辑", "通过单元测试"],
-                "file_hints": ["src/sum.mjs"]
-            }
-        })).unwrap();
-        assert!(with_ctx.context_excerpts.is_some());
-        let ctx = with_ctx.context_excerpts.unwrap();
-        assert_eq!(ctx.background.as_deref(), Some("sum.mjs 未对负数做容错"));
-        assert_eq!(ctx.todo_slice.len(), 2);
-    }
-
-    #[test]
     fn render_writer_initial_prompt_partitions_or_fallbacks() {
         let req_simple = WriterRequest {
             task: "修复 bug".into(),

@@ -496,6 +496,10 @@ pub(crate) fn record_plan_without_review(checkpoint: &mut AgentCheckpoint, submi
         return Err("已有方案审查阻塞尚未核销；关闭后续自动审查不撤销该结论。".into());
     }
     let (targets, _) = crate::agent::plan_gate::validate_plan_submission(submission, false)?;
+    if let Some(verdict) = checkpoint.triage_verdict.as_mut() {
+        // Saving a plan without a plan reviewer can still enable stage review.
+        verdict.apply_plan_review_overrides("", &submission.stage_review_mode);
+    }
     checkpoint.submitted_plan=Some(submission.clone());
     checkpoint.submitted_plan_step=Some(step_id);
     if checkpoint.plan_mode == crate::agent::checkpoint::PlanExecutionMode::PlanApproval {

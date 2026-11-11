@@ -1,7 +1,8 @@
 use crate::agent::mcp::{McpToolDef, PluginConfig};
 use crate::llm::ModelConfig;
 use serde::Serialize;
-use std::collections::HashMap;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -36,17 +37,12 @@ fn catalogs() -> &'static Mutex<HashMap<String, CachedCatalog>> {
     CATALOGS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn fingerprint(config: &PluginConfig) -> String {
-    let env = serde_json::to_string(&config.env).unwrap_or_default();
-    let headers = serde_json::to_string(&config.headers).unwrap_or_default();
-    format!(
-        "{:?}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
-        config.url,
-        config.command,
-        config.args.join("\u{1f}"),
-        headers,
-        env
-    )
+pub(crate) fn fingerprint(config: &PluginConfig) -> String {
+    let env: BTreeMap<_, _> = config.env.iter().collect();
+    let headers: BTreeMap<_, _> = config.headers.iter().collect();
+    let bytes = serde_json::to_vec(&(&config.url, &config.command, &config.args, env, headers))
+        .expect("MCP connection settings are serializable");
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 /// 默认的 0 依赖规则型 MCP 能力卡生成器（从各工具描述中提取核心摘要，100% 确定性、零等待）

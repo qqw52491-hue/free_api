@@ -17,7 +17,11 @@ const sandbox = {exports:{}}; vm.runInNewContext(helperJS,sandbox); const helper
 const locked={value:false};
 const parent={modelRouting:{stages:{plan:true},stage_reviewer_override:'disabled',stage_review_committee:true}};
 let emissions=[];
-const composer=functions('src/components/agent/AgentComposer.vue',['setFixedStage'],{workflowLocked:locked,props:parent,withFixedStageChange:helper.withFixedStageChange,emit:(name,value)=>{emissions.push(name);parent.modelRouting=value;}});
+const composer=functions('src/components/agent/AgentComposer.vue',['setFixedStage','selectPlanMode'],{
+  workflowLocked:locked,props:parent,withFixedStageChange:helper.withFixedStageChange,
+  planMenuOpen:{value:true},activeModeGuide:{value:null},
+  emit:(name,value)=>{emissions.push(name);if(name==='update:model-routing') parent.modelRouting=value;},
+});
 const fieldProps={modelValue:parent.modelRouting.stages,approval:false,legacyStageReviewDisabled:true};
 const fields=functions('src/components/agent/StageSettingsFields.vue',['mode','change'],{props:fieldProps,emit:(name,...args)=>{if(name==='stage-change') composer.setFixedStage(...args);}});
 function sync(){fieldProps.modelValue=parent.modelRouting.stages;fieldProps.legacyStageReviewDisabled=helper.stageReviewerIsDisabled(parent.modelRouting);}
@@ -29,6 +33,15 @@ fields.change('stage_review','off');sync();assert.equal(fields.mode('stage_revie
 fields.change('stage_review','auto');sync();assert.equal(fields.mode('stage_review'),'auto');assert.equal(helper.stageReviewerIsDisabled(parent.modelRouting),false);
 parent.modelRouting.stage_reviewer_override='review-role';fields.change('stage_review','off');sync();assert.equal(parent.modelRouting.stage_reviewer_override,'review-role');
 fields.change('stage_review','auto');sync();assert.equal(parent.modelRouting.stage_reviewer_override,'review-role');
+fields.change('plan','off');sync();
+assert.equal(parent.modelRouting.stages.plan,false);
+composer.selectPlanMode('cross_review');sync();
+assert.equal(parent.modelRouting.stages.plan,true);
+fieldProps.requiresPlan=true;
+const beforePlanOff=emissions.length;
+fields.change('plan','off');sync();
+assert.equal(parent.modelRouting.stages.plan,true);
+assert.equal(emissions.length,beforePlanOff);
 locked.value=true; const old=JSON.stringify(parent.modelRouting), count=emissions.length;fields.change('stage_review','off');
 assert.equal(JSON.stringify(parent.modelRouting),old,'locked resume cannot change current task settings');assert.equal(emissions.length,count);
-console.log('PASS: actual stage field → composer integration, legacy fallback, reviewer preservation, resume lock');
+console.log('PASS: actual stage field → composer integration, cross-review plan requirement, legacy fallback, reviewer preservation, resume lock');

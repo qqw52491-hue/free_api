@@ -97,9 +97,8 @@ async fn dispatch_inner(
             if profile=="reviewer" {let mut mapped=params.clone();mapped["question"]=params["task"].clone();adapted.params=Some(mapped);adapted.command=None;}
             let result=match profile {
 
-                "writer"=>Box::pin(super::dispatch_child_writer::dispatch_child_writer(ctx,&adapted)).await?,
                 "reviewer"=>super::dispatch_child_reviewer::dispatch_child_reviewer(ctx,&adapted).await?,
-                _=>return Err("profile 仅允许 task/worker/writer/reviewer；未派发。".into()),
+                _=>return Err("当前派发类型没有专用审查入口；未派发。".into()),
             };
             return match result {ArmOutcome::Done(out)|ArmOutcome::Early(out)=>Ok(out)};
         }
@@ -366,6 +365,7 @@ async fn dispatch_inner(
             Err(error) => { let _ = ctx.app.emit(&format!("agent-log-{}",ctx.final_session_id),format!("{error}；本次沿用原有派发默认流程。")); }
         }
     }
+    let execution = crate::agent::execution::runtime::ExecutionConfig::parse(&params, profile)?;
     ctx.checkpoint.prepare_child_dispatch(inst, ctx.context, slot, true)?;
     save_checkpoint(ctx.state.inner(), ctx.checkpoint)?;
     let (workspace_session, workspace_run) = child_task::workspace_owner(ctx.final_session_id, ctx.parent_run_id)?;
@@ -404,7 +404,6 @@ async fn dispatch_inner(
         child_session: format!("task-{id}"),
         child_run: id.clone(),
     };
-    let execution=crate::agent::execution::runtime::ExecutionConfig::parse(&params,profile)?;
     let mut role_context = task_role.as_ref().map(|card|format!("{}\n{}\n{}",crate::agent::tools::role_manager::persona_block(card),crate::agent::tools::role_manager::skills_block(ctx.state.inner(),card),card.parse_custom_schema().map(|s|s.render_prompt_instructions()).unwrap_or_default())).unwrap_or_default();
     if let Some(brief) = ctx.checkpoint.triage_verdict.as_ref().and_then(|v|v.investigation_brief_text()) {
         role_context.push_str(&format!("\n【入口调查参考（不是新增验收义务）】{brief}"));

@@ -335,7 +335,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
     let maybe_model_cfg = model_cfg_res.as_ref().ok();
 
     // 5. 查询所有 MCP Server 的工具列表并提前预热/升级当前会话的智能能力卡
-    let (mcp_tools_menu, compact_tools_index) = {
+    let (mcp_tools_menu, compact_tools_index, review_mcp_menu) = {
         let registry = registry_state.lock().await;
         registry
             .prime_tool_catalog_for_session(&final_session_id, maybe_model_cfg)
@@ -406,8 +406,12 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
             crate::agent::task_context::visibility::reviewer_index(&initial_execution_config,
                 crate::agent::review_tools::forensic_budget(), review.final_fingerprint.is_some() && !review.verify_obligations.is_empty())
         } else { crate::agent::prompt_assembly::builtin_tool_specs().iter().filter(|s| initial_review.is_none() && crate::agent::task_context::visibility::tool(&initial_execution_config,s.name)).map(|s|s.name).collect::<Vec<_>>().join(", ") };
+        let (review_mcp_index, review_mcp_menu) = if initial_review.is_some() {
+            crate::agent::child_reviewer::main_executor::mcp_tools::menu(state.inner(), &registry, &initial_execution_config)
+        } else { Default::default() };
+        let mcp_part = if review_mcp_index.is_empty() { mcp_part } else { review_mcp_index };
         let compact = format!("- 原生内置: {}\n- MCP 插件:\n{}", builtin_list, mcp_part);
-        (if initial_review.is_some() || initial_execution_config.allowed_tools.is_some() { String::new() } else { registry.format_tools_menu() }, compact)
+        (if initial_review.is_some() || initial_execution_config.allowed_tools.is_some() { String::new() } else { registry.format_tools_menu() }, compact, review_mcp_menu)
     };
 
     // 6. 扫描 prompts/skills/ 目录，生成动态 Skill 目录摘要（不含已固定编译的内置 Skill）
@@ -438,9 +442,11 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
         "\n\n## 通用会话模式 (无绑定工程)\n当前会话未选定具体工程项目。凡未明确要求存放于工程中的临时文件、数据导出或中间脚本，一律写入 `tmp/` 目录并通过 `artifact_manager` 登记交付，严禁直接散落在当前运行根目录下。交付门禁直接对账 tmp/ 产物与登记记录，严禁为迎合门禁把产物拷入当前目录。"
     };
     let system_prompt = if let Some(review) = &initial_review {
-        crate::agent::task_context::review_entry(&review.messages, &workspace_skill_context, &custom_instruction_context,
+        let mut prompt = crate::agent::task_context::review_entry(&review.messages, &workspace_skill_context, &custom_instruction_context,
             &initial_execution_config, crate::agent::review_tools::forensic_budget(),
-            review.final_fingerprint.is_some() && !review.verify_obligations.is_empty())
+            review.final_fingerprint.is_some() && !review.verify_obligations.is_empty());
+        prompt.push_str(&review_mcp_menu);
+        prompt
     } else { format!(
         "{}{}{}{}{}\n{}\n{}{}",
         base_prompt,
@@ -640,8 +646,14 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
         let _ = app.emit(&format!("agent-log-{}", final_session_id),
             "⚠️ 旧任务未保存审查人数和旧审查覆盖的原始配置；本次沿用当前设置并记录，无法还原此前值。执行模式和固定环节仍沿用原检查点。");
     }
-    let validation_mode = if is_resuming_existing { Some(checkpoint.plan_mode.as_str()) } else { plan_mode.as_deref() };
-    checkpoint.stages.validate(validation_mode)?;
+    if is_resuming_existing {
+        checkpoint.stages.validate(Some(checkpoint.plan_mode.as_str()))?;
+    } else {
+        let mode = crate::agent::checkpoint::PlanExecutionMode::from_str_or_auto_pilot(
+            plan_mode.as_deref(), auto_pilot,
+        );
+        checkpoint.stages.validate_for_new_task(Some(mode.as_str()))?;
+    }
     let review_program = crate::agent::child_reviewer::main_executor::load(state.inner(), &run_id)?;
     context.add_host_feedback(&if review_program.is_some() {
         "【当前审查职责】只读取证并交回审查结果；不能实施修改或再次委派。父任务流程配置见审查材料，内部防递归配置不改变父任务设置。".to_string()
@@ -846,15 +858,14 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
                 context.turns_history.push(crate::agent::context::ChatMessage {
                     role: "user".to_string(),
                     content: json!(format!(
-                        "【🧭 入口调查参考（入口分流给出）】\n{}\n{}\n【审查方式随方案选择（不得自行免审）】submit_plan 里额外填 final_review_mode（mechanical_only|artifact_quality|code_review|operational_verification|panel）与 stage_review_mode（none|milestone），按你摸底后确定的真实产物来选：视频/动画/PPT/页面/报表等成品用 artifact_quality（终审员可对视频抽帧、对页面/PPT 截图核对内容）；跨模块测试和运行验证可选 operational_verification，核对实际命令、回执和未覆盖项；仅入口已选择机械校验的简单任务可沿用 mechanical_only。已有独立终审、多人终审或 milestone 不可由执行模型自行关闭；确需放宽应交人工决定，方案审查通过不替代此授权。\n【非代码产物（视频/PPT/表格/报告等）的方案要求】产出文件时 target_files 填真实产出路径；仅对话报告、只读调查或测试任务可填 []；方案须写明产物规格、分步清单、每步可核对的验证方式与关键假设；验证以真实打开/渲染/检查产物内容为准，不要只确认文件存在。",
+                        "【🧭 入口调查参考（入口分流给出）】\n{}\n{}\n【审查方式随方案选择】submit_plan 可填写 final_review_mode（mechanical_only|artifact_quality|code_review|operational_verification|panel）。视频/动画/PPT/页面/报表等成品用 artifact_quality（终审员可对视频抽帧、对页面/PPT 截图核对内容）。跨模块测试和运行验证可选 operational_verification，核对实际命令、回执和未覆盖项。入口已选择机械校验的简单任务可沿用 mechanical_only。自动阶段审查沿用入口选择。若调查发现有需要提前复核的风险，可用 stage_review_mode=milestone 补开。用户固定设置优先，放宽已选的独立终审、多人终审或 milestone 由人工决定。\n【非代码产物（视频/PPT/表格/报告等）的方案要求】产出文件时 target_files 填真实产出路径；仅对话报告、只读调查或测试任务可填 []；方案须写明产物规格、分步清单、每步可核对的验证方式与关键假设；验证以真实打开/渲染/检查产物内容为准，不要只确认文件存在。",
                         brief, investigation_hint
                     )),
                 });
             }
         }
-        // 方案路由先保留独立终审和 milestone；方案可选择实际产物对应的终审类型，
-        // 但执行模型不能自行免审（曾将复杂只读测试改为 mechanical_only/none）。
-        verdict.apply_plan_route_review_defaults();
+        // 方案路由保留独立终审，阶段审查沿用入口分流的独立选择。
+        verdict.apply_plan_route_final_review_default();
         checkpoint.triage_verdict = Some(verdict);
         // 审查覆盖面观测行：分流判决如何塑形阶段/终审一目了然；判决关闭阶段审查
         // 时额外落 gate 留痕（step_id 此处未就位，与上方 triage 记录一致用 0）。

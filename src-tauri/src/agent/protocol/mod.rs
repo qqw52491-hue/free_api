@@ -721,22 +721,7 @@ impl DispatchEnvelope {
         let identity =
             crate::agent::child_reviewer::ChildRunIdentity::from_envelope(self);
         match self.role_id.as_str() {
-            "child_writer" | "writer" => {
-                crate::agent::child_writer::spawn_child_writer(
-                    app,
-                    db,
-                    &self.parent_run_id,
-                    &self.parent_session_id,
-                    workspace_root,
-                    &self.model_id,
-                    &self.reasoning_effort,
-                    &self.input_payload,
-                    final_persona,
-                    interrupt_rx,
-                    &identity,
-                )
-                .await
-            }
+            "child_writer" | "writer" => Err(crate::agent::child_writer::ISOLATED_WRITER_RETIRED.into()),
             "child_worker" | "worker" => {
                 crate::agent::child_worker::spawn_child_worker(
                     app,
