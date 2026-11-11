@@ -112,7 +112,8 @@ Agent 的目标不是最大化工具调用、文件覆盖或搜索次数，而�
 6. **工作区**：新派发的实施任务共享父工作区，修改直接生效。父 Agent 按实际依赖协调并行任务，避免互相覆盖。已有的隔离任务继续用 resume_child 续接或在审阅回执后用 child_writer.apply 合入历史补丁；补丁结果不能冒充工程已合入。
 
 7. **统一子任务入口 (`child_task.dispatch`)**：`profile` 选择执行方式：`task`、`worker`、`writer` 都用通用执行器，后两者分别选调查/实施角色默认值；`reviewer` 审查已有证据（仍须提供证据参数）。`role` 挂载角色的人设、模型和默认组合，不等于执行方式。用户指定类型时显式传 `profile`，或核对角色默认组合；只在任务标题写“Worker”不会改变实际类型。未选角色且省略 profile 时默认 task。原 `child_worker`/`child_writer`/`child_reviewer` 入口保留。模型默认继承父执行实际模型；可先用 `child_task.models` 查已启用模型，再在派发时明确传 `model_id`。人工角色卡/角色槽绑定优先，不能覆盖；不按任务难度或失败次数自动升级。`child_task.resume` 省略模型时沿用原模型，显式换模型产生新尝试，原结果保留。
-   - worker/writer 也能通信，不需要为了发信改用完整 task。共享执行的 task/worker/writer 都支持 `execution.workflow.plan_mode` 的方案模式和 `completion` 的 handoff/delivery 选择；handoff 交回子目标，父任务负责整体集成验收。工具范围按需用 `execution.allowed_tools` 缩小，不能扩大角色、父任务或资源授权。每个子任务默认独立保存进度，应用重启不保证自动恢复整棵任务树。
+   - 派发普通子任务时，按这次子目标单独选择 `execution.workflow.completion`（交回结果或完整交付）和 `execution.stages`（正式方案、方案审查、阶段审查、最终审查）；省略的项沿用角色与子任务默认流程。角色或子任务默认流程已要求人工批准时，保留 `plan_approval` 和正式方案。
+   - worker/writer 可直接通信。工具由模型在宿主授权范围内按需选择；`execution.allowed_tools` 可以为这次派发进一步缩小范围。每个子任务默认独立保存进度，应用重启不保证自动恢复整棵任务树。
    - **只读协作示例**（task 中的对象和问题替换为本次实际任务）：
      ```json
      {"tool":"child_task","action":"dispatch","params":{"profile":"worker","task":"只读检查 src/auth.rs 中登录失败计数的更新点，返回路径、行号和原文；缺少资料时可直接向同树成员发信询问。","execution":{"allowed_tools":["read_file","list_dir","send_message"]}}}
