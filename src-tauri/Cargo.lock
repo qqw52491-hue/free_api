@@ -1255,7 +1255,7 @@ dependencies = [
 
 [[package]]
 name = "free-api-chat"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
