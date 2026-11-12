@@ -220,6 +220,7 @@ pub(crate) fn start(
     effort: String,
     program: ReviewProgram,
     interrupt: watch::Receiver<u64>,
+    progress_member_id: Option<&str>,
 ) -> Result<(), String> {
     let managed = app
         .try_state::<DbState>()
@@ -264,6 +265,11 @@ pub(crate) fn start(
         true,
         "auto".into(),
         None,
+        Some(crate::agent::child_task::runtime::ReviewRelay {
+            member_id: progress_member_id.map(str::to_owned),
+            label: program.role_label.as_ref().and_then(Value::as_str).map(str::to_owned),
+            model: model.to_owned(),
+        }),
     )?;
     let id = id.to_string();
     let db = db.clone();
@@ -329,6 +335,27 @@ fn read_tool(
     let parent: String = db.reader()?.query_row(
         "SELECT parent_run_id FROM agent_child_runs WHERE id=?1", [id], |r| r.get(0),
     ).map_err(|e|e.to_string())?;
+    if name == "list_task_tree" {
+        for key in ["offset", "limit"] {
+            if params.get(key).is_some_and(|v| v.as_u64().is_none()) {
+                return Err(format!("{key} 必须是非负整数；未执行查询"));
+            }
+        }
+        let actor = crate::agent::agent_mailbox::Actor::new(id, &format!("task-{id}"));
+        let mut overview = crate::agent::agent_mailbox::family_overview(
+            db, &actor, params["offset"].as_u64().unwrap_or(0), params["limit"].as_u64().unwrap_or(30).clamp(1, 100),
+        )?;
+        if let Some(tasks) = overview["tasks"].as_array_mut() {
+            for task in tasks {
+                if let Some(row) = task.as_object_mut() {
+                    row.remove("execution_config");
+                    row.remove("checkpoint");
+                }
+            }
+        }
+        overview["scope_notice"] = json!("同一任务树的只读概览；详细步骤与结果仍按本次审查范围授权。");
+        return Ok(overview.to_string());
+    }
     if matches!(name, "list_execution_steps" | "list_child_runs" | "read_child_result") {
         return crate::agent::reviewer_gatekeeper::review_history_tool(db, &parent, name, &params);
     }
@@ -538,6 +565,7 @@ pub(crate) async fn run_final(
     obligations: Vec<crate::agent::review_contract::ReviewObligation>,
     evidence_since: chrono::DateTime<chrono::Utc>,
     mut interrupt: watch::Receiver<u64>,
+    progress_member_id: &str,
 ) -> Result<crate::agent::reviewer_gatekeeper::ReviewResult, String> {
     let id = begin_child_run_extended(
         db,
@@ -577,6 +605,7 @@ pub(crate) async fn run_final(
         "auto".into(),
         program,
         interrupt.clone(),
+        Some(progress_member_id),
     ) {
         crate::agent::execution::runtime::fail_checkpoint(db, &id, error.clone());
         return Err(error);

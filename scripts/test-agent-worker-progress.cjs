@@ -261,7 +261,7 @@ async function main() {
     assert.deepEqual(placeReviewRows([{ ...final, anchor: { ...final.anchor, occurrence: 1 } }], [{ ...historyEntries[1], steps: [historyStep, retry] }]).owners.get('retry'), [final.id], 'logical retries stay distinct');
     assert.deepEqual(placeReviewRows([{ id: 'unanchored' }], historyEntries).unplaced, ['unanchored']);
     const timelineStatement = ast.statements.find(n => ts.isVariableStatement(n) && n.declarationList.declarations.some(d => d.name.getText(ast) === 'timelineEntries'));
-    const timelines = vm.runInNewContext(ts.transpileModule(timelineStatement.getText(ast) + '\n timelineEntries.value;', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, { computed: vue.computed, baseTimelineEntries: vue.ref([{ id: 'finish-plan', type: 'plan' }, { id: 'live-completion', type: 'completion' }]), reviewPlacement: vue.ref({ unplaced: ['unanchored'] }), props: { isRunning: false } });
+    const timelines = vm.runInNewContext(ts.transpileModule(timelineStatement.getText(ast) + '\n timelineEntries.value;', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, { computed: vue.computed, baseTimelineEntries: vue.ref([{ id: 'finish-plan', type: 'plan' }, { id: 'live-completion', type: 'completion' }]), reviewPlacement: vue.ref({ unplaced: ['unanchored'] }), unplacedLiveReviewers: vue.ref([]), unplacedReviewEntry: { id: 'unplaced-final-review', type: 'review', timestamp: 0 }, props: { isRunning: false } });
     assert.equal(timelines[1].type, 'review'); assert.equal(timelines[2].type, 'completion', 'unanchored fallback is before final response, not after');
     assert(text(reviews()[2]).includes('通过'), 'completed conclusion retained');
     await emit('channel-run-started', { session_id: 'existing-session', goal: 'next run' });
@@ -297,6 +297,53 @@ async function main() {
     await vue.nextTick();
     assert.equal(s.reviewProgress.value.find(r=>r.id==='final-stop').phase,'cancelled', 'late success cannot overwrite manual cancellation');
     assert(!stopButton(finalStop()));
+
+    // Production relay shape. Plan review may be registered by submit_plan
+    // without a visible dispatch row; its wait still carries the exact ID.
+    const planReview = { type: 'child_task_progress', child_run_id: 'plan-review-executor', review: { label: '技术主管', model: 'fixture' } };
+    progress({ ...planReview, event: { type: 'started' } });
+    progress({ type: 'step_new', step: { id: 11, tool: 'wait_jobs', params: { job_ids: ['plan-review-executor', 'shell-job'] } } });
+    const planWait = s.steps.value.find(step => step.stepId === 11);
+    const { extractSubagentsFromStep } = load(path.join(base, 'workerUtils.ts'));
+    assert.deepEqual(Array.from(extractSubagentsFromStep(planWait, s.steps.value, s.teamWorkers.value), w => w.id), ['plan-review-executor']);
+    progress({ ...planReview, event: { type: 'step_new', step: {
+        id: 0, tool: 'parallel', description: '核对服务状态',
+        params: { parallel: [{ tool: 'run_command', params: { command: 'printf status' } }, { tool: 'read_file', params: { path: 'service.log', start_line: 15 } }] },
+    } } });
+    progress({ ...planReview, event: { type: 'step_start', step_id: 0 } });
+    await vue.nextTick();
+    const planCard = () => cards().find(el => el.props['data-worker-id'] === 'plan-review-executor');
+    assert(text(planCard()).includes('run_command\nprintf status'));
+    assert(text(planCard()).includes('read_file · service.log · #L15'));
+    progress({ ...planReview, event: { type: 'step_error', step_id: 0, duration_ms: 19 } });
+    await vue.nextTick();
+    assert(text(planCard()).includes('执行失败'));
+    progress({ ...planReview, event: { type: 'returned', execution_status: 'succeeded', duration_ms: 1234 } });
+    progress({ ...planReview, event: { type: 'step_start', step_id: 0 } });
+    await vue.nextTick();
+    const planWorker = s.teamWorkers.value.find(w => w.id === 'plan-review-executor');
+    assert.equal(planWorker.status, 'succeeded');
+    assert.equal(planWorker.steps[0].status, 'failed');
+    assert(text(planCard()).includes('已保存审查结果'));
+
+    const finalBase = { type: 'finish_review_progress', review_id: 'final-executor-member', member_key: 'final-executor', role_label: '终审员', phase: 'preparing', started_at_ms: stopStart };
+    progress(finalBase);
+    progress({ ...planReview, child_run_id: 'real-final-child', review: { member_id: 'final-executor-member' }, event: {
+        type: 'step_new', step: { id: 0, tool: 'get_step_output', params: { output_id: 'evidence-1' } },
+    } });
+    progress({ ...finalBase, phase: 'passed', elapsed_ms: 250 });
+    await vue.nextTick();
+    assert(!s.teamWorkers.value.some(w => w.id === 'real-final-child'), 'final executor belongs to its existing member card');
+    const finalCard = cards().find(el => el.props['data-review-id'] === 'final-executor-member');
+    toggle(finalCard).props.onClick(); await vue.nextTick();
+    assert(text(finalCard).includes('get_step_output · output_id=evidence-1'));
+
+    const { historicalReviewer } = load(path.join(base, 'reviewWorkerSteps.ts'));
+    const saved = historicalReviewer({ id: 'plan-review-executor', purpose: 'plan_review', status: 'running', steps: [
+        { id: 0, tool: 'read_file', status: 'succeeded', params: { path: 'service.log' } },
+    ] });
+    assert.equal(extractSubagentsFromStep(planWait, [planWait], [saved])[0].steps[0].tool, 'read_file');
+    assert.equal(saved.status, 'challenged', 'historical running status does not imply an attached executor');
     app.unmount();
     await checkAllWorkerRoles();
     console.log('PASS member UI: all child roles, single/multi reviewers, bounded live thought/steps, independent scrolling, terminal collapse, compact finals, fallback, stop, reset');
@@ -351,7 +398,7 @@ async function checkAllWorkerRoles() {
     worker.value = { ...worker.value, id: 'stopped-child', status: 'running', currentStep: '执行中' };
     await vue.nextTick(); assert.equal(body().length, 1);
     running.value = false; await vue.nextTick();
-    assert.equal(body().length, 0); assert(text(card()).includes('未完成'));
+    assert.equal(body().length, 0); assert(text(card()).includes('状态待核对'));
     running.value = true; worker.value = { ...worker.value, id: 'failed-child', status: 'running' };
     await vue.nextTick(); worker.value.status = 'failed'; worker.value.currentStep = '调用失败'; await vue.nextTick();
     assert.equal(body().length, 0); assert(text(card()).includes('调用失败'));

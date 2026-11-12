@@ -621,6 +621,17 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
                 cp.retire_stopped_stage_wait(state.inner())?;
             }
             cp.restore_task_for_entry(&mut context, &goal);
+            match cp.retire_interrupted_plan_wait(state.inner(), &run_id, &mut context) {
+                Ok(true) => {
+                    let _ = app.emit(&format!("agent-log-{}", final_session_id),
+                        "上轮方案审查已中断且无回执；继续原任务时需重新派发审查。");
+                }
+                Err(error) => {
+                    let _ = app.emit(&format!("agent-log-{}", final_session_id),
+                        format!("读取上一轮方案审查状态失败：{error}"));
+                }
+                Ok(false) => {}
+            }
             cp
         }
         Some(existing) => {

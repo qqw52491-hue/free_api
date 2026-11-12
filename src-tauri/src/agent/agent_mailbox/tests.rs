@@ -67,6 +67,57 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn observation_reads_interrupted_review_and_new_attempt_without_rebinding_or_collecting() {
+    let f = Fixture::new();
+    let old = f.child(&f.parent, "review");
+    let child_session = format!("task-{}", old.run);
+    crate::agent::run_trace::upsert_snapshot(&f.db, &old.run, &child_session,
+        "核对服务状态", "cancelled", &[], None).unwrap();
+    let proof = crate::agent::run_trace::save_step_output_with_meta(
+        &f.db, &child_session, 0, "parallel", "parallel", "succeeded", "service.log evidence",
+    ).unwrap();
+    crate::agent::run_trace::append_step(&f.db, &old.run, 3, &json!({
+        "id":0,"tool":"parallel","status":"succeeded","description":"核对服务状态","output_id":proof,
+        "params":{"parallel":[{"tool":"read_file","params":{"path":"service.log","api_key":"omit"}}]}
+    })).unwrap();
+    crate::agent::run_trace::append_step(&f.db, &old.run, 9, &json!({"id":1,"tool":"git_diff"})).unwrap();
+    let next = Actor::new("resumed-parent", &f.parent.session);
+    crate::agent::run_trace::upsert_snapshot(&f.db, &next.run, &next.session, "继续", "running", &[], None).unwrap();
+    let latest = f.child(&next, "review");
+    f.db.0.lock().unwrap().execute("UPDATE agent_child_runs SET status='interrupted', purpose='plan_review' WHERE id=?1", [&old.run]).unwrap();
+    f.db.0.lock().unwrap().execute("UPDATE agent_child_runs SET purpose='plan_review', resumed_from=?1 WHERE id=?2", params![old.run,latest.run]).unwrap();
+
+    let historical = observation::history(&f.db, &next, 0, 10).unwrap();
+    assert_eq!(historical["tasks"].as_array().unwrap().len(), 1);
+    assert_eq!(historical["tasks"][0]["child_run_id"], old.run);
+    let observed = observation::status(&f.db, &next, &old.run).unwrap();
+    assert_eq!(observed["execution_status"], "interrupted");
+    assert_eq!(observed["historical_reference"], true);
+    assert_eq!(observed["result_available"], false);
+    assert_eq!(observed["total_steps"], 2);
+    assert_eq!(observed["recent_steps"][0]["seq"], 3);
+    assert_eq!(observed["recent_steps"][0]["operations"][0]["target"], "service.log");
+    assert!(!observed.to_string().contains("omit"));
+    let page = replies::read_result(&f.db, &next, &json!({"child_run_id":old.run,"view":"steps","limit":1})).unwrap();
+    assert_eq!(page["next_after_seq"], 3);
+    assert_eq!(page["has_more"], true);
+    let result = replies::read_result(&f.db, &next, &json!({"child_run_id":old.run,"view":"result"})).unwrap();
+    assert_eq!(result["total_chars"], 0);
+    let raw = replies::read_result(&f.db, &next, &json!({"child_run_id":old.run,"view":"step_output","output_id":proof})).unwrap();
+    assert!(raw.to_string().contains("service.log evidence"));
+    assert!(replies::read_result(&f.db, &next, &json!({"child_run_id":latest.run,"view":"step_output","output_id":proof})).is_err());
+    let current = observation::status(&f.db, &next, &latest.run).unwrap();
+    assert_eq!(current["historical_reference"], false);
+    assert_eq!(current["resumed_from"], old.run);
+    assert_eq!(current["execution_status"], "running");
+    assert_eq!(observation::status(&f.db, &next, &old.run).unwrap()["collected_at"], Value::Null);
+    assert!(authorize_target(&f.db, &next, &old.run).is_err(), "read access does not authorize mailbox actions");
+    let outsider = Actor::new("different-run", "different-session");
+    assert!(observation::status(&f.db, &outsider, &old.run).is_err());
+    assert!(replies::read_result(&f.db, &outsider, &json!({"child_run_id":old.run,"view":"steps"})).is_err());
+}
+
+#[test]
 fn family_messages_preserve_json_and_host_source_and_reject_other_tasks() {
     let f = Fixture::new();
     let task = f.child(&f.parent, "task");
@@ -505,4 +556,37 @@ fn nested_tasks_exchange_messages_with_root_and_siblings() {
     assert_eq!(pending(&f.db, &sibling).unwrap()[0]["sender_run_id"], grandchild.run);
     send(&f.db, &grandchild, &json!({"target":"parent","message":"进展"}), None, false).unwrap();
     assert_eq!(pending(&f.db, &child).unwrap()[0]["sender_run_id"], grandchild.run);
+}
+
+#[test]
+fn same_tree_overview_and_root_steps_are_readable_without_cross_tree_access() {
+    let f = Fixture::new();
+    let child = f.child(&f.parent, "task");
+    let grandchild = f.child(&child, "review");
+    let sibling = f.child(&f.parent, "review");
+    let other = Actor::new(&uuid::Uuid::new_v4().to_string(), &uuid::Uuid::new_v4().to_string());
+    crate::agent::run_trace::upsert_snapshot(&f.db, &other.run, &other.session, "other", "running", &[], None).unwrap();
+    let foreign_child = f.child(&other, "review");
+    crate::agent::run_trace::append_step(&f.db, &f.parent.run, 7,
+        &json!({"id":7,"description":"检查根任务","tool":"read_file","status":"done","timestamp":1_700_000_000_123_i64})).unwrap();
+    let first = family_overview(&f.db, &grandchild, 0, 2).unwrap();
+    assert_eq!(first["root_run_id"], f.parent.run);
+    assert_eq!(first["self_run_id"], grandchild.run);
+    assert_eq!(first["tasks"][0]["run_id"], f.parent.run);
+    assert_eq!(first["tasks"][0]["latest_activity"]["description"], "检查根任务");
+    assert_eq!(first["tasks"][0]["latest_activity"]["recorded_at"], "2023-11-14T22:13:20.123+00:00");
+    assert_eq!(first["has_more"], true);
+    let second = family_overview(&f.db, &grandchild, 2, 2).unwrap();
+    let all: Vec<_> = first["tasks"].as_array().unwrap().iter().chain(second["tasks"].as_array().unwrap()).collect();
+    assert_eq!(all.len(), 4);
+    assert!(all.iter().any(|x| x["run_id"] == sibling.run));
+    assert!(all.iter().any(|x| x["run_id"] == grandchild.run && x["depth"] == 2));
+    let parent = observation::status(&f.db, &grandchild, &f.parent.run).unwrap();
+    assert_eq!(parent["kind"], "main");
+    assert_eq!(parent["recent_steps"][0]["seq"], 7);
+    let steps = replies::read_result(&f.db, &grandchild, &json!({"child_run_id":f.parent.run,"view":"steps"})).unwrap();
+    assert_eq!(steps["steps"][0]["seq"], 7);
+    assert!(observation::status(&f.db, &grandchild, &other.run).is_err());
+    assert!(observation::status(&f.db, &grandchild, &foreign_child.run).is_err());
+    assert!(replies::read_result(&f.db, &grandchild, &json!({"child_run_id":other.run,"view":"steps"})).is_err());
 }

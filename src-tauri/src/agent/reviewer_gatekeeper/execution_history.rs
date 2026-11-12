@@ -49,31 +49,7 @@ pub(crate) fn review_history_tool(
         let run = req["run_id"].as_str().unwrap_or(parent);
         drop(conn);
         review_run_session(db, parent, run)?;
-        let after = match req.get("after_seq") {
-            None => -1,
-            Some(v) => v
-                .as_i64()
-                .filter(|v| *v >= -1)
-                .ok_or("after_seq 必须是大于等于 -1 的整数")?,
-        };
-        let conn = db.reader()?;
-        let mut stmt = conn.prepare("SELECT seq,step_json FROM agent_run_steps WHERE run_id=?1 AND seq>?2 ORDER BY seq LIMIT ?3").map_err(|e|e.to_string())?;
-        let rows = stmt
-            .query_map(rusqlite::params![run, after, limit + 1], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-            })
-            .map_err(|e| e.to_string())?;
-        let mut steps = Vec::new();
-        for row in rows {
-            let (seq, raw) = row.map_err(|e| e.to_string())?;
-            let s: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-            steps.push(json!({"seq":seq,"step_id":s["id"],"tool":s["action"],"status":s["status"],
-                "description":s["description"].as_str().unwrap_or("").chars().take(400).collect::<String>(),"output_id":s["output_id"]}));
-        }
-        let more = steps.len() > limit as usize;
-        steps.truncate(limit as usize);
-        return Ok(json!({"run_id":run,"steps":steps,"has_more":more,"next_after_seq":steps.last().map(|s|s["seq"].clone()),
-            "scope_notice":"仅宿主持久化步骤目录；描述是执行者声明，结果须按 output_id 核实。读取后代输出请携带本目录 run_id。"}).to_string());
+        return execution_steps_page(db, run, req).map(|page| page.to_string());
     }
     if name == "read_child_result" {
         let id = req["child_run_id"]
@@ -141,4 +117,107 @@ pub(crate) fn review_history_tool(
     }
     let fingerprint = format!("{:x}", state.finalize());
     Ok(json!({"scope_notice":"本任务树登记状态；省略终审自身的 final_review 执行。完整结果按 child_run_id 查询。","state_fingerprint":fingerprint,"children":children,"has_more":more,"next_after_id":children.last().map(|c|c["child_run_id"].clone())}).to_string())
+}
+
+/// Shared step projection for a run already authorized by the caller.
+pub(crate) fn execution_steps_page(db: &DbState, run: &str, req: &Value) -> Result<Value, String> {
+    let limit = number(req, "limit", 30)?;
+    if !(1..=100).contains(&limit) {
+        return Err("limit 必须在 1..100 之间".into());
+    }
+    let after = match req.get("after_seq") {
+        None => -1,
+        Some(value) => value
+            .as_i64()
+            .filter(|v| *v >= -1)
+            .ok_or("after_seq 必须是大于等于 -1 的整数")?,
+    };
+    let conn = db.reader()?;
+    let mut stmt = conn.prepare("SELECT seq,step_json FROM agent_run_steps WHERE run_id=?1 AND seq>?2 ORDER BY seq LIMIT ?3").map_err(|e|e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![run, after, limit + 1], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut steps = collect_step_rows(rows)?;
+    let more = steps.len() > limit as usize;
+    steps.truncate(limit as usize);
+    Ok(
+        json!({"run_id":run,"steps":steps,"has_more":more,"next_after_seq":steps.last().map(|s|s["seq"].clone()),
+        "scope_notice":"仅宿主持久化步骤目录；描述是执行者声明，结果须按 output_id 核实。读取后代输出请携带本目录 run_id。"}),
+    )
+}
+
+pub(crate) fn recent_execution_steps(db: &DbState, run: &str) -> Result<Vec<Value>, String> {
+    let conn = db.reader()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT seq,step_json FROM agent_run_steps WHERE run_id=?1 ORDER BY seq DESC LIMIT 6",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([run], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?;
+    let mut steps = collect_step_rows(rows)?;
+    steps.reverse();
+    Ok(steps)
+}
+
+fn collect_step_rows(
+    rows: impl Iterator<Item = rusqlite::Result<(i64, String)>>,
+) -> Result<Vec<Value>, String> {
+    fn brief(step: &Value) -> Value {
+        let params = step
+            .get("params")
+            .or_else(|| step.get("command"))
+            .unwrap_or(&Value::Null);
+        let tool = step["action"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .or_else(|| step["tool"].as_str());
+        let target = [
+            "path",
+            "file_path",
+            "query",
+            "pattern",
+            "command",
+            "cmd",
+            "output_id",
+        ]
+        .iter()
+        .find_map(|key| params[*key].as_str())
+        .map(|s| {
+            s.lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(120)
+                .collect::<String>()
+        });
+        json!({"tool":tool,"target":target})
+    }
+    rows.map(|row| {
+        let (seq, raw) = row.map_err(|e| e.to_string())?;
+        let step: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        let mut entry = brief(&step);
+        entry["seq"] = json!(seq);
+        entry["step_id"] = step["id"].clone();
+        entry["status"] = step["status"].clone();
+        entry["description"] = json!(step["description"]
+            .as_str()
+            .unwrap_or("")
+            .chars()
+            .take(400)
+            .collect::<String>());
+        entry["output_id"] = step["output_id"].clone();
+        let branches = step["params"]["parallel"]
+            .as_array()
+            .or_else(|| step["params"]["commands"].as_array());
+        if let Some(branches) = branches {
+            entry["operations"] = json!(branches.iter().take(5).map(brief).collect::<Vec<_>>());
+            entry["operation_count"] = json!(branches.len());
+        }
+        Ok(entry)
+    })
+    .collect()
 }

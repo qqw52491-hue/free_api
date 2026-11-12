@@ -727,3 +727,32 @@ for line in sys.stdin:
     let snapshot = Snapshot::load(&f.db, &f.id, "reviewer").unwrap().unwrap();
     assert_eq!(snapshot.state["tool_steps"], 3);
 }
+
+#[tokio::test]
+async fn review_tree_overview_spans_branches_but_evidence_remains_scoped() {
+    let f = Fixture::new();
+    let now = chrono::Utc::now().to_rfc3339();
+    {
+        let conn = f.db.0.lock().unwrap();
+        for (id, session) in [("root-run", "root-session"), ("parent-run", "owner"), ("sibling", "task-sibling"), ("other", "other-session")] {
+            conn.execute("INSERT INTO agent_run_traces(id,session_id,goal,status,steps_json,started_at,updated_at) VALUES (?1,?2,'goal','running','[]',?3,?3)", params![id,session,now]).unwrap();
+        }
+        for id in ["parent-run", "sibling"] {
+            conn.execute("INSERT INTO agent_child_runs(id,parent_run_id,parent_session_id,workspace_root,model_id,status,started_at,kind,result_json) VALUES (?1,'root-run','root-session',?2,'mock','succeeded',?3,'task','{\"summary\":\"private\"}')",params![id,f.root.to_string_lossy(),now]).unwrap();
+        }
+    }
+    let (_tx, mut rx) = watch::channel(0);
+    let request = |value| serde_json::from_value::<AgentInstruction>(value).unwrap();
+    let result = tool(&f.db, &f.id, &f.program, &request(json!({"tool":"list_task_tree","params":{"limit":100}})), &mut rx).await;
+    assert!(result.success, "{}", result.stderr);
+    let page: Value = serde_json::from_str(&result.stdout).unwrap();
+    let tasks = page["tasks"].as_array().unwrap();
+    assert!(tasks.iter().any(|t| t["run_id"] == "root-run"));
+    assert!(tasks.iter().any(|t| t["run_id"] == "sibling"));
+    assert!(!tasks.iter().any(|t| t["run_id"] == "other"));
+    assert!(tasks.iter().all(|t| t.get("execution_config").is_none()));
+    let forbidden = tool(&f.db, &f.id, &f.program, &request(json!({"tool":"read_child_result","params":{"child_run_id":"sibling"}})), &mut rx).await;
+    assert!(!forbidden.success);
+    let parent = tool(&f.db, &f.id, &f.program, &request(json!({"tool":"list_execution_steps","params":{"run_id":"parent-run"}})), &mut rx).await;
+    assert!(parent.success, "{}", parent.stderr);
+}

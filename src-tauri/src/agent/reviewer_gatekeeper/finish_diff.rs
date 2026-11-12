@@ -744,17 +744,27 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
         (app as &dyn std::any::Any).downcast_ref::<AppHandle>(),
         crate::agent::child_reviewer::main_executor::parent_run(),
     ) {
-        progress.phase("reviewing","通用 Agent 正在执行终审");
+        progress.phase("preparing", "终审 Agent 正在准备");
         let result=crate::agent::child_reviewer::main_executor::run_final(
             handle.clone(),db,&parent_run,session_id,workspace,&model_config,&messages,
             &review_fingerprint,verify_obligations.clone(),run_started_at,interrupt_rx.clone(),
+            progress.id(),
         ).await;
         if !_registration.complete() {
             progress.fail("cancelled",crate::agent::review_control::STOP_NOTE);
             return ReviewResult::cancelled(crate::agent::review_control::STOP_NOTE,&model_id,&review_fingerprint);
         }
         return match result {
-            Ok(result)=>{progress.phase("completed","终审结果已回收");result},
+            Ok(result) => {
+                if result.verdict == "cancelled" {
+                    progress.fail("cancelled", &result.summary);
+                } else if result.is_service_failure() {
+                    progress.fail("request", &result.summary);
+                } else {
+                    progress.finish(if result.is_passed() { "passed" } else { "rejected" });
+                }
+                result
+            },
             Err(error)=>{progress.fail("request",&error);ReviewResult::failed_open(&error,&model_id,&review_fingerprint)},
         };
     }

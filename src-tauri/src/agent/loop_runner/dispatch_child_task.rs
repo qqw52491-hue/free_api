@@ -121,9 +121,16 @@ async fn dispatch_inner(
         }
         "models" => return Ok(output(child_task::models::catalog(ctx.state.inner(),params["offset"].as_u64().unwrap_or(0))?)),
         "list" => {
-            return Ok(output(
-                json!({"tasks":crate::agent::agent_mailbox::family_list(ctx.state.inner(),&actor)?,"collaboration":crate::agent::agent_mailbox::coordination::list(ctx.state.inner(),&actor,params["offset"].as_u64().unwrap_or(0))?}),
-            ))
+            if params["scope"] == "history" {
+                return Ok(output(crate::agent::agent_mailbox::observation::history(
+                    ctx.state.inner(), &actor, params["offset"].as_u64().unwrap_or(0),
+                    params["limit"].as_u64().unwrap_or(20),
+                )?));
+            }
+            let offset = params["offset"].as_u64().unwrap_or(0);
+            let mut view = crate::agent::agent_mailbox::family_overview(ctx.state.inner(), &actor, offset, params["limit"].as_u64().unwrap_or(50))?;
+            view["collaboration"] = crate::agent::agent_mailbox::coordination::list(ctx.state.inner(), &actor, offset)?;
+            return Ok(output(view))
         }
         "receipt" => {
             return Ok(output(crate::agent::agent_mailbox::receipt(
@@ -134,8 +141,11 @@ async fn dispatch_inner(
         }
         "status" => {
             let id = params["child_run_id"].as_str().unwrap_or_default();
-            let owner = child_task::task_owner(ctx.state.inner(), &actor, id)?;
-            return Ok(output(child_task::status(ctx.state.inner(), &owner, id)?));
+            let body = match child_task::task_owner(ctx.state.inner(), &actor, id) {
+                Ok(owner) => child_task::status(ctx.state.inner(), &owner, id)?,
+                Err(_) => crate::agent::agent_mailbox::observation::status(ctx.state.inner(), &actor, id)?,
+            };
+            return Ok(output(body));
         }
         "inbox" | "wait" => {
             if effective == "inbox" {
@@ -420,6 +430,7 @@ async fn dispatch_inner(
         ctx.checkpoint.auto_pilot,
         execution.workflow.plan_mode.unwrap_or_else(||"auto".into()),
         _workspace,
+        None,
     )?;
     Ok(DispatchResult {view:None,success:true,stdout:json!({"child_run_id":id,"model_selection":model_selection,"execution_status":"running","delivery_accepted":false,"next":"可用 child_task.status / send / wait / cancel；共享工作区可并行使用，请协调相关修改。需要信息时子任务可给 parent 发消息，父任务等待会被消息唤醒。"}).to_string(),stderr:String::new(),route:"child_task:spawned".into()})
 }

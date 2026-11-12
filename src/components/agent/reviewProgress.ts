@@ -1,4 +1,4 @@
-import type { AgentStepItem } from './types';
+import type { AgentStepItem, AgentWorkerStep } from './types';
 
 export interface ReviewStepAnchor { stepId: string; stepNumber: number; occurrence: number; runId: string; }
 export interface ReviewActivity { phase: string; description: string; elapsedMs: number; round: number; toolSteps: number; }
@@ -27,6 +27,8 @@ export interface ReviewProgressItem {
     formatCorrections: number | null;
     anchor?: ReviewStepAnchor;
     activities?: ReviewActivity[];
+    childRunId?: string;
+    steps?: AgentWorkerStep[];
 }
 const phases = new Set(['preparing', 'waiting', 'responding', 'tool', 'verifying', 'retrying', 'format_retry', 'converging', 'passed', 'rejected', 'failed', 'incomplete', 'cancelled', 'skipped']);
 const terminal = new Set(['passed', 'rejected', 'failed', 'incomplete', 'cancelled', 'skipped']);
@@ -60,6 +62,8 @@ export function applyReviewProgress(items: ReviewProgressItem[], payload: Record
     if (old && (old.startedAt > startedAt || (old.id === id && (old.elapsedMs > next.elapsedMs || (isReviewTerminal(old.phase) && !isReviewTerminal(phase)))))) return items;
     next.anchor = old?.anchor;
     if (old && old.id === id) {
+        next.childRunId = old.childRunId;
+        next.steps = old.steps;
         if (next.lastRequestTokensPerSecond == null && old.lastRequestTokensPerSecond != null) {
             next.lastRequestTokensPerSecond = old.lastRequestTokensPerSecond;
             next.lastRequestRound = old.lastRequestRound;

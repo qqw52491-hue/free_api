@@ -45,6 +45,7 @@ fn reviewer_tools(config: &ExecutionConfig, budget: u32, verify: bool) -> Vec<&'
             "search_step_output",
             "list_execution_steps",
             "list_child_runs",
+            "list_task_tree",
             "read_child_result",
             "evidence_find",
             "evidence_inspect",
@@ -66,6 +67,18 @@ pub(crate) fn reviewer_index(config: &ExecutionConfig, budget: u32, verify: bool
 pub(crate) fn reviewer_menu(config: &ExecutionConfig, budget: u32, verify: bool) -> String {
     let names = reviewer_tools(config, budget, verify);
     let mut menu = format!("\n【当前 Reviewer 可执行工具（配置上限与只读适配器的交集）】{}\n只使用上述工具；执行时仍由宿主检查权限和预算，不提供实施或委派能力。", names.join(", "));
+    if names.contains(&"list_task_tree") {
+        menu.push_str("\n需要了解其他分支时，用 {\"tool\":\"list_task_tree\",\"params\":{\"offset\":0,\"limit\":30}} 读取同树成员简报。has_more 为 true 时把 next_offset 传为 offset。详细证据仍按本次审查范围授权。");
+    }
+    if names.contains(&"list_child_runs") {
+        menu.push_str("\n本审查范围内的成员目录用 list_child_runs(limit?, after_id?)；有下一页时用 next_after_id 续查。");
+    }
+    if names.contains(&"list_execution_steps") {
+        menu.push_str("\n用 list_execution_steps(run_id?, after_seq?, limit?) 查步骤。省略 run_id 查询直接父任务；下一页把 next_after_seq 传为 after_seq。");
+    }
+    if names.contains(&"read_child_result") {
+        menu.push_str("\n用 read_child_result(child_run_id, offset?, limit?) 查看有权访问的子执行交付；有下一页时用 next_offset 续查。");
+    }
     if names.iter().any(|name| !matches!(*name, "finish" | "verify")) {
         menu.push_str("\n可自行将互不依赖的取证调用放进同一个 {\"parallel\":[{\"tool\":\"工具名\",\"params\":{...}},...]}；每个分支单独校验和计入取证预算。verify 和 finish 单独调用。");
     }

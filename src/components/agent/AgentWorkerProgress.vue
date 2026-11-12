@@ -40,7 +40,7 @@
         </div>
         <p v-if="stopError" class="review-stop-error" role="alert">{{ stopError }}</p>
         <div v-if="expanded && review" class="review-live-body">
-            <div class="review-stats-grid" aria-label="实际请求与取证统计">
+            <div v-if="!review.childRunId" class="review-stats-grid" aria-label="实际请求与取证统计">
                 <span class="stat-chip">
                     <span class="stat-k">请求</span>
                     <span class="stat-v">{{ review.round }} 次</span>
@@ -70,6 +70,19 @@
                     <span class="stat-v">{{ review.formatCorrections }}</span>
                 </span>
             </div>
+            <div v-if="workerActionRows.length" class="review-activity-scroll worker-activity-scroll soft-scrollbar" role="region" :aria-label="`${label} · 审查步骤`">
+                <div v-for="(row, index) in workerActionRows" :key="index" class="review-activity-event worker-action-event">
+                    <span class="worker-step-index">{{ row.step.stepNumber }}</span>
+                    <div class="worker-action-content">
+                        <details v-if="row.invocation" class="worker-command" :class="{ 'has-purpose': !!row.explanation }">
+                            <summary><code :title="row.invocation">{{ row.invocation }}</code><span class="worker-action-purpose">{{ row.explanation }}</span></summary>
+                            <pre class="worker-command-full">{{ row.invocation }}</pre>
+                        </details>
+                        <p v-else class="worker-action-purpose">{{ row.explanation }}</p>
+                    </div>
+                    <span class="worker-action-duration">{{ stepStatusLabel(row.step.status) }}</span>
+                </div>
+            </div>
             <div ref="activityPane" class="review-activity-scroll soft-scrollbar" role="region" :aria-label="`${label} · 实时动作`" tabindex="0" @scroll.passive="onActivityScroll" @wheel.passive="followActivity = false" @touchmove.passive="followActivity = false">
                 <p v-for="(event, index) in reviewActivities" :key="`${review.id}-${index}`" class="review-activity-event">
                     <time>{{ (event.elapsedMs / 1000).toFixed(1) }}s</time><span>{{ event.description || statusText }}</span>
@@ -82,8 +95,8 @@
                 </summary>
                 <div class="review-diagnostic-content">
                     <p v-if="diagnosis" class="diag-banner" :class="`tone-${diagnosis.tone || 'neutral'}`">{{ diagnosis.title }} · {{ diagnosis.detail }}</p>
-                    <p>第 {{ review.round }} 次逻辑请求 · 取证已用 {{ review.toolSteps }} / 上限 {{ review.toolBudget }} 次</p>
-                    <p>超时重发 {{ review.timeoutRetries ?? '未知' }} 次 · 格式补正 {{ review.formatCorrections ?? '未知' }} 次</p>
+                    <p v-if="!review.childRunId">第 {{ review.round }} 次逻辑请求 · 取证已用 {{ review.toolSteps }} / 上限 {{ review.toolBudget }} 次</p>
+                    <p v-if="!review.childRunId">超时重发 {{ review.timeoutRetries ?? '未知' }} 次 · 格式补正 {{ review.formatCorrections ?? '未知' }} 次</p>
                     <p v-if="review.lastNotice" class="diag-notice">最近异常：{{ review.lastNotice }}</p>
                     <p class="diag-caption">片段数不是 token 数或吞吐速度；耗时以最后事件为准，成员通过不代表整个任务已经交付。</p>
                 </div>
@@ -105,7 +118,7 @@
                 </span>
             </div>
             <div v-if="hasWorkerActivityPane" ref="activityPane" class="review-activity-scroll worker-activity-scroll soft-scrollbar" role="region" :aria-label="`${label} · 实时动作与思考片段`" tabindex="0" @scroll.passive="onActivityScroll" @wheel.passive="followActivity = false" @touchmove.passive="followActivity = false">
-                <div v-for="row in workerActionRows" :key="row.step.stepNumber" class="review-activity-event worker-action-event">
+                <div v-for="(row, index) in workerActionRows" :key="`${row.step.stepNumber}-${index}`" class="review-activity-event worker-action-event">
                     <span class="worker-step-index">{{ row.step.stepNumber }}</span>
                     <div class="worker-action-content">
                         <details v-if="row.invocation" class="worker-command" :class="{ 'has-purpose': !!row.explanation }">
@@ -118,6 +131,7 @@
                         </details>
                         <p v-else class="worker-action-purpose" :title="row.explanation">{{ row.explanation }}</p>
                     </div>
+                    <span v-if="worker.role === 'reviewer'" class="worker-action-duration">{{ stepStatusLabel(row.step.status) }}</span>
                 </div>
                 <p v-if="!workerSteps.length || worker.livePreview || !memberActive" class="worker-current-action">{{ activity }}</p>
                 <p v-if="workerThoughtPreview" class="worker-thought-fragment"><span class="worker-thought-source">{{ worker.livePreview?.streamType === 'thinking' && memberActive ? '思考片段' : '此前思考' }}</span>{{ workerThoughtPreview }}</p>
@@ -143,7 +157,7 @@
 
 <script setup lang="ts">
 import { computed, inject, nextTick, ref, watch } from 'vue';
-import type { AgentWorkerItem } from './types';
+import type { AgentWorkerItem, AgentWorkerStep } from './types';
 import { workerStepInvocation } from './workerUtils';
 import { isReviewTerminal, type ReviewProgressItem } from './reviewProgress';
 import { reviewDiagnosis, reviewStatusLabel } from './reviewDiagnostics';
@@ -171,7 +185,10 @@ const expanded = computed({ get: () => manualExpanded.value ?? memberActive.valu
 watch(() => props.review?.id || props.worker?.id, () => { manualExpanded.value = null; fullThoughtOpen.value = false; followActivity.value = true; });
 watch(memberActive, (active, previous) => { if (!active && previous) { manualExpanded.value = null; fullThoughtOpen.value = false; } });
 watch(expanded, value => { if (!value) fullThoughtOpen.value = false; });
-const workerSteps = computed(() => props.worker?.steps?.slice(-4) || []);
+const workerSteps = computed(() => (props.review?.steps || props.worker?.steps)?.slice(-4) || []);
+function stepStatusLabel(status: AgentWorkerStep['status']) {
+    return ({ pending: '待执行', running: '执行中', succeeded: '已执行', failed: '执行失败', challenged: '待核对' })[status];
+}
 const workerActionRows = computed(() => workerSteps.value.map(step => {
     const invocation = workerStepInvocation(step);
     return { step, invocation, explanation: step.description || (step.title !== invocation ? step.title : '') || '' };
@@ -209,7 +226,8 @@ const rowStatus = computed(() => {
 const statusText = computed(() => props.review ? reviewStatusLabel(props.review, props.isRunning) : props.worker?.reviewStopped ? '已停止 · 本任务排除' : typeof props.worker?.extra?.hostTaskState === 'string' ? props.worker.extra.hostTaskState : !props.isRunning && (props.worker?.status === 'running' || props.worker?.status === 'pending') ? '状态待核对' : ({ running: '执行中', pending: '等待中', succeeded: '已完成', failed: '失败', challenged: '待核验' }[rowStatus.value]));
 const activity = computed(() => {
     if (props.review) {
-        return statusText.value;
+        const current = props.review.steps?.at(-1);
+        return memberActive.value && current?.status === 'running' ? current.title : statusText.value;
     }
     const worker = props.worker;
     if (!worker) return statusText.value;

@@ -61,12 +61,24 @@ const diagramTitle = computed(() => {
 async function renderDiagram() {
   const generation = ++renderGeneration;
   renderError.value = null;
+  const container = containerRef.value;
+  if (!container) return;
   const raw = props.code.trim();
-  if (!raw) return;
+  if (!raw) {
+    svgContent.value = "";
+    return;
+  }
 
+  // Mermaid needs a mounted element to measure text. Keep its temporary SVG
+  // inside this card and remove it even when a renderer throws.
+  const scratch = document.createElement("div");
+  scratch.style.cssText = "position:fixed;left:-10000px;top:0;visibility:hidden;pointer-events:none";
+  scratch.setAttribute("aria-hidden", "true");
+  container.after(scratch);
   try {
     mermaid.initialize({
       startOnLoad: false,
+      suppressErrorRendering: true,
       theme: "base",
       securityLevel: "loose",
       themeVariables: {
@@ -85,13 +97,15 @@ async function renderDiagram() {
       },
     });
 
-    const { svg } = await mermaid.render(uniqueId, raw);
+    const { svg } = await mermaid.render(`${uniqueId}-${generation}`, raw, scratch);
     if (generation !== renderGeneration) return;
     svgContent.value = svg;
   } catch (err: any) {
     if (generation !== renderGeneration) return;
     renderError.value = err?.message || String(err);
     svgContent.value = "";
+  } finally {
+    scratch.remove();
   }
 }
 

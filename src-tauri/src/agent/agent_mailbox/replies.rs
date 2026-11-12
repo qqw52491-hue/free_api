@@ -62,12 +62,29 @@ pub(crate) fn read_result(db: &DbState, actor: &Actor, params: &Value) -> Result
             ));
         }
     }
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    let (target, kind) = resolve(&conn, actor, id)?;
     let view = params["view"].as_str().unwrap_or("result");
-    if !matches!(view, "result" | "history" | "checkpoint" | "dispatch_input") {
-        return Err("view 仅允许 result/history/checkpoint/dispatch_input。".into());
+    if !matches!(view, "result" | "history" | "checkpoint" | "dispatch_input" | "steps" | "step_output") {
+        return Err("view 仅允许 result/history/checkpoint/dispatch_input/steps/step_output。".into());
     }
+    if matches!(view, "steps" | "step_output") {
+        let historical = {
+            let conn = db.reader()?;
+            observation::member_on(&conn, actor, id)?
+        };
+        if view == "steps" {
+            let mut page = crate::agent::reviewer_gatekeeper::execution_steps_page(db, id, params)?;
+            page["historical_reference"] = json!(historical);
+            return Ok(page);
+        }
+        return observation::step_output(db, id, params);
+    }
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let (target, kind) = match resolve(&conn, actor, id) {
+        Ok(member) => member,
+        Err(_) if view == "result" && observation::member_on(&conn, actor, id)? =>
+            (Actor::new(id, ""), "historical_child".into()),
+        Err(error) => return Err(error),
+    };
     if view == "dispatch_input" && kind == "main" {
         return Err("主任务没有子任务派发输入快照；本次未读取交付结果替代该快照。".into());
     }

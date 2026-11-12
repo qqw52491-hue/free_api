@@ -353,6 +353,43 @@ pub(crate) fn relay_progress(id: &str, payload: Value) -> Option<Value> {
     )
 }
 
+/// Only the invocation preview crosses the session boundary. Do not copy the
+/// child instruction's reasoning, output, or review material into the parent.
+pub(crate) fn review_step_preview(step: &Value) -> Value {
+    fn params_preview(params: &Value) -> Value {
+        let mut result = serde_json::Map::new();
+        for key in ["path", "file_path", "command", "cmd", "query", "pattern",
+            "start_line", "end_line", "output_id"] {
+            if let Some(value) = params.get(key) {
+                if value.is_string() || value.is_number() {
+                    result.insert(key.into(), value.clone());
+                }
+            }
+        }
+        for key in ["parallel", "commands"] {
+            if let Some(items) = params[key].as_array() {
+                result.insert(key.into(), Value::Array(items.iter().map(review_step_preview).collect()));
+            }
+        }
+        Value::Object(result)
+    }
+    json!({
+        "id": step.get("id").or_else(|| step.get("step_id")),
+        "tool": step.get("tool"), "action": step.get("action"),
+        "description": step.get("description"),
+        "params": params_preview(step.get("params").or_else(|| step.get("command")).unwrap_or(&Value::Null)),
+        "status": step.get("status"),
+        "duration_ms": step.get("duration_ms").or_else(|| step["metrics"].get("tool_duration_ms")),
+    })
+}
+
+pub(crate) fn relay_review_step(id: &str, payload: &Value) -> Option<Value> {
+    (payload["type"] == "step_new").then(|| json!({
+        "type": "child_task_progress", "child_run_id": id,
+        "event": {"type": "step_new", "step": review_step_preview(&payload["step"])}
+    }))
+}
+
 pub(crate) fn projection(body: &Value) -> String {
     let mut compact = body.clone();
     if let Some(goal) = compact["goal"].as_str().map(str::to_owned) {

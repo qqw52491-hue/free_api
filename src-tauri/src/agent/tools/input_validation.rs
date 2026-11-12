@@ -138,11 +138,11 @@ pub(crate) fn validate_native(tool: &str, action: &str, params: &Value) -> Resul
             let effective=crate::agent::child_task::request_action(act,params);
             match effective.as_str(){
                 "send"|"ask"=>crate::agent::agent_mailbox::validate_payload(params)?,
-                "read_agent_result"=>{text(&tool,params,&["child_run_id"],false)?;optional(&tool,params,"view","string")?;optional(&tool,params,"offset","非负整数")?;optional(&tool,params,"limit","非负整数")?;},
+                "read_agent_result"=>{text(&tool,params,&["child_run_id"],false)?;optional(&tool,params,"view","string")?;optional(&tool,params,"offset","非负整数")?;optional(&tool,params,"limit","非负整数")?;optional(&tool,params,"output_id","string")?;},
                 "result"|"status"|"cancel"=>{text(&tool,params,&["child_run_id"],false)?;optional(&tool,params,"output_id","string")?;},
                 "resume"=>{text(&tool,params,&["child_run_id"],false)?;text(&tool,params,&["message"],false)?;if params["message"].as_str().unwrap().chars().count()>65_536{return Err("追问超过 65536 字符，未执行。".into())}},
                 "receipt"=>text(&tool,params,&["message_id"],false)?,
-                "models"|"list"=>{optional(&tool,params,"offset","非负整数")?;},
+                "models"|"list"=>{optional(&tool,params,"offset","非负整数")?;if effective=="list" {optional(&tool,params,"limit","非负整数")?;optional(&tool,params,"scope","string")?;if params.get("scope").is_some() && !matches!(params["scope"].as_str(),Some("current"|"history")) {return Err("child_task.list.scope 仅允许 current/history；本次未查询。".into());}}},
                 "inbox"=>{optional(&tool,params,"child_run_id","string")?;optional(&tool,params,"offset","非负整数")?;optional(&tool,params,"limit","非负整数")?;},
                 "wait"=>{optional(&tool,params,"child_run_id","string")?;optional(&tool,params,"timeout_secs","非负整数")?;},
                 "dispatch" => {

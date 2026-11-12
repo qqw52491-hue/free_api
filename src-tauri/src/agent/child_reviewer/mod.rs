@@ -435,7 +435,7 @@ pub async fn spawn_child_reviewer(
             evidence_scope_refs: evidence_scope_refs.clone(), final_fingerprint: None, verify_obligations: vec![],
             evidence_since: None,
         };
-        if let Err(error)=main_executor::start(handle.clone(), db, &child_run_id, parent_run_id, &config.model_id, reasoning_effort.clone(), program, interrupt_rx) {
+        if let Err(error)=main_executor::start(handle.clone(), db, &child_run_id, parent_run_id, &config.model_id, reasoning_effort.clone(), program, interrupt_rx, None) {
             crate::agent::execution::runtime::fail_checkpoint(db,&child_run_id,error.clone());return Err(error);
         }
         return Ok(child_run_id);

@@ -311,8 +311,8 @@
                         </div>
                     </template>
                 </article>
-                <div v-else-if="entry.type === 'review'" class="ambient-workers-list review-step-members" :data-tl="entry.id" aria-label="终审进度（未关联步骤）">
-                    <div v-if="unplacedReviews.length > 1" class="review-panel-header">
+                <div v-else-if="entry.type === 'review'" class="ambient-workers-list review-step-members" :data-tl="entry.id" aria-label="审查进度（未关联步骤）">
+                    <div v-if="!entry.workers && unplacedReviews.length > 1" class="review-panel-header">
                         <span class="review-panel-title">
                             <svg class="review-shield-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                 <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
@@ -320,7 +320,8 @@
                             <span>多模型并发审查 ({{ unplacedReviews.length }} 位成员)</span>
                         </span>
                     </div>
-                    <AgentWorkerProgress v-for="review in unplacedReviews" :key="review.id" :review="review" :is-running="isRunning" />
+                    <AgentWorkerProgress v-for="review in entry.workers ? [] : unplacedReviews" :key="review.id" :review="review" :is-running="isRunning" />
+                    <AgentWorkerProgress v-for="worker in entry.workers || unplacedLiveReviewers" :key="worker.id" :worker="worker" :is-running="!entry.workers && isRunning" />
                 </div>
                 <article
                     v-else-if="entry.type === 'plan'"
@@ -1552,7 +1553,7 @@ import AgentOutcomeNotice from "./AgentOutcomeNotice.vue";
 import { toolViewComponents } from "./views";
 import ArtifactList from "../artifacts/ArtifactList.vue";
 import FileIcon from "./FileIcon.vue";
-import { workerRowOwners } from "./workerAssociation";
+import { getStepJobIds, workerRowOwners } from "./workerAssociation";
 import AgentWorkerProgress from "./AgentWorkerProgress.vue";
 import AgentQuestionNav from "./AgentQuestionNav.vue";
 import AgentTimelineList from "./AgentTimelineList.vue";
@@ -1825,11 +1826,11 @@ async function openDocPreview(att: ParsedAttachment) {
 }
 
 type HistoryMessage = { id: string; role: string; content: string; created_at: string; timestamp: number };
-type HistoryTurn = { id: string; goal: string; status: string; steps: AgentStepItem[]; messages: HistoryMessage[]; summary: string; artifacts: AgentArtifactInput[]; startedAt: number; completedAt: number };
+type HistoryTurn = { id: string; goal: string; status: string; steps: AgentStepItem[]; reviewers?: AgentWorkerItem[]; messages: HistoryMessage[]; summary: string; artifacts: AgentArtifactInput[]; startedAt: number; completedAt: number };
 type PlanEntry = { id: string; type: "plan"; runId?: string; timestamp: number; title: string; status: AgentToolStatus; steps: AgentStepItem[]; isThinking: boolean; thinkingTimestamp?: number; interventions?: StepInterventionRow[] };
 type TimelineEntry =
     | PlanEntry
-    | { id: string; type: "review"; timestamp: number }
+    | { id: string; type: "review"; timestamp: number; workers?: AgentWorkerItem[] }
     | { id: string; type: "user"; timestamp: number; content: string }
     | { id: string; type: "message"; timestamp: number; role: string; content: string; isHuman: boolean; anchorId?: string; question?: string; stepId?: string }
     | { id: string; type: "completion"; timestamp: number; title: string; summary: string; artifacts: AgentArtifactInput[]; failed: boolean; outcome?: 'succeeded' | 'cancelled' | 'failed' }
@@ -1929,7 +1930,7 @@ const historicalStepWorkers = computed(() => {
     const snapshots = new Map((props.childTaskSnapshots || []).map(task => [task.child_run_id, task]));
     for (const turn of props.historyTurns) {
         if (props.isRunning && turn.status === "running") continue;
-        for (const step of turn.steps) map.set(step, extractSubagentsFromStep(step, turn.steps, []).map(worker => historicalWorkerSnapshot(worker, snapshots.get(worker.id))));
+        for (const step of turn.steps) map.set(step, extractSubagentsFromStep(step, turn.steps, turn.reviewers || []).map(worker => historicalWorkerSnapshot(worker, snapshots.get(worker.id))));
     }
     return map;
 });
@@ -1947,6 +1948,13 @@ const historicalWorkerRows = computed(() => {
     return rows;
 });
 const liveWorkerRows = computed(() => workerRowOwners(props.steps, liveStepWorkers.value));
+const unplacedLiveReviewers = computed(() => {
+    const placed = new Set([...liveWorkerRows.value.values()].flatMap(workers => workers.map(worker => worker.id)));
+    if (!props.isRunning) {
+        for (const turn of props.historyTurns) for (const reviewer of turn.reviewers || []) placed.add(reviewer.id);
+    }
+    return (props.teamState?.workers || []).filter(worker => worker.extra?.reviewExecutor && !placed.has(worker.id));
+});
 function getOrchestrationTitle(step: AgentStepItem): string {
     const workers = getStepActiveWorkers(step);
     if (!workers.length) return "并发协作 · 子任务调度记录";
@@ -3909,6 +3917,7 @@ function completionArtifacts(value: unknown): AgentArtifactInput[] {
         return true;
     });
 }
+const liveFinalReviewIds = computed(() => props.reviewProgress.flatMap(review => review.childRunId || []).join(" "));
 const historyTimelineEntries = computed<TimelineEntry[]>(() => {
     const timeline: TimelineEntry[] = [];
     // 过滤掉当前正在实时运行中的回合，由 live 视图独立渲染，防止双份重复
@@ -3916,6 +3925,7 @@ const historyTimelineEntries = computed<TimelineEntry[]>(() => {
         if (props.isRunning && turn.status === "running") return false;
         return true;
     });
+    const activeReviewIds = liveFinalReviewIds.value.split(" ");
 
     for (const turn of [...turnsToRender].sort((a, b) => a.startedAt - b.startedAt)) {
         timeline.push({ id: `history-user-${turn.id}`, type: "user", timestamp: turn.startedAt, content: turn.goal });
@@ -3947,6 +3957,9 @@ const historyTimelineEntries = computed<TimelineEntry[]>(() => {
         middle.sort((a, b) => a.timestamp - b.timestamp || Number(a.type === "message" && a.isHuman) - Number(b.type === "message" && b.isHuman) || a.id.localeCompare(b.id));
         assignInterventionAnchors(middle);
         timeline.push(...middle);
+        const linkedReviews = new Set([...turn.steps.flatMap(getStepJobIds), ...activeReviewIds]);
+        const unplaced = (turn.reviewers || []).filter(worker => !linkedReviews.has(worker.id));
+        if (unplaced.length) timeline.push({ id: `history-reviews-${turn.id}`, type: 'review', timestamp: turn.completedAt, workers: unplaced });
         if (turn.summary || turn.artifacts.length || ["succeeded", "failed", "cancelled"].includes(turn.status)) {
             const isCancelled = turn.status === "cancelled";
             const failed = turn.status === "failed" || isCancelled;
@@ -4037,7 +4050,7 @@ function getStepReviewRows(step: AgentStepItem): ReviewProgressItem[] {
 }
 const timelineEntries = computed<TimelineEntry[]>(() => {
     const entries = [...baseTimelineEntries.value];
-    if (reviewPlacement.value.unplaced.length) {
+    if (reviewPlacement.value.unplaced.length || unplacedLiveReviewers.value.length) {
         const liveCompletion = entries.findIndex(entry => entry.id === 'live-completion');
         const lastCompletion = props.isRunning ? -1 : entries.map(entry => entry.type).lastIndexOf('completion');
         const index = liveCompletion >= 0 ? liveCompletion : lastCompletion >= 0 ? lastCompletion : entries.length;

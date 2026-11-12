@@ -148,11 +148,13 @@ pub fn list_session_traces(db: &DbState, session_id: &str) -> Result<Vec<Value>,
             .as_deref()
             .and_then(|value| serde_json::from_str::<Value>(value).ok())
             .unwrap_or(Value::Null);
+        let reviewers = review_step_history(&conn, session_id, &id).unwrap_or_default();
         Ok(json!({
             "id": id,
             "goal": goal,
             "status": status,
             "steps": steps,
+            "reviewers": reviewers,
             "completion": completion,
             "started_at": started_at,
             "updated_at": updated_at,
@@ -160,6 +162,44 @@ pub fn list_session_traces(db: &DbState, session_id: &str) -> Result<Vec<Value>,
         }))
     })
     .collect()
+}
+
+fn review_step_history(conn: &rusqlite::Connection, session: &str, parent_run: &str) -> rusqlite::Result<Vec<Value>> {
+    let mut members = conn.prepare(
+        "SELECT id,purpose,model_id,status,duration_ms,execution_checkpoint_json
+         FROM agent_child_runs WHERE parent_session_id=?1 AND parent_run_id=?2 AND kind='review'
+         ORDER BY started_at,id",
+    )?;
+    let mut steps = conn.prepare(
+        "SELECT seq,step_json FROM agent_run_steps WHERE run_id=?1 ORDER BY seq DESC LIMIT 6",
+    )?;
+    let rows = members.query_map(params![session, parent_run], |row| Ok((
+        row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?,
+        row.get::<_, String>(2)?, row.get::<_, String>(3)?,
+        row.get::<_, Option<i64>>(4)?, row.get::<_, Option<String>>(5)?,
+    )))?;
+    rows.map(|row| {
+        let (id, purpose, model, status, duration, checkpoint) = row?;
+        let checkpoint = checkpoint.and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+        let role_label = checkpoint.as_ref().and_then(|value|
+            value["state"]["dispatch_input"]["params"]["role_label"].as_str()
+        );
+        let rows = steps.query_map([&id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?;
+        let mut previews = Vec::new();
+        for row in rows {
+            let (seq, raw) = row?;
+            if let Ok(step) = serde_json::from_str::<Value>(&raw) {
+                let mut preview = super::child_task::review_step_preview(&step);
+                preview["id"] = json!(seq);
+                previews.push(preview);
+            }
+        }
+        previews.reverse();
+        Ok(json!({
+            "id": id, "purpose": purpose, "model": model, "status": status,
+            "label": role_label, "duration_ms": duration, "steps": previews,
+        }))
+    }).collect()
 }
 
 /// 超过该字符阈值（约 2,000 字符 / ~500 Tokens）时自动溢出落盘到本地独立文件
@@ -703,5 +743,42 @@ mod tests {
         assert_eq!(traces.len(), 1);
         assert_eq!(traces[0]["status"], "succeeded");
         assert_eq!(traces[0]["completion"]["summary"], "完成");
+    }
+
+    #[test]
+    fn history_projects_review_steps_only_for_the_owning_run_and_session() {
+        let db = test_db();
+        upsert_snapshot(&db, "parent", "session-1", "目标", "running", &[], None).unwrap();
+        let child_step = json!({"id":0,"tool":"parallel","params":{"parallel":[
+            {"tool":"read_file","params":{"path":"service.log","start_line":15,"secret":"omit"}}
+        ]},"thought":"omit","output":"omit","status":"succeeded"});
+        {
+            let conn = db.0.lock().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE agent_child_runs (
+                    id TEXT, purpose TEXT, model_id TEXT, status TEXT, duration_ms INTEGER,
+                    execution_checkpoint_json TEXT, parent_session_id TEXT, parent_run_id TEXT,
+                    kind TEXT, started_at TEXT
+                );
+                CREATE TABLE agent_run_steps (run_id TEXT, seq INTEGER, step_json TEXT);
+                INSERT INTO agent_child_runs VALUES
+                    ('review', 'plan_review', 'model', 'running', NULL, NULL, 'session-1', 'parent', 'review', '1'),
+                    ('other-session', 'plan_review', 'model', 'running', NULL, NULL, 'session-2', 'parent', 'review', '1'),
+                    ('other-run', 'stage_review', 'model', 'running', NULL, NULL, 'session-1', 'other', 'review', '1'),
+                    ('task', 'task', 'model', 'running', NULL, NULL, 'session-1', 'parent', 'task', '1');",
+            ).unwrap();
+            conn.execute("INSERT INTO agent_run_steps VALUES ('review', 0, ?1)", [child_step.to_string()]).unwrap();
+        }
+        let trace = &list_session_traces(&db, "session-1").unwrap()[0];
+        let members = trace["reviewers"].as_array().unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0]["id"], "review");
+        let step = &members[0]["steps"][0];
+        assert_eq!(step["status"], "succeeded");
+        assert_eq!(step["params"]["parallel"][0]["params"]["path"], "service.log");
+        assert!(!step.to_string().contains("omit"));
+        let live = crate::agent::child_task::relay_review_step("review", &json!({"type":"step_new","step":child_step})).unwrap();
+        assert_eq!(live["child_run_id"], "review");
+        assert_eq!(&live["event"]["step"], step);
     }
 }

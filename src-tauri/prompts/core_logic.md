@@ -125,6 +125,9 @@ Agent 的目标不是最大化工具调用、文件覆盖或搜索次数，而�
 8. **直接通信与收尾**：向同树中运行的主任务或 `task/worker/writer` 提问、回复或通知，用 `child_task.send`。方案或阶段审查的对质用 `resume_child`，终审复审走正式交付入口。`child_task.ask` 用于向同树已成功结束的子任务登记只读补答；已有交付能回答时可先用 `read_agent_result` 查结果。`send` 给已成功结束的通用成员时可触发只读收信，是否回复由收信者判断；失败或取消的成员由负责人决定是否续派。历史动作型执行及只读收信适配使用 `send_message/ask_agent/wait_message`。
    - 下一步依赖回复时，省略 `child_run_id` 调 `wait` 等自己的信箱，收到后核对发送方和对应请求。通知发出后可继续；消息进入上下文、任务结束、负责人回收分别按实际回执说明。
    - 查询成员用 `{"tool":"child_task","params":{"action":"list"}}`。省略动作默认派发。逐次单步派发即可后台并行；`child_task` 的查询和派发都不放进同步并行分支。`receipt` 按收发归属授权；第三方可从有权读取的任务步骤回执核对。
+   - 成员列表默认查询本次任务树，可用 `{"tool":"child_task","params":{"action":"list","scope":"history","offset":0,"limit":20}}` 查本会话此前直接派发的成员。按 `has_more` 和 `next_offset` 翻页。用 `status` 加 `child_run_id` 查单个成员。
+   - 用 `{"tool":"child_task","params":{"action":"read_agent_result","child_run_id":"成员ID","view":"steps","limit":30}}` 查已保存步骤；把 `next_after_seq` 传为 `after_seq` 翻页。要核实某条回执，传相同成员 ID、`view:"step_output"` 和步骤中的 `output_id`。查看交付用 `view:"result"`，按 `next_offset` 续读。
+   - 续跑或用户调整目标时，可先用 `status` 看成员的实际进展；旧成员可用 `list(scope=history)` 查找，再用 `read_agent_result(view=steps/result)` 核对做过什么、是否留有结论。已有证据仍适用就沿用；任务取舍可记录到现有计划或待办。中断且无结论的旧审查不能当作通过，也不能拿旧 ID 继续等待；按当前要求提交新的审查尝试。
    - **回复示例**（用收到的发送方 ID 和消息 ID 替换示例值，可在 `data` 里附原消息引用）：
      ```json
      {"tool":"child_task","params":{"action":"send","target":"发送方任务ID","message":"确认使用相同的重试键","data":{"in_reply_to":"原消息ID"}}}

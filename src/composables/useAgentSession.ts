@@ -7,12 +7,14 @@ import type { ArtifactDescriptor, AgentArtifactInput } from "../types/artifact";
 import { normalizeArtifact, normalizeArtifactList } from "../utils/artifact";
 import { finishSummaryText } from "../utils/agentCompletionText";
 import { activeReviewAnchor, applyReviewProgress, type ReviewProgressItem } from "../components/agent/reviewProgress";
+import { historicalReviewer, updateReviewWorkerSteps } from "../components/agent/reviewWorkerSteps";
 
 export interface AgentHistoryTurn {
     id: string;
     goal: string;
     status: string;
     steps: AgentStepItem[];
+    reviewers?: AgentWorkerItem[];
     messages: Array<PersistedConversationMessage & { timestamp: number }>;
     summary: string;
     artifacts: ArtifactDescriptor[];
@@ -714,6 +716,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             goal,
             status: toText(trace.status) || "running",
             steps,
+            reviewers: Array.isArray(trace.reviewers) ? trace.reviewers.flatMap(value => historicalReviewer(value) ?? []) : [],
             summary: (() => {
                 const s = finishSummaryText(toText(completion.summary || completion.message || completion.result || completion.content));
                 const d = finishSummaryText(toText(completion.details || ""));
@@ -1003,7 +1006,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 // A wait receipt identifies the job type, not a replacement for its custom role label.
                 if (!worker.roleLabel || ["Worker", "侦察", "审查员", "写入员"].includes(worker.roleLabel)) worker.roleLabel = details.roleLabel;
             }
-            if (receipt?.status) {
+            if (receipt?.status && !(worker.extra?.settledByHost && (receipt.status === "running" || receipt.status === "pending"))) {
                 worker.status = receipt.status;
                 worker.durationMs = receipt.durationMs;
                 worker.currentStep = receipt.status === "succeeded" ? "任务已完成并回收结论"
@@ -1012,7 +1015,11 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 if (receipt.output != null) {
                     worker.output = receipt.output;
                     const arts = parseWorkerArtifacts(receipt.output);
-                    for (const [key, value] of Object.entries(arts)) if (value != null) (worker as any)[key] = value;
+                    for (const [key, value] of Object.entries(arts)) {
+                        if (value == null || (key === "steps" && worker.extra?.reviewExecutor)) continue;
+                        if (key === "extra") worker.extra = { ...value as Record<string, unknown>, ...worker.extra };
+                        else (worker as any)[key] = value;
+                    }
                 }
             }
         }
@@ -1613,6 +1620,50 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             const evType = toText(event.type);
             const toolName = toText(event.tool || event.action);
             const detail = toText(event.description || event.message || event.execution_status || evType);
+            if (child && payload.review) {
+                if (stoppedReviewIds.has(child)) return;
+                const review = asRecord(payload.review);
+                const parentRun = toText(review.parent_run_id);
+                if (parentRun && reviewRunId.value && parentRun !== reviewRunId.value) return;
+                const memberId = toText(review.member_id);
+                if (memberId) {
+                    reviewProgress.value = reviewProgress.value.map(member => member.id === memberId && !stoppedReviewIds.has(memberId)
+                        ? { ...member, childRunId: child, steps: updateReviewWorkerSteps(member.steps || [], event) }
+                        : member);
+                    return;
+                }
+                let worker = teamWorkers.value.find(item => item.id === child);
+                if (!worker) {
+                    const label = toText(review.label) || "审查员";
+                    teamWorkers.value.push({
+                        id: child, name: label, role: "reviewer", roleLabel: label, model: toText(review.model),
+                        status: "running", currentStep: "审查 Agent 正在准备", progress: 0, startedAt: Date.now(),
+                        extra: { reviewExecutor: true },
+                    });
+                    worker = teamWorkers.value[teamWorkers.value.length - 1];
+                }
+                worker.extra = { ...worker.extra, reviewExecutor: true };
+                if (worker.extra.settledByHost) return;
+                worker.steps = updateReviewWorkerSteps(worker.steps || [], event);
+                const latest = worker.steps.at(-1);
+                if (evType === "returned") {
+                    const status = toText(event.execution_status);
+                    worker.extra.settledByHost = ["succeeded", "failed", "cancelled", "invalid_output", "timed_out"].includes(status);
+                    worker.status = status === "succeeded" ? "succeeded" : worker.extra.settledByHost ? "failed" : "challenged";
+                    worker.currentStep = status === "succeeded" ? "已保存审查结果"
+                        : status === "cancelled" ? "审查已停止"
+                        : worker.extra.settledByHost ? "审查执行未完成" : "审查结果待核对";
+                    if (event.duration_ms != null) worker.durationMs = numberOrUndefined(event.duration_ms);
+                } else if (evType === "complete") {
+                    worker.currentStep = "执行已结束，正在核对结算状态…";
+                } else if (evType === "step_start" || evType === "step_done" || evType === "step_error") {
+                    worker.currentTool = latest?.tool;
+                    worker.currentStep = latest?.title || detail;
+                } else if (evType === "action_phase" && detail) {
+                    worker.currentStep = detail;
+                }
+                return;
+            }
             if (child) {
                 const worker = teamWorkers.value.find((w) => w.id === child);
                 const alreadySettled = worker?.extra?.settledByHost === true;

@@ -141,7 +141,7 @@ pub(crate) fn spawn_review_resume(
         });
         program.messages=messages;program.schema=schema;program.can_finalize=can_finalize;program.model=config.model_name.clone();
         program.workspace=workspace.into();program.parent_session=session.into();
-        if let Err(message)=super::main_executor::start(app,db,&id,parent_run,&config.model_id,effort,program,interrupt) {
+        if let Err(message)=super::main_executor::start(app,db,&id,parent_run,&config.model_id,effort,program,interrupt,None) {
             crate::agent::execution::runtime::fail_checkpoint(db,&id,message.clone());
             return Err(error("resume_child:main_executor_start_failed",message));
         }

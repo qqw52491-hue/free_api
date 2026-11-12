@@ -588,12 +588,17 @@ export function workerStepInvocation(step: AgentWorkerStep): string {
     if (typeof input === "string") { try { input = JSON.parse(input); } catch { input = {}; } }
     const p = input && typeof input === "object" ? input : {};
     const action = step.action || step.tool || "";
+    const branches: AgentWorkerStep[] = Array.isArray(p.parallel) ? p.parallel : Array.isArray(p.commands) ? p.commands : [];
+    if (branches.length) {
+        return [action, ...branches.map(branch => workerStepInvocation(branch)).filter(Boolean)].filter(Boolean).join("\n");
+    }
     const command = typeof p.command === "string" ? p.command
         : typeof p.cmd === "string" ? p.cmd
         : step.view?.kind === "terminal" ? step.view.command : "";
     if (command) return action ? `${action}\n${command}` : command;
     const parts = [action];
-    if (typeof p.path === "string") parts.push(p.path);
+    const path = p.path ?? p.file_path;
+    if (typeof path === "string") parts.push(path);
     const query = p.query ?? p.pattern;
     if (typeof query === "string") parts.push(query);
     if (typeof p.start_line === "number") parts.push(`#L${p.start_line}${typeof p.end_line === "number" ? `-${p.end_line}` : ""}`);

@@ -122,6 +122,22 @@ impl Drop for Relay {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct ReviewRelay {
+    pub member_id: Option<String>,
+    pub label: Option<String>,
+    pub model: String,
+}
+
+impl ReviewRelay {
+    fn annotate(&self, payload: &mut Value, parent_run: &str) {
+        payload["review"] = json!({
+            "member_id": self.member_id, "label": self.label, "model": self.model,
+            "parent_run_id": parent_run
+        });
+    }
+}
+
 pub(crate) fn spawn(
     app: AppHandle,
     db: DbState,
@@ -132,6 +148,7 @@ pub(crate) fn spawn(
     auto: bool,
     mode: String,
     workspace_guard: Option<WorkspaceRunGuard>,
+    review: Option<ReviewRelay>,
 ) -> Result<(), String> {
     let guard = TaskGuard::enter(binding.clone());
     let (done_tx, done) = watch::channel(false);
@@ -150,6 +167,8 @@ pub(crate) fn spawn(
     let parent = binding.parent_session.clone();
     let child_id = binding.child_run.clone();
     let child_session = binding.child_session.clone();
+    let parent_run = binding.parent_run.clone();
+    let review_events = review.clone();
     let id = app.listen(format!("agent-progress-{child_session}"), move |event| {
         if let Ok(payload) = serde_json::from_str::<Value>(event.payload()) {
             let kind = payload["type"].as_str().unwrap_or_default();
@@ -167,7 +186,19 @@ pub(crate) fn spawn(
                     crate::agent::job_engine::notify_job_state_changed();
                 }
             }
-            if let Some(detail) = super::relay_progress(&child_id, payload) {
+            let nested = kind == "child_task_progress";
+            if nested && payload.get("review").is_some() {
+                return;
+            }
+            let review_step = review_events.as_ref().and_then(|_| super::relay_review_step(&child_id, &payload));
+            let duration = payload["metrics"]["tool_duration_ms"].as_u64();
+            if let Some(mut detail) = review_step.or_else(|| super::relay_progress(&child_id, payload)) {
+                if let Some(review) = review_events.as_ref().filter(|_| !nested) {
+                    review.annotate(&mut detail, &parent_run);
+                    if let Some(duration) = duration {
+                        detail["event"]["duration_ms"] = json!(duration);
+                    }
+                }
                 let _ = event_app.emit(&format!("agent-progress-{parent}"), detail);
             }
         }
@@ -176,6 +207,11 @@ pub(crate) fn spawn(
         app: app.clone(),
         id,
     };
+    if let Some(review) = &review {
+        let mut detail = json!({"type":"child_task_progress","child_run_id":binding.child_run,"event":{"type":"started"}});
+        review.annotate(&mut detail, &binding.parent_run);
+        let _ = app.emit(&format!("agent-progress-{}", binding.parent_session), detail);
+    }
     tauri::async_runtime::spawn(async move {
         let _relay = relay;
         let started = std::time::Instant::now();
@@ -223,7 +259,21 @@ pub(crate) fn spawn(
             .unwrap_or_else(|e| e.into_inner())
             .remove(&binding.child_run);
         crate::agent::job_engine::notify_job_state_changed();
-        let _=app.emit(&format!("agent-progress-{}",binding.parent_session),json!({"type":"child_task_progress","child_run_id":binding.child_run,"event":{"type":"returned"}}));
+        let mut detail = json!({"type":"child_task_progress","child_run_id":binding.child_run,"event":{"type":"returned"}});
+        if let Some(review) = &review {
+            review.annotate(&mut detail, &binding.parent_run);
+            if let Ok(conn) = db.0.lock() {
+                if let Ok((status, duration)) = conn.query_row(
+                    "SELECT status,duration_ms FROM agent_child_runs WHERE id=?1 AND kind='review'",
+                    [&binding.child_run],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
+                ) {
+                    detail["event"]["execution_status"] = json!(status);
+                    detail["event"]["duration_ms"] = json!(duration);
+                }
+            }
+        }
+        let _ = app.emit(&format!("agent-progress-{}", binding.parent_session), detail);
     });
     Ok(())
 }

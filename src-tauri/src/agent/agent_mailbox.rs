@@ -5,6 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 pub(crate) mod replies;
 pub(crate) mod coordination;
+pub(crate) mod observation;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Actor {
@@ -405,13 +406,50 @@ pub(crate) async fn wait(
     }
 }
 
-pub(crate) fn family_list(db: &DbState, actor: &Actor) -> Result<Vec<Value>, String> {
+pub(crate) fn family_overview(db: &DbState, actor: &Actor, offset: u64, limit: u64) -> Result<Value, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let owner = root(&conn, actor)?;
-    let mut stmt=conn.prepare("WITH RECURSIVE family(id) AS (SELECT ?1 UNION SELECT c.id FROM agent_child_runs c JOIN family f ON c.parent_run_id=f.id) SELECT c.id,c.kind,c.status,c.model_id,c.parent_run_id,c.started_at,c.finished_at,c.purpose,c.resumed_from,c.applied_at,(c.result_json IS NOT NULL),c.execution_config_json,CASE WHEN c.kind='task' THEN COALESCE((SELECT json_object('profile','task','phase',p.phase,'version',p.version) FROM agent_checkpoints p WHERE p.run_id='task-'||c.id),c.execution_checkpoint_json) ELSE c.execution_checkpoint_json END FROM agent_child_runs c JOIN family f ON f.id=c.id ORDER BY (c.status='running') DESC,c.started_at DESC LIMIT 100").map_err(|e|e.to_string())?;
-    let rows=stmt.query_map([owner.run],|r|Ok(json!({"child_run_id":r.get::<_,String>(0)?,"kind":r.get::<_,String>(1)?,"execution_status":r.get::<_,String>(2)?,"model":r.get::<_,String>(3)?,"parent_run_id":r.get::<_,String>(4)?,"started_at":r.get::<_,String>(5)?,"finished_at":r.get::<_,Option<String>>(6)?,"purpose":r.get::<_,Option<String>>(7)?,"resumed_from":r.get::<_,Option<String>>(8)?,"collected_at":r.get::<_,Option<String>>(9)?,"result_available":r.get::<_,bool>(10)?,"execution_config":r.get::<_,Option<String>>(11)?.and_then(|s|serde_json::from_str::<Value>(&s).ok()),"checkpoint":r.get::<_,Option<String>>(12)?.and_then(|s|serde_json::from_str::<Value>(&s).ok()).map(|s|json!({"profile":s["profile"],"phase":s["phase"],"version":s["version"]}))}))).map_err(|e|e.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())
+    let limit = limit.clamp(1, 100);
+    let offset = offset.min(i64::MAX as u64);
+    // Stable ordering permits paging while members change status. Each row contains
+    // only bounded projections of persisted facts, never checkpoint contents.
+    let mut stmt = conn.prepare("WITH RECURSIVE family(id,depth,path) AS (SELECT ?1,0,json_array(?1) UNION ALL SELECT c.id,f.depth+1,json_insert(f.path,'$[#]',c.id) FROM agent_child_runs c JOIN family f ON c.parent_run_id=f.id WHERE NOT EXISTS (SELECT 1 FROM json_each(f.path) WHERE value=c.id)), members AS (SELECT f.id,f.depth,c.parent_run_id,c.kind,c.status,c.model_id,c.started_at,c.finished_at,c.purpose,c.resumed_from,c.applied_at,c.result_json,c.execution_checkpoint_json,c.execution_config_json,t.goal,t.updated_at,t.completion_json FROM family f LEFT JOIN agent_child_runs c ON c.id=f.id LEFT JOIN agent_run_traces t ON t.id=f.id) SELECT id,depth,parent_run_id,COALESCE(kind,'main'),status,model_id,started_at,finished_at,purpose,resumed_from,applied_at,result_json IS NOT NULL,goal,updated_at,completion_json IS NOT NULL,CASE WHEN json_valid(execution_checkpoint_json) THEN COALESCE(json_extract(execution_checkpoint_json,'$.state.main_review.role_label'),json_extract(execution_checkpoint_json,'$.state.dispatch_input.params.role_label')) END,(SELECT step_json FROM agent_run_steps s WHERE s.run_id=members.id ORDER BY seq DESC LIMIT 1), (SELECT COUNT(*) FROM agent_run_steps s WHERE s.run_id=members.id), (SELECT status FROM agent_run_traces t WHERE t.id=members.id), (SELECT started_at FROM agent_run_traces t WHERE t.id=members.id), (SELECT completed_at FROM agent_run_traces t WHERE t.id=members.id),execution_config_json,CASE WHEN kind='task' THEN COALESCE((SELECT json_object('profile','task','phase',p.phase,'version',p.version) FROM agent_checkpoints p WHERE p.run_id='task-'||members.id),execution_checkpoint_json) ELSE execution_checkpoint_json END FROM members ORDER BY depth,id LIMIT ?2 OFFSET ?3").map_err(|e|e.to_string())?;
+    let rows = stmt.query_map(params![owner.run, limit + 1, offset], |r| {
+        let id: String = r.get(0)?;
+        let raw: Option<String> = r.get(16)?;
+        let activity = raw.and_then(|s| serde_json::from_str::<Value>(&s).ok()).map(|s| json!({
+            "description":s["description"].as_str().map(|v|v.chars().take(200).collect::<String>()),
+            "tool":s["action"].as_str().or_else(||s["tool"].as_str()),"status":s["status"],
+            "recorded_at":s["timestamp"].as_i64()
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map(|time| time.to_rfc3339())
+                .or_else(|| s["timestamp"].as_str().or_else(||s["created_at"].as_str()).map(str::to_owned))
+        }));
+        let kind: String = r.get(3)?;
+        let is_main = kind == "main";
+        Ok(json!({"child_run_id":id,"run_id":id,"depth":r.get::<_,u64>(1)?,"parent_run_id":r.get::<_,Option<String>>(2)?,
+            "kind":kind,"execution_status":r.get::<_,Option<String>>(4)?.or(r.get::<_,Option<String>>(18)?),
+            "model":r.get::<_,Option<String>>(5)?,"started_at":r.get::<_,Option<String>>(6)?.or(r.get::<_,Option<String>>(19)?),
+            "finished_at":r.get::<_,Option<String>>(7)?.or(r.get::<_,Option<String>>(20)?),"purpose":r.get::<_,Option<String>>(8)?,
+            "resumed_from":r.get::<_,Option<String>>(9)?,"collected_at":r.get::<_,Option<String>>(10)?,
+            "result_available":if is_main {r.get::<_,bool>(14)?} else {r.get::<_,bool>(11)?},
+            "task":r.get::<_,Option<String>>(12)?.map(|s|s.lines().next().unwrap_or("").chars().take(200).collect::<String>()),
+            "updated_at":r.get::<_,Option<String>>(13)?,"role_label":r.get::<_,Option<String>>(15)?.map(|s|s.chars().take(120).collect::<String>()),
+            "latest_activity":activity,"total_steps":r.get::<_,u64>(17)?,
+            "execution_config":r.get::<_,Option<String>>(21)?.and_then(|s|serde_json::from_str::<Value>(&s).ok()),
+            "checkpoint":r.get::<_,Option<String>>(22)?.and_then(|s|serde_json::from_str::<Value>(&s).ok()).map(|s|json!({"profile":s["profile"],"phase":s["phase"],"version":s["version"]}))}))
+    }).map_err(|e|e.to_string())?;
+    let mut tasks = rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    let has_more = tasks.len() > limit as usize;
+    tasks.truncate(limit as usize);
+    let next_offset = offset.saturating_add(tasks.len() as u64);
+    Ok(json!({"tasks":tasks,"has_more":has_more,"next_offset":next_offset,"root_run_id":owner.run,"self_run_id":actor.run,
+        "scope_notice":"同一任务树的只读快照；最近活动取自已保存步骤，更新时间不等于步骤发生时间。分页期间新增成员可能影响偏移。"}))
+}
+
+#[cfg(test)]
+pub(crate) fn family_list(db: &DbState, actor: &Actor) -> Result<Vec<Value>, String> {
+    Ok(family_overview(db, actor, 0, 100)?["tasks"].as_array().cloned().unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -464,7 +502,7 @@ pub(crate) async fn specialist_action(
             .map(|v| v.to_string()),
         ),
         "team_status" if params.get("offset").is_some_and(|v| v.as_u64().is_none()) => Some(Err("team_status.offset 类型错误：期望非负整数；未查询。".into())),
-        "team_status" => Some(family_list(db, &actor).and_then(|v| coordination::list(db,&actor,params["offset"].as_u64().unwrap_or(0)).map(|c|json!({"tasks":v,"collaboration":c}).to_string()))),
+        "team_status" => Some(family_overview(db, &actor, params["offset"].as_u64().unwrap_or(0), 100).and_then(|mut v| coordination::list(db,&actor,params["offset"].as_u64().unwrap_or(0)).map(|c|{v["collaboration"]=c;v.to_string()}))),
         _ => None,
     }
 }

@@ -292,3 +292,67 @@ fn cancelled_unconsumed_stage_wait_refunds_only_the_unfinished_round() {
     drop(db);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn resumed_running_checkpoint_retires_only_an_interrupted_foreign_run_plan_wait() {
+    let db = crate::db::DbState(std::sync::Arc::new(std::sync::Mutex::new(
+        rusqlite::Connection::open_in_memory().unwrap(),
+    )));
+    db.0.lock().unwrap().execute_batch(
+        "CREATE TABLE agent_child_runs (
+            id TEXT PRIMARY KEY, parent_run_id TEXT, parent_session_id TEXT, kind TEXT,
+            status TEXT, result_json TEXT, consumed_at TEXT, applied_at TEXT, batch_id TEXT
+        );
+        INSERT INTO agent_child_runs VALUES
+          ('old-review','old-run','session','review','interrupted',NULL,NULL,NULL,'cancelled-plan-batch');",
+    ).unwrap();
+    let (mut context, mut cp) = failed_fixture();
+    cp.plan_mode = PlanExecutionMode::Auto;
+    cp.triage_verdict.as_mut().unwrap().fallback = None;
+    cp.plan_reviewer_retry_count = 1;
+    cp.record_instruction(serde_json::from_value(json!({
+        "tool": "wait_jobs", "params": {"job_ids": ["old-review"]}
+    })).unwrap(), &context);
+    let snapshot = serde_json::to_string(&cp).unwrap();
+    let mut cp: AgentCheckpoint = serde_json::from_str(&snapshot).unwrap();
+    cp.restore_task_for_entry(&mut context, "可以继续么");
+    assert_eq!(recovery_decision(&cp), RecoveryDecision::ResumeTool);
+    assert!(!cp.retire_interrupted_plan_wait(&db, "old-run", &mut context).unwrap());
+    for (status, result, owner) in [
+        ("running", None, "session"),
+        ("succeeded", Some("{}"), "session"),
+        ("interrupted", Some("{}"), "session"),
+        ("interrupted", None, "another-session"),
+    ] {
+        db.0.lock().unwrap().execute(
+            "UPDATE agent_child_runs SET status=?1,result_json=?2,parent_session_id=?3",
+            rusqlite::params![status,result,owner],
+        ).unwrap();
+        assert!(!cp.retire_interrupted_plan_wait(&db, "new-run", &mut context).unwrap());
+    }
+    db.0.lock().unwrap().execute(
+        "UPDATE agent_child_runs SET status='interrupted',result_json=NULL,parent_session_id='session'",
+        [],
+    ).unwrap();
+    let previous = crate::agent::plan_gate::check_pre_write_gatekeeper(
+        &mut cp, &context, &db, "new-run", 2, false,
+    ).unwrap();
+    assert_eq!(previous.route, "plan_gatekeeper:need_wait_reviewer_jobs");
+
+    assert!(cp.retire_interrupted_plan_wait(&db, "new-run", &mut context).unwrap());
+    assert_eq!(recovery_decision(&cp), RecoveryDecision::ResumePlanning);
+    assert!(!cp.plan_reviewer_consumed);
+    assert!(cp.plan_review_batch_id.is_none());
+    let plan = cp.submitted_plan.as_ref().unwrap();
+    assert!(crate::agent::plan_gate::submit_plan_rejection(&cp, plan).is_none());
+    let next = crate::agent::plan_gate::check_pre_write_gatekeeper(
+        &mut cp, &context, &db, "new-run", 2, false,
+    ).unwrap();
+    assert_eq!(next.route, "plan_gatekeeper:need_reviewer_dispatch");
+    assert!(context.turns_history.iter().any(|message|
+        message.content.as_str().is_some_and(|text| text.contains("旧任务 ID 无法由本轮等待"))));
+    let status: String = db.0.lock().unwrap().query_row(
+        "SELECT status FROM agent_child_runs WHERE id='old-review'", [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(status, "interrupted");
+}

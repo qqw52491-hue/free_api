@@ -2,6 +2,79 @@
 use super::*;
 
 impl AgentCheckpoint {
+    /// Restart may cancel the old run without advancing its checkpoint to Failed.
+    /// Retire a saved wait only when every member belongs to an earlier run in
+    /// this session and ended without leaving a receipt.
+    pub(crate) fn retire_interrupted_plan_wait(
+        &mut self,
+        db: &DbState,
+        current_run: &str,
+        context: &mut SandwichContext,
+    ) -> Result<bool, String> {
+        let Some(batch) = self.plan_review_batch_id.as_ref() else { return Ok(false); };
+        if self.plan_phase.is_approved()
+            || (self.plan_mode == PlanExecutionMode::Auto
+                && !crate::agent::plan_gate::plan_discussion_required(self))
+        {
+            return Ok(false);
+        }
+        let members = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            let mut statement = conn.prepare(
+                "SELECT id, parent_session_id=?2 AND parent_run_id<>?3
+                       AND kind IN ('review','reviewer','child_reviewer')
+                       AND status IN ('interrupted', 'cancelled')
+                       AND result_json IS NULL AND consumed_at IS NULL AND applied_at IS NULL
+                 FROM agent_child_runs WHERE batch_id=?1",
+            ).map_err(|e| e.to_string())?;
+            let rows = statement.query_map(rusqlite::params![batch, self.run_id, current_run], |row|
+                Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
+            ).map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+        };
+        if members.is_empty() || members.len() < self.plan_review_expected_count as usize
+            || members.iter().any(|(_, interrupted)| !interrupted)
+        {
+            return Ok(false);
+        }
+
+        self.reset_plan_review_wait();
+        self.plan_reviewer_consumed = false;
+        self.auto_plan_approval_pending = false;
+        self.pending_finalization = None;
+        context.add_host_feedback("【方案审查续跑】上一轮方案审查已中断，未留下可回收结论。旧任务 ID 无法由本轮等待。原方案和审查要求仍有效，请沿用原证据重新 submit_plan；如有已裁决的升级要求，按原要求重新派发审查。");
+
+        let stale_wait = self.prepared_instruction.as_ref().is_some_and(|instruction| {
+            if !matches!(instruction.get_tool().as_str(), "wait_jobs" | "wait_for_jobs") {
+                return false;
+            }
+            let params = instruction.get_params();
+            params.get("job_ids").and_then(serde_json::Value::as_array).is_some_and(|ids| {
+                !ids.is_empty() && ids.iter().all(|id|
+                    id.as_str().is_some_and(|id| members.iter().any(|(member, _)| member == id))
+                )
+            })
+        });
+        if self.phase == AgentPhase::RunTool && self.pending.is_none() && stale_wait {
+            self.begin_planning(self.step_id, context);
+        } else {
+            self.refresh_context(context);
+        }
+        Ok(true)
+    }
+
+    fn reset_plan_review_wait(&mut self) {
+        if self.plan_review_batch_id.is_some() {
+            self.plan_review_dispatch_failures.clear();
+        }
+        self.plan_review_batch_id = None;
+        self.plan_review_expected_count = 0;
+        self.plan_reviewer_retry_count = 0;
+        self.plan_reviewer_failover_count = 0;
+        self.plan_reviewer_last_dispatch = None;
+        self.plan_review_batch = PlanReviewBatchState::default();
+    }
+
     /// 被取消且尚未消费的阶段批次没有有效结论，不应继续占预算或把派发当覆盖。
     /// 只读台账；真实成功结论/问题不退款，不改变历史任务归属。
     pub(crate) fn retire_stopped_stage_wait(&mut self, db: &DbState) -> Result<(), String> {
@@ -82,15 +155,7 @@ impl AgentCheckpoint {
         // 失败/取消不是审查通过；已落账的真实结论、blocking 和人工裁决一律保留。
         if !self.plan_phase.is_approved() {
             // 无人启动的失败事实可在续跑后继续交人工仲裁；旧在途批次则须重新派发。
-            if self.plan_review_batch_id.is_some() {
-                self.plan_review_dispatch_failures.clear();
-            }
-            self.plan_review_batch_id = None;
-            self.plan_review_expected_count = 0;
-            self.plan_reviewer_retry_count = 0;
-            self.plan_reviewer_failover_count = 0;
-            self.plan_reviewer_last_dispatch = None;
-            self.plan_review_batch = PlanReviewBatchState::default();
+            self.reset_plan_review_wait();
         }
         // 阶段批次的旧后台任务不会被新 run 轮询，不能继续假装在途。
         // 已审出的问题及其来源仍有效，可继续对质；仅清等待句柄。
