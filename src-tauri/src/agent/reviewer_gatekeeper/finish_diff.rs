@@ -382,7 +382,8 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
 
     // 执行轨迹摘要：审查者核对"声称做过的验证"是否真实执行（谎报检测），
     // 也兼作已知证据地图减少重复取证。
-    let mut execution_evidence = collect_execution_evidence_digest(db, session_id, run_started_at).unwrap_or_default();
+    let (execution_evidence, recent_refs) = collect_execution_review_evidence(db, session_id, run_started_at);
+    let mut execution_evidence = execution_evidence.unwrap_or_default();
     if let Some(parent) = crate::agent::child_reviewer::main_executor::parent_run() {
         let children = review_history_tool(db, &parent, "list_child_runs", &json!({"limit":30}))
             .unwrap_or_else(|e|format!("查询失败：{e}；不能据此判断没有子任务。"));
@@ -702,9 +703,14 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
         format!("\n\n{}", block_sections.join("\n\n"))
     };
 
+    let priority_evidence = if recent_refs.is_empty() {
+        "（当前未找到可前置的近期回执；仍可按需回查。）".to_string()
+    } else {
+        recent_refs.join("\n")
+    };
     let user_prompt = format!(
-        "【任务目标】\n{}\n\n【当前提交的交付正文（本次待验收对象，完整原文）】\n{}\n\n【辅助材料：工作区状态、已登记产物与证据索引】\n下列文件差异仅表示相对保留基线的工作区状态，不证明由本轮 Agent 写入。没有写入归属证据时应标记归属未确认，不得仅据此认定只读自述造假或要求撤销工作区差异。流程状态不是产品质量缺陷；正在申请验收，无须先取得本次验收通过。方案审查与终审是不同阶段，其结果可以不同。\n```\n{}\n```{}\n\n请核验当前交付正文的结论与证据；补证可读取现有源码和工具原文，不要求为提供证据而制造代码 diff。",
-        context.effective_goal(), delivery_text.unwrap_or("（本次未附交付正文，请核验已登记产物）"),
+        "【本次终审重点】\n以当前任务目标和交付正文为准，核对交付声明与实际证据。以下仅列近期回执的定位信息，适用性由审查者判断；完整索引见后续材料。\n{}\n\n【任务目标】\n{}\n\n【当前提交的交付正文（本次待验收对象，完整原文）】\n{}\n\n【辅助材料：工作区状态、已登记产物与证据索引】\n下列文件差异仅表示相对保留基线的工作区状态，不证明由本轮 Agent 写入。没有写入归属证据时应标记归属未确认，不得仅据此认定只读自述造假或要求撤销工作区差异。流程状态不是产品质量缺陷；正在申请验收，无须先取得本次验收通过。方案审查与终审是不同阶段，其结果可以不同。\n```\n{}\n```{}\n\n请核验当前交付正文的结论与证据；补证可读取现有源码和工具原文，不要求为提供证据而制造代码 diff。",
+        priority_evidence, context.effective_goal(), delivery_text.unwrap_or("（本次未附交付正文，请核验已登记产物）"),
         review_material, extra_guidance
     );
 
@@ -1479,6 +1485,8 @@ mod finish_review_regression_tests {
             assert!(system.contains("不自动构成报告自身的阻塞缺陷"));
             assert!(system.contains("修复任务仍须核验实际修复"));
             let material = messages[1]["content"].as_str().unwrap();
+            assert!(material.starts_with("【本次终审重点】"));
+            assert!(material.find("【本次终审重点】") < material.find("【当前提交的交付正文"));
             assert!(material.contains("只读审查权限逻辑") && material.contains("本轮不修复"));
         }
     }
@@ -1610,6 +1618,11 @@ mod finish_review_regression_tests {
         let input = requests[0]["messages"][1]["content"].as_str().unwrap();
         assert!(input.contains("HTTP/1.1 302 Found") && input.contains("Location: /login"), "{input}");
         assert!(input.contains("原文读取: ") && input.contains("pipeline-proof-fixture"));
+        let (focus, remainder) = input.split_once("【任务目标】").unwrap();
+        assert!(focus.contains("output_id=pipeline-proof-fixture"));
+        assert!(!focus.contains("Location: /login"));
+        assert!(remainder.contains("Location: /login"));
+
         let observation = requests[1]["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap();
         assert!(observation.contains("HTTP/1.1 302 Found") && observation.contains("source"));
     }

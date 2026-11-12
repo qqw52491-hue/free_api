@@ -133,23 +133,33 @@ pub(crate) fn sniff_task_file_anomalies(files: &[std::path::PathBuf]) -> Vec<Str
 
 /// 流程审计用的最近记录：包含历史审批/交付状态，供分流复核等场景追溯。
 pub(crate) fn collect_step_trace_digest(db: &DbState, session_id: &str) -> Option<String> {
-    collect_trace_digest(db, session_id, false, None)
+    collect_trace_digest(db, session_id, false, None).map(|(digest, _)| digest)
 }
 
 /// 终审沿用现有任务起点（续跑不变，新任务重建），只索引本任务工具回执。
 /// 历史证据仍可明确按 output_id 读取，但不默认混入当前验收清单。
+#[cfg(test)]
 pub(crate) fn collect_execution_evidence_digest(
     db: &DbState,
     session_id: &str,
     task_started_at: chrono::DateTime<Utc>,
 ) -> Option<String> {
-    let mut digest = collect_trace_digest(db, session_id, true, Some(task_started_at)).unwrap_or_default();
+    collect_execution_review_evidence(db, session_id, task_started_at).0
+}
+
+pub(crate) fn collect_execution_review_evidence(
+    db: &DbState,
+    session_id: &str,
+    task_started_at: chrono::DateTime<Utc>,
+) -> (Option<String>, Vec<String>) {
+    let (mut digest, recent_refs) =
+        collect_trace_digest(db, session_id, true, Some(task_started_at)).unwrap_or_default();
     match crate::agent::evidence_store::review_digest(db, session_id, task_started_at) {
         Ok(Some(index)) => digest.push_str(&index),
         Ok(None) => {},
         Err(error) => digest.push_str(&format!("\n\n【可选证据索引读取失败】{error}；不能据此判断此前未取证，可按明确引用回查。")),
     }
-    (!digest.is_empty()).then_some(digest)
+    ((!digest.is_empty()).then_some(digest), recent_refs)
 }
 
 /// 仅开放读取/比较，不允许 Reviewer 登记自述；来源沿用实际 output_id 的任务边界。
@@ -253,7 +263,7 @@ fn collect_trace_digest(
     session_id: &str,
     execution_only: bool,
     since: Option<chrono::DateTime<Utc>>,
-) -> Option<String> {
+) -> Option<(String, Vec<String>)> {
     // 分类依据是宿主保存的 tool/outcome，不根据输出正文里的词语猜测。
     // 先排除流程回执再取窗口，连续 finish 不会挤走取证/验证回执。
     let mut items = {
@@ -296,6 +306,14 @@ fn collect_trace_digest(
     } else {
         None
     };
+    let recent_refs = if execution_only {
+        items.iter().take(3).map(|(step, id, at, _, tool, status)| {
+            format!("- step {step} | {at} | tool={} | status={} | output_id={id}",
+                tool.as_deref().unwrap_or("unknown"), status.as_deref().unwrap_or("unknown"))
+        }).collect()
+    } else {
+        Vec::new()
+    };
     items.reverse();
     let mut lines = Vec::new();
     for (step_id, output_id, at, raw, tool, outcome) in items {
@@ -315,15 +333,15 @@ fn collect_trace_digest(
         ));
     }
     if execution_only {
-        Some(format!(
+        Some((format!(
             "\n\n【工具回执证据索引（{} 条，has_more={}）】\n当前任务起点：{}。仅列起点之后可归类的工具回执；同任务续跑沿用原起点。历史参考不自动并入清单，明确引用的本会话旧 output_id 仍可读取或搜索并标明来源。索引缺项不代表此前未取证，失败回执也不代表命令已执行。\n{}",
             lines.len(), has_more, since.map(|at| at.to_rfc3339()).unwrap_or_default(),
             if lines.is_empty() { "尚无可索引的工具回执".into() } else { lines.join("\n") }
-        ) + older_receipts.as_deref().unwrap_or_default())
+        ) + older_receipts.as_deref().unwrap_or_default(), recent_refs))
     } else if lines.is_empty() {
         None
     } else {
-        Some(format!("\n\n【流程审计记录（{} 条，has_more={}；包括历史审批/交付回执，不是本次验收结论）】\n{}", lines.len(), has_more, lines.join("\n")))
+        Some((format!("\n\n【流程审计记录（{} 条，has_more={}；包括历史审批/交付回执，不是本次验收结论）】\n{}", lines.len(), has_more, lines.join("\n")), recent_refs))
     }
 }
 

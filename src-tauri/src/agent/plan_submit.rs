@@ -197,6 +197,12 @@ pub async fn handle_submit_plan(
     .chars()
     .take(1900)
     .collect();
+    let questions: String = flatten(&submission.open_questions.join("；")).chars().take(600).collect();
+    let verification: String = flatten(submission.intended_verification.trim()).chars().take(600).collect();
+    let focus = format!("【审查重点（方案提出，可质疑或补充）】未决问题：{}；预期验证：{}；{}",
+        if questions.is_empty() { "未提供" } else { &questions },
+        if verification.is_empty() { "未提供" } else { &verification }, question);
+    let question: String = focus.chars().take(1900).collect();
 
     let mut evidence_excerpt = format!("【宿主审查配置（完整）】{}\n", review_policy);
     evidence_excerpt.push_str(&format!(
