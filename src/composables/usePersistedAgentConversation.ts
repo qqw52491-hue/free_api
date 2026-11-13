@@ -9,6 +9,7 @@ export interface PersistedConversationMessage {
     attachments?: string | null;
     created_at: string;
     model_id?: string | null;
+    run_id?: string | null;
 }
 
 export function usePersistedAgentConversation(

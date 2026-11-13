@@ -44,7 +44,7 @@ pub(crate) fn persist_failed_run(
     failed.pending_task_failure = None;
     failed.pending_finalization = None;
     failed.mark_failed(reason.to_string(), context);
-    crate::agent::finalization::commit_failure(
+    crate::agent::finalization::commit_failure_with_claims(
         db,
         &mut failed,
         run_id,
@@ -53,6 +53,7 @@ pub(crate) fn persist_failed_run(
         steps,
         &json!({"summary": message, "reason": reason, "status": "failed"}),
         &message,
+        &context.pending_claim_chat_ids,
     )?;
     *checkpoint = failed;
     Ok(message)
@@ -60,7 +61,7 @@ pub(crate) fn persist_failed_run(
 
 /// 先中断真实请求，再收停台账/后台进程/监听；所有失败来源共用。
 pub(crate) async fn stop_run_runtime(db: &DbState, session_id: &str, run_id: &str) -> Vec<String> {
-    crate::agent::control::notify_stream_interrupt(session_id).await;
+    let released = crate::agent::control::release_run_channels(session_id, run_id, true).await;
     crate::agent::child_task::stop_children(run_id).await;
     let mut warnings = Vec::new();
     if let Err(e) = crate::agent::child_reviewer::cancel_running_child_runs(db, run_id) {
@@ -69,15 +70,9 @@ pub(crate) async fn stop_run_runtime(db: &DbState, session_id: &str, run_id: &st
     if let Err(e) = crate::agent::job_engine::cancel_all_running_jobs(db, run_id) {
         warnings.push(format!("后台任务收停失败：{e}"));
     }
-    crate::agent::control::intervention_channels()
-        .lock()
-        .await
-        .remove(session_id);
-    crate::agent::control::stream_interrupt_channels()
-        .lock()
-        .await
-        .remove(session_id);
-    crate::agent::control::clear_stage(session_id);
+    if released {
+        crate::agent::control::clear_stage(session_id);
+    }
     warnings
 }
 
@@ -110,14 +105,16 @@ pub(crate) async fn finish_failed_run<R: tauri::Runtime>(
     // 兼容旧 UI：complete 先填失败报告，权威终态随后广播（终态后 UI 忽略迟到进度）。
     let _ = app.emit(
         &format!("agent-progress-{session_id}"),
-        json!({"type":"complete", "message":message, "success":false}),
+        json!({"run_id":run_id, "type":"complete", "message":message, "success":false}),
     );
     let snapshot = machine
         .transition(AgentRunEvent::Fail {
             reason: message.clone(),
         })
         .map_err(|e| e.to_string())?;
-    let _ = app.emit(&format!("agent-run-state-{session_id}"), snapshot);
+    let mut state_payload = serde_json::to_value(snapshot).map_err(|e| e.to_string())?;
+    state_payload["run_id"] = json!(run_id);
+    let _ = app.emit(&format!("agent-run-state-{session_id}"), state_payload);
     crate::agent::channel::notify_session_event(session_id, "message");
     persisted.map(|_| ())
 }
@@ -313,15 +310,8 @@ mod tests {
         let (dir, db, _, _) = fixture();
         let sid = format!("cleanup-{}", uuid::Uuid::new_v4());
         let (tx, mut rx) = tokio::sync::watch::channel(0u64);
-        crate::agent::control::stream_interrupt_channels()
-            .lock()
-            .await
-            .insert(sid.clone(), tx);
-        let (tx, _rx) = tokio::sync::mpsc::channel(2);
-        crate::agent::control::intervention_channels()
-            .lock()
-            .await
-            .insert(sid.clone(), tx);
+        let (control_tx, _rx) = tokio::sync::mpsc::channel(2);
+        crate::agent::control::register_run_channels(&sid, "run-1", control_tx, tx).await;
         let job = crate::agent::job_engine::begin_job(&db, "run-1", &sid, "watch", "own job", "{}")
             .unwrap();
         let other = crate::agent::job_engine::begin_job(

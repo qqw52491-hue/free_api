@@ -385,6 +385,27 @@ async fn dispatch_inner(
         &workspace_run,
     )
     .await?;
+    let parent_investigation_reference = || {
+        ctx.checkpoint.triage_verdict.as_ref()
+            .and_then(|verdict| verdict.investigation_brief_text())
+            .unwrap_or_default()
+    };
+    let (parent_goal, investigation_reference) = if let Some(id) = &existing {
+        let input = crate::agent::execution::runtime::Snapshot::load(ctx.state.inner(), id, "task")
+            .ok().flatten()
+            .map(|snapshot| snapshot.state["dispatch_input"]["parent_context"].clone())
+            .unwrap_or_default();
+        (
+            input["goal"].as_str().unwrap_or_default().to_owned(),
+            input["investigation_reference"].as_str().map(str::to_owned)
+                .unwrap_or_else(parent_investigation_reference),
+        )
+    } else {
+        (
+            ctx.context.effective_goal().to_owned(),
+            parent_investigation_reference(),
+        )
+    };
     let id = match existing {
         Some(id) => id,
         None => crate::agent::child_reviewer::begin_child_run_extended(
@@ -402,7 +423,11 @@ async fn dispatch_inner(
                 contract_schema: task_role.as_ref().and_then(|card|card.parse_custom_schema()).filter(|schema|!schema.is_empty()).map(|schema|serde_json::to_string(&schema)).transpose().map_err(|e|e.to_string())?,
                 execution_config: params.get("execution").map(Value::to_string),
                 purpose: Some(profile.to_string()),
-                dispatch_input: Some(json!({"params":params,"model_selection":model_selection}).to_string()),
+                dispatch_input: Some(json!({
+                    "params": params,
+                    "model_selection": model_selection,
+                    "parent_context": {"goal": parent_goal, "investigation_reference": investigation_reference}
+                }).to_string()),
                 task_id: key,
                 ..crate::agent::child_reviewer::ChildRunIdentity::fresh("task")
             },
@@ -414,12 +439,11 @@ async fn dispatch_inner(
         child_session: format!("task-{id}"),
         child_run: id.clone(),
     };
-    let mut role_context = task_role.as_ref().map(|card|format!("{}\n{}\n{}",crate::agent::tools::role_manager::persona_block(card),crate::agent::tools::role_manager::skills_block(ctx.state.inner(),card),card.parse_custom_schema().map(|s|s.render_prompt_instructions()).unwrap_or_default())).unwrap_or_default();
-    if let Some(brief) = ctx.checkpoint.triage_verdict.as_ref().and_then(|v|v.investigation_brief_text()) {
-        role_context.push_str(&format!("\n【入口调查参考（不是新增验收义务）】{brief}"));
-    }
-    let goal = crate::agent::task_context::ordinary(&params, &role_context,
-        &crate::agent::path_guard::get_session_tmp_dir(ctx.final_session_id), &id);
+    let role_context = task_role.as_ref().map(|card|format!("{}\n{}\n{}",crate::agent::tools::role_manager::persona_block(card),crate::agent::tools::role_manager::skills_block(ctx.state.inner(),card),card.parse_custom_schema().map(|s|s.render_prompt_instructions()).unwrap_or_default())).unwrap_or_default();
+    let goal = crate::agent::task_context::ordinary(
+        &params, &role_context, &parent_goal, &investigation_reference,
+        &crate::agent::path_guard::get_session_tmp_dir(ctx.final_session_id), &id,
+    );
     child_task::runtime::spawn(
         ctx.app.clone(),
         ctx.state.inner().clone(),

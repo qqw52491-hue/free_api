@@ -39,18 +39,32 @@ fn long_goal_and_manifest_cannot_starve_stage_evidence_or_diff() {
 }
 #[test]
 fn ordinary_material_is_not_repeated_by_role_and_specialization() {
-    let p = json!({"task":"目标","custom_inputs":{"key":"UNIQUE"},"specialized_context":"independent focus","context":"caller context","test_command":"cargo test target"});
+    let p = json!({"task":"目标","custom_inputs":{
+        "key":"UNIQUE","verified_facts":[{"claim":"观察","source":"output_id=proof-a"}],
+        "hard_constraints":"只查指定入口","definition_of_done":["返回生产入口位置"]
+    },"specialized_context":"independent focus","context":"caller context","test_command":"cargo test target"});
     let goal = ordinary(
         &p,
         "ROLE CONTRACT",
+        "PARENT_GOAL",
+        "ENTRY_REFERENCE",
         std::path::Path::new("/tmp/parent"),
         "child",
     );
     assert_eq!(goal.matches("UNIQUE").count(), 1);
     assert!(goal.contains("cargo test target"));
     assert!(goal.contains("/tmp/parent"));
+    assert!(goal.contains("【父任务目标（供理解本次委派）】\nPARENT_GOAL"));
+    assert!(goal.contains("【父任务入口调查参考】\nENTRY_REFERENCE"));
+    assert!(goal.contains("派发方提供的事实线索"));
+    assert_eq!(goal.matches("output_id=proof-a").count(), 1);
+    assert!(goal.contains("派发方提供的约束"));
+    assert!(goal.contains("完成定义"));
+    assert!(!goal.contains("**verified_facts**"));
     let goal = ordinary(
         &json!({"task":"目标","custom_inputs":{"key":"UNIQUE"}}),
+        "",
+        "",
         "",
         std::path::Path::new("/tmp"),
         "child",
@@ -184,6 +198,8 @@ fn ordinary_soft_budget_preserves_inputs_and_exposes_original_focus_handle() {
     let output = ordinary(
         &p,
         "ROLE_REQUIRED",
+        "",
+        "",
         std::path::Path::new("/tmp"),
         "real-child-id",
     );
@@ -199,7 +215,7 @@ fn ordinary_soft_budget_preserves_inputs_and_exposes_original_focus_handle() {
         assert!(output.contains(marker));
     }
     let p = json!({"task":"GOAL","context":"C".repeat(18000),"custom_inputs":{"constraint":"REQUIRED"},"specialized_context":"F".repeat(40000)});
-    let output = ordinary(&p, "ROLE_REQUIRED", std::path::Path::new("/tmp"), "child");
+    let output = ordinary(&p, "ROLE_REQUIRED", "", "", std::path::Path::new("/tmp"), "child");
     assert!(output.contains(&"C".repeat(18000)));
     assert!(output.contains("REQUIRED"));
     assert!(output.contains("软预算披露"));

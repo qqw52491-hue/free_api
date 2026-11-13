@@ -59,6 +59,7 @@ pub(super) async fn dispatch_local_tool(
                         emit_tool_event(
                             ctx.app,
                             ctx.final_session_id,
+                            ctx.parent_run_id,
                             ctx.step_id,
                             inst,
                             "failed",
@@ -97,6 +98,7 @@ pub(super) async fn dispatch_local_tool(
                 emit_tool_event(
                     ctx.app,
                     ctx.final_session_id,
+                    ctx.parent_run_id,
                     ctx.step_id,
                     inst,
                     "failed",

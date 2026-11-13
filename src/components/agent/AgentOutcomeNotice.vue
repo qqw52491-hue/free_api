@@ -37,7 +37,17 @@ const props = defineProps<{ kind: 'cancelled' | 'failed'; content: string }>();
 defineEmits<{ 'open-preview': [code: string] }>();
 const expanded = ref(false);
 const title = computed(() => props.kind === 'cancelled' ? '任务已停止' : '任务未能完成');
-const fullText = computed(() => props.content.trim() || (props.kind === 'cancelled' ? '任务已停止。' : '本次运行未能完成。'));
+const fullText = computed(() => {
+    const content = props.content.trim();
+    // Older and live run records may quote the entire next goal in the stop reason.
+    // The next round already displays that text as its user message.
+    if (props.kind === 'cancelled'
+        && content.startsWith('用户提交了新的任务目标：')
+        && content.endsWith(' 已在安全边界停止旧任务。')) {
+        return '收到新的任务目标，本轮已在安全边界停止。';
+    }
+    return content || (props.kind === 'cancelled' ? '任务已停止。' : '本次运行未能完成。');
+});
 const hasDetails = computed(() => fullText.value.length > 900 || fullText.value.split('\n').length > 12);
 const isCompact = computed(() => !hasDetails.value && !fullText.value.includes('\n') && !fullText.value.includes('```') && fullText.value.length <= 140);
 

@@ -218,6 +218,19 @@ pub(crate) fn runs_store_snapshot() -> Vec<RunRecord> {
         .collect()
 }
 
+/// 返回该会话当前仍处于活动状态（running / waiting_human）的最新 run_id。
+pub(crate) fn active_run_id_for_session(session_id: &str) -> Option<String> {
+    runs_store()
+        .lock()
+        .expect("runs store poisoned")
+        .values()
+        .filter(|r| {
+            r.session_id == session_id && matches!(r.status.as_str(), "running" | "waiting_human")
+        })
+        .max_by(|a, b| a.started_at.cmp(&b.started_at))
+        .map(|r| r.run_id.clone())
+}
+
 /// scratch 目录解析的 crate 级入口（调度器复用）
 pub(crate) fn effective_scratch_dir_pub(config: &ChannelConfig) -> std::path::PathBuf {
     effective_scratch_dir(config)

@@ -99,6 +99,7 @@ export interface AgentHumanForm {
 export interface AgentHumanIntervention {
     message: string;
     timestamp: number;
+    messageId?: string;
     /** 发起本次 ask_human 挂起的步骤 id（agent_paused 时快照），供时间线把答复回填进步骤内 */
     stepId?: string;
     /** 挂起时向用户展示的提问原文（pauseReason 快照），供标记行内联"问→答"上下文 */
@@ -221,10 +222,16 @@ export interface TerminalToolView {
     spawn_error?: string;
 }
 
-export type ToolView = SearchToolView | SearchCacheToolView | ReadToolView | DiffToolView | WriteToolView | TerminalToolView | ({ kind: string } & Record<string, unknown>);
+export interface HumanReplyToolView {
+    kind: "human_reply";
+    message_id: string;
+}
+
+export type ToolView = SearchToolView | SearchCacheToolView | ReadToolView | DiffToolView | WriteToolView | TerminalToolView | HumanReplyToolView | ({ kind: string } & Record<string, unknown>);
 
 export interface AgentStepItem {
     id: string;
+    outputId?: string;
     stepId: number;
     description: string;
     planId: string;

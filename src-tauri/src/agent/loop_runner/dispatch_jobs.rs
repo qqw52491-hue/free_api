@@ -74,6 +74,7 @@ pub(super) async fn dispatch_wait_jobs(
             &format!("agent-progress-{}", ctx.final_session_id),
             json!({
                 "type": "agent_waiting_jobs",
+                "run_id": ctx.parent_run_id,
                 "message": "正在挂起等待后台任务完成...",
                 "job_ids": target_ids.clone().unwrap_or_default(),
                 "timeout_secs": effective_timeout,

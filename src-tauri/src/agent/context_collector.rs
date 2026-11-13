@@ -148,6 +148,47 @@ pub fn collect_last_verify_log(last_verify_log: Option<&str>) -> Option<String> 
     Some(out)
 }
 
+/// 保留调用方材料的来源标记，按已知字段分节，其余业务字段原样呈现。
+pub(crate) fn render_custom_inputs(inputs: &Value) -> Option<String> {
+    let object = inputs.as_object()?;
+    let mut sections = Vec::new();
+    for &(key, title) in RESERVED_INPUT_SECTIONS {
+        let Some(value) = object.get(key).filter(|value| !value.is_null()) else {
+            continue;
+        };
+        let values = match value {
+            Value::Array(items) => items.as_slice(),
+            single => std::slice::from_ref(single),
+        };
+        let lines = values.iter().filter_map(|item| {
+            let text = match item {
+                Value::Null => return None,
+                Value::String(text) if text.trim().is_empty() => return None,
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
+            Some(format!("- {text}"))
+        }).collect::<Vec<_>>();
+        if !lines.is_empty() {
+            sections.push(format!("{title}\n{}", lines.join("\n")));
+        }
+    }
+    let remaining = object.iter()
+        .filter(|(key, _)| !RESERVED_INPUT_SECTIONS.iter().any(|(reserved, _)| *reserved == key.as_str()))
+        .map(|(key, value)| {
+            let text = value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string());
+            format!("- **{key}**: {text}")
+        })
+        .collect::<Vec<_>>();
+    if !remaining.is_empty() {
+        sections.push(format!(
+            "【📌 主调度传递的专项业务参数 (Custom Inputs)】\n{}",
+            remaining.join("\n"),
+        ));
+    }
+    (!sections.is_empty()).then(|| sections.join("\n\n"))
+}
+
 /// 核心上下文装配器：根据角色声明的关注域清单与自定义业务入参，异步组装结构化背景材料
 pub async fn assemble_focus_context(
     domains: &[FocusDomain],
@@ -157,64 +198,8 @@ pub async fn assemble_focus_context(
 ) -> Option<String> {
     let mut sections = Vec::new();
 
-    // 1. 装配主调度显式传入的自定义业务入参 (custom_inputs)
-    if let Some(inputs) = custom_inputs {
-        if let Some(obj) = inputs.as_object() {
-            if !obj.is_empty() {
-                // 保留键升格为一级小节（先于通用平铺块呈现），内容为空则不渲染该小节
-                for &(key, title) in RESERVED_INPUT_SECTIONS {
-                    let raw_items: Vec<String> = match obj.get(key) {
-                        Some(Value::String(s)) => vec![s.clone()],
-                        Some(Value::Array(arr)) => arr
-                            .iter()
-                            .map(|item| match item {
-                                Value::String(s) => s.clone(),
-                                other => other.to_string(),
-                            })
-                            .collect(),
-                        _ => Vec::new(),
-                    };
-                    let items: Vec<String> = raw_items
-                        .into_iter()
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    if !items.is_empty() {
-                        let mut lines = vec![title.to_string()];
-                        for item in items {
-                            lines.push(format!("- {}", item));
-                        }
-                        sections.push(lines.join("\n"));
-                    }
-                }
-                // 其余键照旧平铺为 Custom Inputs 块（保留键不再重复出现）
-                let mut input_lines = Vec::new();
-                for (k, v) in obj {
-                    if RESERVED_INPUT_SECTIONS.iter().any(|(key, _)| *key == k.as_str()) {
-                        continue;
-                    }
-                    let val_str = match v {
-                        Value::String(s) => s.clone(),
-                        Value::Array(arr) => {
-                            let items: Vec<String> = arr.iter().map(|item| match item {
-                                Value::String(s) => s.clone(),
-                                other => other.to_string(),
-                            }).collect();
-                            format!("[{}]", items.join(", "))
-                        }
-                        other => other.to_string(),
-                    };
-                    input_lines.push(format!("- **{}**: {}", k, val_str));
-                }
-                if !input_lines.is_empty() {
-                    input_lines.insert(
-                        0,
-                        "【📌 主调度传递的专项业务参数 (Custom Inputs)】".to_string(),
-                    );
-                    sections.push(input_lines.join("\n"));
-                }
-            }
-        }
+    if let Some(inputs) = custom_inputs.and_then(render_custom_inputs) {
+        sections.push(inputs);
     }
 
     // 2. 根据 focus domains 并发/按需装配系统底层材料

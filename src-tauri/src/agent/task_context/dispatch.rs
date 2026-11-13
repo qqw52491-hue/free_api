@@ -3,6 +3,8 @@ use serde_json::Value;
 pub(crate) fn ordinary(
     params: &Value,
     role: &str,
+    parent_goal: &str,
+    investigation_reference: &str,
     parent_tmp: &std::path::Path,
     execution_id: &str,
 ) -> String {
@@ -23,8 +25,11 @@ pub(crate) fn ordinary(
         }
     }
     // Explicit inputs are required material, independent of optional focus data.
-    if let Some(inputs) = params.get("custom_inputs") {
-        material.push_str(&format!("【派发方专项输入（不是宿主核实结论）】{inputs}\n"));
+    if let Some(inputs) = params.get("custom_inputs")
+        .and_then(crate::agent::context_collector::render_custom_inputs)
+    {
+        material.push_str(&inputs);
+        material.push('\n');
     }
     if let Some(command) = params["test_command"]
         .as_str()
@@ -35,9 +40,22 @@ pub(crate) fn ordinary(
         ));
     }
     material.push_str(&format!(
-        "【宿主提供的父会话证据目录】{}（引用使用绝对路径；你的 tmp/ 独立）。",
+        "【宿主提供的父会话证据目录】{}（引用使用绝对路径；你的 tmp/ 独立）。\n",
         parent_tmp.display()
     ));
+    let parent_goal = parent_goal.trim();
+    if !parent_goal.is_empty() && params["task"].as_str().map(str::trim) != Some(parent_goal) {
+        let preview: String = parent_goal.chars().take(1100).collect();
+        material.push_str(&format!("【父任务目标（供理解本次委派）】\n{preview}\n"));
+        if preview.len() < parent_goal.len() {
+            material.push_str(&format!(
+                "父任务目标已节选。原文见 child_task.read_agent_result(child_run_id={execution_id}, view=dispatch_input) 的 parent_context.goal。\n"
+            ));
+        }
+    }
+    if !investigation_reference.trim().is_empty() {
+        material.push_str(&format!("【父任务入口调查参考】\n{investigation_reference}\n"));
+    }
     // Explicit inputs and result contracts are never silently discarded to meet
     // a soft budget. Optional collected focus material uses the remaining space.
     if let Some(focus) = params["specialized_context"]

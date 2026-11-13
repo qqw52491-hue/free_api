@@ -133,6 +133,7 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             attachments TEXT,
             created_at TEXT NOT NULL,
             model_id TEXT,
+            run_id TEXT,
             FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
         );
 
@@ -357,7 +358,8 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             completion_json TEXT,
             started_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            completed_at TEXT
+            completed_at TEXT,
+            goal_message_id TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_agent_run_traces_session
             ON agent_run_traces(session_id, started_at ASC);
@@ -706,6 +708,12 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
     // contract_id 记录交付契约版本。落库后"谁在等结果/这道题烧了多少钱"变成查询
     // 而非 checkpoint 里手动维护的名单。
     let _ = conn.execute("ALTER TABLE agent_child_runs ADD COLUMN task_id TEXT;", []);
+    let _ = conn.execute("ALTER TABLE agent_run_traces ADD COLUMN goal_message_id TEXT;", []);
+    let _ = conn.execute("ALTER TABLE chat_messages ADD COLUMN run_id TEXT;", []);
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_run ON chat_messages(run_id);",
+        [],
+    );
     let _ = conn.execute(
         "ALTER TABLE agent_child_runs ADD COLUMN attempt_id INTEGER NOT NULL DEFAULT 1;",
         [],

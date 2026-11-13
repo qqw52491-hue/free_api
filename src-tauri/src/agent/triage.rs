@@ -401,6 +401,7 @@ pub async fn run_triage<R: tauri::Runtime>(
     skill_index_text: &str,
     recent_context: &str,
     session_id: &str,
+    run_id: &str,
     mut interrupt_rx: watch::Receiver<u64>,
 ) -> TriageVerdict {
     // 分流是全局复杂性判断，固定用 Pro 档；空则回退 flash→vision（与会话主模型同序）
@@ -419,6 +420,7 @@ pub async fn run_triage<R: tauri::Runtime>(
         &format!("agent-progress-{}", session_id),
         json!({
             "type": "action_phase",
+            "run_id": run_id,
             "phase": "triaging",
             "description": "🧭 正在对任务做入口复杂度分流..."
         }),
@@ -1120,7 +1122,7 @@ mod live_triage_tests {
             let (_tx, rx) = watch::channel(0u64);
             let v = run_triage(
                 &app_handle, &db, &routing, goal, "", &[], &skill_index, recent,
-                &format!("triage-live-m{}", i), rx,
+                &format!("triage-live-m{}", i), "triage-test", rx,
             )
             .await;
             let picks: Vec<&str> = v.skill_recommendations.iter().map(|r| r.name.as_str()).collect();
@@ -1198,7 +1200,7 @@ mod live_triage_tests {
             let (_tx, rx) = watch::channel(0u64);
             let v = run_triage(
                 &app_handle, &db, &routing, &goal, "", &[], &skill_index, "",
-                &format!("triage-live-hd{}", i), rx,
+                &format!("triage-live-hd{}", i), "triage-test", rx,
             )
             .await;
             let picks: Vec<&str> = v.skill_recommendations.iter().map(|r| r.name.as_str()).collect();

@@ -90,7 +90,7 @@
                             type="button"
                             class="composer-tool-btn attach-btn"
                             title="上传/附加数据文件 (图片、Excel、Word、PDF、代码...)"
-                            :disabled="isRunning"
+                            :disabled="isRunning || stopRequested"
                             @click="promptAttachFiles"
                         >
                             <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
@@ -103,7 +103,7 @@
                                 type="button"
                                 :class="{ active: modelMenuOpen }"
                                 :title="modelChipTooltip"
-                                :disabled="isRunning"
+                                :disabled="isRunning || stopRequested"
                                 @click="toggleModelMenu"
                             >
                                 <span class="model-name-text">{{ currentModelName }}</span>
@@ -1104,7 +1104,7 @@
                             <div v-if="ringBreakdown.length === 0" class="cd-empty">暂无分段数据（下一次调用后产生）</div>
                         </div>
                     </div>
-                    <button v-if="isRunning" class="stop-control" type="button" :disabled="stopRequested" @click="$emit('stop')">{{ stopRequested ? '停止中' : '停止' }}</button>
+                    <button v-if="isRunning || stopRequested" class="stop-control" type="button" :disabled="stopRequested" @click="$emit('stop')">{{ stopRequested ? '停止中' : '停止' }}</button>
                     
                     <!-- 任务意图是结构化选择，不通过“继续”等自然语言猜测。 -->
                     <button
@@ -1138,7 +1138,7 @@
                         }"
                         type="button"
                         :disabled="!canSubmit || isSending"
-                        :title="!isRunning && modelSetupHint ? modelSetupHint : isRunning ? (isWaitingForHuman ? '回答当前请求' : (submitMode === 'interrupt' ? '⚡ 立即打断当前任务并切换为新目标' : '⏳ 加入队列，等当前任务完成后自动执行')) : (taskStartMode === 'resume' ? '继续原任务，保留审查状态' : '开始新任务')"
+                        :title="stopRequested ? '正在停止，请等待当前任务结束' : !isRunning && modelSetupHint ? modelSetupHint : isRunning ? (isWaitingForHuman ? '回答当前请求' : (submitMode === 'interrupt' ? '⚡ 立即打断当前任务并切换为新目标' : '⏳ 加入队列，等当前任务完成后自动执行')) : (taskStartMode === 'resume' ? '继续原任务，保留审查状态' : '开始新任务')"
                         @click="submit"
                     >
                         <svg viewBox="0 0 24 24"><path d="m7 12 5-5 5 5M12 7v10"/></svg>
@@ -2359,7 +2359,7 @@ const placeholderText = computed(() => props.isRunning
     : taskStartMode.value === "resume" ? "补充说明或输入继续，将保留原任务与审查状态…" : "想让 Agent 帮你做什么？",
 );
 const canSubmit = computed(() => {
-    return (props.isRunning || Boolean(selectedProModel.value && selectedFlashModel.value))
+    return !props.stopRequested && (props.isRunning || Boolean(selectedProModel.value && selectedFlashModel.value))
         && (Boolean(props.draft.trim()) || attachments.value.length > 0);
 });
 

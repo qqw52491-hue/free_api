@@ -7,8 +7,7 @@ use crate::agent::checkpoint::{
 };
 use crate::agent::context;
 use crate::agent::control::{
-    finish_interrupted_run, intervention_channels, stream_interrupt_channels,
-    take_pending_interrupt, HumanControl,
+    finish_interrupted_run, take_pending_interrupt, HumanControl,
 };
 use crate::agent::dispatcher::{is_finish_instruction, is_write_or_side_effect_tool};
 use crate::agent::loop_runner::run_call_llm_and_run_tool_phases;
@@ -83,17 +82,10 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
     task_start_mode: Option<crate::agent::conversation::TaskStartMode>,
     delegation: Option<crate::agent::child_task::TaskBinding>,
 ) -> Result<(), String> {
-    // 立即注册人类干预与流式中断接收器，确保任务启动第一毫秒即可被前端即时打断
+    // 立即在统一协调临界区内注册控制通道并消费早期的待取消标记，避免启动与取消竞态漏信号
     let (tx, mut rx) = mpsc::channel::<HumanControl>(5);
     let (interrupt_tx, interrupt_rx) = watch::channel(0u64);
-    {
-        let mut channels = intervention_channels().lock().await;
-        channels.insert(final_session_id.clone(), tx);
-    }
-    stream_interrupt_channels()
-        .lock()
-        .await
-        .insert(final_session_id.clone(), interrupt_tx);
+    crate::agent::control::register_run_channels(&final_session_id, &run_id, tx, interrupt_tx).await;
 
     // 🐕 会话停滞看门狗：主循环每轮刷新原子心跳；若超过阈值仍无新步且会话
     // 仍 running，说明任务在 await 死锁/panic 逃逸（实弹已见三场僵尸会话：
@@ -178,19 +170,19 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
                     &format!("agent-log-{}", w_session),
                     format!("⏱️ {}", reason),
                 );
-                intervention_channels().lock().await.remove(&w_session);
-                stream_interrupt_channels().lock().await.remove(&w_session);
+                crate::agent::control::release_run_channels(&w_session, &w_run, true).await;
                 break;
             }
         });
     }
 
-    let run_trace_steps: Vec<serde_json::Value> =
+    let mut run_trace_steps: Vec<serde_json::Value> =
         crate::agent::run_trace::load_run_steps(state.inner(), &run_id).unwrap_or_default();
     let mut run_machine = AgentRunMachine::new();
     advance_run_state(
         &app,
         &final_session_id,
+        &run_id,
         &mut run_machine,
         AgentRunEvent::Start,
     )?;
@@ -290,6 +282,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
     let _ = app.emit(
         &format!("agent-progress-{}", final_session_id),
         json!({
+            "run_id": &run_id,
             "type": "action_phase",
             "phase": "skills",
             "description": "📚 正在装配系统提示词与 Skill 缓存..."
@@ -468,23 +461,38 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
         && existing_checkpoint
             .as_ref()
             .is_some_and(|cp| cp.phase == AgentPhase::Failed);
-    if !is_resuming_existing {
-        crate::agent::conversation::begin_turn(
+    let goal_message = if !is_resuming_existing {
+        Some(crate::agent::conversation::begin_turn_for_run(
             state.inner(),
             &final_session_id,
             &conversation_model_id,
             &goal,
-        )?;
+            &run_id,
+        )?)
     } else {
         // 续接未完成 checkpoint 时本条用户消息仍是新发言，须落盘成气泡——
         // 否则桌面/网页会话页静默吞掉这句话（用户发了却看不到）。
         // 恢复路径由新 goal 驱动上下文，此处纯记账不改语义。
-        if let Err(error) = crate::agent::conversation::append_human_intervention(
+        match crate::agent::conversation::append_human_intervention_for_run(
             state.inner(),
             &final_session_id,
             &goal,
+            &run_id,
         ) {
-            eprintln!("[conversation] 续接轮次用户消息落盘失败: {error}");
+            Ok(cursor) => Some(cursor),
+            Err(error) => {
+                eprintln!("[conversation] 续接轮次用户消息落盘失败: {error}");
+                None
+            }
+        }
+    };
+    if let Some(cursor) = goal_message {
+        let conn = state.0.lock().map_err(|error| error.to_string())?;
+        if let Err(error) = conn.execute(
+            "UPDATE agent_run_traces SET goal_message_id=?1 WHERE id=?2 AND session_id=?3",
+            rusqlite::params![cursor.id, run_id, final_session_id],
+        ) {
+            eprintln!("[run-trace] 无法关联开场消息: {error}");
         }
     }
     let mut context = context::SandwichContext::new(system_prompt, goal.clone());
@@ -601,6 +609,11 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
     } else { Vec::new() };
     context.turns_history = entry_history.messages;
     context.conversation_cursor = entry_history.cursor;
+    if is_resuming_existing {
+        for msg_id in entry_history.consumed_user_message_ids {
+            context.queue_claim_chat_id(msg_id);
+        }
+    }
     // 审查任务在首次模型调用前注入轻量项目地图。它只包含目录、入口和 Git 元数据，
     // 不读取源码正文；恢复中的运行沿用 checkpoint，避免反复追加同一张地图。
     if !is_resuming_existing && is_explicit_workspace {
@@ -785,6 +798,22 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
                 .collect();
             tail.into_iter().rev().collect::<Vec<_>>().join("\n---\n")
         };
+        if let Some(reason) = take_pending_interrupt(&mut rx) {
+            finish_interrupted_run(
+                &app,
+                state.inner(),
+                &final_session_id,
+                &run_id,
+                &goal,
+                &run_trace_steps,
+                &mut checkpoint,
+                &context,
+                &mut run_machine,
+                reason,
+            )
+            .await?;
+            return Ok(());
+        }
         let mut verdict = crate::agent::triage::run_triage(
             &app,
             state.inner(),
@@ -795,6 +824,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
             &skill_index_text,
             &recent_context,
             &final_session_id,
+            &run_id,
             interrupt_rx.clone(),
         )
         .await;
@@ -1145,7 +1175,12 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
         &final_session_id,
     )?);
     checkpoint.refresh_context(&context);
-    save_checkpoint(state.inner(), &mut checkpoint)?;
+    crate::agent::checkpoint::save_checkpoint_and_claim_chats(
+        state.inner(),
+        &mut checkpoint,
+        &run_id,
+        &mut context,
+    )?;
     // 仅在从 phase=RunTool 且尚无 pending 的 checkpoint 恢复时使用。
     let mut recovered_instruction: Option<AgentInstruction> = None;
     let action_history: std::collections::VecDeque<String> = std::collections::VecDeque::new();
@@ -1153,6 +1188,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
     advance_run_state(
         &app,
         &final_session_id,
+        &run_id,
         &mut run_machine,
         AgentRunEvent::RuntimeReady,
     )?;
@@ -1195,6 +1231,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
             advance_run_state(
                 &app,
                 &final_session_id,
+                &run_id,
                 &mut run_machine,
                 AgentRunEvent::InstructionReady {
                     action: "checkpoint_recovery".to_string(),
@@ -1203,6 +1240,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
             advance_run_state(
                 &app,
                 &final_session_id,
+                &run_id,
                 &mut run_machine,
                 AgentRunEvent::WaitForHuman {
                     question: reason.clone(),
@@ -1210,14 +1248,16 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
             )?;
             app.emit(
                 &format!("agent-progress-{}", final_session_id),
-                json!({ "type": "agent_paused", "message": reason }),
+                json!({
+                "run_id": &run_id, "type": "agent_paused", "message": reason }),
             )
             .map_err(|error| error.to_string())?;
 
-            let reply = match rx.recv().await {
+            let (reply, recovery_reply_id) = match rx.recv().await {
                 Some(HumanControl::Answer(reply, cursor)) => {
+                    let msg_id = cursor.as_ref().map(|c| c.id.clone());
                     context.acknowledge_chat(cursor);
-                    reply
+                    (reply, msg_id)
                 },
                 Some(HumanControl::ReplaceGoal(next_goal)) => {
                     let reason = format!("用户提交了新的任务目标：{}", next_goal);
@@ -1252,14 +1292,45 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
                     .await?;
                     return Ok(());
                 }
-                None => "人类未回复，通道异常关闭".to_string(),
+                None => ("人类未回复，通道异常关闭".to_string(), None),
             };
+            if let Some(reply_id) = recovery_reply_id {
+                let recovery_step = json!({
+                    "id": checkpoint.step_id,
+                    "description": "恢复后的人工确认",
+                    "tool": "ask_human",
+                    "action": "checkpoint_recovery",
+                    "command": { "question": &reason },
+                    "params": { "question": &reason },
+                    "plan_id": context.active_plan_id().unwrap_or_default(),
+                    "plan_title": context.active_plan_title().map(str::to_string).unwrap_or_else(|| crate::agent::context::types::clip_plan_title(&goal)),
+                    "status": "succeeded",
+                    "output": format!("人类的回复是: {}", reply),
+                    "view": { "kind": "human_reply", "message_id": reply_id },
+                    "timestamp": Utc::now().timestamp_millis(),
+                });
+                run_trace_steps.push(recovery_step.clone());
+                if let Err(error) = crate::agent::run_trace::append_step(
+                    state.inner(),
+                    &run_id,
+                    (run_trace_steps.len() - 1) as i64,
+                    &recovery_step,
+                ) {
+                    eprintln!("[run-trace] 无法追加恢复确认步骤: {error}");
+                }
+            }
             context.add_error_feedback(&format!("【checkpoint 恢复后的人工确认】{}", reply));
             checkpoint.begin_planning(checkpoint.step_id, &context);
-            save_checkpoint(state.inner(), &mut checkpoint)?;
+            crate::agent::checkpoint::save_checkpoint_and_claim_chats(
+                state.inner(),
+                &mut checkpoint,
+                &run_id,
+                &mut context,
+            )?;
             advance_run_state(
                 &app,
                 &final_session_id,
+                &run_id,
                 &mut run_machine,
                 AgentRunEvent::HumanReplyReceived,
             )?;
@@ -1341,6 +1412,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
         advance_run_state(
             &app,
             &final_session_id,
+            &run_id,
             &mut run_machine,
             AgentRunEvent::Succeed {
                 summary: "任务已完成".to_string(),
@@ -1364,14 +1436,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
         .await?;
         return Err(terminal_error);
     }
-    {
-        let mut channels = intervention_channels().lock().await;
-        channels.remove(&final_session_id);
-        stream_interrupt_channels()
-            .lock()
-            .await
-            .remove(&final_session_id);
-    }
+    crate::agent::control::release_run_channels(&final_session_id, &run_id, false).await;
 
     Ok(())
 }

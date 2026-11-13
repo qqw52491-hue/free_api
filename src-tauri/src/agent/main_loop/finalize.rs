@@ -191,7 +191,7 @@ pub(crate) fn commit_completed_run(
     }
 
     // ── 终态短事务：checkpoint Done + run trace succeeded + 会话消息原子提交 ──
-    crate::agent::finalization::commit_finalization(
+    crate::agent::finalization::commit_finalization_with_claims(
         db,
         &mut candidate,
         run_id,
@@ -201,7 +201,9 @@ pub(crate) fn commit_completed_run(
         &emitted_finish,
         &persisted_summary,
         conversation_model_id,
+        &context.pending_claim_chat_ids,
     )?;
+    candidate_context.pending_claim_chat_ids.clear();
     *checkpoint = candidate;
     *context = candidate_context;
     Ok(emitted_finish)

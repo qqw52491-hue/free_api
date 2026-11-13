@@ -318,6 +318,33 @@ pub fn commit_finalization(
     assistant_message: &str,
     model_id: &str,
 ) -> Result<(), String> {
+    commit_finalization_with_claims(
+        db,
+        checkpoint,
+        run_id,
+        session_id,
+        goal,
+        steps,
+        completion,
+        assistant_message,
+        model_id,
+        &[],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn commit_finalization_with_claims(
+    db: &DbState,
+    checkpoint: &mut AgentCheckpoint,
+    run_id: &str,
+    session_id: &str,
+    goal: &str,
+    steps: &[Value],
+    completion: &Value,
+    assistant_message: &str,
+    model_id: &str,
+    claim_chat_ids: &[String],
+) -> Result<(), String> {
     commit_terminal(
         db,
         checkpoint,
@@ -329,6 +356,7 @@ pub fn commit_finalization(
         assistant_message,
         model_id,
         "succeeded",
+        claim_chat_ids,
     )
 }
 
@@ -341,6 +369,31 @@ pub(crate) fn commit_failure(
     steps: &[Value],
     completion: &Value,
     assistant_message: &str,
+) -> Result<(), String> {
+    commit_failure_with_claims(
+        db,
+        checkpoint,
+        run_id,
+        session_id,
+        goal,
+        steps,
+        completion,
+        assistant_message,
+        &[],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn commit_failure_with_claims(
+    db: &DbState,
+    checkpoint: &mut AgentCheckpoint,
+    run_id: &str,
+    session_id: &str,
+    goal: &str,
+    steps: &[Value],
+    completion: &Value,
+    assistant_message: &str,
+    claim_chat_ids: &[String],
 ) -> Result<(), String> {
     if checkpoint.phase != crate::agent::checkpoint::AgentPhase::Failed {
         return Err("失败提交要求 Failed 检查点，不得冒充成功交付".into());
@@ -356,9 +409,11 @@ pub(crate) fn commit_failure(
         assistant_message,
         "",
         "failed",
+        claim_chat_ids,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn commit_terminal(
     db: &DbState,
     checkpoint: &mut AgentCheckpoint,
@@ -370,6 +425,7 @@ fn commit_terminal(
     assistant_message: &str,
     model_id: &str,
     status: &str,
+    claim_chat_ids: &[String],
 ) -> Result<(), String> {
     // 任何 SQL 失败均保持调用方 version 不变，不仅仅处理乐观锁冲突。
     let mut candidate = checkpoint.clone();
@@ -384,11 +440,13 @@ fn commit_terminal(
         assistant_message,
         model_id,
         status,
+        claim_chat_ids,
     )?;
     *checkpoint = candidate;
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn commit_terminal_inner(
     db: &DbState,
     checkpoint: &mut AgentCheckpoint,
@@ -400,6 +458,7 @@ fn commit_terminal_inner(
     assistant_message: &str,
     model_id: &str,
     status: &str,
+    claim_chat_ids: &[String],
 ) -> Result<(), String> {
     let mut conn = db.0.lock().map_err(|error| error.to_string())?;
     let now = Utc::now().to_rfc3339();
@@ -467,19 +526,35 @@ fn commit_terminal_inner(
     )
     .map_err(|error| error.to_string())?;
 
-    // 3) 会话 assistant 消息 + session 计数
+    // 3) 会话 assistant 消息 + 待认领用户消息归属 + session 计数
+    crate::agent::conversation::claim_messages_on(&tx, session_id, run_id, claim_chat_ids)?;
     let assistant_message_id = uuid::Uuid::new_v4().to_string();
-    tx.execute(
-        "INSERT INTO chat_messages (id, session_id, role, content, attachments, created_at, model_id)
-         VALUES (?1, ?2, 'assistant', ?3, NULL, ?4, ?5)",
-        params![
-            assistant_message_id,
-            session_id,
-            assistant_message,
-            now,
-            model_id
-        ],
-    )
+    if crate::agent::conversation::chat_messages_has_run_id(&tx) {
+        tx.execute(
+            "INSERT INTO chat_messages (id, session_id, role, content, attachments, created_at, model_id, run_id)
+             VALUES (?1, ?2, 'assistant', ?3, NULL, ?4, ?5, ?6)",
+            params![
+                assistant_message_id,
+                session_id,
+                assistant_message,
+                now,
+                model_id,
+                run_id
+            ],
+        )
+    } else {
+        tx.execute(
+            "INSERT INTO chat_messages (id, session_id, role, content, attachments, created_at, model_id)
+             VALUES (?1, ?2, 'assistant', ?3, NULL, ?4, ?5)",
+            params![
+                assistant_message_id,
+                session_id,
+                assistant_message,
+                now,
+                model_id
+            ],
+        )
+    }
     .map_err(|error| error.to_string())?;
     tx.execute(
         "UPDATE chat_sessions SET updated_at=?1, message_count=message_count+1 WHERE id=?2",

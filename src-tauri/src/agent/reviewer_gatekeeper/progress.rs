@@ -49,7 +49,11 @@ impl ReviewProgress {
     ) -> Self {
         let app = app.clone();
         let channel = format!("agent-progress-{session}");
-        Self::with_sink(member, label, model, move |value| {
+        let parent_run = crate::agent::child_reviewer::main_executor::parent_run();
+        Self::with_sink(member, label, model, move |mut value| {
+            if let (Some(run_id), Some(payload)) = (&parent_run, value.as_object_mut()) {
+                payload.insert("run_id".into(), json!(run_id));
+            }
             let _ = app.emit(&channel, value);
         })
     }

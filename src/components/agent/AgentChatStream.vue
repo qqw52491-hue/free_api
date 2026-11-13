@@ -27,7 +27,7 @@
         </div>
 
         <div class="stream-centered-content" :class="{ 'is-ambient': streamViewMode === 'ambient' }">
-            <section v-if="!currentGoal && !timelineEntries.length && !legacyMessages.length" class="empty-conversation">
+            <section v-if="!currentGoal && !timelineEntries.length && !visibleLegacyMessages.length" class="empty-conversation">
                 <div class="empty-logo">
                     <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" stroke="none">
                         <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
@@ -38,8 +38,8 @@
             </section>
 
             <!-- 早期对话记录 -->
-            <section v-if="legacyMessages.length" class="conversation-history" aria-label="早期对话记录">
-                <AgentTimelineList ref="legacyHistoryList" :entries="legacyMessages" lazy :initial-count="24"
+            <section v-if="visibleLegacyMessages.length" class="conversation-history" aria-label="早期对话记录">
+                <AgentTimelineList ref="legacyHistoryList" :entries="visibleLegacyMessages" lazy :initial-count="24"
                     :scroll-element="streamElement" :view-active="viewActive" @before-expand="pauseLiveFollow">
                 <template #default="{ entry: message }">
                 <article
@@ -1200,7 +1200,7 @@
                                         <!-- 1.5 人工应答回填行：本步骤 ask_human 挂起后用户的答复直接贴在步骤内，
                                              无需跳到底部标记行对照上下文；点击仍走 select-human 打开 Inspector -->
                                         <button
-                                            v-for="iv in stepInterventions.get(step.id) || []"
+                                            v-for="iv in stepInterventions.get(step) || []"
                                             :key="iv.entryId"
                                             class="child-row intervention-child"
                                             type="button"
@@ -1428,6 +1428,11 @@
                     </template>
                 </article>
 
+                <article v-else-if="entry.type === 'artifacts'" class="saved-message from-agent">
+                    <div class="final-artifacts">
+                        <ArtifactList :artifacts="entry.artifacts" @preview="handlePreviewArtifact" @download="handleDownloadArtifact" />
+                    </div>
+                </article>
                 <article
                     v-else-if="entry.type === 'completion'"
                     :data-tl="entry.id"
@@ -1521,7 +1526,7 @@
                 @submit="$emit('submit-human', $event)"
             />
 
-            <p v-if="isRunning && !timelineEntries.length && !legacyMessages.length" class="idle-live"><i></i>{{ stateDescription }}</p>
+            <p v-if="isRunning && !timelineEntries.length && !visibleLegacyMessages.length" class="idle-live"><i></i>{{ stateDescription }}</p>
         </div>
 
         <!-- 📎 全局全屏附件预览弹窗 (Teleport 到 body) -->
@@ -1667,25 +1672,54 @@ function humanQuestionFromStep(step: AgentStepItem | undefined): string {
     return desc && desc !== "执行操作" ? desc : "";
 }
 
-/** 同一回合内距离消息最近的 ask_human/human 步骤——历史应答的归属启发式。
- *  优先取消息时间戳之前的最近者；落库精度错位时消息可能排在提问步骤
- *  零点几秒前，此时放行 30s 窗口内"在其后"的最近 ask_human 兜底，
- *  否则 stepId 落空、marker 只能按原时间戳漂到提问上方。 */
-function nearestHumanStepBefore(steps: AgentStepItem[], timestamp: number): AgentStepItem | undefined {
-    const NEAR_WINDOW_MS = 30_000;
-    let bestBefore: AgentStepItem | undefined;
-    let bestAfter: AgentStepItem | undefined;
-    for (const s of steps) {
-        const probe = `${s.tool || ""} ${s.action || ""}`.toLowerCase();
-        if (!probe.includes("ask_human") && !probe.includes("human")) continue;
-        if (s.timestamp <= timestamp) {
-            if (!bestBefore || s.timestamp >= bestBefore.timestamp) bestBefore = s;
-        } else if (s.timestamp - timestamp <= NEAR_WINDOW_MS) {
-            if (!bestAfter || s.timestamp < bestAfter.timestamp) bestAfter = s;
+function matchSavedHumanReplies(steps: AgentStepItem[], messages: HistoryMessage[]): Map<string, AgentStepItem> {
+    const matches = new Map<string, AgentStepItem>();
+    const replies = messages.filter(message => message.role === "user");
+    let previousReplyStepAt = -Infinity;
+    // The trace timestamp records completion, which follows the saved reply.
+    // An identical reply in a later question must not reuse the previous message.
+    for (const step of steps) {
+        const view = step.view as { kind?: string; message_id?: string } | undefined;
+        const isAskHuman = view?.kind === "human_reply"
+            || step.tool === "ask_human"
+            || step.action === "ask_human"
+            || step.action === "ask";
+        if (!isAskHuman) continue;
+        if (view?.kind === "human_reply" && view.message_id) {
+            const message = replies.find(candidate => candidate.id === view.message_id);
+            if (message) matches.set(message.id, step);
+            previousReplyStepAt = step.timestamp;
+            continue;
         }
+        const output = step.rawResult ?? step.result;
+        const prefix = "人类的回复是: ";
+        if (typeof output !== "string" || !output.startsWith(prefix)) continue;
+        const answer = output.slice(prefix.length).trim();
+        const candidates = replies.filter(message => !matches.has(message.id)
+            && message.timestamp > previousReplyStepAt
+            && message.timestamp <= step.timestamp
+            && message.content.trim() === answer);
+        if (candidates.length === 1) matches.set(candidates[0].id, step);
+        previousReplyStepAt = step.timestamp;
     }
-    return bestBefore || bestAfter;
+    return matches;
 }
+
+const savedHumanReplySteps = computed(() => new Map(props.historyTurns.map(
+    turn => [turn.id, matchSavedHumanReplies(turn.steps, turn.messages)],
+)));
+
+const showLiveTimeline = computed(() => {
+    const run = props.historyTurns.find(item => item.id === props.liveRunId);
+    return props.isRunning || !props.liveRunId || !run
+        || !["succeeded", "failed", "cancelled"].includes(run.status);
+});
+const liveHumanMessageIds = computed(() => new Set(
+    showLiveTimeline.value ? props.humanInterventions.flatMap(item => item.messageId ? [item.messageId] : []) : [],
+));
+const visibleLegacyMessages = computed(() => props.legacyMessages.filter(
+    message => !liveHumanMessageIds.value.has(message.id),
+));
 
 interface StepInterventionRow {
     /** 对应时间线条目 id（与标记行一致），点击时原样 emit select-human，保证 Inspector 查找命中 */
@@ -1698,40 +1732,40 @@ interface StepInterventionRow {
 /**
  * step.id → 挂在该步骤内的人工应答行。
  * live：agent_paused 时已快照 pausedStepId，直接按 stepId 归属；
- * history：无快照可存，按"消息之前最近的 ask_human/human 步骤"启发式回填。
+ * history：从保存的 ask_human 执行结果匹配真实回答。
  */
-const stepInterventions = computed<Map<string, StepInterventionRow[]>>(() => {
-    const map = new Map<string, StepInterventionRow[]>();
+const stepInterventions = computed<Map<AgentStepItem, StepInterventionRow[]>>(() => {
+    const map = new Map<AgentStepItem, StepInterventionRow[]>();
     props.humanInterventions.forEach((item, index) => {
         if (!item.stepId) return;
-        const list = map.get(item.stepId) || [];
+        const step = props.steps.find(candidate => candidate.id === item.stepId);
+        if (!step) return;
+        const list = map.get(step) || [];
         list.push({
             entryId: `live-human-${item.timestamp}-${index}`,
             summary: interventionSummary(item.message),
             timestamp: item.timestamp,
             question: item.question || undefined,
         });
-        map.set(item.stepId, list);
+        map.set(step, list);
     });
     for (const turn of props.historyTurns) {
         // 与 historyTimelineEntries 同口径：运行中的回合由 live 视图接管，
         // 否则同一应答会经 live 快照与历史消息两条路径挂两遍
-        if (props.isRunning && turn.status === "running") continue;
+        if (isHistoryTurnCoveredByLive(turn)) continue;
         for (const message of turn.messages) {
-            if (message.role !== "user") continue;
-            const anchorStep = nearestHumanStepBefore(turn.steps, message.timestamp);
+            if (message.role !== "user" || liveHumanMessageIds.value.has(message.id)) continue;
+            const anchorStep = savedHumanReplySteps.value.get(turn.id)?.get(message.id);
             if (!anchorStep) continue;
-            const list = map.get(anchorStep.id) || [];
+            const list = map.get(anchorStep) || [];
             const summary = interventionSummary(message.content);
-            // 刚结算的瞬间 live 与历史可能同时持有同一回答——同步骤同摘要视为重复
-            if (list.some((r) => r.summary === summary)) continue;
             list.push({
                 entryId: `history-message-${turn.id}-${message.id}`,
                 summary,
                 timestamp: message.timestamp,
                 question: humanQuestionFromStep(anchorStep) || undefined,
             });
-            map.set(anchorStep.id, list);
+            map.set(anchorStep, list);
         }
     }
     return map;
@@ -1833,6 +1867,7 @@ type TimelineEntry =
     | { id: string; type: "review"; timestamp: number; workers?: AgentWorkerItem[] }
     | { id: string; type: "user"; timestamp: number; content: string }
     | { id: string; type: "message"; timestamp: number; role: string; content: string; isHuman: boolean; anchorId?: string; question?: string; stepId?: string }
+    | { id: string; type: "artifacts"; timestamp: number; artifacts: AgentArtifactInput[] }
     | { id: string; type: "completion"; timestamp: number; title: string; summary: string; artifacts: AgentArtifactInput[]; failed: boolean; outcome?: 'succeeded' | 'cancelled' | 'failed' }
     | { id: "active-thought"; type: "active-thought"; timestamp: number };
 
@@ -1843,6 +1878,8 @@ const props = withDefaults(
         currentGoal: string;
         legacyMessages: { id: string; role: string; content: string; created_at: string }[];
         historyTurns: HistoryTurn[];
+        activeRunId?: string | null;
+        liveRunId?: string | null;
         steps: AgentStepItem[];
         selectedStepId: string | null;
         selectedSubpart: "thought" | "tool" | null;
@@ -1929,7 +1966,7 @@ const historicalStepWorkers = computed(() => {
     const map = new Map<AgentStepItem, AgentWorkerItem[]>();
     const snapshots = new Map((props.childTaskSnapshots || []).map(task => [task.child_run_id, task]));
     for (const turn of props.historyTurns) {
-        if (props.isRunning && turn.status === "running") continue;
+        if (isHistoryTurnCoveredByLive(turn)) continue;
         for (const step of turn.steps) map.set(step, extractSubagentsFromStep(step, turn.steps, turn.reviewers || []).map(worker => historicalWorkerSnapshot(worker, snapshots.get(worker.id))));
     }
     return map;
@@ -2771,7 +2808,7 @@ function buildAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
 
 /// 简报流内联人工应答：取挂在该步骤上的应答行，转为 intervention 展示项原位插入
 function pushAmbientInterventions(step: AgentStepItem, items: AmbientDisplayItem[]) {
-    const rows = stepInterventions.value.get(step.id);
+    const rows = stepInterventions.value.get(step);
     if (!rows) return;
     for (const r of rows) {
         items.push({ type: 'intervention', id: r.entryId, text: r.summary, question: r.question, timestamp: r.timestamp });
@@ -3918,26 +3955,46 @@ function completionArtifacts(value: unknown): AgentArtifactInput[] {
     });
 }
 const liveFinalReviewIds = computed(() => props.reviewProgress.flatMap(review => review.childRunId || []).join(" "));
+// 历史步骤全部已出现在同一运行的实时视图时，才隐藏该回合。
+function isHistoryTurnCoveredByLive(turn: HistoryTurn): boolean {
+    if (!props.isRunning || !props.activeRunId || turn.id !== props.activeRunId) return false;
+    if (!props.steps.length) return false;
+    if (turn.messages.some(message => message.role === "user") || turn.reviewers?.length || turn.summary || turn.artifacts.length) return false;
+    return historyStepsNotCoveredByLive(turn).length === 0;
+}
+
+function historyStepsNotCoveredByLive(turn: HistoryTurn): AgentStepItem[] {
+    if (!props.isRunning || !props.activeRunId || turn.id !== props.activeRunId) return turn.steps;
+    const liveCounts = new Map<string, number>();
+    const historyCounts = new Map<string, number>();
+    for (const step of props.steps) if (step.outputId) liveCounts.set(step.outputId, (liveCounts.get(step.outputId) || 0) + 1);
+    for (const step of turn.steps) if (step.outputId) historyCounts.set(step.outputId, (historyCounts.get(step.outputId) || 0) + 1);
+    return turn.steps.filter(step => !step.outputId || liveCounts.get(step.outputId) !== 1 || historyCounts.get(step.outputId) !== 1);
+}
+
 const historyTimelineEntries = computed<TimelineEntry[]>(() => {
     const timeline: TimelineEntry[] = [];
     // 过滤掉当前正在实时运行中的回合，由 live 视图独立渲染，防止双份重复
     const turnsToRender = props.historyTurns.filter((turn) => {
-        if (props.isRunning && turn.status === "running") return false;
+        if (isHistoryTurnCoveredByLive(turn)) return false;
         return true;
     });
     const activeReviewIds = liveFinalReviewIds.value.split(" ");
 
     for (const turn of [...turnsToRender].sort((a, b) => a.startedAt - b.startedAt)) {
-        timeline.push({ id: `history-user-${turn.id}`, type: "user", timestamp: turn.startedAt, content: turn.goal });
+        const hasLiveGoal = props.isRunning && props.activeRunId === turn.id && Boolean(props.currentGoal);
+        if (!hasLiveGoal) timeline.push({ id: `history-user-${turn.id}`, type: "user", timestamp: turn.startedAt, content: turn.goal });
         // 过滤掉最终已由 completion 展示的助手消息，只保留人工干预记录
-        const humanMessages = turn.messages.filter((m) => m.role === "user");
-        const plans = planEntries(turn.steps, `history-${turn.id}`, false, turn.id);
+        const humanMessages = turn.messages.filter(m => m.role === "user" && !liveHumanMessageIds.value.has(m.id));
+        const plans = planEntries(historyStepsNotCoveredByLive(turn), `history-${turn.id}`, false, turn.id);
         const stepToPlan = new Map<string, PlanEntry>();
         for (const p of plans) for (const s of p.steps) stepToPlan.set(s.id, p);
         const middle: TimelineEntry[] = [...plans];
+        for (const message of turn.messages.filter(m => m.role === "assistant" && m.content.trim())) {
+            middle.push({ id: `history-message-${turn.id}-${message.id}`, type: "message", timestamp: message.timestamp, role: message.role, content: message.content, isHuman: false });
+        }
         for (const message of humanMessages) {
-            // 历史无 pausedStepId 快照：从"消息之前最近的 ask_human 步骤"回放提问原文与归属
-            const anchorStep = nearestHumanStepBefore(turn.steps, message.timestamp);
+            const anchorStep = savedHumanReplySteps.value.get(turn.id)?.get(message.id);
             const row: StepInterventionRow = {
                 entryId: `history-message-${turn.id}-${message.id}`,
                 summary: interventionSummary(message.content),
@@ -3960,7 +4017,10 @@ const historyTimelineEntries = computed<TimelineEntry[]>(() => {
         const linkedReviews = new Set([...turn.steps.flatMap(getStepJobIds), ...activeReviewIds]);
         const unplaced = (turn.reviewers || []).filter(worker => !linkedReviews.has(worker.id));
         if (unplaced.length) timeline.push({ id: `history-reviews-${turn.id}`, type: 'review', timestamp: turn.completedAt, workers: unplaced });
-        if (turn.summary || turn.artifacts.length || ["succeeded", "failed", "cancelled"].includes(turn.status)) {
+        if (!["succeeded", "failed", "cancelled"].includes(turn.status) && turn.artifacts.length) {
+            timeline.push({ id: `history-${turn.id}-artifacts`, type: "artifacts", timestamp: turn.completedAt, artifacts: completionArtifacts(turn.artifacts) });
+        }
+        if (["succeeded", "failed", "cancelled"].includes(turn.status)) {
             const isCancelled = turn.status === "cancelled";
             const failed = turn.status === "failed" || isCancelled;
             const title = isCancelled
@@ -3983,16 +4043,7 @@ const historyTimelineEntries = computed<TimelineEntry[]>(() => {
 
 function currentTimeline(): TimelineEntry[] {
     const timeline: TimelineEntry[] = [];
-    const latestTurn = props.historyTurns[props.historyTurns.length - 1];
-    // 仅在任务未运行、且最新一轮已完成的 turn 与当前目标完全一致时才隐藏 live，防止重复渲染双份 completion
-    // 严禁使用 cleanGoal.includes(turnGoal) 遍历所有 80 轮历史，避免短文本匹配误判导致新发送的消息不显示
-    const alreadyPersisted = !props.isRunning && Boolean(
-        latestTurn &&
-        props.currentGoal &&
-        latestTurn.goal.trim() === props.currentGoal.trim() &&
-        ["succeeded", "failed", "cancelled"].includes(latestTurn.status)
-    );
-    if (alreadyPersisted) return timeline;
+    if (!showLiveTimeline.value) return timeline;
 
     const plans = planEntries(props.steps, "live", props.isThinking);
     const firstTimestamp = plans[0]?.timestamp || Date.now();
@@ -4030,7 +4081,22 @@ function currentTimeline(): TimelineEntry[] {
 }
 
 const liveTimelineEntries = computed<TimelineEntry[]>(currentTimeline);
-const baseTimelineEntries = computed<TimelineEntry[]>(() => [...historyTimelineEntries.value, ...liveTimelineEntries.value]);
+const baseTimelineEntries = computed<TimelineEntry[]>(() => {
+    const history = historyTimelineEntries.value;
+    const live = liveTimelineEntries.value;
+    if (!props.isRunning || !props.activeRunId) return [...history, ...live];
+    const prefix = `history-${props.activeRunId}-`;
+    const belongsToCurrent = (entry: TimelineEntry) => entry.id.startsWith(prefix)
+        || entry.id.startsWith(`history-message-${props.activeRunId}-`)
+        || entry.id === `history-reviews-${props.activeRunId}`
+        || entry.id === `history-completion-${props.activeRunId}`;
+    const previous = history.filter(entry => !belongsToCurrent(entry));
+    const current = history.filter(belongsToCurrent);
+    const goal = live.filter(entry => entry.id === "live-user-goal");
+    const activity = [...current, ...live.filter(entry => entry.id !== "live-user-goal")];
+    activity.sort((a, b) => a.timestamp - b.timestamp);
+    return [...previous, ...goal, ...activity];
+});
 const historyEntryIds = computed(() => new Set(historyTimelineEntries.value.map(entry => entry.id)));
 // 只以身份/锚点变更重算位置；心跳和片段计数不重建步骤分组。
 const reviewLocationKey = computed(() => JSON.stringify(props.reviewProgress.map(review => ({ id: review.id, anchor: review.anchor }))));
@@ -4089,7 +4155,7 @@ function questionNavigationEntries(entries: TimelineEntry[], running: boolean): 
 
 const historicalQuestionNavigationKey = computed(() => {
     const entries: QuestionNavigationEntry[] = [];
-    for (const message of props.legacyMessages) {
+    for (const message of visibleLegacyMessages.value) {
         if (message.role === 'user') entries.push({ id: `legacy-${message.id}`, kind: 'question', text: message.content });
         else if (['agent', 'assistant'].includes(message.role)) entries.push({ id: `legacy-${message.id}`, kind: 'answer', text: message.content });
     }

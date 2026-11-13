@@ -266,6 +266,10 @@ pub struct SandwichContext {
     /// 运行期单独消费的人工回答；入口合并前不能用它们跳过其他未消费的消息。
     #[serde(default)]
     pub acknowledged_chat_ids: BTreeSet<String>,
+    /// 本轮已消费、等待随下次 checkpoint 或终态事务原子写入 `chat_messages.run_id` 的消息 ID。
+    /// 不序列化：若提交前崩溃，游标尚未持久化，恢复时应保留 `run_id IS NULL` 由接手轮次认领。
+    #[serde(skip)]
+    pub pending_claim_chat_ids: Vec<String>,
 
     // ════════════════════════════════════════════════════════════════════
     // 🍞 3. 底层面包 (Dynamic Tail State Card - 动态聚合状态卡，压在最末端)
@@ -451,11 +455,18 @@ pub struct SandwichContext {
 }
 
 impl SandwichContext {
+    pub(crate) fn queue_claim_chat_id(&mut self, id: String) {
+        if !id.is_empty() && !self.pending_claim_chat_ids.iter().any(|existing| existing == &id) {
+            self.pending_claim_chat_ids.push(id);
+        }
+    }
+
     pub(crate) fn acknowledge_chat(
         &mut self,
         cursor: Option<crate::agent::conversation::ConversationCursor>,
     ) {
         if let Some(cursor) = cursor {
+            self.queue_claim_chat_id(cursor.id.clone());
             self.acknowledged_chat_ids.insert(cursor.id);
         }
     }
@@ -488,6 +499,7 @@ impl SandwichContext {
             image_observations: BTreeMap::new(),
             conversation_cursor: None,
             acknowledged_chat_ids: BTreeSet::new(),
+            pending_claim_chat_ids: Vec::new(),
             current_observation: String::new(),
             progress_summary: String::new(),
             plan_state: PlanState::new(),

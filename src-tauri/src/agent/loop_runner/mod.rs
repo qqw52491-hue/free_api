@@ -163,7 +163,7 @@ pub async fn run_tool_phase(
         if result.route == "task:failed" {
             checkpoint.pending_task_failure = Some(request.reason.trim().to_string());
         }
-        emit_tool_event(app, final_session_id, step_id, inst, "failed",
+        emit_tool_event(app, final_session_id, parent_run_id, step_id, inst, "failed",
             Some(result.route.clone()), Some(false), &result.stderr, Some(0), None);
         return Ok(result);
     }
@@ -175,7 +175,7 @@ pub async fn run_tool_phase(
         }
     }
     if let Some(result) = crate::agent::tools::input_validation::instruction_rejection(state.inner(), inst) {
-        emit_tool_event(app, final_session_id, step_id, inst, "failed",
+        emit_tool_event(app, final_session_id, parent_run_id, step_id, inst, "failed",
             Some(result.route.clone()), Some(false), &result.stderr, Some(0), None);
         return Ok(result);
     }
@@ -209,6 +209,7 @@ pub async fn run_tool_phase(
     app.emit(
         &format!("agent-progress-{}", final_session_id),
         json!({
+            "run_id": parent_run_id,
             "type": "step_start",
             "step_id": step_id,
             "description": &inst.description
@@ -219,6 +220,7 @@ pub async fn run_tool_phase(
     emit_tool_event(
         app,
         final_session_id,
+        parent_run_id,
         step_id,
         inst,
         "started",
@@ -283,6 +285,7 @@ pub async fn run_tool_phase(
         emit_tool_event(
             app,
             final_session_id,
+            parent_run_id,
             step_id,
             inst,
             if result.success { "completed" } else { "failed" },
@@ -364,6 +367,7 @@ pub async fn run_tool_phase(
         emit_tool_event(
             app,
             final_session_id,
+            parent_run_id,
             step_id,
             inst,
             if result.success { "completed" } else { "failed" },
@@ -413,6 +417,7 @@ pub async fn run_tool_phase(
             emit_tool_event(
                 app,
                 final_session_id,
+                parent_run_id,
                 step_id,
                 inst,
                 "failed",
@@ -524,6 +529,7 @@ pub async fn run_tool_phase(
             emit_tool_event(
                 app,
                 final_session_id,
+                parent_run_id,
                 step_id,
                 inst,
                 "failed",
@@ -657,6 +663,7 @@ pub async fn run_tool_phase(
     emit_tool_event(
         app,
         final_session_id,
+        parent_run_id,
         step_id,
         inst,
         event_type,

@@ -122,7 +122,7 @@ pub(super) async fn dispatch_ask_human(
             if let Err(reject_msg) = normalize_approval_description(
                 &mut final_form_val, params.get("message").and_then(Value::as_str),
             ) {
-                emit_tool_event(ctx.app, ctx.final_session_id, ctx.step_id, inst, "failed",
+                emit_tool_event(ctx.app, ctx.final_session_id, ctx.parent_run_id, ctx.step_id, inst, "failed",
                     Some("plan_approval_content_missing".into()), Some(false), &reject_msg,
                     Some(ctx.tool_started_at.elapsed().as_millis()), None);
                 return Ok(ArmOutcome::Early(DispatchResult { view: None, stdout: String::new(),
@@ -139,6 +139,7 @@ pub(super) async fn dispatch_ask_human(
         ctx.app.emit(
             &format!("agent-progress-{}", ctx.final_session_id),
             json!({
+                "run_id": ctx.parent_run_id,
                 "type": "agent_paused",
                 "message": ask_msg,
                 "form": final_form_val.unwrap_or(serde_json::Value::Null)
@@ -169,14 +170,17 @@ pub(super) async fn dispatch_ask_human(
         crate::agent::advance_run_state(
             ctx.app,
             ctx.final_session_id,
+            ctx.parent_run_id,
             ctx.run_machine,
             AgentRunEvent::WaitForHuman {
                 question: ask_msg.clone(),
             },
         )?;
         crate::agent::control::mark_stage(ctx.final_session_id, "ask_human:waiting_reply");
+        let mut reply_message_id = None;
         let (reply, received_human_reply) = match ctx.rx.recv().await {
             Some(HumanControl::Answer(reply, cursor)) => {
+                reply_message_id = cursor.as_ref().map(|value| value.id.clone());
                 ctx.context.acknowledge_chat(cursor);
                 (reply, true)
             },
@@ -218,10 +222,16 @@ pub(super) async fn dispatch_ask_human(
             ctx.checkpoint.register_human_reply(if is_approval_context {&waiver_question} else {&ask_msg}, &reply, is_approval_context && explicit_plan.is_none());
         }
         ctx.checkpoint.begin_planning(ctx.step_id, ctx.context);
-        save_checkpoint(ctx.state.inner(), ctx.checkpoint)?;
+        crate::agent::checkpoint::save_checkpoint_and_claim_chats(
+            ctx.state.inner(),
+            ctx.checkpoint,
+            ctx.parent_run_id,
+            ctx.context,
+        )?;
         crate::agent::advance_run_state(
             ctx.app,
             ctx.final_session_id,
+            ctx.parent_run_id,
             ctx.run_machine,
             AgentRunEvent::HumanReplyReceived,
         )?;
@@ -235,7 +245,7 @@ pub(super) async fn dispatch_ask_human(
         .ok();
 
         // 伪造一个成功的执行结果，把人类的话当作工具输出返回给大模型
-        crate::agent::types::DispatchResult { view: None,
+        crate::agent::types::DispatchResult { view: reply_message_id.map(|id| json!({ "kind": "human_reply", "message_id": id })),
             success: true,
             stdout: format!("人类的回复是: {}", reply),
             stderr: String::new(),

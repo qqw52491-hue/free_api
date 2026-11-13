@@ -231,6 +231,7 @@ pub async fn run_call_llm_and_run_tool_phases(
         crate::agent::advance_run_state(
             &app,
             &final_session_id,
+            run_id,
             &mut run_machine,
             AgentRunEvent::InstructionReady {
                 action: inst.get_action(),
@@ -270,6 +271,7 @@ pub async fn run_call_llm_and_run_tool_phases(
         crate::agent::advance_run_state(
             &app,
             &final_session_id,
+            run_id,
             &mut run_machine,
             AgentRunEvent::ToolFailed {
                 reason: error_detail.clone(),
@@ -281,6 +283,7 @@ pub async fn run_call_llm_and_run_tool_phases(
         crate::agent::advance_run_state(
             &app,
             &final_session_id,
+            run_id,
             &mut run_machine,
             AgentRunEvent::RetryPlanning,
         )?;
@@ -363,6 +366,7 @@ pub async fn run_call_llm_and_run_tool_phases(
         let _ = app.emit(
             &format!("agent-progress-{}", final_session_id),
             json!({
+                "run_id": run_id,
                 "type": "action_phase",
                 "phase": "calling_llm",
                 "description": format!("🧠 正在调用 {} 进行决策规划...", routing.model_id),
@@ -399,6 +403,7 @@ pub async fn run_call_llm_and_run_tool_phases(
             Some(&app),
             step_id,
             &final_session_id,
+            Some(run_id),
             log_context.unwrap_or(false),
             transient_llm_request_retries,
             model_routing.reasoning_effort_for(&routing.tier),
@@ -453,6 +458,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                     crate::agent::advance_run_state(
                         &app,
                         final_session_id,
+                        run_id,
                         &mut run_machine,
                         AgentRunEvent::PlanningFailed { reason: e.to_string() },
                     )?;
@@ -467,6 +473,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                     crate::agent::advance_run_state(
                         &app,
                         &final_session_id,
+                        run_id,
                         &mut run_machine,
                         AgentRunEvent::PlanningFailed { reason: e.clone() },
                     )?;
@@ -479,6 +486,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                     crate::agent::advance_run_state(
                         &app,
                         &final_session_id,
+                        run_id,
                         &mut run_machine,
                         AgentRunEvent::RetryPlanning,
                     )?;
@@ -500,6 +508,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                 crate::agent::advance_run_state(
                     &app,
                     &final_session_id,
+                    run_id,
                     &mut run_machine,
                     AgentRunEvent::PlanningFailed { reason: e.clone() },
                 )?;
@@ -540,6 +549,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                 app.emit(
                     &format!("agent-progress-{}", final_session_id),
                     json!({
+                        "run_id": run_id,
                         "type": "session_title_updated",
                         "title": clean,
                     }),
@@ -570,6 +580,7 @@ pub async fn run_call_llm_and_run_tool_phases(
         crate::agent::advance_run_state(
             &app,
             &final_session_id,
+            run_id,
             &mut run_machine,
             AgentRunEvent::InstructionReady {
                 action: inst.get_action(),
@@ -580,6 +591,7 @@ pub async fn run_call_llm_and_run_tool_phases(
         app.emit(
             &format!("agent-progress-{}", final_session_id),
             json!({
+                "run_id": run_id,
                 "type": "token_usage",
                 "step_id": step_id,
                 "prompt_tokens": token_usage.prompt_tokens,
@@ -607,6 +619,7 @@ pub async fn run_call_llm_and_run_tool_phases(
             app.emit(
                 &format!("agent-progress-{}", final_session_id),
                 json!({
+                    "run_id": run_id,
                     "type": "thinking",
                     "step_id": step_id,
                     "content": &thinking_text,
@@ -653,6 +666,7 @@ pub async fn run_call_llm_and_run_tool_phases(
         app.emit(
             &format!("agent-progress-{}", final_session_id),
             json!({
+                "run_id": run_id,
                 "type": "step_new",
                 "step": {
                     "id": step_id,
@@ -735,6 +749,7 @@ pub async fn run_call_llm_and_run_tool_phases(
             crate::agent::advance_run_state(
                 &app,
                 &final_session_id,
+                run_id,
                 &mut run_machine,
                 AgentRunEvent::ToolFailed {
                     reason: error_detail.clone(),
@@ -825,6 +840,7 @@ pub async fn run_call_llm_and_run_tool_phases(
             app.emit(
                 &format!("agent-progress-{}", final_session_id),
                 json!({
+                    "run_id": run_id,
                     "type": "step_error",
                     "step_id": step_id,
                     "description": inst.description.clone(),

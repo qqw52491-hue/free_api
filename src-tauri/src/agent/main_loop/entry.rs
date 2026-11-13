@@ -39,11 +39,14 @@ use crate::agent::workspace_lock::{acquire_workspace_lock, ChildWorkspaceGuard};
 pub fn advance_run_state<R: tauri::Runtime>(
     app: &AppHandle<R>,
     session_id: &str,
+    run_id: &str,
     machine: &mut AgentRunMachine,
     event: AgentRunEvent,
 ) -> Result<(), String> {
     let snapshot = machine.transition(event).map_err(|err| err.to_string())?;
-    app.emit(&format!("agent-run-state-{}", session_id), snapshot)
+    let mut payload = serde_json::to_value(snapshot).map_err(|err| err.to_string())?;
+    payload["run_id"] = serde_json::json!(run_id);
+    app.emit(&format!("agent-run-state-{}", session_id), payload)
         .map_err(|err| err.to_string())?;
     Ok(())
 }
@@ -63,6 +66,10 @@ pub async fn run_agent_main_loop(
     plan_mode: Option<String>,
     task_start_mode: Option<crate::agent::conversation::TaskStartMode>,
 ) -> Result<(), String> {
+    // 尽量早于模型校验（涉及 SQLite 全局锁）建立启动占位，避免锁竞争超过停止轮询窗口。
+    let _entry_starting_guard = session_id
+        .as_deref()
+        .map(crate::agent::control::StartingSessionGuard::enter);
     {
         let conn = state.0.lock().map_err(|e| e.to_string())?;
         model_routing.validate_desktop_start(&conn)?;
@@ -111,6 +118,8 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
             .map(|d| d.as_millis().to_string())
             .unwrap_or_else(|_| "default".to_string())
     });
+    // 极早期启动占位：覆盖附件搬迁等前置 I/O，保证刚启动即点停止也不会漏掉取消信号。
+    let _starting_guard = crate::agent::control::StartingSessionGuard::enter(&final_session_id);
     let (goal, attachments) = crate::commands::chat::attachment_storage::adopt_draft_attachments(
         &final_session_id, goal, attachments,
     )?;

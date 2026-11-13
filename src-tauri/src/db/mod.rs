@@ -172,6 +172,7 @@ pub struct ChatMessage {
     pub attachments: Option<String>,
     pub created_at: String,
     pub model_id: Option<String>,
+    pub run_id: Option<String>,
 }
 
 pub fn get_db_path() -> PathBuf {

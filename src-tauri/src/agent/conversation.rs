@@ -13,10 +13,36 @@ pub struct ConversationCursor {
     pub id: String,
 }
 
+pub(crate) fn chat_messages_has_run_id(conn: &rusqlite::Connection) -> bool {
+    conn.prepare("SELECT run_id FROM chat_messages LIMIT 0").is_ok()
+}
+
+/// 在已有连接/事务内把本轮已消费或接管的聊天消息绑定到 `run_id`。
+/// 只认尚无归属（`run_id IS NULL`）且同属该会话的记录，不覆盖既有绑定，也不猜测历史。
+pub(crate) fn claim_messages_on(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    run_id: &str,
+    message_ids: &[String],
+) -> Result<(), String> {
+    if message_ids.is_empty() || run_id.trim().is_empty() || !chat_messages_has_run_id(conn) {
+        return Ok(());
+    }
+    let mut stmt = conn
+        .prepare("UPDATE chat_messages SET run_id = ?1 WHERE id = ?2 AND session_id = ?3 AND run_id IS NULL")
+        .map_err(|e| e.to_string())?;
+    for id in message_ids {
+        stmt.execute(params![run_id, id, session_id])
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 pub(crate) struct EntryHistory {
     pub messages: Vec<ChatMessage>,
     pub cursor: Option<ConversationCursor>,
     pub legacy_reference: Option<ChatMessage>,
+    pub consumed_user_message_ids: Vec<String>,
 }
 
 /// 只导入检查点尚未接收的消息。旧检查点没有游标时，已运行区间内的聊天
@@ -65,6 +91,7 @@ pub(crate) fn history_for_entry(
     let legacy = checkpoint.filter(|_| previous.is_none());
     let mut messages = Vec::new();
     let mut references = Vec::new();
+    let mut consumed_user_message_ids = Vec::new();
     let mut cursor = previous.cloned();
     for row in rows {
         let (position, message, rowid) = row.map_err(|e| e.to_string())?;
@@ -72,8 +99,12 @@ pub(crate) fn history_for_entry(
         if checkpoint.is_some_and(|cp| cp.data.acknowledged_chat_ids.contains(&position.id)) {
             continue;
         }
+        let is_user = message.role == "user";
         if let Some(last_rowid) = previous_rowid {
             if rowid > last_rowid {
+                if is_user {
+                    consumed_user_message_ids.push(position.id.clone());
+                }
                 messages.push(message);
             }
         } else if legacy.is_some() || previous.is_some() {
@@ -89,6 +120,9 @@ pub(crate) fn history_for_entry(
             let started = chrono::DateTime::parse_from_rfc3339(&cp.created_at)
                 .map_err(|e| format!("检查点起点无效: {e}"))?;
             if time > updated {
+                if is_user {
+                    consumed_user_message_ids.push(position.id.clone());
+                }
                 messages.push(message);
             } else if previous.is_some() || time >= started {
                 references.push(
@@ -97,6 +131,9 @@ pub(crate) fn history_for_entry(
                 );
             }
         } else {
+            if is_user {
+                consumed_user_message_ids.push(position.id.clone());
+            }
             messages.push(message);
         }
     }
@@ -111,6 +148,7 @@ pub(crate) fn history_for_entry(
         messages,
         cursor,
         legacy_reference,
+        consumed_user_message_ids,
     })
 }
 
@@ -139,6 +177,7 @@ pub(crate) fn import_live_messages(
         if role == "user" && !context.acknowledged_chat_ids.contains(&position.id) {
             append_live_goal(context, &content);
             context.turns_history.push(ChatMessage { role, content: json!(content) });
+            context.queue_claim_chat_id(position.id.clone());
             imported += 1;
         }
         context.acknowledged_chat_ids.remove(&position.id);
@@ -191,15 +230,24 @@ fn append_message(
     role: &str,
     content: &str,
     model_id: Option<&str>,
+    run_id: Option<&str>,
 ) -> Result<ConversationCursor, String> {
     let conn = db.0.lock().map_err(|error| error.to_string())?;
     let now = Utc::now().to_rfc3339();
     let id = Uuid::new_v4().to_string();
-    conn.execute(
-        "INSERT INTO chat_messages (id, session_id, role, content, attachments, created_at, model_id)
-         VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
-        params![id, session_id, role, content, now, model_id],
-    )
+    if run_id.is_some() && chat_messages_has_run_id(&conn) {
+        conn.execute(
+            "INSERT INTO chat_messages (id, session_id, role, content, attachments, created_at, model_id, run_id)
+             VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7)",
+            params![id, session_id, role, content, now, model_id, run_id],
+        )
+    } else {
+        conn.execute(
+            "INSERT INTO chat_messages (id, session_id, role, content, attachments, created_at, model_id)
+             VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
+            params![id, session_id, role, content, now, model_id],
+        )
+    }
     .map_err(|error| error.to_string())?;
     conn.execute(
         "UPDATE chat_sessions SET updated_at=?1, message_count=message_count+1 WHERE id=?2",
@@ -240,9 +288,20 @@ pub fn begin_turn(
     session_id: &str,
     model_id: &str,
     user_message: &str,
-) -> Result<(), String> {
+) -> Result<ConversationCursor, String> {
     ensure_conversation(db, session_id, model_id, user_message)?;
-    append_message(db, session_id, "user", user_message, Some(model_id)).map(|_| ())
+    append_message(db, session_id, "user", user_message, Some(model_id), None)
+}
+
+pub(crate) fn begin_turn_for_run(
+    db: &DbState,
+    session_id: &str,
+    model_id: &str,
+    user_message: &str,
+    run_id: &str,
+) -> Result<ConversationCursor, String> {
+    ensure_conversation(db, session_id, model_id, user_message)?;
+    append_message(db, session_id, "user", user_message, Some(model_id), Some(run_id))
 }
 
 pub fn complete_turn(
@@ -257,6 +316,7 @@ pub fn complete_turn(
         "assistant",
         assistant_message,
         Some(model_id),
+        None,
     )
     .map(|_| ())
 }
@@ -266,7 +326,16 @@ pub fn append_human_intervention(
     session_id: &str,
     message: &str,
 ) -> Result<ConversationCursor, String> {
-    append_message(db, session_id, "user", message, None)
+    append_message(db, session_id, "user", message, None, None)
+}
+
+pub(crate) fn append_human_intervention_for_run(
+    db: &DbState,
+    session_id: &str,
+    message: &str,
+    run_id: &str,
+) -> Result<ConversationCursor, String> {
+    append_message(db, session_id, "user", message, None, Some(run_id))
 }
 
 #[cfg(test)]

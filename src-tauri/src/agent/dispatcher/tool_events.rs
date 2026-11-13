@@ -24,6 +24,7 @@ use super::*;
 /// 仍由 task_store / 文件系统持久化，不能被事件流或模型上下文重复承载。
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentToolEvent {
+    pub run_id: String,
     pub event_type: String,
     pub step_id: usize,
     pub description: String,
@@ -53,6 +54,7 @@ pub fn event_summary(value: &str, limit: usize) -> String {
 pub fn emit_tool_event(
     app: &AppHandle,
     session_id: &str,
+    run_id: &str,
     step_id: usize,
     inst: &AgentInstruction,
     event_type: &str,
@@ -63,6 +65,7 @@ pub fn emit_tool_event(
     view: Option<&serde_json::Value>,
 ) {
     let payload = AgentToolEvent {
+        run_id: run_id.to_string(),
         event_type: event_type.to_string(),
         step_id,
         description: inst.description.clone(),

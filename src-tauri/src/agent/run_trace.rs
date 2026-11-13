@@ -103,11 +103,14 @@ pub fn load_run_steps(db: &DbState, run_id: &str) -> Result<Vec<Value>, String> 
 
 pub fn list_session_traces(db: &DbState, session_id: &str) -> Result<Vec<Value>, String> {
     let conn = db.reader()?;
+    let has_goal_message_id = conn.prepare("SELECT goal_message_id FROM agent_run_traces LIMIT 0").is_ok();
+    let query = if has_goal_message_id {
+        "SELECT id, goal, status, steps_json, completion_json, started_at, updated_at, completed_at, goal_message_id FROM agent_run_traces WHERE session_id=?1 ORDER BY started_at ASC, id ASC"
+    } else {
+        "SELECT id, goal, status, steps_json, completion_json, started_at, updated_at, completed_at, NULL FROM agent_run_traces WHERE session_id=?1 ORDER BY started_at ASC, id ASC"
+    };
     let mut statement = conn
-        .prepare(
-            "SELECT id, goal, status, steps_json, completion_json, started_at, updated_at, completed_at
-             FROM agent_run_traces WHERE session_id=?1 ORDER BY started_at ASC, id ASC",
-        )
+        .prepare(query)
         .map_err(|error| error.to_string())?;
     let rows = statement
         .query_map(params![session_id], |row| {
@@ -122,11 +125,12 @@ pub fn list_session_traces(db: &DbState, session_id: &str) -> Result<Vec<Value>,
                 row.get::<_, String>(5)?,
                 row.get::<_, String>(6)?,
                 row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
             ))
         })
         .map_err(|error| error.to_string())?;
     rows.map(|row| {
-        let (id, goal, status, steps_json, completion_json, started_at, updated_at, completed_at) =
+        let (id, goal, status, steps_json, completion_json, started_at, updated_at, completed_at, goal_message_id) =
             row.map_err(|error| error.to_string())?;
         // 行优先：增量持久化后 steps_json 只在启动/终态整写
         let row_steps: Vec<Value> = conn
@@ -152,6 +156,7 @@ pub fn list_session_traces(db: &DbState, session_id: &str) -> Result<Vec<Value>,
         Ok(json!({
             "id": id,
             "goal": goal,
+            "goal_message_id": goal_message_id,
             "status": status,
             "steps": steps,
             "reviewers": reviewers,

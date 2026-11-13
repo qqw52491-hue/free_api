@@ -103,6 +103,7 @@ impl Fixture {
             None,
             1,
             &session,
+            None,
             false,
             0,
             "auto",
@@ -144,7 +145,7 @@ async fn human_reply_decision_uses_the_normal_model_request_and_actual_host_appl
     let app = tauri::test::mock_app();
     app.manage(f.data.db.clone());
     let (_sender, mut interrupt) = watch::channel(0);
-    let (inst, _, _, _) = call_llm(&context, &app.state::<DbState>(), "mock".into(), "flash", None, 1, "reply-model", false, 0, "auto", false, &mut interrupt).await.unwrap();
+    let (inst, _, _, _) = call_llm(&context, &app.state::<DbState>(), "mock".into(), "flash", None, 1, "reply-model", None, false, 0, "auto", false, &mut interrupt).await.unwrap();
     cp.apply_human_reply_decision(&f.data.db, &mut context, inst.human_reply_decision.as_ref().unwrap()).unwrap();
     assert!(cp.git_destructive_approved_scopes.is_empty());
     let result = run_agent_step(&f.data.db, "reply-model", &inst, &PluginRegistry::new(), Some(&f.data.root));

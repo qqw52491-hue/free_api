@@ -45,6 +45,17 @@ async function main() {
     assert.equal(bodies()[0].props.content, props.content, 'short explanations retain original Markdown');
     assert.equal(all(root, el => el.type === 'details').length, 0);
 
+    const nextGoal = '下一轮的用户消息\n' + '多行目标\n'.repeat(20);
+    props.content = `用户提交了新的任务目标：${nextGoal}（已中断前序工具） 已在安全边界停止旧任务。`;
+    await vue.nextTick();
+    assert.equal(bodies()[0].props.content, '收到新的任务目标，本轮已在安全边界停止。');
+    assert(!text(root).includes('下一轮的用户消息'));
+    assert.equal(all(root, el => el.type === 'details').length, 0);
+
+    props.content = '用户请求停止当前任务。 已在安全边界停止旧任务。';
+    await vue.nextTick();
+    assert.equal(bodies()[0].props.content, props.content, 'manual stop retains its own reason');
+
     props.kind = 'failed'; props.content = '{"error":"request timeout","retryable":true}'; await vue.nextTick();
     assert(String(card().props.class).includes('is-failed'));
     assert.equal(card().props['aria-label'], '任务未能完成');

@@ -420,3 +420,111 @@
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn fork_remaps_goal_and_human_reply_message_ids() {
+        let mut conn = test_conn();
+        let dir = std::env::temp_dir().join(format!("fork-test-{}", Uuid::new_v4()));
+        let src_tmp = dir.join("src");
+        let dst_tmp = dir.join("dst");
+        seed(&conn, &src_tmp);
+
+        const MSG_REPLY: &str = "dddddddd-0000-0000-0000-0000000000r1";
+        conn.execute(
+            "INSERT INTO chat_messages (id, session_id, role, content, attachments, created_at, model_id, run_id)
+             VALUES (?1, ?2, 'user', '好', NULL, ?3, NULL, ?4)",
+            params![MSG_REPLY, SRC, t(2), TRACE1],
+        )
+        .unwrap();
+        const MSG_LEGACY: &str = "dddddddd-0000-0000-0000-0000000000l0";
+        conn.execute(
+            "INSERT INTO chat_messages (id, session_id, role, content, attachments, created_at, model_id, run_id)
+             VALUES (?1, ?2, 'user', '旧聊天', NULL, '2025-12-31T00:00:00Z', NULL, NULL)",
+            params![MSG_LEGACY, SRC],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE chat_messages SET run_id=?1 WHERE id IN (?2, ?3)",
+            params![TRACE1, MSG_U1, MSG_A1],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE agent_run_traces SET goal_message_id=?1 WHERE id=?2",
+            params![MSG_U1, TRACE1],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_run_steps (run_id, seq, step_json) VALUES (?1, 2, ?2)",
+            params![
+                TRACE1,
+                serde_json::json!({
+                    "id": 1,
+                    "tool": "ask_human",
+                    "action": "ask_human",
+                    "view": { "kind": "human_reply", "message_id": MSG_REPLY }
+                })
+                .to_string()
+            ],
+        )
+        .unwrap();
+
+        fork_session_at(&mut conn, SRC, ForkPoint::Full, DST, &src_tmp, &dst_tmp).unwrap();
+
+        let (dst_goal_msg_id, dst_trace_id): (Option<String>, String) = conn
+            .query_row(
+                "SELECT goal_message_id, id FROM agent_run_traces WHERE session_id=?1 AND goal_message_id IS NOT NULL",
+                params![DST],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        let new_goal_msg_id = dst_goal_msg_id.expect("forked trace should keep remapped goal_message_id");
+        assert_ne!(new_goal_msg_id, MSG_U1);
+        let goal_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chat_messages WHERE session_id=?1 AND id=?2",
+                params![DST, new_goal_msg_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(goal_exists, 1);
+
+        let step_json: String = conn
+            .query_row(
+                "SELECT step_json FROM agent_run_steps WHERE run_id=?1 AND seq=2",
+                params![dst_trace_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&step_json).unwrap();
+        let remapped_reply_id = parsed["view"]["message_id"].as_str().unwrap().to_string();
+        assert_ne!(remapped_reply_id, MSG_REPLY);
+        let (reply_exists, remapped_reply_run_id): (i64, Option<String>) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(run_id) FROM chat_messages WHERE session_id=?1 AND id=?2",
+                params![DST, remapped_reply_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(reply_exists, 1);
+        assert_eq!(remapped_reply_run_id.as_deref(), Some(dst_trace_id.as_str()));
+
+        let goal_run_id: Option<String> = conn
+            .query_row(
+                "SELECT run_id FROM chat_messages WHERE session_id=?1 AND id=?2",
+                params![DST, new_goal_msg_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(goal_run_id.as_deref(), Some(dst_trace_id.as_str()));
+
+        let legacy_run_id: Option<String> = conn
+            .query_row(
+                "SELECT run_id FROM chat_messages WHERE session_id=?1 AND content='旧聊天'",
+                params![DST],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_run_id, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }

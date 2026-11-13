@@ -350,6 +350,7 @@ pub async fn call_llm(
     app: Option<&tauri::AppHandle>,
     step_id: usize,
     session_id: &str,
+    run_id: Option<&str>,
     log_context: bool,
     transient_request_retries: u32,
     reasoning_effort: &str,
@@ -466,6 +467,7 @@ pub async fn call_llm(
                                     &format!("agent-progress-{}", session_id),
                                     json!({
                                         "type": "thinking",
+                                        "run_id": run_id,
                                         "step_id": step_id,
                                         "content": accumulated,
                                         "done": false,
@@ -500,6 +502,7 @@ pub async fn call_llm(
                                     &format!("agent-progress-{}", session_id),
                                     json!({
                                         "type": "content_stream",
+                                        "run_id": run_id,
                                         "step_id": step_id,
                                         "chunk": chunk,
                                         "accumulated": accumulated_content,
@@ -518,6 +521,7 @@ pub async fn call_llm(
                                             &format!("agent-progress-{}", session_id),
                                             json!({
                                                 "type": "summary_stream",
+                                                "run_id": run_id,
                                                 "step_id": step_id,
                                                 "content": summary_text,
                                                 "live_tokens": est_tokens,
@@ -747,6 +751,7 @@ pub async fn call_llm(
                         &format!("agent-progress-{}", session_id),
                         json!({
                             "type": "llm_parse_error",
+                            "run_id": run_id,
                             "step_id": step_id,
                             "try_index": current_try,
                             "error": &e,

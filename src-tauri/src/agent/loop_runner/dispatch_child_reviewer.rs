@@ -78,6 +78,7 @@ pub(super) async fn dispatch_child_reviewer(
                 emit_tool_event(
                     ctx.app,
                     ctx.final_session_id,
+                    ctx.parent_run_id,
                     ctx.step_id,
                     inst,
                     "failed",

@@ -19,9 +19,12 @@ pub async fn get_messages(
     session_id: String,
 ) -> Result<Vec<ChatMessage>, String> {
     let conn = state.reader()?;
-    let mut stmt = conn.prepare(
-        "SELECT id, session_id, role, content, attachments, created_at, model_id FROM chat_messages WHERE session_id=?1 ORDER BY created_at ASC"
-    ).map_err(|e| e.to_string())?;
+    let select_sql = if crate::agent::conversation::chat_messages_has_run_id(&conn) {
+        "SELECT id, session_id, role, content, attachments, created_at, model_id, run_id FROM chat_messages WHERE session_id=?1 ORDER BY created_at ASC"
+    } else {
+        "SELECT id, session_id, role, content, attachments, created_at, model_id, NULL FROM chat_messages WHERE session_id=?1 ORDER BY created_at ASC"
+    };
+    let mut stmt = conn.prepare(select_sql).map_err(|e| e.to_string())?;
     let list = stmt
         .query_map(params![session_id], |row| {
             Ok(ChatMessage {
@@ -32,6 +35,7 @@ pub async fn get_messages(
                 attachments: row.get(4)?,
                 created_at: row.get(5)?,
                 model_id: row.get(6)?,
+                run_id: row.get(7)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -69,5 +73,6 @@ pub async fn save_message(
         attachments,
         created_at: now,
         model_id,
+        run_id: None,
     })
 }

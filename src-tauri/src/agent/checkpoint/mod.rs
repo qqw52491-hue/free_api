@@ -749,6 +749,35 @@ pub struct AppliedReceipt {
     pub verdict: Option<(String, String)>,
 }
 
+fn save_checkpoint_in_tx<F>(
+    db: &DbState,
+    checkpoint: &mut AgentCheckpoint,
+    context: &crate::agent::context::SandwichContext,
+    conflict_msg: &str,
+    on_saved: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&rusqlite::Transaction<'_>, &str) -> Result<(), String>,
+{
+    let mut candidate = checkpoint.clone();
+    candidate.refresh_context(context);
+    candidate.updated_at = Utc::now().to_rfc3339();
+    {
+        let mut conn = db.0.lock().map_err(|_| "数据库锁已中毒".to_string())?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        match write_checkpoint_on(&tx, &mut candidate)? {
+            WriteOutcome::Conflict => return Err(conflict_msg.to_string()),
+            WriteOutcome::Saved => {
+                on_saved(&tx, &candidate.updated_at)?;
+                tx.commit().map_err(|error| error.to_string())?;
+            }
+        }
+    }
+    // 只有整笔事务成功才发布新版本，SQL 错误、冲突和提交失败均保留调用方原状态。
+    *checkpoint = candidate;
+    Ok(())
+}
+
 /// 回执消费提交点：checkpoint 快照 + 本批回执 applied_at 标记 + 裁决回写
 /// 在同一 SQLite 事务内原子落账。崩溃只可能落在事务两侧：
 /// - COMMIT 前：两者一起回滚，行仍 applied_at IS NULL → 下次轮询重新投递，
@@ -767,36 +796,67 @@ pub fn save_checkpoint_and_consume(
     if applied.is_empty() {
         return save_checkpoint(db, checkpoint);
     }
-    let mut candidate = checkpoint.clone();
-    candidate.refresh_context(context);
-    candidate.updated_at = Utc::now().to_rfc3339();
-    {
-        let mut conn = db.0.lock().map_err(|_| "数据库锁已中毒".to_string())?;
-        let tx = conn.transaction().map_err(|error| error.to_string())?;
-        match write_checkpoint_on(&tx, &mut candidate)? {
-            WriteOutcome::Conflict => return Err(
-                "checkpoint 已被另一保存者更新；回执未核销，请重新加载后重新消费".into()
-            ),
-            WriteOutcome::Saved => {
-                for receipt in applied {
-                    if let Some((status, error_kind)) = &receipt.verdict {
-                        tx.execute(
-                            "UPDATE agent_child_runs SET applied_at = ?1, status = ?2, error_kind = ?3 WHERE id = ?4",
-                            params![candidate.updated_at, status, error_kind, receipt.run_id],
-                        ).map_err(|error| error.to_string())?;
-                    } else {
-                        tx.execute(
-                            "UPDATE agent_child_runs SET applied_at = ?1 WHERE id = ?2",
-                            params![candidate.updated_at, receipt.run_id],
-                        ).map_err(|error| error.to_string())?;
-                    }
+    save_checkpoint_in_tx(
+        db,
+        checkpoint,
+        context,
+        "checkpoint 已被另一保存者更新；回执未核销，请重新加载后重新消费",
+        |tx, updated_at| {
+            for receipt in applied {
+                if let Some((status, error_kind)) = &receipt.verdict {
+                    tx.execute(
+                        "UPDATE agent_child_runs SET applied_at = ?1, status = ?2, error_kind = ?3 WHERE id = ?4",
+                        params![updated_at, status, error_kind, receipt.run_id],
+                    ).map_err(|error| error.to_string())?;
+                } else {
+                    tx.execute(
+                        "UPDATE agent_child_runs SET applied_at = ?1 WHERE id = ?2",
+                        params![updated_at, receipt.run_id],
+                    ).map_err(|error| error.to_string())?;
                 }
-                tx.commit().map_err(|error| error.to_string())?;
             }
-        }
+            Ok(())
+        },
+    )
+}
+
+/// 与 `save_checkpoint_and_claim_chats` 同口径的只读上下文版本（供无法持有 `&mut SandwichContext` 的中断收尾使用）。
+pub(crate) fn save_checkpoint_with_chat_claims(
+    db: &DbState,
+    checkpoint: &mut AgentCheckpoint,
+    run_id: &str,
+    context: &crate::agent::context::SandwichContext,
+) -> Result<(), String> {
+    if context.pending_claim_chat_ids.is_empty() {
+        return save_checkpoint(db, checkpoint);
     }
-    // 只有整笔事务成功才发布新版本，SQL 错误、冲突和提交失败均保留调用方原状态。
-    *checkpoint = candidate;
+    let session_id = checkpoint.run_id.clone();
+    save_checkpoint_in_tx(
+        db,
+        checkpoint,
+        context,
+        "checkpoint 已被另一保存者更新；消息归属与消费游标未覆盖，请重新加载",
+        |tx, _| {
+            crate::agent::conversation::claim_messages_on(
+                tx,
+                &session_id,
+                run_id,
+                &context.pending_claim_chat_ids,
+            )
+        },
+    )
+}
+
+/// 消费游标持久化与聊天消息 `run_id` 认领同事务提交。
+/// 事务成功提交前，不清空 `context.pending_claim_chat_ids`，也不覆盖内存 `checkpoint`。
+pub(crate) fn save_checkpoint_and_claim_chats(
+    db: &DbState,
+    checkpoint: &mut AgentCheckpoint,
+    run_id: &str,
+    context: &mut crate::agent::context::SandwichContext,
+) -> Result<(), String> {
+    save_checkpoint_with_chat_claims(db, checkpoint, run_id, context)?;
+    context.pending_claim_chat_ids.clear();
     Ok(())
 }
 
@@ -887,19 +947,20 @@ pub(crate) fn save_checkpoint_and_messages(
     db: &DbState, checkpoint: &mut AgentCheckpoint,
     context: &crate::agent::context::SandwichContext, run: &str, ids: &[String],
 ) -> Result<(), String> {
-    let mut candidate=checkpoint.clone();
-    candidate.refresh_context(context);
-    candidate.updated_at=Utc::now().to_rfc3339();
-    let mut conn=db.0.lock().map_err(|e|e.to_string())?;
-    let tx=conn.transaction().map_err(|e|e.to_string())?;
-    match write_checkpoint_on(&tx,&mut candidate)? {
-        WriteOutcome::Conflict=>return Err("消息尚未核销：检查点版本冲突，请重新加载。".into()),
-        WriteOutcome::Saved=>for id in ids {
-            tx.execute("UPDATE agent_messages SET delivered_at=?1 WHERE id=?2 AND target_run_id=?3 AND target_session_id=?4 AND delivered_at IS NULL",
-                params![candidate.updated_at,id,run,checkpoint.run_id]).map_err(|e|e.to_string())?;
-        }
-    }
-    tx.commit().map_err(|e|e.to_string())?;
-    *checkpoint=candidate;
-    Ok(())
+    let session = checkpoint.run_id.clone();
+    save_checkpoint_in_tx(
+        db,
+        checkpoint,
+        context,
+        "消息尚未核销：检查点版本冲突，请重新加载。",
+        |tx, updated_at| {
+            for id in ids {
+                tx.execute(
+                    "UPDATE agent_messages SET delivered_at=?1 WHERE id=?2 AND target_run_id=?3 AND target_session_id=?4 AND delivered_at IS NULL",
+                    params![updated_at, id, run, session],
+                ).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        },
+    )
 }

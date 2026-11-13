@@ -12,6 +12,7 @@ import { historicalReviewer, updateReviewWorkerSteps } from "../components/agent
 export interface AgentHistoryTurn {
     id: string;
     goal: string;
+    goalMessageId?: string;
     status: string;
     steps: AgentStepItem[];
     reviewers?: AgentWorkerItem[];
@@ -22,6 +23,151 @@ export interface AgentHistoryTurn {
     completedAt: number;
 }
 interface HistoryRunSnapshot extends Omit<AgentHistoryTurn, "messages"> { }
+
+export function isMessageInsideRunInterval(
+    timestamp: number,
+    run: Pick<HistoryRunSnapshot, "startedAt" | "completedAt">,
+): boolean {
+    return timestamp >= run.startedAt && timestamp <= run.completedAt;
+}
+
+export function findRunReplyMessageOwners(
+    runs: readonly Pick<HistoryRunSnapshot, "id" | "steps">[],
+): Map<string, string | null> {
+    const owners = new Map<string, string | null>();
+    for (const run of runs) {
+        for (const step of run.steps) {
+            const view = step.view as { kind?: string; message_id?: string } | undefined;
+            if (view?.kind !== "human_reply" || typeof view.message_id !== "string" || !view.message_id) continue;
+            const existing = owners.get(view.message_id);
+            if (existing === undefined) {
+                owners.set(view.message_id, run.id);
+            } else if (existing !== run.id) {
+                owners.set(view.message_id, null);
+            }
+        }
+    }
+    return owners;
+}
+
+export function findRunGoalMessageIds(
+    messages: readonly PersistedConversationMessage[],
+    runs: readonly Pick<HistoryRunSnapshot, "id" | "goal" | "goalMessageId" | "startedAt" | "completedAt">[],
+    replyOwners?: ReadonlyMap<string, string | null>,
+): Set<string> {
+    const firstUserByRun = new Map<string, PersistedConversationMessage>();
+    // Saved messages arrive in creation order. Prefer explicit run_id first, then fallback to
+    // the first user message inside a single actual run interval without time tolerance.
+    for (const message of messages) {
+        if (message.role !== "user") continue;
+        if (replyOwners?.has(message.id)) continue;
+        if (message.run_id) {
+            const owner = runs.find(run => run.id === message.run_id);
+            if (owner && !firstUserByRun.has(owner.id)) firstUserByRun.set(owner.id, message);
+            continue;
+        }
+        const timestamp = Date.parse(message.created_at);
+        const owners = runs.filter(run => isMessageInsideRunInterval(timestamp, run));
+        if (owners.length !== 1) continue;
+        const run = owners[0];
+        if (!firstUserByRun.has(run.id)) firstUserByRun.set(run.id, message);
+    }
+    const ids = new Set<string>();
+    for (const run of runs) {
+        if (run.goalMessageId) {
+            ids.add(run.goalMessageId);
+            continue;
+        }
+        const message = firstUserByRun.get(run.id);
+        if (message && message.content.trim() === run.goal.trim()) ids.add(message.id);
+    }
+    return ids;
+}
+
+function parsePersistedMessageTimestamp(value: unknown, fallback = 0): number {
+    const parsed = Date.parse(String(value ?? ""));
+    return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+export function selectMessagesForRun(
+    messages: readonly PersistedConversationMessage[],
+    run: Pick<HistoryRunSnapshot, "id" | "summary" | "startedAt" | "completedAt">,
+    allRuns: readonly Pick<HistoryRunSnapshot, "id" | "startedAt" | "completedAt">[],
+    goalMessageIds: ReadonlySet<string>,
+    replyOwners: ReadonlyMap<string, string | null>,
+    normalizeAssistantSummary: (text: string) => string = (text) => text,
+): PersistedConversationMessage[] {
+    const normalizedSummary = run.summary.trim();
+    return messages.filter((message) => {
+        if (goalMessageIds.has(message.id)) return false;
+        const explicitReplyOwner = replyOwners.get(message.id);
+        if (message.run_id) {
+            if (message.run_id !== run.id) return false;
+        } else if (explicitReplyOwner !== undefined) {
+            if (explicitReplyOwner !== run.id) return false;
+        } else {
+            const timestamp = parsePersistedMessageTimestamp(message.created_at, 0);
+            if (!isMessageInsideRunInterval(timestamp, run)) return false;
+            if (allRuns.filter(candidate => isMessageInsideRunInterval(timestamp, candidate)).length !== 1) return false;
+        }
+        const content = message.content.trim();
+        if (message.role !== "user" && normalizedSummary && normalizeAssistantSummary(content).trim() === normalizedSummary) return false;
+        return true;
+    });
+}
+
+export function selectLegacyConversationMessages(
+    messages: readonly PersistedConversationMessage[],
+    allRuns: readonly Pick<HistoryRunSnapshot, "id" | "startedAt" | "completedAt">[],
+    goalMessageIds: ReadonlySet<string>,
+    replyOwners: ReadonlyMap<string, string | null>,
+    activeState: { isRunning: boolean; activeRunId?: string | null; runStartedAt?: number | null; now?: number },
+): PersistedConversationMessage[] {
+    const knownRunIds = new Set(allRuns.map(run => run.id));
+    const activeRun = activeState.activeRunId
+        ? allRuns.find(run => run.id === activeState.activeRunId)
+        : undefined;
+    const effectiveRunStart = activeRun?.startedAt ?? activeState.runStartedAt ?? null;
+    const now = activeState.now ?? Date.now();
+    return messages.filter((message) => {
+        if (goalMessageIds.has(message.id)) return false;
+        if (
+            message.run_id
+            && (knownRunIds.has(message.run_id) || (activeState.isRunning && message.run_id === activeState.activeRunId))
+        ) {
+            return false;
+        }
+        if (replyOwners.get(message.id)) return false;
+        const timestamp = parsePersistedMessageTimestamp(message.created_at, 0);
+        const matchingRuns = allRuns.filter(run => isMessageInsideRunInterval(timestamp, run));
+        if (matchingRuns.length === 1) return false;
+        if (matchingRuns.length > 1) return true;
+        if (activeState.isRunning) {
+            if (effectiveRunStart != null) {
+                if (timestamp >= effectiveRunStart) return false;
+            } else {
+                // 若刚从 checkpoint 恢复或启动边界导致 runStartedAt 未初始化，兜底判定：有活跃任务时，任何在 10 分钟内的消息都不算早期遗留消息
+                if (timestamp >= now - 600000) return false;
+            }
+        }
+        return true;
+    });
+}
+
+export function findPausedStepId(
+    steps: readonly Pick<AgentStepItem, "id" | "status" | "tool" | "action">[],
+): string | undefined {
+    let activeFallback: string | undefined;
+    for (let i = steps.length - 1; i >= 0; i--) {
+        const step = steps[i];
+        if (step.status !== "running" && step.status !== "pending") continue;
+        const probe = `${step.tool || ""} ${step.action || ""}`.toLowerCase();
+        if (probe.includes("ask_human") || probe.includes("human")) return step.id;
+        if (!activeFallback) activeFallback = step.id;
+    }
+    return activeFallback;
+}
+
 import {
     AGENT_RUN_STATE_CATALOG,
     type AgentHumanForm,
@@ -53,6 +199,55 @@ import { createIncrementalThoughtPreview } from "../components/agent/liveThought
 const MAX_LOGS = 600;
 type ReasoningEffort = "auto" | "off" | "low" | "medium" | "high";
 type StoredReasoningEffort = ReasoningEffort | "max";
+
+export interface RunDoneMatchInput {
+    isDeletedSession: boolean;
+    awaitingRunStart: boolean;
+    stopRequested: boolean;
+    activeLocalRunCount: number;
+    stoppingRunId: string | null;
+    activeRunId: string | null;
+    doneRunId: string;
+}
+
+export interface RunDoneMatchDecision {
+    acceptRunEnd: boolean;
+    releaseStop: boolean;
+}
+
+export function evaluateRunDoneEvent(input: RunDoneMatchInput): RunDoneMatchDecision {
+    if (input.awaitingRunStart) {
+        return { acceptRunEnd: false, releaseStop: false };
+    }
+    if (input.isDeletedSession) {
+        return { acceptRunEnd: true, releaseStop: true };
+    }
+    if (input.stopRequested) {
+        const matchedStopRun = Boolean(input.stoppingRunId)
+            && Boolean(input.doneRunId)
+            && input.doneRunId === input.stoppingRunId;
+        if (!matchedStopRun) {
+            // 目标 ID 尚未取得或与完成事件 ID 不一致时，绝不因旧任务结束而提前放行
+            return { acceptRunEnd: false, releaseStop: false };
+        }
+        return {
+            acceptRunEnd: true,
+            releaseStop: input.activeLocalRunCount === 0,
+        };
+    }
+    if (input.activeRunId) {
+        const matchedActive = Boolean(input.doneRunId) && input.doneRunId === input.activeRunId;
+        return { acceptRunEnd: matchedActive, releaseStop: false };
+    }
+    if (input.activeLocalRunCount > 0) {
+        // 本地任务在途但尚未取得 started run_id：不接受无匹配目标的旧结束事件
+        return { acceptRunEnd: false, releaseStop: false };
+    }
+    return {
+        acceptRunEnd: Boolean(input.doneRunId),
+        releaseStop: false,
+    };
+}
 
 const MODEL_ROUTING_STORAGE_KEY = "free-api.agent.model-routing.v1";
 const REASONING_EFFORTS: ReasoningEffort[] = ["auto", "off", "low", "medium", "high"];
@@ -254,10 +449,22 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     const pausedStepId = ref<string | undefined>(undefined);
     const humanForm = ref<AgentHumanForm | null>(null);
     const humanInput = ref("");
-    const pendingReplacementGoal = ref("");
+    const pendingReplacementGoal = ref<{ text: string; attachments?: ParsedAttachment[] } | null>(null);
     const queuedGoals = ref<QueuedAgentGoal[]>([]);
+    interface CancelAgentRunResult {
+        delivered: boolean;
+        has_active_run: boolean;
+        active_run_id: string | null;
+    }
+
     const isSendingHuman = ref(false);
     const stopRequested = ref(false);
+    let pendingStopCommand: Promise<CancelAgentRunResult | null> | null = null;
+    let activeLocalRunCount = 0;
+    const activeRunId = ref<string | null>(null);
+    const liveStepsRunId = ref<string | null>(null);
+    let stoppingRunId: string | null = null;
+    const completedRunIds = new Set<string>();
     const elapsedSeconds = ref(0);
     const runStartedAt = ref<number | null>(null);
 
@@ -398,6 +605,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         () => activeSessionId.value,
         (message) => appendLog(`[会话历史加载失败] ${message}`),
     );
+    const runReplyMessageOwners = computed(() => findRunReplyMessageOwners(historyRuns.value));
+    const runGoalMessageIds = computed(() => findRunGoalMessageIds(conversationMessages.value, historyRuns.value, runReplyMessageOwners.value));
     const historyTurns = computed<AgentHistoryTurn[]>(() => historyRuns.value.map((run) => ({
         ...run,
         artifacts: normalizeArtifactList(run.artifacts),
@@ -405,20 +614,17 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     })));
     // 仅保留没有任何运行轨迹可归属的早期旧消息；有轨迹的消息由对应回合原位显示。
     // 若任务正在执行中，当前运行期间产生的任何消息（如人工干预回复）均属于当前活跃回合，绝不泄漏为早期旧消息。
-    const legacyConversationMessages = computed(() => conversationMessages.value.filter((message) => {
-        if (historyRuns.value.some((run) => isMessageInsideRun(message, run))) return false;
-        if (isRunning.value) {
-            const timestamp = traceTimestamp(message.created_at, 0);
-            const runStart = runStartedAt.value;
-            if (runStart != null) {
-                if (timestamp >= runStart - 5000) return false;
-            } else {
-                // 若刚从 checkpoint 恢复或启动边界导致 runStartedAt 未初始化，兜底判定：有活跃任务时，任何在 10 分钟内的消息都不算早期遗留消息
-                if (timestamp >= Date.now() - 600000) return false;
-            }
-        }
-        return true;
-    }));
+    const legacyConversationMessages = computed(() => selectLegacyConversationMessages(
+        conversationMessages.value,
+        historyRuns.value,
+        runGoalMessageIds.value,
+        runReplyMessageOwners.value,
+        {
+            isRunning: isRunning.value,
+            activeRunId: activeRunId.value,
+            runStartedAt: runStartedAt.value,
+        },
+    ));
     const finishOutput = ref<Record<string, unknown> | null>(null);
     const hasError = ref(false);
     // 每次运行只有首次终态可改变 UI；终态后的异步流事件必须被丢弃，
@@ -672,6 +878,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             const result = step.output ?? step.result;
             return {
                 id: `history-${runId}-step-${stepId}-${index}`,
+                outputId: toText(step.output_id) || undefined,
                 stepId,
                 description: toText(step.description) || "已执行步骤",
                 planId: `history-run-${runId}-${sourcePlanId}`,
@@ -714,6 +921,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         return {
             id: runId,
             goal,
+            goalMessageId: toText(trace.goal_message_id) || undefined,
             status: toText(trace.status) || "running",
             steps,
             reviewers: Array.isArray(trace.reviewers) ? trace.reviewers.flatMap(value => historicalReviewer(value) ?? []) : [],
@@ -742,24 +950,23 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         };
     }
     function isMessageInsideRun(message: PersistedConversationMessage, run: HistoryRunSnapshot) {
-        const timestamp = traceTimestamp(message.created_at, 0);
-        return timestamp >= run.startedAt - 5000 && timestamp <= run.completedAt + 5000;
+        return isMessageInsideRunInterval(traceTimestamp(message.created_at, 0), run);
     }
     function messagesForRun(run: HistoryRunSnapshot) {
-        const normalizedGoal = run.goal.trim();
-        const normalizedSummary = run.summary.trim();
-        return conversationMessages.value.filter((message) => {
-            if (!isMessageInsideRun(message, run)) return false;
-            const content = message.content.trim();
-            if (message.role === "user" && content === normalizedGoal) return false;
-            if (message.role !== "user" && normalizedSummary && finishSummaryText(content).trim() === normalizedSummary) return false;
-            return true;
-        });
+        return selectMessagesForRun(
+            conversationMessages.value,
+            run,
+            historyRuns.value,
+            runGoalMessageIds.value,
+            runReplyMessageOwners.value,
+            finishSummaryText,
+        );
     }
     function summaryFromConversation(run: HistoryRunSnapshot) {
-        const assistantMessages = conversationMessages.value.filter((message) =>
-            message.role !== "user" && isMessageInsideRun(message, run) && Boolean(message.content.trim()),
-        );
+        const assistantMessages = conversationMessages.value.filter((message) => {
+            if (message.role === "user" || !message.content.trim()) return false;
+            return message.run_id ? message.run_id === run.id : isMessageInsideRun(message, run);
+        });
         return assistantMessages.length ? finishSummaryText(assistantMessages[assistantMessages.length - 1].content.trim()) : "";
     }
     function dedupeHistoryRuns(runs: HistoryRunSnapshot[]): HistoryRunSnapshot[] {
@@ -790,7 +997,9 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             if (session !== activeSessionId.value) return;
             const normalized = (Array.isArray(traces) ? traces : []).map((trace) => normalizeRunTrace(trace));
             normalized.forEach((run) => {
-                if (!run.summary) run.summary = summaryFromConversation(run);
+                if (!run.summary && ["succeeded", "failed", "cancelled"].includes(run.status)) {
+                    run.summary = summaryFromConversation(run);
+                }
             });
             historyRuns.value = dedupeHistoryRuns(normalized);
             // 历史卡片不能只依赖派发回执；主动从宿主加载本会话任务树的结算状态。
@@ -915,7 +1124,13 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         }
     }
 
+    function belongsToActiveRun(payload: Record<string, unknown>): boolean {
+        const eventRunId = toText(payload.run_id || payload.runId);
+        return !eventRunId || !activeRunId.value || eventRunId === activeRunId.value;
+    }
+
     function handleRunState(payload: Record<string, unknown>) {
+        if (!belongsToActiveRun(payload)) return;
         flushStreamDisplay();
         if (runTerminal.value) return;
         const state = normalizeState(payload.state);
@@ -1092,6 +1307,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     }
 
     function handleToolEvent(payload: Record<string, unknown>) {
+        if (!belongsToActiveRun(payload)) return;
         flushStreamDisplay();
         if (runTerminal.value) return;
         const eventType = String(payload.event_type || payload.type || "started").toLowerCase();
@@ -1242,6 +1458,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     }
 
     function handleProgress(payload: Record<string, unknown>) {
+        if (!belongsToActiveRun(payload)) return;
         const displayEvent = String(payload.event_type || payload.type || payload.stage || "").toLowerCase();
         if (displayEvent !== "thinking" && displayEvent !== "summary_stream") flushStreamDisplay();
         // 终态通知可能晚于父任务结束；只允许已知尝试补齐诊断，不能重开任务或引入旧成员。
@@ -1710,25 +1927,9 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             isRunning.value = true;
             isThinking.value = false;
             pauseReason.value = message;
-            // 快照发起本次挂起的步骤：优先最近的 ask_human/human 工具步骤，
-            // 其次最近仍在 running/pending 的步骤——应答送达后回填进该步骤行内。
-            pausedStepId.value = undefined;
-            for (let i = steps.value.length - 1; i >= 0; i--) {
-                const probe = `${steps.value[i].tool || ""} ${steps.value[i].action || ""}`.toLowerCase();
-                if (probe.includes("ask_human") || probe.includes("human")) {
-                    pausedStepId.value = steps.value[i].id;
-                    break;
-                }
-            }
-            if (!pausedStepId.value) {
-                for (let i = steps.value.length - 1; i >= 0; i--) {
-                    const status = steps.value[i].status;
-                    if (status === "running" || status === "pending") {
-                        pausedStepId.value = steps.value[i].id;
-                        break;
-                    }
-                }
-            }
+            // 快照发起本次挂起的步骤：优先最近的运行中/待执行 ask_human/human 步骤，
+            // 其次最近仍在 running/pending 的步骤——应答送达后回填进该步骤行内，绝不误绑早期已完成的提问。
+            pausedStepId.value = findPausedStepId(steps.value);
             humanForm.value = normalizeHumanForm(payload.form, message);
             setRunState("waiting_for_human", message);
             appendLog(`⏸️ [人类协助] ${message}`);
@@ -1825,6 +2026,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             const stepId = numberOrUndefined(payload.step_id) ?? 0;
             const existing = getLatestStep(stepId);
             if (existing) {
+                if (payload.output_id) existing.outputId = toText(payload.output_id);
                 existing.status = "succeeded";
                 if (payload.finding) existing.finding = toText(payload.finding);
                 if (payload.finding_kind || payload.findingKind) existing.findingKind = (payload.finding_kind || payload.findingKind) as any;
@@ -1872,6 +2074,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             const stepId = numberOrUndefined(payload.step_id) ?? 0;
             const existing = getLatestStep(stepId);
             if (existing) {
+                if (payload.output_id) existing.outputId = toText(payload.output_id);
                 existing.status = "failed";
                 if (payload.view && typeof payload.view === "object") {
                     existing.view = payload.view as AgentStepItem["view"];
@@ -1927,6 +2130,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     function handleContext(payload: unknown) {
         if (runTerminal.value) return;
         const data = asRecord(payload);
+        if (!belongsToActiveRun(data)) return;
         latestContext.value = data;
         const candidates = [data.resources, data.resource, asRecord(data.context).resources, asRecord(data.data).resources]
             .flatMap((entry) => Array.isArray(entry) ? entry : entry ? [entry] : []);
@@ -1976,6 +2180,9 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         humanForm.value = null;
         humanInput.value = "";
         stopRequested.value = false;
+        activeRunId.value = null;
+        liveStepsRunId.value = null;
+        stoppingRunId = null;
         elapsedSeconds.value = 0;
         runStartedAt.value = null;
         setRunState("idle");
@@ -2014,10 +2221,26 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 clearStreamDisplay();
                 // 新一代任务已亮明身份，启动窗口结束；此后属于本代的 done 事件正常重置运行态
                 awaitingRunStart = false;
+                const startedRunId = toText(payload.run_id);
+                if (startedRunId && liveStepsRunId.value && liveStepsRunId.value !== startedRunId) {
+                    steps.value = [];
+                    humanInterventions.value = [];
+                    selectedStepId.value = null;
+                    pauseReason.value = "";
+                    humanForm.value = null;
+                }
+                if (startedRunId) liveStepsRunId.value = startedRunId;
+                activeRunId.value = startedRunId || null;
+                if (startedRunId) {
+                    completedRunIds.delete(startedRunId);
+                    if (stopRequested.value && !stoppingRunId) {
+                        stoppingRunId = startedRunId;
+                    }
+                }
                 reviewProgress.value = [];
                 reviewProgressStartedAt.value = Date.now();
                 stoppedReviewIds.clear();
-                reviewRunId.value = toText(payload.run_id);
+                reviewRunId.value = startedRunId;
                 if (payload?.goal) {
                     currentGoal.value = payload.goal;
                 }
@@ -2030,7 +2253,10 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 // 新代任务起跑：上一轮挂起步骤快照随之作废
                 pausedStepId.value = undefined;
                 if (!runStartedAt.value) {
-                    runStartedAt.value = Date.now();
+                    const startedTrace = startedRunId
+                        ? historyRuns.value.find(run => run.id === startedRunId)
+                        : undefined;
+                    runStartedAt.value = startedTrace?.startedAt ?? traceTimestamp(payload?.at);
                 }
                 setRunState("executing", "Agent 正在执行任务...");
                 await loadRunTraces();
@@ -2039,9 +2265,33 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         });
         await register("channel-run-done", async (payload: any) => {
             if (payload?.session_id === sid) {
-                // 启动窗口内收到的 done 事件必属于已被新一代接管的旧任务：
-                // 只做数据同步，严禁重置运行态/停计时器，避免踩掉新任务。
-                if (awaitingRunStart) {
+                const doneRunId = toText(payload?.run_id);
+                const doneStatus = toText(payload?.status);
+                const isDeletedSession = doneStatus === "deleted";
+                const recordDoneRun = () => {
+                    if (!doneRunId) return;
+                    completedRunIds.add(doneRunId);
+                    if (completedRunIds.size > 50) {
+                        const first = completedRunIds.values().next().value;
+                        if (first) completedRunIds.delete(first);
+                    }
+                };
+                if (!awaitingRunStart && activeLocalRunCount === 0 && pendingStopCommand) {
+                    await pendingStopCommand;
+                }
+                const initialDecision = evaluateRunDoneEvent({
+                    isDeletedSession,
+                    awaitingRunStart,
+                    stopRequested: stopRequested.value,
+                    activeLocalRunCount,
+                    stoppingRunId,
+                    activeRunId: activeRunId.value,
+                    doneRunId,
+                });
+                if (!initialDecision.acceptRunEnd) {
+                    // 启动窗口内或非当前目标 ID（含目标 ID 尚未取得时的旧事件）：
+                    // 只做数据同步，严禁重置运行态、停计时器或提前放行。
+                    recordDoneRun();
                     try {
                         await loadRunTraces();
                         await loadConversation();
@@ -2051,9 +2301,12 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                     return;
                 }
                 const currentGenAtDone = runGeneration;
-                // 立即重置前端运行状态，确保用户发送下一条消息时不会因 isRunning 滞后而误发到打断通道
+                // 目标 ID 已核对匹配，再重置运行态，避免旧任务或无 ID 事件提前清掉 isRunning。
                 isRunning.value = false;
                 isThinking.value = false;
+                if (!doneRunId || activeRunId.value === doneRunId || isDeletedSession) {
+                    activeRunId.value = null;
+                }
                 stopElapsedTimer();
                 try {
                     await loadRunTraces();
@@ -2061,9 +2314,30 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 } catch (error) {
                     appendLog(`[后台同步失败] ${toText(error)}`);
                 } finally {
+                    recordDoneRun();
                     if (currentGenAtDone === runGeneration) {
-                        isRunning.value = false;
-                        isThinking.value = false;
+                        if (activeLocalRunCount === 0 && pendingStopCommand) {
+                            await pendingStopCommand;
+                        }
+                        if (currentGenAtDone === runGeneration && (!activeRunId.value || activeRunId.value === doneRunId)) {
+                            const finalDecision = evaluateRunDoneEvent({
+                                isDeletedSession,
+                                awaitingRunStart,
+                                stopRequested: stopRequested.value,
+                                activeLocalRunCount,
+                                stoppingRunId,
+                                activeRunId: activeRunId.value,
+                                doneRunId,
+                            });
+                            if (finalDecision.acceptRunEnd || initialDecision.acceptRunEnd) {
+                                isRunning.value = false;
+                                isThinking.value = false;
+                            }
+                            if (finalDecision.releaseStop) {
+                                stoppingRunId = null;
+                                stopRequested.value = false;
+                            }
+                        }
                     }
                 }
             }
@@ -2097,12 +2371,12 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         const selectedTaskMode = taskStartMode ?? (canResumeTask.value ? "resume" : undefined);
         const requestedPlanMode = selectedTaskMode === "resume" ? undefined : planMode.value;
         const requestedGoal = (nextGoal ?? goalInput.value).trim();
-        if (!requestedGoal || isRunning.value) return;
+        if (!requestedGoal || isRunning.value || stopRequested.value) return;
 
         let currentSessionId: string;
         try { currentSessionId = await ensureSession(); }
         catch (err) { appendLog(`[会话持久化异常] ${toText(err)}`); return; }
-        if (isRunning.value) return;
+        if (isRunning.value || stopRequested.value) return;
 
         const currentGeneration = ++runGeneration;
         // 关键修复：点击发送后，第一步立即重置并更新运行态，使气泡与规划指示 0ms 即刻上屏响应！
@@ -2123,6 +2397,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
 
         // 进入启动窗口：invoke 在途且 channel-run-started 未到达期间，迟到的旧代 run-done 不得重置运行态
         awaitingRunStart = true;
+        activeLocalRunCount += 1;
         try {
             await invoke("run_agent_main_loop", {
                 modelRouting: modelRoutingForRun(),
@@ -2148,11 +2423,18 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 // 忽略恢复时的辅助同步异常
             }
         } finally {
+            activeLocalRunCount = Math.max(0, activeLocalRunCount - 1);
             if (currentGeneration === runGeneration) {
+                // 停止请求本身也要返回，避免迟到的停止信号落到下一轮。
+                if (pendingStopCommand) await pendingStopCommand;
+                if (currentGeneration !== runGeneration) return;
                 // 本代任务终结，退出启动窗口；若已被新一代接管（else 分支），绝不触碰新代设置的标记
                 awaitingRunStart = false;
                 isRunning.value = false;
                 isThinking.value = false;
+                activeRunId.value = null;
+                stoppingRunId = null;
+                stopRequested.value = false;
                 stopElapsedTimer();
                 const queuedGoal = pendingReplacementGoal.value;
                 try {
@@ -2164,7 +2446,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                         return;
                     }
                     const newest = historyRuns.value[historyRuns.value.length - 1];
-                    if (newest && newest.goal === currentGoal.value && ["succeeded", "failed", "cancelled"].includes(newest.status)) {
+                    if (newest && newest.id === liveStepsRunId.value && ["succeeded", "failed", "cancelled"].includes(newest.status)) {
                         // 收尾保留本轮终审诊断；下次运行仍完整清空，且不写入真实历史。
                         clearSession(true);
                         autoScrollToBottom(false);
@@ -2176,9 +2458,9 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                     return;
                 }
                 if (queuedGoal) {
-                    pendingReplacementGoal.value = "";
+                    pendingReplacementGoal.value = null;
                     await nextTick();
-                    void runAgent(queuedGoal, undefined, "new");
+                    void runAgent(queuedGoal.text, queuedGoal.attachments, "new");
                 } else if (queuedGoals.value.length > 0) {
                     const next = queuedGoals.value.shift();
                     if (next) {
@@ -2220,12 +2502,58 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         if (!isRunning.value || stopRequested.value) return;
         flushStreamDisplay();
         stopRequested.value = true;
-        setRunState("cancelled", "正在向模型发送中断信号并安全停止任务...");
+        stoppingRunId = null;
+        statusDescription.value = "正在向模型发送中断信号并安全停止任务...";
         appendLog("[停止请求] 正在向模型与工具发送中断信号...");
-        try {
-            await invoke("cancel_agent_run", { sessionId: activeSessionId.value });
-        } catch (error) {
-            appendLog(`[停止指令] ${toText(error)}`);
+        const command = invoke<CancelAgentRunResult>("cancel_agent_run", { sessionId: activeSessionId.value })
+            .catch((error) => {
+                appendLog(`[停止指令] ${toText(error)}`);
+                return null;
+            });
+        pendingStopCommand = command;
+        const outcome = await command;
+        if (pendingStopCommand === command) pendingStopCommand = null;
+
+        if (!outcome) {
+            stoppingRunId = null;
+            stopRequested.value = false;
+            return;
+        }
+
+        if (outcome.has_active_run) {
+            if (outcome.active_run_id) {
+                activeRunId.value = outcome.active_run_id;
+                stoppingRunId = outcome.active_run_id;
+                if (activeLocalRunCount === 0 && completedRunIds.has(outcome.active_run_id)) {
+                    activeRunId.value = null;
+                    stoppingRunId = null;
+                    stopRequested.value = false;
+                    return;
+                }
+            }
+            if (!outcome.delivered) {
+                // 后台存在活动运行但停止信号未能投递：解除“停止中”按钮锁定以便重试停止，
+                // 同时保留 isRunning 阻止误启动新一轮。
+                stoppingRunId = null;
+                stopRequested.value = false;
+                statusDescription.value = "停止信号未送达当前任务，请重试停止。";
+                appendLog("[停止未送达] 后台仍有活动任务，但停止指令未送达，请再次点击停止重试。");
+            }
+            return;
+        }
+
+        // 后端明确确认不存在活动运行（如重启遗留的人工挂起检查点），安全解除锁定。
+        if (activeLocalRunCount === 0) {
+            activeRunId.value = null;
+            stoppingRunId = null;
+            stopRequested.value = false;
+            if (runState.value === "waiting_for_human") {
+                pauseReason.value = "";
+                humanForm.value = null;
+                setRunState("cancelled", "已停止等待人工输入。");
+            } else if (isRunning.value) {
+                setRunState("cancelled", "任务已停止。");
+            }
         }
     }
     async function checkAndRestoreCheckpointState() {
@@ -2241,13 +2569,16 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 form?: unknown;
             } | null>("get_agent_checkpoint", { sessionId: activeSessionId.value });
             if (cp && cp.is_waiting_human) {
+                activeRunId.value = cp.run_id || null;
+                liveStepsRunId.value = cp.run_id || null;
                 runTerminal.value = false;
                 isRunning.value = true;
                 isThinking.value = false;
                 setRunState("waiting_for_human", "Agent 正在等待你的输入。");
                 pauseReason.value = cp.last_error || "Agent 正在等待你的输入。";
                 if (!runStartedAt.value) {
-                    runStartedAt.value = Date.now();
+                    const runningTrace = [...historyRuns.value].reverse().find(run => run.status === "running");
+                    runStartedAt.value = runningTrace?.startedAt ?? Date.now();
                 }
                 humanForm.value = normalizeHumanForm(cp.form, pauseReason.value);
                 currentGoal.value = cp.user_goal;
@@ -2260,20 +2591,23 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
 
     async function answerHuman(answer: string) {
         const message = answer.trim();
-        if (!message || isSendingHuman.value) return;
+        if (!message || isSendingHuman.value || stopRequested.value) return;
         // 日志展示用清洗后的文本（剥离后端解析用的结构化标记），但传给 Agent 的 message 保持原样
         const displayMessage = stripPlanDecisionMarker(message);
         isSendingHuman.value = true;
         try {
             try {
-                await invoke("send_human_intervention", { sessionId: activeSessionId.value, message });
+                const stepId = pausedStepId.value;
+                const question = pauseReason.value || undefined;
+                const receipt = await invoke<{ id: string } | null>("send_human_intervention", { sessionId: activeSessionId.value, message });
                 // 应答落账：绑定发起挂起的步骤与当时的提问原文（须在清空 pauseReason 前快照），
                 // 让时间线能把"你的回答"直接回填到对应 ask_human 步骤行内。
                 humanInterventions.value.push({
                     message: displayMessage,
                     timestamp: Date.now(),
-                    stepId: pausedStepId.value,
-                    question: pauseReason.value || undefined,
+                    messageId: receipt?.id,
+                    stepId,
+                    question,
                 });
                 pausedStepId.value = undefined;
                 humanInput.value = "";
@@ -2316,18 +2650,21 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         attachments?: ParsedAttachment[]
     ) {
         const message = (overrideText ?? humanInput.value).trim();
-        if (!message || isSendingHuman.value) return;
+        if (!message || isSendingHuman.value || stopRequested.value) return;
         isSendingHuman.value = true;
         try {
             if (isWaitingForHuman.value) {
                 try {
-                    await invoke("send_human_intervention", { sessionId: activeSessionId.value, message });
+                    const stepId = pausedStepId.value;
+                    const question = pauseReason.value || undefined;
+                    const receipt = await invoke<{ id: string } | null>("send_human_intervention", { sessionId: activeSessionId.value, message });
                     // 同 answerHuman：落账时快照步骤与提问，回填时间线步骤行
                     humanInterventions.value.push({
                         message: stripPlanDecisionMarker(message),
                         timestamp: Date.now(),
-                        stepId: pausedStepId.value,
-                        question: pauseReason.value || undefined,
+                        messageId: receipt?.id,
+                        stepId,
+                        question,
                     });
                     pausedStepId.value = undefined;
                     humanInput.value = "";
@@ -2356,7 +2693,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 appendLog(`[排队任务] 已排队后续执行：${message}`);
             } else {
                 // ⚡ 立即打断模式：立即中断前序任务，切换为新目标
-                pendingReplacementGoal.value = message;
+                pendingReplacementGoal.value = { text: message, attachments };
                 try {
                     await invoke("replace_agent_goal", { sessionId: activeSessionId.value, goal: message });
                     humanInput.value = "";
@@ -2367,7 +2704,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                         // 任务在后端其实已经结束，通道已被释放。此时前端 isRunning 尚未刷新导致误判。
                         // 修正前端运行态，并无缝转为启动新任务，确保用户输入绝不被吞！
                         appendLog(`[运行态同步] 检测到前序任务已终结，无缝转为新任务启动: ${message}`);
-                        pendingReplacementGoal.value = "";
+                        pendingReplacementGoal.value = null;
                         humanInput.value = "";
                         isRunning.value = false;
                         await runAgent(message, attachments, "new");
@@ -2378,7 +2715,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             }
             autoScrollToBottom();
         } catch (error) {
-            pendingReplacementGoal.value = "";
+            pendingReplacementGoal.value = null;
             appendLog(`[输入发送失败] ${toText(error)}`);
         } finally {
             isSendingHuman.value = false;
@@ -2460,6 +2797,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         steps,
         allSteps: displayedSteps,
         historyTurns,
+        activeRunId,
+        liveStepsRunId,
         legacyConversationMessages,
         selectedStepId,
         selectedStep,

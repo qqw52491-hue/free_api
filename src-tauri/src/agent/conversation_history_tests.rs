@@ -7,7 +7,8 @@ fn db() -> DbState {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(
         "CREATE TABLE chat_sessions (id TEXT PRIMARY KEY, title TEXT, model_id TEXT, created_at TEXT, updated_at TEXT, message_count INTEGER);
-         CREATE TABLE chat_messages (id TEXT PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, attachments TEXT, created_at TEXT, model_id TEXT);",
+         CREATE TABLE chat_messages (id TEXT PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, attachments TEXT, created_at TEXT, model_id TEXT, run_id TEXT);
+         CREATE TABLE agent_checkpoints (run_id TEXT PRIMARY KEY, phase TEXT NOT NULL, snapshot_json TEXT NOT NULL, version INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);",
     ).unwrap();
     DbState(Arc::new(Mutex::new(conn)))
 }
@@ -287,4 +288,106 @@ fn missing_live_cursor_never_replays_old_messages() {
     let mut ctx = SandwichContext::new("SYS".into(), "新任务".into());
     assert_eq!(import_live_messages(&db, "s", &mut ctx).unwrap(), 0);
     assert_eq!(ctx.effective_goal(), "新任务");
+}
+
+fn msg_run_id(db: &DbState, id: &str) -> Option<String> {
+    db.0.lock()
+        .unwrap()
+        .query_row("SELECT run_id FROM chat_messages WHERE id=?1", [id], |r| r.get(0))
+        .unwrap()
+}
+
+#[test]
+fn live_supplement_stays_unowned_until_consumed_and_claims_new_run_after_takeover() {
+    let db = db();
+    let goal1 = begin_turn_for_run(&db, "s", "model", "第一轮", "run-1").unwrap();
+    assert_eq!(msg_run_id(&db, &goal1.id).as_deref(), Some("run-1"));
+
+    let ctx1 = enter(&db, None, "第一轮");
+    let mut cp1 = AgentCheckpoint::new("s".into(), &ctx1);
+    crate::agent::checkpoint::save_checkpoint(&db, &mut cp1).unwrap();
+
+    // 运行中补充写入只入聊天表，未真实消费前 run_id 必须保持 NULL
+    let supp = append_human_intervention(&db, "s", "改用深色主题").unwrap();
+    assert_eq!(msg_run_id(&db, &supp.id), None);
+
+    // 即使 run-1 在 import_live_messages 前就结束，未保存消费前仍属于未认领
+    let entry = history_for_entry(&db, "s", Some(&cp1)).unwrap();
+    assert_eq!(entry.consumed_user_message_ids, vec![supp.id.clone()]);
+    let mut ctx2 = SandwichContext::new("SYS".into(), "第一轮".into());
+    ctx2.turns_history = entry.messages;
+    ctx2.conversation_cursor = entry.cursor;
+    for id in entry.consumed_user_message_ids {
+        ctx2.queue_claim_chat_id(id);
+    }
+    let mut cp2 = crate::agent::checkpoint::load_checkpoint(&db, "s").unwrap().unwrap();
+    crate::agent::checkpoint::save_checkpoint_and_claim_chats(&db, &mut cp2, "run-2", &mut ctx2).unwrap();
+
+    assert_eq!(msg_run_id(&db, &supp.id).as_deref(), Some("run-2"));
+    assert!(ctx2.pending_claim_chat_ids.is_empty());
+
+    // 已有归属的消息不得被其他轮次覆盖
+    {
+        let conn = db.0.lock().unwrap();
+        claim_messages_on(&conn, "s", "run-3", &[supp.id.clone()]).unwrap();
+    }
+    assert_eq!(msg_run_id(&db, &supp.id).as_deref(), Some("run-2"));
+}
+
+#[test]
+fn checkpoint_conflict_rolls_back_chat_run_id_and_preserves_unconsumed() {
+    let db = db();
+    begin_turn_for_run(&db, "s", "model", "初始目标", "run-1").unwrap();
+    let mut ctx1 = enter(&db, None, "初始目标");
+    let mut cp1 = AgentCheckpoint::new("s".into(), &ctx1);
+    crate::agent::checkpoint::save_checkpoint(&db, &mut cp1).unwrap();
+    let mut stale_cp = cp1.clone();
+
+    // 模拟另一并发保存者抢先推进 checkpoint 版本
+    crate::agent::checkpoint::save_checkpoint(&db, &mut cp1).unwrap();
+
+    let supp = append_human_intervention(&db, "s", "尚未提交的补充").unwrap();
+    assert_eq!(import_live_messages(&db, "s", &mut ctx1).unwrap(), 1);
+    assert_eq!(ctx1.pending_claim_chat_ids, vec![supp.id.clone()]);
+    // import_live_messages 本身不写库：冲突前数据库里仍无归属
+    assert_eq!(msg_run_id(&db, &supp.id), None);
+
+    let err = crate::agent::checkpoint::save_checkpoint_and_claim_chats(
+        &db, &mut stale_cp, "run-stale", &mut ctx1,
+    ).unwrap_err();
+    assert!(err.contains("冲突") || err.contains("另一保存者"));
+    assert_eq!(msg_run_id(&db, &supp.id), None);
+    assert_eq!(ctx1.pending_claim_chat_ids, vec![supp.id.clone()]);
+
+    // 从库里真实的 cp1 恢复时仍可读到该未消费补充，由真正成功的 run-2 认领
+    let entry = history_for_entry(&db, "s", Some(&cp1)).unwrap();
+    assert_eq!(entry.consumed_user_message_ids, vec![supp.id.clone()]);
+    let mut ctx2 = SandwichContext::new("SYS".into(), "初始目标".into());
+    ctx2.conversation_cursor = entry.cursor;
+    for id in entry.consumed_user_message_ids {
+        ctx2.queue_claim_chat_id(id);
+    }
+    crate::agent::checkpoint::save_checkpoint_and_claim_chats(&db, &mut cp1, "run-2", &mut ctx2).unwrap();
+    assert_eq!(msg_run_id(&db, &supp.id).as_deref(), Some("run-2"));
+}
+
+#[test]
+fn acknowledge_chat_claims_recovery_reply_atomically_on_save() {
+    let db = db();
+    begin_turn_for_run(&db, "s", "model", "主任务", "run-1").unwrap();
+    let mut ctx = enter(&db, None, "主任务");
+    let mut cp = AgentCheckpoint::new("s".into(), &ctx);
+    crate::agent::checkpoint::save_checkpoint(&db, &mut cp).unwrap();
+
+    let answer = append_human_intervention(&db, "s", "确认继续").unwrap();
+    assert_eq!(msg_run_id(&db, &answer.id), None);
+    ctx.acknowledge_chat(Some(answer.clone()));
+    assert_eq!(msg_run_id(&db, &answer.id), None);
+
+    cp.begin_planning(0, &ctx);
+    crate::agent::checkpoint::save_checkpoint_and_claim_chats(&db, &mut cp, "run-1", &mut ctx).unwrap();
+    assert_eq!(msg_run_id(&db, &answer.id).as_deref(), Some("run-1"));
+    assert!(ctx.pending_claim_chat_ids.is_empty());
+    // 已确认且已提交：后续入口恢复不会重放该回答
+    assert!(history_for_entry(&db, "s", Some(&cp)).unwrap().messages.is_empty());
 }

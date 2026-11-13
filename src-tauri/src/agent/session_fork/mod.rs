@@ -167,13 +167,16 @@ fn fork_session_at(
         )
         .map_err(|_| "源会话不存在".to_string())?;
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, role, content, created_at, model_id, attachments FROM chat_messages
-             WHERE session_id=?1 ORDER BY created_at ASC, id ASC",
-        )
-        .map_err(|e| e.to_string())?;
-    let messages: Vec<(String, String, String, String, Option<String>, Option<String>)> = stmt
+    let has_msg_run_id = crate::agent::conversation::chat_messages_has_run_id(conn);
+    let msg_select_sql = if has_msg_run_id {
+        "SELECT id, role, content, created_at, model_id, attachments, run_id FROM chat_messages
+         WHERE session_id=?1 ORDER BY created_at ASC, id ASC"
+    } else {
+        "SELECT id, role, content, created_at, model_id, attachments, NULL FROM chat_messages
+         WHERE session_id=?1 ORDER BY created_at ASC, id ASC"
+    };
+    let mut stmt = conn.prepare(msg_select_sql).map_err(|e| e.to_string())?;
+    let messages: Vec<(String, String, String, String, Option<String>, Option<String>, Option<String>)> = stmt
         .query_map(params![src_session_id], |r| {
             Ok((
                 r.get(0)?,
@@ -182,6 +185,7 @@ fn fork_session_at(
                 r.get(3)?,
                 r.get(4)?,
                 r.get(5)?,
+                r.get(6)?,
             ))
         })
         .map_err(|e| e.to_string())?
@@ -356,21 +360,40 @@ fn fork_session_at(
     .map_err(|e| e.to_string())?;
 
     // 消息
-    for (old_id, role, content, created_at, msg_model, attachments) in copied_msgs {
-        tx.execute(
-            "INSERT INTO chat_messages (id, session_id, role, content, attachments, created_at, model_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                msg_map[old_id],
-                new_session_id,
-                role,
-                rw.apply(content),
-                attachments.as_deref().map(|a| rw.apply(a)),
-                created_at,
-                msg_model
-            ],
-        )
-        .map_err(|e| e.to_string())?;
+    for (old_id, role, content, created_at, msg_model, attachments, run_id) in copied_msgs {
+        let remapped_run_id = run_id.as_deref().and_then(|rid| id_map.get(rid).cloned());
+        if has_msg_run_id {
+            tx.execute(
+                "INSERT INTO chat_messages (id, session_id, role, content, attachments, created_at, model_id, run_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    msg_map[old_id],
+                    new_session_id,
+                    role,
+                    rw.apply(content),
+                    attachments.as_deref().map(|a| rw.apply(a)),
+                    created_at,
+                    msg_model,
+                    remapped_run_id
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            tx.execute(
+                "INSERT INTO chat_messages (id, session_id, role, content, attachments, created_at, model_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    msg_map[old_id],
+                    new_session_id,
+                    role,
+                    rw.apply(content),
+                    attachments.as_deref().map(|a| rw.apply(a)),
+                    created_at,
+                    msg_model
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
     }
 
     // checkpoint：分叉点→最近的历史锚点快照；整会话克隆→当前最新 checkpoint
@@ -479,13 +502,28 @@ fn fork_session_at(
     // 运行过程树
     let mut copied_traces = 0usize;
     {
-        let mut ts = tx
-            .prepare(
-                "SELECT id, goal, status, steps_json, completion_json, started_at, updated_at, completed_at
-                 FROM agent_run_traces WHERE session_id=?1",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows: Vec<(String, String, String, String, Option<String>, String, String, Option<String>)> = ts
+        let has_goal_message_id = tx
+            .prepare("SELECT goal_message_id FROM agent_run_traces LIMIT 0")
+            .is_ok();
+        let select_sql = if has_goal_message_id {
+            "SELECT id, goal, status, steps_json, completion_json, started_at, updated_at, completed_at, goal_message_id
+             FROM agent_run_traces WHERE session_id=?1"
+        } else {
+            "SELECT id, goal, status, steps_json, completion_json, started_at, updated_at, completed_at, NULL
+             FROM agent_run_traces WHERE session_id=?1"
+        };
+        let mut ts = tx.prepare(select_sql).map_err(|e| e.to_string())?;
+        let rows: Vec<(
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        )> = ts
             .query_map(params![src_session_id], |r| {
                 Ok((
                     r.get(0)?,
@@ -496,34 +534,56 @@ fn fork_session_at(
                     r.get(5)?,
                     r.get(6)?,
                     r.get(7)?,
+                    r.get(8)?,
                 ))
             })
             .map_err(|e| e.to_string())?
             .collect::<Result<_, _>>()
             .map_err(|e| e.to_string())?;
         drop(ts);
-        for (tid, goal, status, steps_json, completion, started, updated, completed) in rows {
+        for (tid, goal, status, steps_json, completion, started, updated, completed, goal_message_id) in rows {
             if let Some(bts) = &boundary_ts {
                 if started >= *bts {
                     continue;
                 }
             }
-            tx.execute(
-                "INSERT INTO agent_run_traces (id, session_id, goal, status, steps_json, completion_json, started_at, updated_at, completed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    id_map[&tid],
-                    new_session_id,
-                    goal,
-                    status,
-                    rw.apply(&steps_json),
-                    completion.as_deref().map(|c| rw.apply(c)),
-                    started,
-                    updated,
-                    completed
-                ],
-            )
-            .map_err(|e| e.to_string())?;
+            let remapped_goal_message_id = goal_message_id.and_then(|gid| msg_map.get(&gid).cloned());
+            if has_goal_message_id {
+                tx.execute(
+                    "INSERT INTO agent_run_traces (id, session_id, goal, status, steps_json, completion_json, started_at, updated_at, completed_at, goal_message_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    params![
+                        id_map[&tid],
+                        new_session_id,
+                        goal,
+                        status,
+                        rw.apply(&steps_json),
+                        completion.as_deref().map(|c| rw.apply(c)),
+                        started,
+                        updated,
+                        completed,
+                        remapped_goal_message_id
+                    ],
+                )
+                .map_err(|e| e.to_string())?;
+            } else {
+                tx.execute(
+                    "INSERT INTO agent_run_traces (id, session_id, goal, status, steps_json, completion_json, started_at, updated_at, completed_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        id_map[&tid],
+                        new_session_id,
+                        goal,
+                        status,
+                        rw.apply(&steps_json),
+                        completion.as_deref().map(|c| rw.apply(c)),
+                        started,
+                        updated,
+                        completed
+                    ],
+                )
+                .map_err(|e| e.to_string())?;
+            }
             copied_traces += 1;
         }
     }

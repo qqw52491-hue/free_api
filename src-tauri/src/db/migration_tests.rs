@@ -192,3 +192,33 @@
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
+
+    #[test]
+    fn legacy_db_adds_chat_messages_run_id_without_backfilling_old_rows() {
+        let temp_dir = std::env::temp_dir().join(format!("test-runid-mig-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let db_path = temp_dir.join("legacy.db");
+        {
+            let old = Connection::open(&db_path).unwrap();
+            old.execute_batch(
+                "CREATE TABLE chat_sessions (id TEXT PRIMARY KEY, title TEXT NOT NULL, model_id TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, message_count INTEGER NOT NULL DEFAULT 0);
+                 CREATE TABLE chat_messages (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, attachments TEXT, created_at TEXT NOT NULL, model_id TEXT);
+                 INSERT INTO chat_sessions VALUES ('s1', 'old', 'm1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1);
+                 INSERT INTO chat_messages VALUES ('m1', 's1', 'user', '旧消息', NULL, '2026-01-01T00:00:01Z', 'm1');",
+            ).unwrap();
+        }
+        let upgraded = init_db(&db_path).unwrap();
+        let run_id: Option<String> = upgraded
+            .query_row("SELECT run_id FROM chat_messages WHERE id='m1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(run_id, None, "旧库历史记录必须保留 run_id 为 NULL，禁止按时间回填");
+        let idx_count: i64 = upgraded
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_messages_run'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx_count, 1);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }

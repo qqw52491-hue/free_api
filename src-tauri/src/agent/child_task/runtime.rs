@@ -193,6 +193,7 @@ pub(crate) fn spawn(
             let review_step = review_events.as_ref().and_then(|_| super::relay_review_step(&child_id, &payload));
             let duration = payload["metrics"]["tool_duration_ms"].as_u64();
             if let Some(mut detail) = review_step.or_else(|| super::relay_progress(&child_id, payload)) {
+                detail["run_id"] = json!(&parent_run);
                 if let Some(review) = review_events.as_ref().filter(|_| !nested) {
                     review.annotate(&mut detail, &parent_run);
                     if let Some(duration) = duration {
@@ -209,6 +210,7 @@ pub(crate) fn spawn(
     };
     if let Some(review) = &review {
         let mut detail = json!({"type":"child_task_progress","child_run_id":binding.child_run,"event":{"type":"started"}});
+        detail["run_id"] = json!(&binding.parent_run);
         review.annotate(&mut detail, &binding.parent_run);
         let _ = app.emit(&format!("agent-progress-{}", binding.parent_session), detail);
     }
@@ -260,6 +262,7 @@ pub(crate) fn spawn(
             .remove(&binding.child_run);
         crate::agent::job_engine::notify_job_state_changed();
         let mut detail = json!({"type":"child_task_progress","child_run_id":binding.child_run,"event":{"type":"returned"}});
+        detail["run_id"] = json!(&binding.parent_run);
         if let Some(review) = &review {
             review.annotate(&mut detail, &binding.parent_run);
             if let Ok(conn) = db.0.lock() {

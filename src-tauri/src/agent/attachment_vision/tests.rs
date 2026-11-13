@@ -213,6 +213,7 @@ async fn observed_attachments_restore_planning_and_survive_checkpoint_recovery()
         None,
         2,
         "fixture",
+        None,
         false,
         0,
         "auto",

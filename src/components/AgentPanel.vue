@@ -68,15 +68,15 @@
 
             <div class="header-actions">
                 <span class="session-status" :class="`state-${session.runState.value}`"><i></i>{{ session.stateMeta.value.category }}</span>
-                <button v-if="session.isRunning.value" class="icon-control stop" type="button" :disabled="session.stopRequested.value" title="停止执行" @click="session.requestStop()"><span>■</span></button>
-                <button class="icon-control" type="button" :disabled="session.isRunning.value" title="新建对话" @click="emit('new-session')">
+                <button v-if="session.isRunning.value || session.stopRequested.value" class="icon-control stop" type="button" :disabled="session.stopRequested.value" :title="session.stopRequested.value ? '正在停止，请等待当前任务结束' : '停止执行'" @click="session.requestStop()"><span>■</span></button>
+                <button class="icon-control" type="button" :disabled="session.isRunning.value || session.stopRequested.value" title="新建对话" @click="emit('new-session')">
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14" /></svg>
                 </button>
                 <button
                     class="icon-control"
                     :class="{ 'is-forking': forking }"
                     type="button"
-                    :disabled="session.isRunning.value || panelId.startsWith('draft-') || forking"
+                    :disabled="session.isRunning.value || session.stopRequested.value || panelId.startsWith('draft-') || forking"
                     title="分叉当前会话（完整克隆当前对话全部历史与状态为新会话）"
                     data-testid="fork-current-session"
                     @click="handleFork()"
@@ -162,6 +162,8 @@
                         :current-goal="session.currentGoal.value"
                         :legacy-messages="session.legacyConversationMessages.value"
                         :history-turns="session.historyTurns.value"
+                        :active-run-id="session.activeRunId.value"
+                        :live-run-id="session.liveStepsRunId.value"
                         :steps="session.steps.value"
                         :selected-step-id="session.selectedStepId.value"
                         :selected-subpart="selectedSubpart"
@@ -641,6 +643,7 @@ function handleOpenDiff(payload: FileDiffPayload) {
     inspectorRef.value?.openDiff(payload);
 }
 function submitComposer(payload?: { text: string; attachments?: any[]; mode?: "interrupt" | "queue"; taskStartMode?: "resume" | "new" }) {
+    if (session.stopRequested.value) return;
     const text = (payload?.text ?? composerDraft.value).trim();
     if (!text && (!payload?.attachments || payload.attachments.length === 0)) return;
     if (session.isRunning.value) {

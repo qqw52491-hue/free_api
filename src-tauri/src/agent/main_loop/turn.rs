@@ -319,12 +319,12 @@ pub(super) async fn turn_main<'a, 'b>(
         }
 
         crate::agent::channel::set_supplements_closed(&run_id, false);
-        if crate::agent::conversation::import_live_messages(
+        let imported_live = crate::agent::conversation::import_live_messages(
             state.inner(),
             &final_session_id,
             &mut context,
-        )? > 0
-        {
+        )?;
+        if imported_live > 0 {
             checkpoint.pending_finalization = None;
         }
 
@@ -348,11 +348,24 @@ pub(super) async fn turn_main<'a, 'b>(
         );
         if resume_instruction.is_none() {
             checkpoint.begin_planning(step_id, &context);
-            save_checkpoint(state.inner(), &mut checkpoint)?;
+            crate::agent::checkpoint::save_checkpoint_and_claim_chats(
+                state.inner(),
+                &mut checkpoint,
+                &run_id,
+                &mut context,
+            )?;
+        } else if imported_live > 0 || !context.pending_claim_chat_ids.is_empty() {
+            crate::agent::checkpoint::save_checkpoint_and_claim_chats(
+                state.inner(),
+                &mut checkpoint,
+                &run_id,
+                &mut context,
+            )?;
         }
         advance_run_state(
             &app,
             &final_session_id,
+            &run_id,
             &mut run_machine,
             AgentRunEvent::BeginPlanning { step_id },
         )?;
@@ -783,7 +796,12 @@ pub(super) async fn turn_main<'a, 'b>(
         let milestones_settled=crate::agent::stage_review::settle_milestones(&mut checkpoint, state.inner());
         if milestones_settled {
             checkpoint.refresh_context(&context);
-            save_checkpoint(state.inner(), &mut checkpoint)?;
+            crate::agent::checkpoint::save_checkpoint_and_claim_chats(
+                state.inner(),
+                &mut checkpoint,
+                &run_id,
+                &mut context,
+            )?;
         }
         if let Some(reason) = crate::agent::stage_review::should_fire(
             &checkpoint,
@@ -807,7 +825,12 @@ pub(super) async fn turn_main<'a, 'b>(
             .await
             {
                 Ok(()) => {
-                    save_checkpoint(state.inner(), &mut checkpoint).map_err(|error| {
+                    crate::agent::checkpoint::save_checkpoint_and_claim_chats(
+                        state.inner(),
+                        &mut checkpoint,
+                        &run_id,
+                        &mut context,
+                    ).map_err(|error| {
                         format!("阶段审查已派发但父状态保存失败；正在停止本轮：{error}")
                     })?;
                     let _ = app.emit(
@@ -1027,6 +1050,7 @@ pub(super) async fn turn_main<'a, 'b>(
                 crate::agent::dispatcher::emit_tool_event(
                     &app,
                     &final_session_id,
+                    &run_id,
                     step_id,
                     &instruction,
                     if is_prepare_finish || receipt.is_ready() {
@@ -1280,7 +1304,12 @@ pub(super) async fn turn_main<'a, 'b>(
                         crate::agent::agent_mailbox::coordination::kick(state.inner());
                         context.add_host_feedback("交付提交前新受理的协作尚未结清；本次未结束，请等待答复并处理交接。");
                         checkpoint.complete_step(step_id, &context);
-                        save_checkpoint(state.inner(), &mut checkpoint)?;
+                        crate::agent::checkpoint::save_checkpoint_and_claim_chats(
+                            state.inner(),
+                            &mut checkpoint,
+                            &run_id,
+                            &mut context,
+                        )?;
                         let _ = app.emit(
                             &format!("agent-log-{}", final_session_id),
                             "交付暂缓：正在等待已登记的协作。",
@@ -1293,17 +1322,25 @@ pub(super) async fn turn_main<'a, 'b>(
         } else {
             // 被质询或失败的 finish 也要推进 durable cursor，恢复后继续下一轮而不是误判终态。
             checkpoint.complete_step(step_id, &context);
-            save_checkpoint(state.inner(), &mut checkpoint)?;
+            crate::agent::checkpoint::save_checkpoint_and_claim_chats(
+                state.inner(),
+                &mut checkpoint,
+                &run_id,
+                &mut context,
+            )?;
         }
 
         // --- 前端通知 + 任务完成判定（合并） ---
-        app.emit(&format!("agent-context-{}", final_session_id), &context)
+        let mut context_payload = serde_json::to_value(&context).map_err(|e| e.to_string())?;
+        context_payload["run_id"] = json!(&run_id);
+        app.emit(&format!("agent-context-{}", final_session_id), context_payload)
             .map_err(|e| e.to_string())?;
 
         if is_actually_completed {
             crate::agent::dispatcher::emit_tool_event(
                 &app,
                 &final_session_id,
+                &run_id,
                 step_id,
                 &instruction,
                 "succeeded",
@@ -1316,6 +1353,7 @@ pub(super) async fn turn_main<'a, 'b>(
             advance_run_state(
                 &app,
                 &final_session_id,
+                &run_id,
                 &mut run_machine,
                 AgentRunEvent::BeginFinalizing,
             )?;
@@ -1332,6 +1370,7 @@ pub(super) async fn turn_main<'a, 'b>(
             app.emit(
                 &format!("agent-progress-{}", final_session_id),
                 json!({
+                    "run_id": &run_id,
                     "type": "complete",
                     "message": complete_msg,
                     "success": true,
@@ -1371,9 +1410,11 @@ pub(super) async fn turn_main<'a, 'b>(
         app.emit(
             &format!("agent-progress-{}", final_session_id),
             json!({
+                "run_id": &run_id,
                 "type": if result.success { "step_done" } else { "step_error" },
                 "step_id": step_id,
                 "description": instruction.description,
+                "output_id": output_id,
                 "finding": instruction.finding.as_deref(),
                 "finding_kind": instruction.finding_kind.as_deref(),
                 "output": output_text,
