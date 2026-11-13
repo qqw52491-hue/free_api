@@ -63,6 +63,8 @@ pub(crate) struct ReviewProgram {
     pub verify_obligations: Vec<crate::agent::review_contract::ReviewObligation>,
     #[serde(default)]
     pub evidence_since: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub parent_step_id: Option<usize>,
 }
 
 pub(crate) fn load(db: &DbState, id: &str) -> Result<Option<ReviewProgram>, String> {
@@ -566,6 +568,9 @@ pub(crate) async fn run_final(
     evidence_since: chrono::DateTime<chrono::Utc>,
     mut interrupt: watch::Receiver<u64>,
     progress_member_id: &str,
+    role_name: Option<&str>,
+    role_label: Option<&str>,
+    parent_step_id: Option<usize>,
 ) -> Result<crate::agent::reviewer_gatekeeper::ReviewResult, String> {
     let id = begin_child_run_extended(
         db,
@@ -587,14 +592,15 @@ pub(crate) async fn run_final(
         allowed_refs: vec![],
         schema: None,
         has_verify_obligation: None,
-        role: None,
-        role_label: None,
+        role: role_name.map(|s| Value::String(s.to_string())),
+        role_label: role_label.map(|s| Value::String(s.to_string())),
         model: config.model_id.clone(),
         can_finalize: None,
         evidence_scope_refs: vec![],
         final_fingerprint: Some(fingerprint.into()),
         verify_obligations: obligations,
         evidence_since: Some(evidence_since),
+        parent_step_id,
     };
     if let Err(error) = start(
         app,

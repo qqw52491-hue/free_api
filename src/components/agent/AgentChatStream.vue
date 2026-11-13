@@ -589,16 +589,17 @@
                                 />
                             </div>
 
-                            <div v-if="getStepReviewRows(item.step).length" class="ambient-workers-list review-step-members" :data-review-step="item.step.id" aria-label="终审成员进度">
-                                <div v-if="getStepReviewRows(item.step).length > 1" class="review-panel-header">
+                            <div v-if="getStepReviewRows(item.step).length || getStepHistoricalReviews(item.step).length" class="ambient-workers-list review-step-members" :data-review-step="item.step.id" aria-label="终审成员进度">
+                                <div v-if="(getStepReviewRows(item.step).length + getStepHistoricalReviews(item.step).length) > 1" class="review-panel-header">
                                     <span class="review-panel-title">
                                         <svg class="review-shield-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                             <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
                                         </svg>
-                                        <span>多模型并发审查 ({{ getStepReviewRows(item.step).length }} 位成员)</span>
+                                        <span>多模型并发审查 ({{ getStepReviewRows(item.step).length + getStepHistoricalReviews(item.step).length }} 位成员)</span>
                                     </span>
                                 </div>
                                 <AgentWorkerProgress v-for="review in getStepReviewRows(item.step)" :key="review.id" :review="review" :is-running="isRunning" />
+                                <AgentWorkerProgress v-for="worker in getStepHistoricalReviews(item.step)" :key="worker.id" :worker="worker" :is-running="false" />
                             </div>
 
                             <!-- 命令输出：执行中自动展开实时输出，结束后自动收起；可用箭头手动展开/收起 -->
@@ -1166,16 +1167,17 @@
                                         <span class="row-status" :class="`status-tag-${step.status}`">{{ isSubAgentTool(step.tool) && step.status === 'running' ? '后台协同中' : (isWaitJobsTool(step.tool) && step.status === 'running' ? '挂起等待' : statusLabel(step.status)) }}</span>
                                         <time>{{ formatClock(step.timestamp) }}</time>
                                     </button>
-                                    <div v-if="getStepReviewRows(step).length" class="ambient-workers-list review-step-members" :data-review-step="step.id" aria-label="终审成员进度">
-                                        <div v-if="getStepReviewRows(step).length > 1" class="review-panel-header">
+                                    <div v-if="getStepReviewRows(step).length || getStepHistoricalReviews(step).length" class="ambient-workers-list review-step-members" :data-review-step="step.id" aria-label="终审成员进度">
+                                        <div v-if="(getStepReviewRows(step).length + getStepHistoricalReviews(step).length) > 1" class="review-panel-header">
                                             <span class="review-panel-title">
                                                 <svg class="review-shield-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                                     <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
                                                 </svg>
-                                                <span>多模型并发审查 ({{ getStepReviewRows(step).length }} 位成员)</span>
+                                                <span>多模型并发审查 ({{ getStepReviewRows(step).length + getStepHistoricalReviews(step).length }} 位成员)</span>
                                             </span>
                                         </div>
                                         <AgentWorkerProgress v-for="review in getStepReviewRows(step)" :key="review.id" :review="review" :is-running="isRunning" />
+                                        <AgentWorkerProgress v-for="worker in getStepHistoricalReviews(step)" :key="worker.id" :worker="worker" :is-running="false" />
                                     </div>
                                     <div class="node-children">
                                         <!-- 1. 思考行 (如果有思考过程) -->
@@ -1565,6 +1567,7 @@ import AgentTimelineList from "./AgentTimelineList.vue";
 import AgentTimelineSections from "./AgentTimelineSections.vue";
 import { buildQuestionMarks, type QuestionNavigationEntry } from "./questionNavigation";
 import { placeReviewRows, type ReviewProgressItem, type ReviewLocation } from "./reviewProgress";
+import { placeHistoricalStepReviewers } from "./reviewWorkerSteps";
 import { extractSubagentsFromStep } from "./workerUtils";
 import { historicalWorkerSnapshot, type ChildTaskSnapshot } from "./delegatedTaskState";
 import { getWorkerLiveLine } from "./liveThoughtPreview";
@@ -2000,6 +2003,22 @@ function getOrchestrationTitle(step: AgentStepItem): string {
 }
 function getAmbientWorkerRows(step: AgentStepItem) {
     return historicalWorkerRows.value.get(step) || liveWorkerRows.value.get(step) || [];
+}
+const activeReviewIdSet = computed(() => new Set(props.reviewProgress.flatMap(review => review.childRunId || [])));
+const historicalStepReviewers = computed(() => {
+    const owners = new Map<AgentStepItem, AgentWorkerItem[]>();
+    const placedIds = new Set<string>();
+    for (const turn of props.historyTurns) {
+        if (isHistoryTurnCoveredByLive(turn) || !turn.reviewers?.length) continue;
+        const covered = new Set([...activeReviewIdSet.value, ...turn.steps.flatMap(getStepJobIds)]);
+        const placed = placeHistoricalStepReviewers(turn.steps, turn.reviewers, covered);
+        for (const [step, rows] of placed.owners) owners.set(step, rows);
+        for (const id of placed.placedIds) placedIds.add(id);
+    }
+    return { owners, placedIds };
+});
+function getStepHistoricalReviews(step: AgentStepItem): AgentWorkerItem[] {
+    return historicalStepReviewers.value.owners.get(step) || [];
 }
 
 
@@ -4014,7 +4033,7 @@ const historyTimelineEntries = computed<TimelineEntry[]>(() => {
         middle.sort((a, b) => a.timestamp - b.timestamp || Number(a.type === "message" && a.isHuman) - Number(b.type === "message" && b.isHuman) || a.id.localeCompare(b.id));
         assignInterventionAnchors(middle);
         timeline.push(...middle);
-        const linkedReviews = new Set([...turn.steps.flatMap(getStepJobIds), ...activeReviewIds]);
+        const linkedReviews = new Set([...turn.steps.flatMap(getStepJobIds), ...activeReviewIds, ...historicalStepReviewers.value.placedIds]);
         const unplaced = (turn.reviewers || []).filter(worker => !linkedReviews.has(worker.id));
         if (unplaced.length) timeline.push({ id: `history-reviews-${turn.id}`, type: 'review', timestamp: turn.completedAt, workers: unplaced });
         if (!["succeeded", "failed", "cancelled"].includes(turn.status) && turn.artifacts.length) {

@@ -169,26 +169,115 @@ pub fn list_session_traces(db: &DbState, session_id: &str) -> Result<Vec<Value>,
     .collect()
 }
 
+fn first_line_clipped(raw: &str, max_chars: usize) -> Option<String> {
+    let line = raw
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    if line.chars().count() > max_chars {
+        Some(format!(
+            "{}...",
+            line.chars().take(max_chars).collect::<String>()
+        ))
+    } else {
+        Some(line.to_string())
+    }
+}
+
 fn review_step_history(conn: &rusqlite::Connection, session: &str, parent_run: &str) -> rusqlite::Result<Vec<Value>> {
-    let mut members = conn.prepare(
-        "SELECT id,purpose,model_id,status,duration_ms,execution_checkpoint_json
-         FROM agent_child_runs WHERE parent_session_id=?1 AND parent_run_id=?2 AND kind='review'
-         ORDER BY started_at,id",
-    )?;
+    let has_models = conn.prepare("SELECT name, display_name FROM models LIMIT 0").is_ok();
+    let has_details = conn.prepare("SELECT error_kind, result_json FROM agent_child_runs LIMIT 0").is_ok();
+    let model_expr = if has_models {
+        "COALESCE(NULLIF(TRIM(m.display_name), ''), NULLIF(TRIM(m.name), ''), r.model_id)"
+    } else {
+        "r.model_id"
+    };
+    let model_join = if has_models {
+        " LEFT JOIN models m ON m.id = r.model_id"
+    } else {
+        ""
+    };
+    let detail_cols = if has_details {
+        "r.error_kind,r.result_json"
+    } else {
+        "NULL,NULL"
+    };
+    let sql = format!(
+        "SELECT r.id,r.purpose,{model_expr},r.status,r.duration_ms,r.execution_checkpoint_json,{detail_cols}
+         FROM agent_child_runs r{model_join}
+         WHERE r.parent_session_id=?1 AND r.parent_run_id=?2 AND r.kind='review'
+         ORDER BY r.started_at,r.id"
+    );
+    let mut members = conn.prepare(&sql)?;
     let mut steps = conn.prepare(
         "SELECT seq,step_json FROM agent_run_steps WHERE run_id=?1 ORDER BY seq DESC LIMIT 6",
     )?;
-    let rows = members.query_map(params![session, parent_run], |row| Ok((
-        row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?,
-        row.get::<_, String>(2)?, row.get::<_, String>(3)?,
-        row.get::<_, Option<i64>>(4)?, row.get::<_, Option<String>>(5)?,
-    )))?;
+    let rows = members.query_map(params![session, parent_run], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<i64>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?,
+            row.get::<_, Option<String>>(7)?,
+        ))
+    })?;
     rows.map(|row| {
-        let (id, purpose, model, status, duration, checkpoint) = row?;
+        let (id, purpose, model, status, duration, checkpoint, error_kind, result_json) = row?;
         let checkpoint = checkpoint.and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
-        let role_label = checkpoint.as_ref().and_then(|value|
-            value["state"]["dispatch_input"]["params"]["role_label"].as_str()
-        );
+        let role_label = checkpoint.as_ref().and_then(|value| {
+            value["state"]["dispatch_input"]["params"]["role_label"]
+                .as_str()
+                .or_else(|| value["state"]["main_review"]["role_label"].as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        });
+        let parent_step_id = checkpoint
+            .as_ref()
+            .and_then(|value| value["state"]["main_review"]["parent_step_id"].as_u64());
+        let parsed_result = result_json.and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+        let verdict = parsed_result
+            .as_ref()
+            .and_then(|value| value["verdict"].as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let summary = parsed_result
+            .as_ref()
+            .and_then(|value| value["summary"].as_str())
+            .and_then(|raw| first_line_clipped(raw, 200));
+        let blocking_issue = parsed_result
+            .as_ref()
+            .and_then(|value| value["blocking_issues"].as_array())
+            .and_then(|items| {
+                items.iter().find_map(|item| {
+                    item.as_str()
+                        .or_else(|| item["issue"].as_str())
+                        .or_else(|| item["description"].as_str())
+                        .or_else(|| item["summary"].as_str())
+                        .or_else(|| item["title"].as_str())
+                })
+            })
+            .and_then(|raw| first_line_clipped(raw, 200));
+        let missing_ev = parsed_result
+            .as_ref()
+            .and_then(|value| value["missing_evidence"].as_array())
+            .and_then(|items| items.iter().find_map(|item| item.as_str()))
+            .and_then(|raw| first_line_clipped(raw, 200));
+        let is_problematic = status != "succeeded"
+            || matches!(verdict.as_deref(), Some("rejected" | "failed_open"));
+        let error_detail = if is_problematic {
+            error_kind
+                .as_deref()
+                .and_then(|raw| first_line_clipped(raw, 200))
+                .or(blocking_issue)
+                .or(missing_ev)
+                .or_else(|| summary.clone())
+        } else {
+            None
+        };
         let rows = steps.query_map([&id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?;
         let mut previews = Vec::new();
         for row in rows {
@@ -201,10 +290,20 @@ fn review_step_history(conn: &rusqlite::Connection, session: &str, parent_run: &
         }
         previews.reverse();
         Ok(json!({
-            "id": id, "purpose": purpose, "model": model, "status": status,
-            "label": role_label, "duration_ms": duration, "steps": previews,
+            "id": id,
+            "purpose": purpose,
+            "model": model,
+            "status": status,
+            "label": role_label,
+            "duration_ms": duration,
+            "parent_step_id": parent_step_id,
+            "verdict": verdict,
+            "summary": summary,
+            "error_detail": error_detail,
+            "steps": previews,
         }))
-    }).collect()
+    })
+    .collect()
 }
 
 /// 超过该字符阈值（约 2,000 字符 / ~500 Tokens）时自动溢出落盘到本地独立文件
@@ -785,5 +884,106 @@ mod tests {
         let live = crate::agent::child_task::relay_review_step("review", &json!({"type":"step_new","step":child_step})).unwrap();
         assert_eq!(live["child_run_id"], "review");
         assert_eq!(&live["event"]["step"], step);
+    }
+
+    #[test]
+    fn review_step_history_resolves_model_names_main_review_metadata_and_failure_details() {
+        let db = test_db();
+        upsert_snapshot(&db, "parent", "session-1", "制作视频", "succeeded", &[], None).unwrap();
+        {
+            let conn = db.0.lock().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE models (id TEXT PRIMARY KEY, name TEXT, display_name TEXT);
+                CREATE TABLE agent_child_runs (
+                    id TEXT PRIMARY KEY, purpose TEXT, model_id TEXT, status TEXT, duration_ms INTEGER,
+                    error_kind TEXT, result_json TEXT, execution_checkpoint_json TEXT,
+                    parent_session_id TEXT, parent_run_id TEXT, kind TEXT, started_at TEXT
+                );
+                CREATE TABLE agent_run_steps (run_id TEXT, seq INTEGER, step_json TEXT);
+                INSERT INTO models VALUES
+                    ('m-uuid-1', 'nex-n2.6-raw', 'nex-n2.6'),
+                    ('m-uuid-2', 'fallback-name', '');",
+            )
+            .unwrap();
+            let failed_cp = json!({
+                "state": {
+                    "main_review": {
+                        "role": "reviewer",
+                        "role_label": "基础审查员",
+                        "parent_step_id": 30
+                    }
+                }
+            })
+            .to_string();
+            let rejected_cp = json!({
+                "state": {
+                    "main_review": {
+                        "role": "reviewer",
+                        "role_label": "安全审查员",
+                        "parent_step_id": 31
+                    }
+                }
+            })
+            .to_string();
+            let passed_cp = json!({
+                "state": {
+                    "main_review": {
+                        "role": "reviewer",
+                        "role_label": "基础审查员",
+                        "parent_step_id": 32
+                    }
+                }
+            })
+            .to_string();
+            conn.execute(
+                "INSERT INTO agent_child_runs VALUES
+                    ('rev-1', 'final_review', 'm-uuid-1', 'failed', 8653,
+                     '模型指令恢复已用完 2 次尝试；未取得可执行指令（空响应或仅思考过程）\n更多堆栈',
+                     NULL, ?1, 'session-1', 'parent', 'review', '2026-11-13T09:06:09Z'),
+                    ('rev-2', 'final_review', 'm-uuid-2', 'succeeded', 12000,
+                     NULL, ?2, ?3, 'session-1', 'parent', 'review', '2026-11-13T09:06:20Z'),
+                    ('rev-3', 'final_review', 'm-missing', 'succeeded', 34950,
+                     NULL, ?4, ?5, 'session-1', 'parent', 'review', '2026-11-13T09:06:26Z');",
+                params![
+                    failed_cp,
+                    json!({
+                        "verdict": "rejected",
+                        "summary": "发现阻塞项",
+                        "blocking_issues": [{ "file": "reel.mp4", "issue": "抽帧画面全黑", "requirement": "完整短片" }]
+                    })
+                    .to_string(),
+                    rejected_cp,
+                    json!({ "verdict": "passed", "summary": "全部核验通过" }).to_string(),
+                    passed_cp,
+                ],
+            )
+            .unwrap();
+        }
+        let trace = &list_session_traces(&db, "session-1").unwrap()[0];
+        let members = trace["reviewers"].as_array().unwrap();
+        assert_eq!(members.len(), 3);
+
+        assert_eq!(members[0]["id"], "rev-1");
+        assert_eq!(members[0]["model"], "nex-n2.6");
+        assert_eq!(members[0]["label"], "基础审查员");
+        assert_eq!(members[0]["parent_step_id"], 30);
+        assert_eq!(
+            members[0]["error_detail"],
+            "模型指令恢复已用完 2 次尝试；未取得可执行指令（空响应或仅思考过程）"
+        );
+
+        assert_eq!(members[1]["id"], "rev-2");
+        assert_eq!(members[1]["model"], "fallback-name");
+        assert_eq!(members[1]["label"], "安全审查员");
+        assert_eq!(members[1]["parent_step_id"], 31);
+        assert_eq!(members[1]["verdict"], "rejected");
+        assert_eq!(members[1]["error_detail"], "抽帧画面全黑");
+
+        assert_eq!(members[2]["id"], "rev-3");
+        assert_eq!(members[2]["model"], "m-missing");
+        assert_eq!(members[2]["label"], "基础审查员");
+        assert_eq!(members[2]["parent_step_id"], 32);
+        assert_eq!(members[2]["verdict"], "passed");
+        assert!(members[2]["error_detail"].is_null());
     }
 }

@@ -38,7 +38,18 @@ const optionalCount = (value: unknown): number | null => typeof value === 'numbe
 const failureKinds = new Set(['timeout', 'request', 'format', 'configuration', 'cancelled']);
 const text = (value: unknown, limit = 200): string => typeof value === 'string' ? value.slice(0, limit) : '';
 
-export function applyReviewProgress(items: ReviewProgressItem[], payload: Record<string, unknown>, runStartedAt: number): ReviewProgressItem[] {
+export function sameReviewStepAnchor(left?: ReviewStepAnchor, right?: ReviewStepAnchor): boolean {
+    if (!left || !right) return true;
+    return left.stepId === right.stepId
+        && (!left.runId || !right.runId || left.runId === right.runId);
+}
+
+export function applyReviewProgress(
+    items: ReviewProgressItem[],
+    payload: Record<string, unknown>,
+    runStartedAt: number,
+    anchor?: ReviewStepAnchor,
+): ReviewProgressItem[] {
     const id = text(payload.review_id), memberKey = text(payload.member_key), phase = text(payload.phase);
     const startedAt = number(payload.started_at_ms);
     if (!id || !memberKey || !phases.has(phase) || startedAt < runStartedAt) return items;
@@ -56,11 +67,14 @@ export function applyReviewProgress(items: ReviewProgressItem[], payload: Record
         failureKind: failureKinds.has(String(payload.failure_kind)) ? String(payload.failure_kind) : '',
         timeoutRetries: optionalCount(payload.timeout_retries), formatCorrections: optionalCount(payload.format_corrections),
     };
-    const index = items.findIndex(item => item.memberKey === memberKey);
+    const exactIndex = items.findIndex(item => item.id === id);
+    const index = exactIndex >= 0
+        ? exactIndex
+        : items.findIndex(item => item.memberKey === memberKey && sameReviewStepAnchor(item.anchor, anchor));
     const old = items[index];
     if (old?.id === id && old.phase === 'cancelled') return items;
     if (old && (old.startedAt > startedAt || (old.id === id && (old.elapsedMs > next.elapsedMs || (isReviewTerminal(old.phase) && !isReviewTerminal(phase)))))) return items;
-    next.anchor = old?.anchor;
+    next.anchor = old?.id === id ? (old.anchor || anchor) : (anchor || old?.anchor);
     if (old && old.id === id) {
         next.childRunId = old.childRunId;
         next.steps = old.steps;

@@ -506,6 +506,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     ).or_else(|| crate::agent::review_team::recommended_primary(
         db, &["reviewer".into()], &model_routing.disabled_role_cards,
     ));
+    let reviewer_role = resolved_card.as_ref().map(|c| c.name.clone());
     let reviewer_label = resolved_card.as_ref().map(|c| c.label.clone()).unwrap_or_else(|| "基础审查员".into());
     let (mut model_id, persona_extra) = if let Some(card) = resolved_card {
         if card.allows_kind("reviewer") {
@@ -754,7 +755,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
         let result=crate::agent::child_reviewer::main_executor::run_final(
             handle.clone(),db,&parent_run,session_id,workspace,&model_config,&messages,
             &review_fingerprint,verify_obligations.clone(),run_started_at,interrupt_rx.clone(),
-            progress.id(),
+            progress.id(),reviewer_role.as_deref(),Some(reviewer_label.as_str()),Some(step_id),
         ).await;
         if !_registration.complete() {
             progress.fail("cancelled",crate::agent::review_control::STOP_NOTE);

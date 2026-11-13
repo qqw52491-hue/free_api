@@ -1,5 +1,5 @@
 import { asRecord, numberOrUndefined, toText } from "./format";
-import type { AgentWorkerItem, AgentWorkerStep } from "./types";
+import type { AgentStepItem, AgentWorkerItem, AgentWorkerStep } from "./types";
 
 export function reviewWorkerStep(value: unknown, fallbackStatus: AgentWorkerStep["status"]): AgentWorkerStep | undefined {
     const raw = asRecord(value);
@@ -57,16 +57,66 @@ export function historicalReviewer(value: unknown): AgentWorkerItem | undefined 
     const label = toText(raw.label) || ({
         ad_hoc: "主动审查员", plan_review: "方案审查员", stage_review: "阶段审查员", final_review: "终审员", rebuttal: "复审员",
     } as Record<string, string>)[purpose] || "审查员";
-    const status = raw.status === "succeeded" ? "succeeded" : raw.status === "running" ? "challenged" : "failed";
-    const currentStep = status === "succeeded" ? "已保存审查结果"
-        : status === "challenged" ? "审查结果待核对"
-        : raw.status === "interrupted" ? "审查已中断"
-        : raw.status === "cancelled" ? "审查已停止" : "审查执行未完成";
+    const verdict = toText(raw.verdict);
+    const errorDetail = toText(raw.error_detail);
+    const summary = toText(raw.summary);
+    const parentStepId = typeof raw.parent_step_id === "number" && Number.isSafeInteger(raw.parent_step_id)
+        ? raw.parent_step_id
+        : undefined;
+    const status = raw.status === "succeeded"
+        ? (verdict === "rejected" ? "failed" : verdict === "failed_open" ? "challenged" : "succeeded")
+        : raw.status === "running"
+            ? "challenged"
+            : "failed";
+    const currentStep = raw.status === "succeeded"
+        ? (verdict === "rejected" ? "审查不通过" : verdict === "failed_open" ? "审查未得出结论" : "已保存审查结果")
+        : raw.status === "running"
+            ? "审查结果待核对"
+            : raw.status === "interrupted"
+                ? "审查已中断"
+                : raw.status === "cancelled"
+                    ? "审查已停止"
+                    : "审查执行未完成";
     return {
         id, name: label, roleLabel: label, role: "reviewer", status, currentStep,
         model: toText(raw.model), durationMs: raw.duration_ms == null ? undefined : numberOrUndefined(raw.duration_ms),
         startedAt: 0, progress: status === "challenged" ? 0 : 100,
+        summary: summary || undefined,
         steps: Array.isArray(raw.steps) ? raw.steps.flatMap(step => reviewWorkerStep(step, "challenged") ?? []) : [],
-        extra: { hostTaskState: currentStep },
+        extra: {
+            hostTaskState: currentStep,
+            ...(parentStepId !== undefined ? { parentStepId } : {}),
+            ...(verdict ? { verdict } : {}),
+            ...(errorDetail ? { errorDetail } : {}),
+        },
     };
+}
+
+export function placeHistoricalStepReviewers(
+    steps: AgentStepItem[],
+    reviewers: AgentWorkerItem[],
+    coveredIds: Set<string>,
+): { owners: Map<AgentStepItem, AgentWorkerItem[]>; placedIds: Set<string> } {
+    const owners = new Map<AgentStepItem, AgentWorkerItem[]>();
+    const placedIds = new Set<string>();
+    const finishByStepNumber = new Map<number, AgentStepItem[]>();
+    for (const step of steps) {
+        if (!["finish", "prepare_finish"].includes(step.tool || "")) continue;
+        const list = finishByStepNumber.get(step.stepId);
+        if (list) list.push(step);
+        else finishByStepNumber.set(step.stepId, [step]);
+    }
+    for (const reviewer of reviewers) {
+        if (coveredIds.has(reviewer.id)) continue;
+        const parentStepId = reviewer.extra?.parentStepId;
+        if (typeof parentStepId !== "number" || !Number.isSafeInteger(parentStepId)) continue;
+        const candidates = finishByStepNumber.get(parentStepId);
+        if (!candidates || candidates.length !== 1) continue;
+        const owner = candidates[0];
+        const existing = owners.get(owner);
+        if (existing) existing.push(reviewer);
+        else owners.set(owner, [reviewer]);
+        placedIds.add(reviewer.id);
+    }
+    return { owners, placedIds };
 }

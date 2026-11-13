@@ -58,6 +58,7 @@ impl Fixture {
             final_fingerprint: None,
             verify_obligations: vec![],
             evidence_since: None,
+            parent_step_id: None,
         };
         crate::agent::conversation::begin_turn(&db, "owner", "mock", "parent").unwrap();
         crate::agent::conversation::begin_turn(&db, &format!("task-{id}"), "mock", "review")

@@ -1508,14 +1508,22 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
 
         // 终审独立进度：按成员归属，不冒充主 Agent 思考/最终判决，不用心跳刷满日志。
         if (eventType === "finish_review_progress") {
-            const next = applyReviewProgress(reviewProgress.value, payload, Math.max(reviewProgressStartedAt.value, runStartedAt.value || 0));
+            const activeRuns = historyRuns.value.filter(run => ['running', 'waiting_human'].includes(run.status));
+            const runId = toText(payload.run_id) || reviewRunId.value || (activeRuns.length === 1 ? activeRuns[0].id : '');
+            const anchor = activeReviewAnchor(steps.value, runId);
+            const next = applyReviewProgress(
+                reviewProgress.value,
+                payload,
+                Math.max(reviewProgressStartedAt.value, runStartedAt.value || 0),
+                anchor,
+            );
             if (next !== reviewProgress.value) {
                 const current = next.find(item => item.id === payload.review_id);
-                const previous = reviewProgress.value.find(item => item.memberKey === current?.memberKey);
+                const previous = reviewProgress.value.find(item => item.id === current?.id || (
+                    item.memberKey === current?.memberKey
+                    && (!anchor || !item.anchor || item.anchor.stepId === anchor.stepId)
+                ));
                 if (current) {
-                    const activeRuns = historyRuns.value.filter(run => ['running', 'waiting_human'].includes(run.status));
-                    const runId = reviewRunId.value || (activeRuns.length === 1 ? activeRuns[0].id : '');
-                    const anchor = activeReviewAnchor(steps.value, runId);
                     if (!current.anchor || (previous?.id !== current.id && anchor)) current.anchor = anchor || current.anchor;
                     else if (!current.anchor.runId && runId) current.anchor = { ...current.anchor, runId };
                 }

@@ -260,6 +260,23 @@ async function main() {
     const retry = { ...historyStep, id: 'retry' };
     assert.deepEqual(placeReviewRows([{ ...final, anchor: { ...final.anchor, occurrence: 1 } }], [{ ...historyEntries[1], steps: [historyStep, retry] }]).owners.get('retry'), [final.id], 'logical retries stay distinct');
     assert.deepEqual(placeReviewRows([{ id: 'unanchored' }], historyEntries).unplaced, ['unanchored']);
+    const step30Anchor = { stepId: 'live-step-30', stepNumber: 30, occurrence: 0, runId: 'run-retry' };
+    const step31Anchor = { stepId: 'live-step-31', stepNumber: 31, occurrence: 0, runId: 'run-retry' };
+    let retryItems = applyReviewProgress([], { ...reviewBase, review_id: 'rev-step-30', member_key: 'finish-review', role_label: '基础审查员', model: 'nex-n2.6', started_at_ms: 100, phase: 'failed', description: '模型未响应', elapsed_ms: 8653 }, 0, step30Anchor);
+    retryItems = applyReviewProgress(retryItems, { ...reviewBase, review_id: 'rev-step-31', member_key: 'finish-review', role_label: '基础审查员', model: 'nex-n2.6', started_at_ms: 200, phase: 'passed', description: '通过', elapsed_ms: 34950 }, 0, step31Anchor);
+    assert.equal(retryItems.length, 2, 'retry on a subsequent finish step preserves earlier failed review attempt');
+    assert.equal(retryItems[0].anchor.stepId, 'live-step-30');
+    assert.equal(retryItems[1].anchor.stepId, 'live-step-31');
+    const step30History = { id: 'h-30', stepId: 30, tool: 'finish' };
+    const step31History = { id: 'h-31', stepId: 31, tool: 'finish' };
+    const retryPlaced = placeReviewRows(retryItems, [{ id: 'p-retry', type: 'plan', runId: 'run-retry', steps: [step30History, step31History] }]);
+    assert.deepEqual(retryPlaced.owners.get('h-30'), ['rev-step-30']);
+    assert.deepEqual(retryPlaced.owners.get('h-31'), ['rev-step-31']);
+    assert.deepEqual(retryPlaced.unplaced, []);
+    const sameStepReplaced = applyReviewProgress(retryItems, { ...reviewBase, review_id: 'rev-step-31-backup', member_key: 'finish-review', role_label: '基础审查员', model: 'backup-m', started_at_ms: 300, phase: 'waiting', description: '备用接手', elapsed_ms: 0 }, 0, step31Anchor);
+    assert.equal(sameStepReplaced.length, 2, 'same-step failover replaces only its own step slot');
+    assert.equal(sameStepReplaced[0].id, 'rev-step-30');
+    assert.equal(sameStepReplaced[1].id, 'rev-step-31-backup');
     const timelineStatement = ast.statements.find(n => ts.isVariableStatement(n) && n.declarationList.declarations.some(d => d.name.getText(ast) === 'timelineEntries'));
     const timelines = vm.runInNewContext(ts.transpileModule(timelineStatement.getText(ast) + '\n timelineEntries.value;', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, { computed: vue.computed, baseTimelineEntries: vue.ref([{ id: 'finish-plan', type: 'plan' }, { id: 'live-completion', type: 'completion' }]), reviewPlacement: vue.ref({ unplaced: ['unanchored'] }), unplacedLiveReviewers: vue.ref([]), unplacedReviewEntry: { id: 'unplaced-final-review', type: 'review', timestamp: 0 }, props: { isRunning: false } });
     assert.equal(timelines[1].type, 'review'); assert.equal(timelines[2].type, 'completion', 'unanchored fallback is before final response, not after');
@@ -418,10 +435,41 @@ async function checkAllWorkerRoles() {
     assert(workerModelHtml.includes('gemini-3.8-flash'), 'worker model must be visible in the rendered member progress');
     assert(workerModelHtml.includes('worker-line-model'), 'worker model pill is visible in progress line');
     assert(workerModelHtml.includes('执行模型：gemini-3.8-flash'), 'worker model is visible in expanded diagnostics');
+
+    const { historicalReviewer: mapHistoricalReviewer, placeHistoricalStepReviewers } = load(path.join(base, 'reviewWorkerSteps.ts'));
+    const step30History = { id: 'h-30', stepId: 30, tool: 'finish' };
+    const step31History = { id: 'h-31', stepId: 31, tool: 'finish' };
+    const failedHist = mapHistoricalReviewer({
+        id: 'hist-30', purpose: 'final_review', label: '基础审查员', model: 'nex-n2.6', status: 'failed',
+        duration_ms: 8653, parent_step_id: 30, error_detail: '模型指令恢复已用完 2 次尝试',
+        steps: [{ id: 0, tool: 'list_dir', status: 'succeeded', params: { path: 'out/check' } }],
+    });
+    const passedHist = mapHistoricalReviewer({
+        id: 'hist-31', purpose: 'final_review', label: '基础审查员', model: 'nex-n2.6', status: 'succeeded',
+        verdict: 'passed', duration_ms: 34950, parent_step_id: 31, steps: [],
+    });
+    const legacyHist = mapHistoricalReviewer({
+        id: 'hist-legacy', purpose: 'final_review', model: 'nex-n2.6', status: 'failed', steps: [],
+    });
+    assert.equal(failedHist.roleLabel, '基础审查员');
+    assert.equal(failedHist.extra.parentStepId, 30);
+    assert.equal(passedHist.currentStep, '已保存审查结果');
+    const histPlacement = placeHistoricalStepReviewers([step30History, step31History], [failedHist, passedHist, legacyHist], new Set(['hist-31']));
+    assert.deepEqual(histPlacement.owners.get(step30History)?.map(w => w.id), ['hist-30']);
+    assert.equal(histPlacement.owners.has(step31History), false, 'live-covered review is not duplicated');
+    assert.equal(histPlacement.placedIds.has('hist-30'), true);
+    assert.equal(histPlacement.placedIds.has('hist-legacy'), false, 'missing parent_step_id never guesses a step');
+    const expandedFailedHistHtml = await snapshot([], 0, false, [failedHist]);
+    assert(expandedFailedHistHtml.includes('基础审查员'));
+    assert(expandedFailedHistHtml.includes('nex-n2.6'));
+    assert(expandedFailedHistHtml.includes('模型指令恢复已用完 2 次尝试'));
+
     const source = fs.readFileSync(path.join(base, 'AgentChatStream.vue'), 'utf8');
     const template = sfc.parse(source).descriptor.template.content;
     assert(template.includes('v-for="worker in getAmbientWorkerRows(item.step)"'));
     assert(template.includes('v-for="worker in getAmbientWorkerRows(step)"'), 'both display modes use the same owned member rows');
+    assert(template.includes('v-for="worker in getStepHistoricalReviews(item.step)"'));
+    assert(template.includes('v-for="worker in getStepHistoricalReviews(step)"'));
     assert(!template.includes('class="subagent-orchestration-card"'), 'old duplicated collaboration large card is not mounted');
 }
 async function snapshot(reviews, expandedIndex = -1, isRunning = true, workers = []) {

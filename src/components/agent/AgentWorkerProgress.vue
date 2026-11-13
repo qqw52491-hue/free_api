@@ -133,22 +133,24 @@
                     </div>
                     <span v-if="worker.role === 'reviewer'" class="worker-action-duration">{{ stepStatusLabel(row.step.status) }}</span>
                 </div>
-                <p v-if="!workerSteps.length || worker.livePreview || !memberActive" class="worker-current-action">{{ activity }}</p>
+                <p v-if="(!workerSteps.length || worker.livePreview || !memberActive) && (!workerFailureNote || activity !== statusText)" class="worker-current-action">{{ activity }}</p>
+                <p v-if="workerFailureNote" class="worker-failure-detail">{{ workerFailureNote }}</p>
                 <p v-if="workerThoughtPreview" class="worker-thought-fragment"><span class="worker-thought-source">{{ worker.livePreview?.streamType === 'thinking' && memberActive ? '思考片段' : '此前思考' }}</span>{{ workerThoughtPreview }}</p>
             </div>
             <details v-if="worker.thought" class="review-diagnostics" @toggle="fullThoughtOpen = ($event.target as HTMLDetailsElement).open">
                 <summary>完整思考</summary>
                 <pre v-if="fullThoughtOpen" class="worker-full-thought">{{ worker.thought }}</pre>
             </details>
-            <details v-if="workerModel" class="review-diagnostics">
+            <details v-if="workerModel || workerFailureNote || worker.steps?.length" class="review-diagnostics">
                 <summary>
                     <span>审查详情</span>
-                    <span class="review-model-pill">{{ workerModel }}</span>
+                    <span v-if="workerModel" class="review-model-pill">{{ workerModel }}</span>
                 </summary>
                 <div class="review-diagnostic-content">
-                    <p>执行模型：{{ workerModel }}</p>
+                    <p v-if="workerModel">执行模型：{{ workerModel }}</p>
                     <p v-if="visibleWorkerTool">子任务类型：{{ visibleWorkerTool }}</p>
                     <p v-if="worker.steps?.length">已上报步骤：{{ worker.steps.length }} 步</p>
+                    <p v-if="workerFailureNote" class="diag-notice">异常详情：{{ workerFailureNote }}</p>
                 </div>
             </details>
         </div>
@@ -238,9 +240,12 @@ const activity = computed(() => {
     }
     return worker.currentStep || visibleWorkerTool.value || statusText.value;
 });
+const workerErrorDetail = computed(() => typeof props.worker?.extra?.errorDetail === 'string' ? props.worker.extra.errorDetail.trim() : '');
+const workerFailureNote = computed(() => workerErrorDetail.value || ((props.worker?.status === 'failed' || props.worker?.status === 'challenged') ? props.worker?.summary?.trim() || '' : ''));
 const hasWorkerActivityPane = computed(() =>
     memberActive.value ||
     workerActionRows.value.length > 0 ||
+    !!workerFailureNote.value ||
     !!workerThoughtPreview.value ||
     (!!activity.value && activity.value !== statusText.value && activity.value !== '未完成')
 );
@@ -743,6 +748,19 @@ button {
     line-height: 20px;
     color: var(--theme-text-primary, #cbd5e1);
     overflow-wrap: anywhere;
+}
+
+.worker-failure-detail {
+    margin: 2px 0 0;
+    padding: 4px 7px;
+    border-radius: 4px;
+    background: rgba(239, 68, 68, 0.08);
+    border: 1px solid rgba(239, 68, 68, 0.22);
+    color: var(--theme-status-danger, #fca5a5);
+    font-size: 11px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+    user-select: text;
 }
 
 .worker-thought-fragment {
