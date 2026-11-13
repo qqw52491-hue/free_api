@@ -127,6 +127,121 @@ pub(crate) struct ReviewRelay {
     pub member_id: Option<String>,
     pub label: Option<String>,
     pub model: String,
+    pub progress: Option<Arc<crate::agent::reviewer_gatekeeper::progress::ReviewProgress>>,
+}
+
+pub(super) struct ReviewProgressBridge {
+    progress: Arc<crate::agent::reviewer_gatekeeper::progress::ReviewProgress>,
+    tool_budget: u32,
+    round: usize,
+    completed_tools: u32,
+    prev_thinking_chars: usize,
+    step_tools: HashMap<i64, String>,
+    finish_steps: std::collections::HashSet<i64>,
+}
+
+impl ReviewProgressBridge {
+    pub(super) fn new(
+        progress: Arc<crate::agent::reviewer_gatekeeper::progress::ReviewProgress>,
+        tool_budget: u32,
+    ) -> Self {
+        Self {
+            progress,
+            tool_budget,
+            round: 0,
+            completed_tools: 0,
+            prev_thinking_chars: 0,
+            step_tools: HashMap::new(),
+            finish_steps: std::collections::HashSet::new(),
+        }
+    }
+
+    pub(super) fn handle(&mut self, kind: &str, payload: &Value) {
+        match kind {
+            "action_phase" => match payload["phase"].as_str() {
+                Some("calling_llm") => {
+                    self.round += 1;
+                    self.prev_thinking_chars = 0;
+                    self.progress.request(self.round, self.completed_tools, self.tool_budget);
+                }
+                Some("skills") => {
+                    self.progress.phase("waiting", "正在装配审查上下文与可用工具");
+                }
+                _ => {
+                    if let Some(desc) = payload["description"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                        self.progress.phase("waiting", desc);
+                    }
+                }
+            },
+            "thinking" if !payload["done"].as_bool().unwrap_or(false) => {
+                let total = payload["content"].as_str().map(|s| s.chars().count()).unwrap_or(0);
+                let delta = total.saturating_sub(self.prev_thinking_chars);
+                if delta > 0 {
+                    self.prev_thinking_chars = total;
+                    self.progress.observe_stream_activity("thinking", delta);
+                }
+            }
+            "content_stream" => {
+                let delta = payload["chunk"].as_str().map(|s| s.chars().count()).unwrap_or(0);
+                if delta > 0 {
+                    self.progress.observe_stream_activity("content", delta);
+                }
+            }
+            "token_usage" => {
+                self.progress.record_request_metrics(
+                    Some(self.round.max(1)),
+                    payload["completion_tokens"].as_i64(),
+                    payload["ttft_ms"].as_u64().unwrap_or(0),
+                    payload["total_duration_ms"].as_u64().unwrap_or(0),
+                );
+            }
+            "llm_parse_error" => {
+                self.progress.phase("format_retry", "模型输出未满足指令协议，正在按协议纠偏重试");
+            }
+            "step_new" => {
+                if let Some(id) = payload["step"]["id"].as_i64() {
+                    let tool = payload["step"]["tool"]
+                        .as_str()
+                        .or_else(|| payload["step"]["action"].as_str())
+                        .unwrap_or("")
+                        .trim();
+                    if tool.eq_ignore_ascii_case("finish") {
+                        self.finish_steps.insert(id);
+                    } else if !tool.is_empty() {
+                        let desc = payload["step"]["description"].as_str().map(str::trim).filter(|s| !s.is_empty());
+                        let label = match desc {
+                            Some(d) => format!("{tool}（{}）", d.chars().take(48).collect::<String>()),
+                            None => tool.to_string(),
+                        };
+                        self.step_tools.insert(id, label);
+                    }
+                }
+            }
+            "step_start" => {
+                let step_id = payload["step_id"].as_i64();
+                if step_id.is_some_and(|id| self.finish_steps.contains(&id)) {
+                    self.progress.phase("converging", "正在校验并收口终审结论");
+                } else {
+                    let label = payload["tool"]
+                        .as_str()
+                        .filter(|s| !s.trim().is_empty())
+                        .map(str::to_owned)
+                        .or_else(|| step_id.and_then(|id| self.step_tools.get(&id).cloned()))
+                        .or_else(|| payload["description"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned))
+                        .unwrap_or_else(|| "取证工具".to_string());
+                    self.progress.phase("tool", &format!("正在取证：{label}"));
+                }
+            }
+            "step_done" | "step_error" => {
+                let step_id = payload["step_id"].as_i64();
+                if !step_id.is_some_and(|id| self.finish_steps.contains(&id)) {
+                    self.completed_tools += 1;
+                    self.progress.tool_completed(self.completed_tools);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 impl ReviewRelay {
@@ -169,6 +284,11 @@ pub(crate) fn spawn(
     let child_session = binding.child_session.clone();
     let parent_run = binding.parent_run.clone();
     let review_events = review.clone();
+    let tool_budget = crate::agent::review_tools::forensic_budget();
+    let progress_bridge = review_events
+        .as_ref()
+        .and_then(|r| r.progress.clone())
+        .map(|progress| Arc::new(Mutex::new(ReviewProgressBridge::new(progress, tool_budget))));
     let id = app.listen(format!("agent-progress-{child_session}"), move |event| {
         if let Ok(payload) = serde_json::from_str::<Value>(event.payload()) {
             let kind = payload["type"].as_str().unwrap_or_default();
@@ -190,6 +310,14 @@ pub(crate) fn spawn(
             if nested && payload.get("review").is_some() {
                 return;
             }
+            if !nested {
+                if let Some(ref bridge) = progress_bridge {
+                    bridge
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .handle(kind, &payload);
+                }
+            }
             let review_step = review_events.as_ref().and_then(|_| super::relay_review_step(&child_id, &payload));
             let duration = payload["metrics"]["tool_duration_ms"].as_u64();
             if let Some(mut detail) = review_step.or_else(|| super::relay_progress(&child_id, payload)) {
@@ -209,6 +337,9 @@ pub(crate) fn spawn(
         id,
     };
     if let Some(review) = &review {
+        if let Some(ref progress) = review.progress {
+            progress.phase("waiting", "终审执行器已启动，正在准备首轮请求");
+        }
         let mut detail = json!({"type":"child_task_progress","child_run_id":binding.child_run,"event":{"type":"started"}});
         detail["run_id"] = json!(&binding.parent_run);
         review.annotate(&mut detail, &binding.parent_run);

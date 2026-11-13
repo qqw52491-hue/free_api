@@ -223,6 +223,7 @@ pub(crate) fn start(
     program: ReviewProgram,
     interrupt: watch::Receiver<u64>,
     progress_member_id: Option<&str>,
+    progress: Option<std::sync::Arc<crate::agent::reviewer_gatekeeper::progress::ReviewProgress>>,
 ) -> Result<(), String> {
     let managed = app
         .try_state::<DbState>()
@@ -271,6 +272,7 @@ pub(crate) fn start(
             member_id: progress_member_id.map(str::to_owned),
             label: program.role_label.as_ref().and_then(Value::as_str).map(str::to_owned),
             model: model.to_owned(),
+            progress,
         }),
     )?;
     let id = id.to_string();
@@ -568,6 +570,7 @@ pub(crate) async fn run_final(
     evidence_since: chrono::DateTime<chrono::Utc>,
     mut interrupt: watch::Receiver<u64>,
     progress_member_id: &str,
+    progress: Option<std::sync::Arc<crate::agent::reviewer_gatekeeper::progress::ReviewProgress>>,
     role_name: Option<&str>,
     role_label: Option<&str>,
     parent_step_id: Option<usize>,
@@ -612,6 +615,7 @@ pub(crate) async fn run_final(
         program,
         interrupt.clone(),
         Some(progress_member_id),
+        progress,
     ) {
         crate::agent::execution::runtime::fail_checkpoint(db, &id, error.clone());
         return Err(error);

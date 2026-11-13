@@ -55,6 +55,8 @@ fn replace_with_isolated_json_repair_context(
 pub(crate) fn instruction_recovery_feedback(error: &str) -> String {
     if error.starts_with("[output_incomplete]") {
         format!("上一轮没有获得完整可执行的正式回复，本次响应未执行（{}）。保留此前已完成的工作，只提交下一项必要操作的完整 JSON；长脚本可以拆成较小的写入操作，不必重新规划整个任务。", error)
+    } else if error.contains("{\"tool\":\"finish\"") {
+        format!("上一轮指令未通过协议校验，本次响应未执行（{}）。请直接返回包含合法 \"tool\" 与 \"params\" 的完整 JSON 对象。", error)
     } else {
         format!("上一轮指令未通过协议校验，本次响应未执行（{}）。请按系统契约返回一个完整、可执行的 JSON 指令。", error)
     }
@@ -91,6 +93,23 @@ fn exhausted_instruction_recovery(failures: &[String]) -> StepExecutionError {
     }
 }
 
+fn bare_review_payload_hint(value: &serde_json::Value) -> Option<&'static str> {
+    let obj = value.as_object()?;
+    let is_final_verdict = obj.contains_key("verdict")
+        && (obj.contains_key("blocking_issues")
+            || obj.contains_key("nit_issues")
+            || obj.contains_key("summary")
+            || obj.contains_key("score"));
+    let is_child_findings = obj.contains_key("findings")
+        && (obj.contains_key("decision")
+            || obj.contains_key("confidence")
+            || obj.contains_key("evidence_refs")
+            || obj.contains_key("missing_evidence"));
+    (is_final_verdict || is_child_findings).then_some(
+        "AgentInstruction 缺少可执行入口（tool/action）：检测到顶层直接输出了审查结果字段（verdict/findings），宿主不会把裸结果对象视为完成动作；本次未提交任何审查结果。若已完成审查，请将完整结果字段放进 {\"tool\":\"finish\",\"params\":{...}} 重新提交；若需继续取证，请输出 {\"tool\":\"取证工具名\",\"params\":{...}}。",
+    )
+}
+
 /// 将模型文本转换为“可执行”的 AgentInstruction。
 /// JSON 语法、serde 结构与可执行形状三层都通过，才允许进入主循环。
 /// 失败统一返回到既有 regeneration feedback，不能默默退化为 `core` 动作。
@@ -101,11 +120,14 @@ fn parse_executable_instruction(final_json_str: &str) -> Result<AgentInstruction
     normalize_raw_instruction_value(&mut value);
     normalize_completion_state_updates(&mut value);
     validate_instruction_todo_ids(&mut value)?;
+    let review_hint = bare_review_payload_hint(&value);
     let mut instruction: AgentInstruction =
         serde_json::from_value(value).map_err(|error| format!("数据结构转换失败: {}", error))?;
-    instruction
-        .validate_executable_shape()
-        .map_err(|error| format!("指令可执行性校验失败: {}", error))?;
+    instruction.validate_executable_shape().map_err(|error| {
+        review_hint
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("指令可执行性校验失败: {}", error))
+    })?;
     // submit_plan / prepare_finish 与工具调用混发：在进入主循环前就地丢弃夹带的工具入口（不执行），
     // 下游写前门/审计台账都只会看到纯状态动作，免整轮打回重发。
     instruction.strip_entry_when_status_action();
@@ -1329,5 +1351,20 @@ mod human_reply_protocol_tests {
         assert!(parse_executable_instruction(bad).is_err());
         let empty = r#"{"human_reply_decision":"","tool":"local_file","params":{"action":"read","path":"a.txt"}}"#;
         assert!(parse_executable_instruction(empty).unwrap().human_reply_decision.is_none());
+    }
+
+    #[test]
+    fn bare_review_verdict_or_findings_gives_finish_tool_recovery_guidance() {
+        for raw in [
+            r#"{"verdict":"passed","score":92,"summary":"已完成核查","blocking_issues":[],"nit_issues":[]}"#,
+            r#"{"decision":"approved","findings":[],"confidence":"confirmed","evidence_refs":[],"missing_evidence":[]}"#,
+        ] {
+            let err = super::parse_executable_instruction(raw).unwrap_err();
+            assert!(err.contains(r#"{"tool":"finish","params""#), "{err}");
+            assert!(err.contains("裸结果对象"), "{err}");
+            let feedback = super::instruction_recovery_feedback(&err);
+            assert!(feedback.contains(r#"{"tool":"finish","params""#), "{feedback}");
+            assert!(feedback.contains("\"tool\" 与 \"params\""), "{feedback}");
+        }
     }
 }

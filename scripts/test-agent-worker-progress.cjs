@@ -345,15 +345,24 @@ async function main() {
 
     const finalBase = { type: 'finish_review_progress', review_id: 'final-executor-member', member_key: 'final-executor', role_label: '终审员', phase: 'preparing', started_at_ms: stopStart };
     progress(finalBase);
+    progress({ ...planReview, child_run_id: 'real-final-child', review: { member_id: 'final-executor-member' }, event: { type: 'started' } });
+    await vue.nextTick();
+    const finalCard = () => cards().find(el => el.props['data-review-id'] === 'final-executor-member');
+    assert(text(finalCard()).includes('等待响应'), 'executor start immediately moves card out of preparing');
+    assert(!text(finalCard()).includes('准备中'));
     progress({ ...planReview, child_run_id: 'real-final-child', review: { member_id: 'final-executor-member' }, event: {
         type: 'step_new', step: { id: 0, tool: 'get_step_output', params: { output_id: 'evidence-1' } },
     } });
+    progress({ ...planReview, child_run_id: 'real-final-child', review: { member_id: 'final-executor-member' }, event: {
+        type: 'step_start', step_id: 0, description: '读取步骤回执',
+    } });
+    await vue.nextTick();
+    assert(text(finalCard()).includes('取证中') || text(finalCard()).includes('读取步骤回执'));
     progress({ ...finalBase, phase: 'passed', elapsed_ms: 250 });
     await vue.nextTick();
     assert(!s.teamWorkers.value.some(w => w.id === 'real-final-child'), 'final executor belongs to its existing member card');
-    const finalCard = cards().find(el => el.props['data-review-id'] === 'final-executor-member');
-    toggle(finalCard).props.onClick(); await vue.nextTick();
-    assert(text(finalCard).includes('get_step_output · output_id=evidence-1'));
+    toggle(finalCard()).props.onClick(); await vue.nextTick();
+    assert(text(finalCard()).includes('get_step_output · output_id=evidence-1'));
 
     const { historicalReviewer } = load(path.join(base, 'reviewWorkerSteps.ts'));
     const saved = historicalReviewer({ id: 'plan-review-executor', purpose: 'plan_review', status: 'running', steps: [

@@ -31,7 +31,7 @@ mod review_types;
 mod git_utils;
 mod finish_diff;
 mod finish_committee;
-mod progress;
+pub(crate) mod progress;
 mod verdict_parse;
 
 pub(crate) use baseline::*;

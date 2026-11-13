@@ -690,3 +690,43 @@ fn collection_rechecks_registered_contract_before_accepting_delivery() {
         assert_eq!(read["delivery_accepted"],accepted);assert_eq!(read["contract_check_error"],body["contract_check_error"]);
     }
 }
+
+#[test]
+fn review_progress_bridge_updates_live_phases_without_leaking_text() {
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let out = events.clone();
+    let progress = std::sync::Arc::new(
+        crate::agent::reviewer_gatekeeper::progress::ReviewProgress::with_sink(
+            "finish-review",
+            "基础审查员",
+            "test-model",
+            move |v| out.lock().unwrap().push(v),
+        ),
+    );
+    let mut bridge = super::runtime::ReviewProgressBridge::new(progress.clone(), 8);
+    progress.phase("preparing", "终审 Agent 正在准备");
+    bridge.handle("action_phase", &json!({"phase":"calling_llm"}));
+    bridge.handle("thinking", &json!({"content":"SECRET_THOUGHT_CHUNK","done":false}));
+    bridge.handle("content_stream", &json!({"chunk":"SECRET_CONTENT"}));
+    bridge.handle("llm_parse_error", &json!({"error":"bad"}));
+    bridge.handle("step_new", &json!({"step":{"id":0,"tool":"read_child_result","description":"读取子交付"}}));
+    bridge.handle("step_start", &json!({"step_id":0,"description":"执行"}));
+    bridge.handle("step_done", &json!({"step_id":0}));
+    bridge.handle("token_usage", &json!({"completion_tokens":120,"ttft_ms":500,"total_duration_ms":2500}));
+    bridge.handle("step_new", &json!({"step":{"id":1,"tool":"finish","description":"提交"}}));
+    bridge.handle("step_start", &json!({"step_id":1}));
+    bridge.handle("step_done", &json!({"step_id":1}));
+    progress.finish("passed");
+    let e = events.lock().unwrap();
+    let phases: Vec<&str> = e.iter().filter_map(|v| v["phase"].as_str()).collect();
+    assert_eq!(
+        phases,
+        vec!["preparing", "waiting", "responding", "responding", "format_retry", "tool", "tool", "tool", "converging", "passed"]
+    );
+    assert_eq!(e.iter().rev().find(|v| v["round"] == 1).unwrap()["tool_steps"], 1, "finish step does not count as forensic tool step");
+    assert_eq!(e.last().unwrap()["format_corrections"], 1);
+    assert_eq!(e.last().unwrap()["last_request_tokens_per_second"], 60.0);
+    let serialized = serde_json::to_string(&*e).unwrap();
+    assert!(!serialized.contains("SECRET_THOUGHT_CHUNK"));
+    assert!(!serialized.contains("SECRET_CONTENT"));
+}

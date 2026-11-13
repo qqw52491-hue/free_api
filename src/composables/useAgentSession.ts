@@ -6,7 +6,7 @@ import { usePersistedAgentConversation, type PersistedConversationMessage } from
 import type { ArtifactDescriptor, AgentArtifactInput } from "../types/artifact";
 import { normalizeArtifact, normalizeArtifactList } from "../utils/artifact";
 import { finishSummaryText } from "../utils/agentCompletionText";
-import { activeReviewAnchor, applyReviewProgress, type ReviewProgressItem } from "../components/agent/reviewProgress";
+import { activeReviewAnchor, applyReviewProgress, isReviewTerminal, type ReviewProgressItem } from "../components/agent/reviewProgress";
 import { historicalReviewer, updateReviewWorkerSteps } from "../components/agent/reviewWorkerSteps";
 
 export interface AgentHistoryTurn {
@@ -1852,9 +1852,27 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 if (parentRun && reviewRunId.value && parentRun !== reviewRunId.value) return;
                 const memberId = toText(review.member_id);
                 if (memberId) {
-                    reviewProgress.value = reviewProgress.value.map(member => member.id === memberId && !stoppedReviewIds.has(memberId)
-                        ? { ...member, childRunId: child, steps: updateReviewWorkerSteps(member.steps || [], event) }
-                        : member);
+                    reviewProgress.value = reviewProgress.value.map(member => {
+                        if (member.id !== memberId || stoppedReviewIds.has(memberId)) return member;
+                        const steps = updateReviewWorkerSteps(member.steps || [], event);
+                        if (isReviewTerminal(member.phase)) return { ...member, childRunId: child, steps };
+                        let phase = member.phase;
+                        let description = member.description;
+                        if (evType === "started" && phase === "preparing") {
+                            phase = "waiting";
+                            description = "终审执行器已启动，等待模型响应";
+                        } else if (evType === "step_start") {
+                            phase = "tool";
+                            description = detail && detail !== evType ? `正在取证：${detail}` : "正在取证";
+                        } else if ((evType === "step_done" || evType === "step_error") && (phase === "tool" || phase === "preparing")) {
+                            phase = "waiting";
+                            description = "取证已返回，等待下一轮研判";
+                        } else if (evType === "action_phase" && detail && (phase === "preparing" || phase === "waiting")) {
+                            phase = "waiting";
+                            description = detail;
+                        }
+                        return { ...member, childRunId: child, steps, phase, description };
+                    });
                     return;
                 }
                 let worker = teamWorkers.value.find(item => item.id === child);

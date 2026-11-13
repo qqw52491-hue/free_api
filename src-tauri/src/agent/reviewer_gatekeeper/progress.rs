@@ -2,7 +2,7 @@
 use crate::llm::StreamEvent;
 use serde_json::{json, Value};
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Mutex,
 };
 use tauri::{AppHandle, Emitter, Runtime};
@@ -25,7 +25,7 @@ struct ProgressState {
     last_request_tokens_per_second: Option<f64>,
 }
 
-pub(super) struct ReviewProgress {
+pub(crate) struct ReviewProgress {
     sink: Box<dyn Fn(Value) + Send + Sync>,
     id: String,
     member_key: String,
@@ -35,11 +35,11 @@ pub(super) struct ReviewProgress {
     started: std::time::Instant,
     state: Mutex<ProgressState>,
     received_chars: AtomicUsize,
-    terminal: bool,
+    terminal: AtomicBool,
 }
 
 impl ReviewProgress {
-    pub(super) fn id(&self) -> &str { &self.id }
+    pub(crate) fn id(&self) -> &str { &self.id }
     pub(super) fn new<R: Runtime>(
         app: &AppHandle<R>,
         session: &str,
@@ -58,7 +58,7 @@ impl ReviewProgress {
         })
     }
 
-    fn with_sink(
+    pub(crate) fn with_sink(
         member: &str,
         label: &str,
         model: &str,
@@ -74,11 +74,14 @@ impl ReviewProgress {
             started: std::time::Instant::now(),
             state: Mutex::new(ProgressState::default()),
             received_chars: AtomicUsize::new(0),
-            terminal: false,
+            terminal: AtomicBool::new(false),
         }
     }
 
-    pub(super) fn phase(&self, phase: &str, message: &str) {
+    fn set_phase_inner(&self, phase: &str, message: &str, force: bool) {
+        if !force && self.terminal.load(Ordering::Acquire) {
+            return;
+        }
         {
             let mut s = self.state.lock().unwrap();
             s.phase = phase.into();
@@ -89,10 +92,17 @@ impl ReviewProgress {
             if phase == "retrying" { s.timeout_retries += 1; }
             if phase == "format_retry" { s.format_corrections += 1; }
         }
-        self.emit();
+        self.emit_payload();
     }
 
-    pub(super) fn request(&self, round: usize, steps: u32, budget: u32) {
+    pub(crate) fn phase(&self, phase: &str, message: &str) {
+        self.set_phase_inner(phase, message, false);
+    }
+
+    pub(crate) fn request(&self, round: usize, steps: u32, budget: u32) {
+        if self.terminal.load(Ordering::Acquire) {
+            return;
+        }
         self.received_chars.store(0, Ordering::Relaxed);
         {
             let mut s = self.state.lock().unwrap();
@@ -107,13 +117,27 @@ impl ReviewProgress {
     // A completed request sample, not a live estimate or an aggregate across tool rounds.
     // The transport's rate can be character-estimated without usage, so compute only
     // from provider-reported output tokens and a meaningful observed generation span.
-    pub(super) fn response_completed(&self, output: &crate::llm::StreamResult) {
+    pub(crate) fn record_request_metrics(
+        &self,
+        round_hint: Option<usize>,
+        output_tokens: Option<i64>,
+        ttft_ms: u64,
+        total_duration_ms: u64,
+    ) {
+        if self.terminal.load(Ordering::Acquire) {
+            return;
+        }
         {
             let mut s = self.state.lock().unwrap();
+            if s.round == 0 {
+                if let Some(round) = round_hint {
+                    s.round = round;
+                }
+            }
             s.last_request_round = Some(s.round);
-            s.last_request_output_tokens = output.usage.filter(|u| u.completion_tokens >= 0).map(|u| u.completion_tokens);
-            s.last_request_ttft_ms = (self.received_chars.load(Ordering::Relaxed) > 0).then_some(output.ttft_ms);
-            let generation_ms = output.total_duration_ms.saturating_sub(output.ttft_ms);
+            s.last_request_output_tokens = output_tokens.filter(|tokens| *tokens >= 0);
+            s.last_request_ttft_ms = (self.received_chars.load(Ordering::Relaxed) > 0).then_some(ttft_ms);
+            let generation_ms = total_duration_ms.saturating_sub(ttft_ms);
             s.last_request_tokens_per_second = s.last_request_output_tokens
                 .filter(|tokens| *tokens > 0 && generation_ms > 50 && s.last_request_ttft_ms.is_some())
                 .map(|tokens| tokens as f64 * 1000.0 / generation_ms as f64);
@@ -121,12 +145,19 @@ impl ReviewProgress {
         self.emit();
     }
 
-    pub(super) fn observe(&self, event: StreamEvent<'_>) -> bool {
-        let (kind, chunk) = match event {
-            StreamEvent::Thinking { chunk, .. } => ("thinking", chunk),
-            StreamEvent::Content { chunk, .. } => ("content", chunk),
-        };
-        let count = chunk.chars().count();
+    pub(super) fn response_completed(&self, output: &crate::llm::StreamResult) {
+        self.record_request_metrics(
+            None,
+            output.usage.map(|u| u.completion_tokens),
+            output.ttft_ms,
+            output.total_duration_ms,
+        );
+    }
+
+    pub(crate) fn observe_stream_activity(&self, kind: &str, count: usize) -> bool {
+        if self.terminal.load(Ordering::Acquire) {
+            return true;
+        }
         if count > 0 {
             let first = self.received_chars.fetch_add(count, Ordering::Relaxed) == 0;
             let changed = {
@@ -147,6 +178,14 @@ impl ReviewProgress {
         true
     }
 
+    pub(super) fn observe(&self, event: StreamEvent<'_>) -> bool {
+        let (kind, chunk) = match event {
+            StreamEvent::Thinking { chunk, .. } => ("thinking", chunk),
+            StreamEvent::Content { chunk, .. } => ("content", chunk),
+        };
+        self.observe_stream_activity(kind, chunk.chars().count())
+    }
+
     // 定时器与被观察 Future 同生共死：停止/返回后没有后台心跳，也不重复发起 HTTP。
     pub(super) async fn wait<F: std::future::Future>(&self, future: F) -> F::Output {
         tokio::pin!(future);
@@ -165,29 +204,39 @@ impl ReviewProgress {
     }
 
     // 固定枚举由宿主分支给出；不按错误文案猜测，不广播上游原始错误。
-    pub(super) fn fail(&mut self, kind: &str, message: &str) {
-        self.terminal = true;
+    pub(crate) fn fail(&self, kind: &str, message: &str) {
+        self.terminal.store(true, Ordering::SeqCst);
         self.state.lock().unwrap().failure_kind = kind.into();
-        self.phase(if kind == "cancelled" { "cancelled" } else { "failed" }, message);
+        self.set_phase_inner(if kind == "cancelled" { "cancelled" } else { "failed" }, message, true);
     }
 
-    pub(super) fn tool_completed(&self, steps: u32) {
+    pub(crate) fn tool_completed(&self, steps: u32) {
+        if self.terminal.load(Ordering::Acquire) {
+            return;
+        }
         self.state.lock().unwrap().tool_steps = steps;
         self.emit();
     }
 
-    pub(super) fn finish(&mut self, verdict: &str) {
-        self.terminal = true;
+    pub(crate) fn finish(&self, verdict: &str) {
+        self.terminal.store(true, Ordering::SeqCst);
         let (phase, message) = match verdict {
             "passed" => ("passed", "终审通过（不代表整个任务已经完成交付）"),
             "rejected" => ("rejected", "终审提出阻塞问题，等待主执行者处理"),
             "skipped" => ("skipped", "本轮未执行模型终审"),
             _ => ("failed", "未获得有效审查结论，请检查调用诊断"),
         };
-        self.phase(phase, message);
+        self.set_phase_inner(phase, message, true);
     }
 
     fn emit(&self) {
+        if self.terminal.load(Ordering::Acquire) {
+            return;
+        }
+        self.emit_payload();
+    }
+
+    fn emit_payload(&self) {
         let s = self.state.lock().unwrap();
         let payload = json!({
             "type": "finish_review_progress", "review_id": self.id, "member_key": self.member_key,
@@ -209,8 +258,8 @@ impl ReviewProgress {
 
 impl Drop for ReviewProgress {
     fn drop(&mut self) {
-        if !self.terminal {
-            self.phase("incomplete", "审查已停止或调用结束，未获得有效结论");
+        if !self.terminal.load(Ordering::Acquire) {
+            self.set_phase_inner("incomplete", "审查已停止或调用结束，未获得有效结论", true);
         }
     }
 }
@@ -236,7 +285,7 @@ mod tests {
 
     #[test]
     fn progress_reports_identity_and_counts_but_never_stream_text() {
-        let (mut p, events) = fixture();
+        let (p, events) = fixture();
         p.request(2, 1, 8);
         p.observe(StreamEvent::Thinking {
             chunk: "PRIVATE_THOUGHT",
@@ -259,7 +308,7 @@ mod tests {
 
     #[test]
     fn request_speed_uses_reported_usage_not_character_estimates() {
-        let (mut p, events) = fixture();
+        let (p, events) = fixture();
         p.request(1, 0, 8);
         p.observe(StreamEvent::Content { chunk: "private", accumulated_content: "private", full_thinking: "" });
         let mut output = crate::llm::StreamResult {
@@ -292,7 +341,7 @@ mod tests {
 
     #[test]
     fn stream_kind_is_observed_not_guessed_and_resets_per_request() {
-        let (mut p, events) = fixture();
+        let (p, events) = fixture();
         p.request(1, 0, 8);
         p.observe(StreamEvent::Thinking { chunk: "secret", accumulated: "secret" });
         p.observe(StreamEvent::Thinking { chunk: "more", accumulated: "secretmore" });
@@ -307,7 +356,7 @@ mod tests {
 
     #[test]
     fn retry_notice_survives_next_request_and_failure_is_terminal() {
-        let (mut p, events) = fixture();
+        let (p, events) = fixture();
         p.request(1, 0, 8);
         p.phase("retrying", "等待超时，正在重试");
         p.request(2, 0, 8);
@@ -323,7 +372,7 @@ mod tests {
     #[test]
     fn terminal_diagnostics_keep_counters_and_distinguish_cancellation() {
         for kind in ["timeout", "request", "format", "configuration", "cancelled"] {
-            let (mut p, events) = fixture();
+            let (p, events) = fixture();
             p.request(1, 0, 8);
             p.phase("format_retry", "纠正格式");
             p.request(2, 0, 8);
@@ -342,7 +391,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn silent_request_has_heartbeat_without_restarting_future() {
-        let (mut p, events) = fixture();
+        let (p, events) = fixture();
         p.request(1, 0, 8);
         p.wait(tokio::time::sleep(std::time::Duration::from_secs(12)))
             .await;
@@ -367,5 +416,26 @@ mod tests {
         let e = events.lock().unwrap();
         assert_eq!(e.len(), count);
         assert_eq!(e.last().unwrap()["phase"], "incomplete");
+    }
+
+    #[test]
+    fn shared_terminal_progress_blocks_late_events_and_drop_incomplete() {
+        let (p, events) = fixture();
+        let shared = std::sync::Arc::new(p);
+        shared.phase("preparing", "正在准备");
+        shared.request(1, 0, 8);
+        shared.observe_stream_activity("thinking", 12);
+        shared.phase("tool", "正在取证：list_child_runs");
+        shared.tool_completed(1);
+        shared.finish("passed");
+        let after_finish = events.lock().unwrap().len();
+        shared.phase("waiting", "late event after terminal");
+        shared.observe_stream_activity("content", 10);
+        shared.tool_completed(2);
+        drop(shared);
+        let e = events.lock().unwrap();
+        assert_eq!(e.len(), after_finish);
+        assert_eq!(e.last().unwrap()["phase"], "passed");
+        assert_eq!(e.last().unwrap()["tool_steps"], 1);
     }
 }
