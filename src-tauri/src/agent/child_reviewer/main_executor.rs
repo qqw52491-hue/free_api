@@ -65,6 +65,8 @@ pub(crate) struct ReviewProgram {
     pub evidence_since: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default)]
     pub parent_step_id: Option<usize>,
+    #[serde(default)]
+    pub parent_step_occurrence: Option<usize>,
 }
 
 pub(crate) fn load(db: &DbState, id: &str) -> Result<Option<ReviewProgram>, String> {
@@ -556,6 +558,15 @@ pub(crate) async fn tool(
     }
 }
 
+pub(crate) struct FinalReviewError {
+    pub message: String,
+    pub kind: &'static str,
+}
+
+impl From<String> for FinalReviewError {
+    fn from(message: String) -> Self { Self { message, kind: "unknown" } }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_final(
     app: AppHandle,
@@ -574,7 +585,7 @@ pub(crate) async fn run_final(
     role_name: Option<&str>,
     role_label: Option<&str>,
     parent_step_id: Option<usize>,
-) -> Result<crate::agent::reviewer_gatekeeper::ReviewResult, String> {
+) -> Result<crate::agent::reviewer_gatekeeper::ReviewResult, FinalReviewError> {
     let id = begin_child_run_extended(
         db,
         parent,
@@ -588,6 +599,14 @@ pub(crate) async fn run_final(
         None,
         &ChildRunIdentity::fresh("final_review"),
     )?;
+    let parent_step_occurrence = parent_step_id.and_then(|step_id| {
+        crate::agent::run_trace::load_run_steps(db, parent).ok().map(|steps| {
+            steps.iter().filter(|step| {
+                step["step_id"].as_u64().or_else(|| step["id"].as_u64()) == Some(step_id as u64)
+                    && matches!(step["tool"].as_str(), Some("finish" | "prepare_finish"))
+            }).count()
+        })
+    });
     let program = ReviewProgram {
         parent_session: session.into(),
         workspace: workspace.into(),
@@ -604,6 +623,7 @@ pub(crate) async fn run_final(
         verify_obligations: obligations,
         evidence_since: Some(evidence_since),
         parent_step_id,
+        parent_step_occurrence,
     };
     if let Err(error) = start(
         app,
@@ -618,7 +638,7 @@ pub(crate) async fn run_final(
         progress,
     ) {
         crate::agent::execution::runtime::fail_checkpoint(db, &id, error.clone());
-        return Err(error);
+        return Err(error.into());
     }
     let mut interrupt_open = true;
     while crate::agent::child_task::runtime::attached(&id) {
@@ -630,25 +650,32 @@ pub(crate) async fn run_final(
             }
         }
     }
-    let (status, raw): (String, Option<String>) = db
+    let (status, raw, failure_kind): (String, Option<String>, Option<String>) = db
         .0
         .lock()
         .map_err(|e| e.to_string())?
         .query_row(
-            "SELECT status,result_json FROM agent_child_runs WHERE id=?1 AND parent_session_id=?2",
+            "SELECT status,result_json,error_kind FROM agent_child_runs WHERE id=?1 AND parent_session_id=?2",
             params![id, session],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .map_err(|e| e.to_string())?;
     // Inline final-review transport consumes its own receipt. Parent mailbox must
     // not reinterpret a final ReviewResult as a child findings contract.
     db.0.lock().map_err(|e|e.to_string())?.execute("UPDATE agent_child_runs SET consumed_at=COALESCE(consumed_at,?2),applied_at=COALESCE(applied_at,?2) WHERE id=?1",params![id,chrono::Utc::now().to_rfc3339()]).map_err(|e|e.to_string())?;
     if status != "succeeded" {
-        return Err(format!(
-            "通用终审执行未成功（{status}）；未获得有效审查结论。"
-        ));
+        return Err(FinalReviewError {
+            message: format!("通用终审执行未成功（{status}）；未获得有效审查结论。"),
+            kind: match failure_kind.as_deref() {
+                Some("invalid_output") => "instruction_recovery",
+                Some("timeout") => "timeout",
+                Some("request_or_stream") => "request",
+                Some("cancelled" | "interrupted") => "cancelled",
+                _ => "unknown",
+            },
+        });
     }
-    serde_json::from_str(raw.as_deref().ok_or("终审回执缺失")?).map_err(|e| e.to_string())
+    serde_json::from_str(raw.as_deref().ok_or_else(|| FinalReviewError::from("终审回执缺失".to_string()))?).map_err(|e| FinalReviewError::from(e.to_string()))
 }
 
 pub(crate) fn settle(
@@ -717,7 +744,15 @@ pub(crate) fn settle(
     let (status, mut body, error) = match result {
         Ok(value) => ("succeeded", value, None),
         Err(error) => {
-            let kind = ChildErrorKind::Other(error.clone());
+            let kind = match Snapshot::load(db, &binding.child_run, "reviewer") {
+                Ok(Some(snapshot)) => match snapshot.state["terminal_failure_kind"].as_str() {
+                    Some("invalid_output") => ChildErrorKind::InvalidOutput,
+                    Some("request_or_stream") => ChildErrorKind::RequestOrStream,
+                    Some("timeout") => ChildErrorKind::Timeout,
+                    _ => ChildErrorKind::Other(error.clone()),
+                },
+                _ => ChildErrorKind::Other(error.clone()),
+            };
             (
                 "failed",
                 serde_json::from_str(&child_error_result_json(

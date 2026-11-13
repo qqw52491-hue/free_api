@@ -237,6 +237,9 @@ fn review_step_history(conn: &rusqlite::Connection, session: &str, parent_run: &
         let parent_step_id = checkpoint
             .as_ref()
             .and_then(|value| value["state"]["main_review"]["parent_step_id"].as_u64());
+        let parent_step_occurrence = checkpoint
+            .as_ref()
+            .and_then(|value| value["state"]["main_review"]["parent_step_occurrence"].as_u64());
         let parsed_result = result_json.and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
         let verdict = parsed_result
             .as_ref()
@@ -269,12 +272,10 @@ fn review_step_history(conn: &rusqlite::Connection, session: &str, parent_run: &
         let is_problematic = status != "succeeded"
             || matches!(verdict.as_deref(), Some("rejected" | "failed_open"));
         let error_detail = if is_problematic {
-            error_kind
-                .as_deref()
-                .and_then(|raw| first_line_clipped(raw, 200))
-                .or(blocking_issue)
+            blocking_issue
                 .or(missing_ev)
                 .or_else(|| summary.clone())
+                .or_else(|| error_kind.as_deref().and_then(|raw| first_line_clipped(raw, 200)))
         } else {
             None
         };
@@ -297,9 +298,11 @@ fn review_step_history(conn: &rusqlite::Connection, session: &str, parent_run: &
             "label": role_label,
             "duration_ms": duration,
             "parent_step_id": parent_step_id,
+            "parent_step_occurrence": parent_step_occurrence,
             "verdict": verdict,
             "summary": summary,
             "error_detail": error_detail,
+            "error_kind": error_kind,
             "steps": previews,
         }))
     })
@@ -910,7 +913,8 @@ mod tests {
                     "main_review": {
                         "role": "reviewer",
                         "role_label": "基础审查员",
-                        "parent_step_id": 30
+                        "parent_step_id": 30,
+                        "parent_step_occurrence": 1
                     }
                 }
             })
@@ -967,6 +971,7 @@ mod tests {
         assert_eq!(members[0]["model"], "nex-n2.6");
         assert_eq!(members[0]["label"], "基础审查员");
         assert_eq!(members[0]["parent_step_id"], 30);
+        assert_eq!(members[0]["parent_step_occurrence"], 1);
         assert_eq!(
             members[0]["error_detail"],
             "模型指令恢复已用完 2 次尝试；未取得可执行指令（空响应或仅思考过程）"

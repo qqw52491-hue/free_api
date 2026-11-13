@@ -81,6 +81,7 @@
                         <p v-else class="worker-action-purpose">{{ row.explanation }}</p>
                     </div>
                     <span class="worker-action-duration">{{ stepStatusLabel(row.step.status) }}</span>
+                    <code v-if="row.step.outputId" class="worker-action-purpose">回执 {{ row.step.outputId }}</code>
                 </div>
             </div>
             <div ref="activityPane" class="review-activity-scroll soft-scrollbar" role="region" :aria-label="`${label} · 实时动作`" tabindex="0" @scroll.passive="onActivityScroll" @wheel.passive="followActivity = false" @touchmove.passive="followActivity = false">
@@ -97,6 +98,7 @@
                     <p v-if="diagnosis" class="diag-banner" :class="`tone-${diagnosis.tone || 'neutral'}`">{{ diagnosis.title }} · {{ diagnosis.detail }}</p>
                     <p v-if="!review.childRunId">第 {{ review.round }} 次逻辑请求 · 取证已用 {{ review.toolSteps }} / 上限 {{ review.toolBudget }} 次</p>
                     <p v-if="!review.childRunId">超时重发 {{ review.timeoutRetries ?? '未知' }} 次 · 格式补正 {{ review.formatCorrections ?? '未知' }} 次</p>
+                    <p v-if="review.lastRequestTry != null">最近请求第 {{ review.lastRequestRound }} 轮，第 {{ review.lastRequestTry }} 次尝试</p>
                     <p v-if="review.lastNotice" class="diag-notice">最近异常：{{ review.lastNotice }}</p>
                     <p class="diag-caption">片段数不是 token 数或吞吐速度；耗时以最后事件为准，成员通过不代表整个任务已经交付。</p>
                 </div>
@@ -132,6 +134,7 @@
                         <p v-else class="worker-action-purpose" :title="row.explanation">{{ row.explanation }}</p>
                     </div>
                     <span v-if="worker.role === 'reviewer'" class="worker-action-duration">{{ stepStatusLabel(row.step.status) }}</span>
+                    <code v-if="row.step.outputId" class="worker-action-purpose">回执 {{ row.step.outputId }}</code>
                 </div>
                 <p v-if="(!workerSteps.length || worker.livePreview || !memberActive) && (!workerFailureNote || activity !== statusText)" class="worker-current-action">{{ activity }}</p>
                 <p v-if="workerFailureNote" class="worker-failure-detail">{{ workerFailureNote }}</p>

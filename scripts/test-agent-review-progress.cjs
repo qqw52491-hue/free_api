@@ -24,8 +24,10 @@ async function html(s, running = true) {
 async function main() {
     const s = await session('failed');
     await emit('channel-run-started', { session_id: 'existing-session', goal: 'review progress regression' });
+    await emit('agent-progress-existing-session', { type: 'step_new', step: { id: 7, tool: 'finish', description: '终审' } });
+    await emit('agent-progress-existing-session', { type: 'step_start', step_id: 7 });
     const start = Date.now() + 100;
-    const base = { type: 'finish_review_progress', review_id: 'attempt-A', member_key: 'finish-review-member-1', role_label: '安全审查员', model: 'test-flash', started_at_ms: start, phase: 'waiting', description: '请求已发起，等待模型响应', elapsed_ms: 0, round: 1, tool_steps: 0, tool_budget: 8, received_chars: 0 };
+    const base = { type: 'finish_review_progress', parent_step_id: 7, review_id: 'attempt-A', member_key: 'finish-review-member-1', role_label: '安全审查员', model: 'test-flash', started_at_ms: start, phase: 'waiting', description: '请求已发起，等待模型响应', elapsed_ms: 0, round: 1, tool_steps: 0, tool_budget: 8, received_chars: 0 };
     const send = p => emit('agent-progress-existing-session', { ...base, ...p });
     send({}); assert.equal(s.reviewProgress.value.length, 1);
     const logs = s.logs.value.length;

@@ -187,7 +187,8 @@ impl ReviewProgressBridge {
                     self.progress.observe_stream_activity("content", delta);
                 }
             }
-            "token_usage" => {
+            "review_request_metrics" => {
+                self.progress.record_request_try(payload["try_index"].as_u64());
                 self.progress.record_request_metrics(
                     Some(self.round.max(1)),
                     payload["completion_tokens"].as_i64(),
@@ -195,7 +196,9 @@ impl ReviewProgressBridge {
                     payload["total_duration_ms"].as_u64().unwrap_or(0),
                 );
             }
-            "llm_parse_error" => {
+            "review_format_retry_started" => {
+                self.prev_thinking_chars = 0;
+                self.progress.reset_stream_activity();
                 self.progress.phase("format_retry", "模型输出未满足指令协议，正在按协议纠偏重试");
             }
             "step_new" => {
@@ -235,8 +238,10 @@ impl ReviewProgressBridge {
             "step_done" | "step_error" => {
                 let step_id = payload["step_id"].as_i64();
                 if !step_id.is_some_and(|id| self.finish_steps.contains(&id)) {
-                    self.completed_tools += 1;
-                    self.progress.tool_completed(self.completed_tools);
+                    if let Some(used) = payload["review_tool_steps"].as_u64() {
+                        self.completed_tools = used.min(u64::from(u32::MAX)) as u32;
+                        self.progress.tool_completed(self.completed_tools);
+                    }
                 }
             }
             _ => {}
@@ -284,13 +289,19 @@ pub(crate) fn spawn(
     let child_session = binding.child_session.clone();
     let parent_run = binding.parent_run.clone();
     let review_events = review.clone();
+    let progress_db = db.clone();
     let tool_budget = crate::agent::review_tools::forensic_budget();
     let progress_bridge = review_events
         .as_ref()
         .and_then(|r| r.progress.clone())
         .map(|progress| Arc::new(Mutex::new(ReviewProgressBridge::new(progress, tool_budget))));
     let id = app.listen(format!("agent-progress-{child_session}"), move |event| {
-        if let Ok(payload) = serde_json::from_str::<Value>(event.payload()) {
+        if let Ok(mut payload) = serde_json::from_str::<Value>(event.payload()) {
+            if matches!(payload["type"].as_str(), Some("step_done" | "step_error")) && progress_bridge.is_some() {
+                if let Ok(Some(snapshot)) = crate::agent::execution::runtime::Snapshot::load(&progress_db, &child_id, "reviewer") {
+                    payload["review_tool_steps"] = snapshot.state["tool_steps"].clone();
+                }
+            }
             let kind = payload["type"].as_str().unwrap_or_default();
             if kind == "agent_paused" {
                 *paused.lock().unwrap_or_else(|e| e.into_inner()) = Some(payload.clone());

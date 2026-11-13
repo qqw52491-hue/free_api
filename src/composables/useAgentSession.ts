@@ -6,7 +6,7 @@ import { usePersistedAgentConversation, type PersistedConversationMessage } from
 import type { ArtifactDescriptor, AgentArtifactInput } from "../types/artifact";
 import { normalizeArtifact, normalizeArtifactList } from "../utils/artifact";
 import { finishSummaryText } from "../utils/agentCompletionText";
-import { activeReviewAnchor, applyReviewProgress, isReviewTerminal, type ReviewProgressItem } from "../components/agent/reviewProgress";
+import { activeReviewAnchor, applyReviewProgress, type ReviewProgressItem } from "../components/agent/reviewProgress";
 import { historicalReviewer, updateReviewWorkerSteps } from "../components/agent/reviewWorkerSteps";
 
 export interface AgentHistoryTurn {
@@ -870,7 +870,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         const rawSteps = Array.isArray(trace.steps) ? trace.steps : [];
         const steps = rawSteps.map((rawStep, index): AgentStepItem => {
             const step = asRecord(rawStep);
-            const stepId = numberOrUndefined(step.id ?? step.step_id) ?? index;
+            const stepId = numberOrUndefined(step.step_id) ?? numberOrUndefined(step.id) ?? index;
             const tool = toText(step.tool || step.action) || "action";
             const sourcePlanId = toText(step.plan_id || step.planId) || "plan-default";
             const planTitle = sanitizePlanTitle(toText(step.plan_title || step.planTitle), toText(goal));
@@ -1510,7 +1510,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         if (eventType === "finish_review_progress") {
             const activeRuns = historyRuns.value.filter(run => ['running', 'waiting_human'].includes(run.status));
             const runId = toText(payload.run_id) || reviewRunId.value || (activeRuns.length === 1 ? activeRuns[0].id : '');
-            const anchor = activeReviewAnchor(steps.value, runId);
+            const parentStepId = typeof payload.parent_step_id === "number" && Number.isSafeInteger(payload.parent_step_id) ? payload.parent_step_id : undefined;
+            const anchor = activeReviewAnchor(steps.value, runId, parentStepId);
             const next = applyReviewProgress(
                 reviewProgress.value,
                 payload,
@@ -1855,23 +1856,10 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                     reviewProgress.value = reviewProgress.value.map(member => {
                         if (member.id !== memberId || stoppedReviewIds.has(memberId)) return member;
                         const steps = updateReviewWorkerSteps(member.steps || [], event);
-                        if (isReviewTerminal(member.phase)) return { ...member, childRunId: child, steps };
-                        let phase = member.phase;
-                        let description = member.description;
-                        if (evType === "started" && phase === "preparing") {
-                            phase = "waiting";
-                            description = "终审执行器已启动，等待模型响应";
-                        } else if (evType === "step_start") {
-                            phase = "tool";
-                            description = detail && detail !== evType ? `正在取证：${detail}` : "正在取证";
-                        } else if ((evType === "step_done" || evType === "step_error") && (phase === "tool" || phase === "preparing")) {
-                            phase = "waiting";
-                            description = "取证已返回，等待下一轮研判";
-                        } else if (evType === "action_phase" && detail && (phase === "preparing" || phase === "waiting")) {
-                            phase = "waiting";
-                            description = detail;
+                        if (evType === "started" && member.phase === "preparing") {
+                            return { ...member, childRunId: child, steps, phase: "waiting", description: "终审执行器已启动，等待模型响应" };
                         }
-                        return { ...member, childRunId: child, steps, phase, description };
+                        return { ...member, childRunId: child, steps };
                     });
                     return;
                 }

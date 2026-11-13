@@ -440,6 +440,7 @@ export interface RoleCard {
 }
 
 export interface AgentWorkerStep {
+    outputId?: string;
     stepNumber: number;
     title: string;
     tool?: string;

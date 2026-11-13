@@ -58,7 +58,7 @@ impl Fixture {
             final_fingerprint: None,
             verify_obligations: vec![],
             evidence_since: None,
-            parent_step_id: None,
+            parent_step_id: None, parent_step_occurrence: None,
         };
         crate::agent::conversation::begin_turn(&db, "owner", "mock", "parent").unwrap();
         crate::agent::conversation::begin_turn(&db, &format!("task-{id}"), "mock", "review")
@@ -758,4 +758,16 @@ async fn review_tree_overview_spans_branches_but_evidence_remains_scoped() {
     assert!(!forbidden.success);
     let parent = tool(&f.db, &f.id, &f.program, &request(json!({"tool":"list_execution_steps","params":{"run_id":"parent-run"}})), &mut rx).await;
     assert!(parent.success, "{}", parent.stderr);
+}
+
+#[test]
+fn exhausted_instruction_recovery_is_recorded_as_invalid_output() {
+    let f = Fixture::new();
+    let mut snapshot = Snapshot::load(&f.db, &f.id, "reviewer").unwrap().unwrap();
+    snapshot.state["terminal_failure_kind"] = json!("invalid_output");
+    snapshot.save(&f.db).unwrap();
+    settle(&f.db, &f.binding(), &Err("指令恢复已耗尽".into()), 1).unwrap();
+    let conn = f.db.0.lock().unwrap();
+    let kind: String = conn.query_row("SELECT error_kind FROM agent_child_runs WHERE id=?1", [&f.id], |row| row.get(0)).unwrap();
+    assert_eq!(kind, "invalid_output");
 }

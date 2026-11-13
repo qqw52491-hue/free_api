@@ -19,6 +19,7 @@ export interface ReviewProgressItem {
     toolBudget: number;
     receivedChars: number;
     lastRequestRound?: number | null;
+    lastRequestTry?: number | null;
     lastRequestOutputTokens?: number | null;
     lastRequestTtftMs?: number | null;
     lastRequestTokensPerSecond?: number | null;
@@ -35,11 +36,11 @@ const terminal = new Set(['passed', 'rejected', 'failed', 'incomplete', 'cancell
 export function isReviewTerminal(phase: string): boolean { return terminal.has(phase); }
 const number = (value: unknown): number => typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : 0;
 const optionalCount = (value: unknown): number | null => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
-const failureKinds = new Set(['timeout', 'request', 'format', 'configuration', 'cancelled']);
+const failureKinds = new Set(['timeout', 'request', 'format', 'instruction_recovery', 'configuration', 'cancelled']);
 const text = (value: unknown, limit = 200): string => typeof value === 'string' ? value.slice(0, limit) : '';
 
 export function sameReviewStepAnchor(left?: ReviewStepAnchor, right?: ReviewStepAnchor): boolean {
-    if (!left || !right) return true;
+    if (!left || !right) return false;
     return left.stepId === right.stepId
         && (!left.runId || !right.runId || left.runId === right.runId);
 }
@@ -61,6 +62,7 @@ export function applyReviewProgress(
         round: number(payload.round), toolSteps: number(payload.tool_steps), toolBudget: number(payload.tool_budget),
         receivedChars: number(payload.received_chars),
         lastRequestRound: optionalCount(payload.last_request_round),
+        lastRequestTry: optionalCount(payload.last_request_try),
         lastRequestOutputTokens: optionalCount(payload.last_request_output_tokens),
         lastRequestTtftMs: optionalCount(payload.last_request_ttft_ms),
         lastRequestTokensPerSecond: optionalCount(payload.last_request_round) && optionalCount(payload.last_request_output_tokens) && typeof payload.last_request_tokens_per_second === 'number' && Number.isFinite(payload.last_request_tokens_per_second) && payload.last_request_tokens_per_second > 0 ? payload.last_request_tokens_per_second : null,
@@ -78,12 +80,13 @@ export function applyReviewProgress(
     if (old && old.id === id) {
         next.childRunId = old.childRunId;
         next.steps = old.steps;
-        if (next.lastRequestTokensPerSecond == null && old.lastRequestTokensPerSecond != null) {
+        if (!("last_request_round" in payload) && next.lastRequestTokensPerSecond == null && old.lastRequestTokensPerSecond != null) {
             next.lastRequestTokensPerSecond = old.lastRequestTokensPerSecond;
             next.lastRequestRound = old.lastRequestRound;
+            next.lastRequestTry = old.lastRequestTry;
             next.lastRequestOutputTokens = old.lastRequestOutputTokens;
         }
-        if (next.lastRequestTtftMs == null && old.lastRequestTtftMs != null) {
+        if (!("last_request_round" in payload) && next.lastRequestTtftMs == null && old.lastRequestTtftMs != null) {
             next.lastRequestTtftMs = old.lastRequestTtftMs;
         }
         if (!next.model && old.model) {
@@ -100,10 +103,11 @@ export function applyReviewProgress(
 }
 
 /** 首次事件只绑定唯一正在执行的 finish；不按角色、文案或最近时间猜步骤。 */
-export function activeReviewAnchor(steps: AgentStepItem[], runId: string): ReviewStepAnchor | undefined {
-    const active = steps.filter(step => ['finish', 'prepare_finish'].includes(step.tool || '') && step.status === 'running');
-    if (active.length !== 1) return undefined;
-    const step = active[0];
+export function activeReviewAnchor(steps: AgentStepItem[], runId: string, parentStepId?: number): ReviewStepAnchor | undefined {
+    const active = steps.filter(step => ['finish', 'prepare_finish'].includes(step.tool || '') && (parentStepId === undefined ? step.status === 'running' : step.stepId === parentStepId));
+    const running = active.filter(step => step.status === 'running');
+    const step = active.length === 1 ? active[0] : running.length === 1 ? running[0] : undefined;
+    if (!step) return undefined;
     return { stepId: step.id, stepNumber: step.stepId, occurrence: steps.filter(s => s.stepId === step.stepId).indexOf(step), runId };
 }
 

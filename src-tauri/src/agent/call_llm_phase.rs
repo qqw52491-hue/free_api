@@ -416,10 +416,10 @@ pub async fn run_call_llm_and_run_tool_phases(
         )
         .await
         {
-            Err(_elapsed) => Err(format!(
+            Err(_elapsed) => Err(StepExecutionError::WatchdogTimeout(format!(
                 "LLM 调用看门狗超时（{}s 无任何产出）——请求可能僵死，已按失败处理避免会话冻结。",
                 llm_watchdog_secs
-            ).into()),
+            ))),
             Ok(r) => r,
         }
         .map(|r| {
@@ -464,6 +464,8 @@ pub async fn run_call_llm_and_run_tool_phases(
                     )?;
                     return Err(e);
                 }
+                let is_request_failure = matches!(e, StepExecutionError::RequestFailure(_));
+                let is_watchdog_timeout = matches!(e, StepExecutionError::WatchdogTimeout(_));
                 let e = e.to_string();
                 // 🛑 如果是网络/API 传输层彻底失败，直接快速终止
                 if e.contains("LLM 请求最终失败")
@@ -477,7 +479,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                         &mut run_machine,
                         AgentRunEvent::PlanningFailed { reason: e.clone() },
                     )?;
-                    return Err(format!("❌ LLM 请求失败 (已达重试上限): {}", e).into());
+                    return Err(StepExecutionError::RequestFailure(format!("❌ LLM 请求失败 (已达重试上限): {}", e)));
                 }
 
                 // 🛡️ 容错自愈：对于模型自言自语/纯文本格式异常，允许在对话上下文中进行 1 次严格引导重试
@@ -516,7 +518,14 @@ pub async fn run_call_llm_and_run_tool_phases(
                     &format!("agent-log-{}", final_session_id),
                     format!("❌ AI 规划失败: {}", e),
                 );
-                return Err(format!("❌ AI 规划失败: {}", e).into());
+                let message = format!("❌ AI 规划失败: {}", e);
+                return Err(if is_watchdog_timeout {
+                    StepExecutionError::WatchdogTimeout(message)
+                } else if is_request_failure {
+                    StepExecutionError::RequestFailure(message)
+                } else {
+                    StepExecutionError::Other(message)
+                });
             }
             Ok(r) => r,
         };

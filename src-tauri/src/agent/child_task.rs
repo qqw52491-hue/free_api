@@ -349,7 +349,7 @@ pub(crate) fn relay_progress(id: &str, payload: Value) -> Option<Value> {
         return None;
     }
     Some(
-        json!({"type":"child_task_progress","child_run_id":id,"event":{"type":kind,"step_id":payload.get("step_id"),"tool":payload.get("tool"),"action":payload.get("action"),"description":payload.get("description"),"message":payload.get("message"),"form":payload.get("form"),"child_session_id":format!("task-{id}")}}),
+        json!({"type":"child_task_progress","child_run_id":id,"event":{"type":kind,"step_id":payload.get("step_id"),"output_id":payload.get("output_id"),"tool":payload.get("tool"),"action":payload.get("action"),"description":payload.get("description"),"message":payload.get("message"),"form":payload.get("form"),"child_session_id":format!("task-{id}")}}),
     )
 }
 
@@ -375,6 +375,7 @@ pub(crate) fn review_step_preview(step: &Value) -> Value {
     }
     json!({
         "id": step.get("id").or_else(|| step.get("step_id")),
+        "output_id": step.get("output_id"),
         "tool": step.get("tool"), "action": step.get("action"),
         "description": step.get("description"),
         "params": params_preview(step.get("params").or_else(|| step.get("command")).unwrap_or(&Value::Null)),

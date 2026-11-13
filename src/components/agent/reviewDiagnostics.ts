@@ -8,7 +8,7 @@ export function reviewDiagnosis(review: ReviewProgressItem, isRunning: boolean) 
     if (review.phase === 'cancelled') return { title: '审查已停止', detail: '宿主已收到停止信号，本次没有形成有效审查结论；不表示代码不合格。', tone: 'warning' };
     if (review.phase === 'failed') {
         const reasons: Record<string, string> = {
-            timeout: '模型响应超时', request: '模型调用失败', format: '模型输出格式无效', configuration: '模型配置加载失败',
+            timeout: '模型响应超时', request: '模型调用失败', format: '模型输出格式无效', instruction_recovery: '模型未生成可执行指令', configuration: '模型配置加载失败',
         };
         return { title: `审查未完成 · ${reasons[review.failureKind] || '原因未明确'}`, detail: '本次未获得有效审查结论，不是代码被判不通过。', tone: 'warning' };
     }
@@ -22,7 +22,7 @@ export function reviewStatusLabel(review: ReviewProgressItem, isRunning: boolean
     if (review.phase === 'rejected') return '存在阻塞';
     if (review.phase === 'skipped') return '未执行';
     if (review.phase === 'cancelled') return '已停止';
-    if (review.phase === 'failed') return ({ timeout: '响应超时', request: '调用失败', format: '格式无效', configuration: '配置失败' } as Record<string, string>)[review.failureKind] || '未完成';
+    if (review.phase === 'failed') return ({ timeout: '响应超时', request: '调用失败', format: '格式无效', instruction_recovery: '指令恢复耗尽', configuration: '配置失败' } as Record<string, string>)[review.failureKind] || '未完成';
     if (review.phase === 'incomplete' || !isRunning) return '未完成';
     if (review.phase === 'responding' && review.streamKind === 'thinking') return '正在思考';
     if (review.phase === 'responding' && review.streamKind === 'content') return '正在生成结论';

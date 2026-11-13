@@ -436,6 +436,20 @@ pub(super) async fn turn_main<'a, 'b>(
                 Ok(res) => break Ok(res),
                 Err(error) => error,
             };
+            let failure_kind = match &phases_err {
+                crate::agent::types::StepExecutionError::InstructionRecoveryExhausted { .. } => Some("invalid_output"),
+                crate::agent::types::StepExecutionError::RequestFailure(_) => Some("request_or_stream"),
+                crate::agent::types::StepExecutionError::WatchdogTimeout(_) => Some("timeout"),
+                _ => None,
+            };
+            if let Some(kind) = failure_kind.filter(|_| phases_err.instruction_recovery_exhausted() || phases_failure_count >= 2) {
+                if let Ok(Some(mut snapshot)) = crate::agent::execution::runtime::Snapshot::load(state.inner(), &run_id, "reviewer") {
+                    snapshot.state["terminal_failure_kind"] = json!(kind);
+                    if let Err(error) = snapshot.save(state.inner()) {
+                        eprintln!("无法保存审查失败类型: {error}");
+                    }
+                }
+            }
             if phases_err.instruction_recovery_exhausted()
                 || phases_err
                     .message()

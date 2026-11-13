@@ -708,11 +708,12 @@ fn review_progress_bridge_updates_live_phases_without_leaking_text() {
     bridge.handle("action_phase", &json!({"phase":"calling_llm"}));
     bridge.handle("thinking", &json!({"content":"SECRET_THOUGHT_CHUNK","done":false}));
     bridge.handle("content_stream", &json!({"chunk":"SECRET_CONTENT"}));
-    bridge.handle("llm_parse_error", &json!({"error":"bad"}));
+    bridge.handle("review_format_retry_started", &json!({"try_index":2}));
     bridge.handle("step_new", &json!({"step":{"id":0,"tool":"read_child_result","description":"读取子交付"}}));
     bridge.handle("step_start", &json!({"step_id":0,"description":"执行"}));
-    bridge.handle("step_done", &json!({"step_id":0}));
-    bridge.handle("token_usage", &json!({"completion_tokens":120,"ttft_ms":500,"total_duration_ms":2500}));
+    bridge.handle("step_done", &json!({"step_id":0,"review_tool_steps":1}));
+    bridge.handle("content_stream", &json!({"chunk":"new output"}));
+    bridge.handle("review_request_metrics", &json!({"completion_tokens":120,"ttft_ms":500,"total_duration_ms":2500}));
     bridge.handle("step_new", &json!({"step":{"id":1,"tool":"finish","description":"提交"}}));
     bridge.handle("step_start", &json!({"step_id":1}));
     bridge.handle("step_done", &json!({"step_id":1}));
@@ -721,7 +722,7 @@ fn review_progress_bridge_updates_live_phases_without_leaking_text() {
     let phases: Vec<&str> = e.iter().filter_map(|v| v["phase"].as_str()).collect();
     assert_eq!(
         phases,
-        vec!["preparing", "waiting", "responding", "responding", "format_retry", "tool", "tool", "tool", "converging", "passed"]
+        vec!["preparing", "waiting", "responding", "responding", "format_retry", "tool", "tool", "responding", "responding", "converging", "passed"]
     );
     assert_eq!(e.iter().rev().find(|v| v["round"] == 1).unwrap()["tool_steps"], 1, "finish step does not count as forensic tool step");
     assert_eq!(e.last().unwrap()["format_corrections"], 1);
@@ -729,4 +730,31 @@ fn review_progress_bridge_updates_live_phases_without_leaking_text() {
     let serialized = serde_json::to_string(&*e).unwrap();
     assert!(!serialized.contains("SECRET_THOUGHT_CHUNK"));
     assert!(!serialized.contains("SECRET_CONTENT"));
+}
+
+#[test]
+fn review_progress_bridge_uses_reported_budget_and_provider_usage() {
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let out = events.clone();
+    let progress = std::sync::Arc::new(
+        crate::agent::reviewer_gatekeeper::progress::ReviewProgress::with_sink(
+            "member", "审查员", "model", move |value| out.lock().unwrap().push(value),
+        ),
+    );
+    let mut bridge = super::runtime::ReviewProgressBridge::new(progress.clone(), 8);
+    bridge.handle("action_phase", &json!({"phase":"calling_llm"}));
+    bridge.handle("content_stream", &json!({"chunk":"output"}));
+    bridge.handle("review_request_metrics", &json!({"completion_tokens":null,"ttft_ms":100,"total_duration_ms":2100}));
+    assert!(events.lock().unwrap().last().unwrap()["last_request_tokens_per_second"].is_null());
+    bridge.handle("review_format_retry_started", &json!({"try_index":2}));
+    bridge.handle("review_request_metrics", &json!({"try_index":2,"completion_tokens":120,"ttft_ms":1000,"total_duration_ms":2000}));
+    assert!(events.lock().unwrap().last().unwrap()["last_request_ttft_ms"].is_null());
+    assert!(events.lock().unwrap().last().unwrap()["last_request_tokens_per_second"].is_null());
+    bridge.handle("step_done", &json!({"step_id":0,"review_tool_steps":3}));
+    assert_eq!(events.lock().unwrap().last().unwrap()["tool_steps"], 3);
+    bridge.handle("step_error", &json!({"step_id":1,"review_tool_steps":3}));
+    assert_eq!(events.lock().unwrap().last().unwrap()["tool_steps"], 3);
+    bridge.handle("step_error", &json!({"step_id":2}));
+    assert_eq!(events.lock().unwrap().last().unwrap()["tool_steps"], 3);
+    progress.finish("passed");
 }

@@ -446,6 +446,15 @@ pub async fn call_llm(
 
     loop {
         current_try += 1;
+        if current_try > 1 {
+            if let Some(app_handle) = app {
+                use tauri::Emitter;
+                let _ = app_handle.emit(&format!("agent-progress-{}", session_id), json!({
+                    "type": "review_format_retry_started", "run_id": run_id,
+                    "step_id": step_id, "try_index": current_try,
+                }));
+            }
+        }
 
         let stream_start = std::time::Instant::now();
         let mut first_token_at: Option<std::time::Instant> = None;
@@ -617,7 +626,7 @@ pub async fn call_llm(
                     failures.push(error);
                     return Err(exhausted_instruction_recovery(&failures));
                 }
-                return Err(error.into());
+                return Err(StepExecutionError::RequestFailure(error));
             }
         };
 
@@ -658,6 +667,14 @@ pub async fn call_llm(
         };
 
         println!("{}", token_usage.summary());
+        if let Some(app_handle) = app {
+            use tauri::Emitter;
+            let _ = app_handle.emit(&format!("agent-progress-{}", session_id), json!({
+                "type": "review_request_metrics", "run_id": run_id, "step_id": step_id, "try_index": current_try,
+                "completion_tokens": result.usage.as_ref().map(|usage| usage.completion_tokens),
+                "ttft_ms": result.ttft_ms, "total_duration_ms": result.total_duration_ms,
+            }));
+        }
         if !result.thinking_text.is_empty() {
             println!(
                 "🧠 Agent 思考过程 ({} 字符): {}...",

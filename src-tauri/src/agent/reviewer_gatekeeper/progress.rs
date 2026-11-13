@@ -20,6 +20,7 @@ struct ProgressState {
     timeout_retries: u32,
     format_corrections: u32,
     last_request_round: Option<usize>,
+    last_request_try: Option<u64>,
     last_request_output_tokens: Option<i64>,
     last_request_ttft_ms: Option<u64>,
     last_request_tokens_per_second: Option<f64>,
@@ -46,6 +47,7 @@ impl ReviewProgress {
         member: &str,
         label: &str,
         model: &str,
+        parent_step_id: usize,
     ) -> Self {
         let app = app.clone();
         let channel = format!("agent-progress-{session}");
@@ -53,6 +55,9 @@ impl ReviewProgress {
         Self::with_sink(member, label, model, move |mut value| {
             if let (Some(run_id), Some(payload)) = (&parent_run, value.as_object_mut()) {
                 payload.insert("run_id".into(), json!(run_id));
+            }
+            if let Some(payload) = value.as_object_mut() {
+                payload.insert("parent_step_id".into(), json!(parent_step_id));
             }
             let _ = app.emit(&channel, value);
         })
@@ -114,9 +119,23 @@ impl ReviewProgress {
         self.phase("waiting", "请求已发起，等待模型响应（尚未收到片段）");
     }
 
+    pub(crate) fn reset_stream_activity(&self) {
+        if self.terminal.load(Ordering::Acquire) {
+            return;
+        }
+        self.received_chars.store(0, Ordering::Relaxed);
+        self.state.lock().unwrap().stream_kind.clear();
+    }
+
     // A completed request sample, not a live estimate or an aggregate across tool rounds.
     // The transport's rate can be character-estimated without usage, so compute only
     // from provider-reported output tokens and a meaningful observed generation span.
+    pub(crate) fn record_request_try(&self, attempt: Option<u64>) {
+        if !self.terminal.load(Ordering::Acquire) {
+            self.state.lock().unwrap().last_request_try = attempt;
+        }
+    }
+
     pub(crate) fn record_request_metrics(
         &self,
         round_hint: Option<usize>,
@@ -247,6 +266,7 @@ impl ReviewProgress {
             "elapsed_ms": self.started.elapsed().as_millis() as u64,
             "received_chars": self.received_chars.load(Ordering::Relaxed),
             "last_request_round": s.last_request_round,
+            "last_request_try": s.last_request_try,
             "last_request_output_tokens": s.last_request_output_tokens,
             "last_request_ttft_ms": s.last_request_ttft_ms,
             "last_request_tokens_per_second": s.last_request_tokens_per_second,

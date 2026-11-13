@@ -819,14 +819,14 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     let model_config = match ModelConfig::from_db_state(db, &model_id) {
         Ok(cfg) => cfg,
         Err(e) => {
-            let progress = super::progress::ReviewProgress::new(app, session_id, log_suffix, &reviewer_label, &model_id);
+            let progress = super::progress::ReviewProgress::new(app, session_id, log_suffix, &reviewer_label, &model_id, step_id);
             progress.fail("configuration", "审查模型配置加载失败，未发起模型请求");
             return ReviewResult::failed_open(&format!("加载 Reviewer 模型配置失败: {}", e), &model_id, &review_fingerprint);
         }
     };
 
     let progress = std::sync::Arc::new(super::progress::ReviewProgress::new(
-        app, session_id, log_suffix, &reviewer_label, &model_config.model_name,
+        app, session_id, log_suffix, &reviewer_label, &model_config.model_name, step_id,
     ));
     let registration = match crate::agent::review_control::register(db, session_id, progress.id(), &model_id, false, interrupt_rx.clone()) {
         Ok(registration) => registration,
@@ -884,8 +884,8 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
                     result
                 }
                 Err(error) => {
-                    progress.fail("request", &error);
-                    ReviewResult::failed_open(&error, &model_id, &review_fingerprint)
+                    progress.fail(error.kind, &error.message);
+                    ReviewResult::failed_open(&error.message, &model_id, &review_fingerprint)
                 }
             };
         }

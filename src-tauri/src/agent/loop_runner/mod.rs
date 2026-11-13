@@ -171,6 +171,10 @@ pub async fn run_tool_phase(
     // 参数错误不进入审查/冷却/读取台账：预检只读，不修改 checkpoint。
     if !is_finish_instruction(inst) && inst.prepare_finish.is_none() && inst.fail_task.is_none() {
         if let Some(program)=crate::agent::child_reviewer::main_executor::load(state.inner(),parent_run_id)? {
+            app.emit(
+                &format!("agent-progress-{}", final_session_id),
+                json!({"run_id": parent_run_id, "type": "step_start", "step_id": step_id, "description": &inst.description}),
+            ).map_err(|e| e.to_string())?;
             return Ok(crate::agent::child_reviewer::main_executor::tool(state.inner(),parent_run_id,&program,inst,registry_state.inner(),interrupt_rx).await);
         }
     }

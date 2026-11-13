@@ -10,6 +10,7 @@ export function reviewWorkerStep(value: unknown, fallbackStatus: AgentWorkerStep
     const status = toText(raw.status);
     return {
         stepNumber: id + 1,
+        outputId: toText(raw.output_id) || undefined,
         title: description || tool || "审查步骤",
         tool,
         action: toText(raw.action) || tool,
@@ -46,7 +47,8 @@ export function updateReviewWorkerSteps(previous: AgentWorkerStep[], event: Reco
         (type === "step_start" && current.status !== "pending")) return previous;
     const status = type === "step_start" ? "running" : type === "step_done" ? "succeeded" : "failed";
     const durationMs = event.duration_ms == null ? current.durationMs : numberOrUndefined(event.duration_ms) ?? current.durationMs;
-    return previous.map((step, i) => i === index ? { ...step, status, durationMs } : step);
+    const outputId = toText(event.output_id) || current.outputId;
+    return previous.map((step, i) => i === index ? { ...step, status, durationMs, outputId } : step);
 }
 
 export function historicalReviewer(value: unknown): AgentWorkerItem | undefined {
@@ -60,9 +62,16 @@ export function historicalReviewer(value: unknown): AgentWorkerItem | undefined 
     const verdict = toText(raw.verdict);
     const errorDetail = toText(raw.error_detail);
     const summary = toText(raw.summary);
+    const failureKind = toText(raw.error_kind);
+    const failureLabel: Record<string, string> = {
+        invalid_output: "模型输出无效或缺失", timeout: "响应超时", timed_out: "响应超时",
+        request_or_stream: "调用失败", cancelled: "审查已停止", interrupted: "审查已中断",
+    };
     const parentStepId = typeof raw.parent_step_id === "number" && Number.isSafeInteger(raw.parent_step_id)
         ? raw.parent_step_id
         : undefined;
+    const parentStepOccurrence = typeof raw.parent_step_occurrence === "number" && Number.isSafeInteger(raw.parent_step_occurrence) && raw.parent_step_occurrence >= 0
+        ? raw.parent_step_occurrence : undefined;
     const status = raw.status === "succeeded"
         ? (verdict === "rejected" ? "failed" : verdict === "failed_open" ? "challenged" : "succeeded")
         : raw.status === "running"
@@ -76,7 +85,7 @@ export function historicalReviewer(value: unknown): AgentWorkerItem | undefined 
                 ? "审查已中断"
                 : raw.status === "cancelled"
                     ? "审查已停止"
-                    : "审查执行未完成";
+                    : failureLabel[failureKind] || "审查执行未完成";
     return {
         id, name: label, roleLabel: label, role: "reviewer", status, currentStep,
         model: toText(raw.model), durationMs: raw.duration_ms == null ? undefined : numberOrUndefined(raw.duration_ms),
@@ -86,8 +95,10 @@ export function historicalReviewer(value: unknown): AgentWorkerItem | undefined 
         extra: {
             hostTaskState: currentStep,
             ...(parentStepId !== undefined ? { parentStepId } : {}),
+            ...(parentStepOccurrence !== undefined ? { parentStepOccurrence } : {}),
             ...(verdict ? { verdict } : {}),
             ...(errorDetail ? { errorDetail } : {}),
+            ...(failureKind ? { failureKind } : {}),
         },
     };
 }
@@ -111,8 +122,10 @@ export function placeHistoricalStepReviewers(
         const parentStepId = reviewer.extra?.parentStepId;
         if (typeof parentStepId !== "number" || !Number.isSafeInteger(parentStepId)) continue;
         const candidates = finishByStepNumber.get(parentStepId);
-        if (!candidates || candidates.length !== 1) continue;
-        const owner = candidates[0];
+        if (!candidates) continue;
+        const occurrence = reviewer.extra?.parentStepOccurrence;
+        const owner = typeof occurrence === "number" ? candidates[occurrence] : candidates.length === 1 ? candidates[0] : undefined;
+        if (!owner) continue;
         const existing = owners.get(owner);
         if (existing) existing.push(reviewer);
         else owners.set(owner, [reviewer]);

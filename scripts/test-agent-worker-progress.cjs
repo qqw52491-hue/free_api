@@ -267,6 +267,20 @@ async function main() {
     assert.equal(retryItems.length, 2, 'retry on a subsequent finish step preserves earlier failed review attempt');
     assert.equal(retryItems[0].anchor.stepId, 'live-step-30');
     assert.equal(retryItems[1].anchor.stepId, 'live-step-31');
+    let pending = applyReviewProgress([retryItems[0]], { ...reviewBase, review_id: 'pending', member_key: 'finish-review', started_at_ms: 200, phase: 'preparing' }, 0);
+    assert.equal(pending.length, 2, 'unanchored new review cannot overwrite an earlier attempt');
+    pending = applyReviewProgress(pending, { ...reviewBase, review_id: 'pending', member_key: 'finish-review', started_at_ms: 200, phase: 'waiting' }, 0, step31Anchor);
+    assert.equal(pending[1].anchor.stepId, 'live-step-31');
+    assert.equal(activeReviewAnchor([{ id: 'late', stepId: 31, tool: 'finish', status: 'failed' }], 'run-retry', 31).stepId, 'late');
+    const repeatedStep = activeReviewAnchor([
+        { id: 'first-7', stepId: 7, tool: 'finish', status: 'failed' },
+        { id: 'second-7', stepId: 7, tool: 'finish', status: 'running' },
+    ], 'run-retry', 7);
+    assert.equal(repeatedStep.stepId, 'second-7');
+    const newSample = applyReviewProgress(initialWithSpeed, { ...reviewBase, review_id: 'retain', member_key: 'retain', phase: 'waiting', last_request_round: 2, last_request_output_tokens: null, last_request_tokens_per_second: null, last_request_ttft_ms: 3000 }, 0);
+    assert.equal(newSample[0].lastRequestTokensPerSecond, null);
+    assert.equal(newSample[0].lastRequestRound, 2);
+    assert.equal(newSample[0].lastRequestTtftMs, 3000);
     const step30History = { id: 'h-30', stepId: 30, tool: 'finish' };
     const step31History = { id: 'h-31', stepId: 31, tool: 'finish' };
     const retryPlaced = placeReviewRows(retryItems, [{ id: 'p-retry', type: 'plan', runId: 'run-retry', steps: [step30History, step31History] }]);
@@ -353,11 +367,16 @@ async function main() {
     progress({ ...planReview, child_run_id: 'real-final-child', review: { member_id: 'final-executor-member' }, event: {
         type: 'step_new', step: { id: 0, tool: 'get_step_output', params: { output_id: 'evidence-1' } },
     } });
+    progress({ ...finalBase, phase: 'tool', description: '正在取证：读取步骤回执', elapsed_ms: 50 });
     progress({ ...planReview, child_run_id: 'real-final-child', review: { member_id: 'final-executor-member' }, event: {
         type: 'step_start', step_id: 0, description: '读取步骤回执',
     } });
     await vue.nextTick();
     assert(text(finalCard()).includes('取证中') || text(finalCard()).includes('读取步骤回执'));
+    progress({ ...finalBase, phase: 'converging', description: '正在校验并收口终审结论', elapsed_ms: 100 });
+    progress({ ...planReview, child_run_id: 'real-final-child', review: { member_id: 'final-executor-member' }, event: { type: 'step_start', step_id: 1, description: '提交判决' } });
+    progress({ ...planReview, child_run_id: 'real-final-child', review: { member_id: 'final-executor-member' }, event: { type: 'step_done', step_id: 1 } });
+    assert.equal(s.reviewProgress.value.find(item => item.id === 'final-executor-member').phase, 'converging');
     progress({ ...finalBase, phase: 'passed', elapsed_ms: 250 });
     await vue.nextTick();
     assert(!s.teamWorkers.value.some(w => w.id === 'real-final-child'), 'final executor belongs to its existing member card');
@@ -460,6 +479,8 @@ async function checkAllWorkerRoles() {
     const legacyHist = mapHistoricalReviewer({
         id: 'hist-legacy', purpose: 'final_review', model: 'nex-n2.6', status: 'failed', steps: [],
     });
+    const typedFailure = mapHistoricalReviewer({ id: 'typed-failure', status: 'failed', error_kind: 'invalid_output' });
+    assert.equal(typedFailure.currentStep, '模型输出无效或缺失');
     assert.equal(failedHist.roleLabel, '基础审查员');
     assert.equal(failedHist.extra.parentStepId, 30);
     assert.equal(passedHist.currentStep, '已保存审查结果');
@@ -468,6 +489,11 @@ async function checkAllWorkerRoles() {
     assert.equal(histPlacement.owners.has(step31History), false, 'live-covered review is not duplicated');
     assert.equal(histPlacement.placedIds.has('hist-30'), true);
     assert.equal(histPlacement.placedIds.has('hist-legacy'), false, 'missing parent_step_id never guesses a step');
+    const sameNumberRetry = { id: 'h-30-retry', stepId: 30, tool: 'finish' };
+    const historicalRetry = mapHistoricalReviewer({ id: 'retry-hist', purpose: 'final_review', status: 'failed', parent_step_id: 30, parent_step_occurrence: 1 });
+    const repeatedHistory = placeHistoricalStepReviewers([step30History, sameNumberRetry], [historicalRetry, failedHist], new Set());
+    assert.deepEqual(repeatedHistory.owners.get(sameNumberRetry)?.map(w => w.id), ['retry-hist']);
+    assert.equal(repeatedHistory.placedIds.has('hist-30'), false, 'old ambiguous records remain unplaced');
     const expandedFailedHistHtml = await snapshot([], 0, false, [failedHist]);
     assert(expandedFailedHistHtml.includes('基础审查员'));
     assert(expandedFailedHistHtml.includes('nex-n2.6'));

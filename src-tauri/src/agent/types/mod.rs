@@ -9,6 +9,8 @@ pub const RUN_INTERRUPTED_ROUTE: &str = "run_interrupted";
 #[derive(Debug)]
 pub enum StepExecutionError {
     Other(String),
+    RequestFailure(String),
+    WatchdogTimeout(String),
     InstructionRecoveryExhausted { reason: String, attempts: usize },
 }
 
@@ -19,7 +21,7 @@ impl StepExecutionError {
 
     pub fn message(&self) -> &str {
         match self {
-            Self::Other(message) => message,
+            Self::Other(message) | Self::RequestFailure(message) | Self::WatchdogTimeout(message) => message,
             Self::InstructionRecoveryExhausted { reason, .. } => reason,
         }
     }
@@ -34,7 +36,7 @@ impl From<String> for StepExecutionError {
 impl std::fmt::Display for StepExecutionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Other(message) => f.write_str(message),
+            Self::Other(message) | Self::RequestFailure(message) | Self::WatchdogTimeout(message) => f.write_str(message),
             Self::InstructionRecoveryExhausted { reason, attempts } => {
                 write!(f, "模型指令恢复已用完 {attempts} 次尝试；未取得可执行指令：{reason}")
             }

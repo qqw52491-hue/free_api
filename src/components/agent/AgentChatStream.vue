@@ -2012,8 +2012,12 @@ const historicalStepReviewers = computed(() => {
         if (isHistoryTurnCoveredByLive(turn) || !turn.reviewers?.length) continue;
         const covered = new Set([...activeReviewIdSet.value, ...turn.steps.flatMap(getStepJobIds)]);
         const placed = placeHistoricalStepReviewers(turn.steps, turn.reviewers, covered);
-        for (const [step, rows] of placed.owners) owners.set(step, rows);
-        for (const id of placed.placedIds) placedIds.add(id);
+        const visible = new Set(historyStepsNotCoveredByLive(turn));
+        for (const [step, rows] of placed.owners) {
+            if (!visible.has(step)) continue;
+            owners.set(step, rows);
+            for (const row of rows) placedIds.add(row.id);
+        }
     }
     return { owners, placedIds };
 });
