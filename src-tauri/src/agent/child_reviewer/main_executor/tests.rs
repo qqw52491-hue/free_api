@@ -471,6 +471,8 @@ async fn parallel_review_reads_share_permissions_budget_and_branch_receipts() {
     ]})).unwrap();
     let mut result = tool(&f.db, &f.id, &program, &inst, &mut rx).await;
     assert!(!result.success);
+    assert!(result.stderr.contains("original evidence"));
+    assert!(result.stderr.contains("不能读取其他任务的回执"));
     let durable = crate::agent::dispatcher::take_tool_durable_output(&mut result, "");
     let select = |id| crate::agent::plan_tree::output::select_branch(
         &durable, &json!({"branch_id":id}),

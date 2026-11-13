@@ -581,6 +581,27 @@ async fn contract_correction_can_still_use_tools_and_explicit_na() {
 }
 
 #[tokio::test]
+async fn ad_hoc_review_receives_context_and_returns_new_reference() {
+    let mut response = verdict(false);
+    response["evidence_refs"] = json!(["src/initial.rs:1", "src/discovered.rs:42"]);
+    let mock = MockReviewer::new(vec![response]).await;
+    let snapshot = PlanReviewerDispatchSnapshot::new(
+        "mock", "flash", "auto", "审查员",
+        json!({"question":"核对恢复", "context":"恢复后显示运行中但没有新步骤",
+            "evidence_refs":["src/initial.rs:1"]}),
+    ).with_purpose("ad_hoc");
+    let (_tx, rx) = watch::channel(0u64);
+    let id = snapshot.spawn(None, &mock.db, "context-run", "context-session", &mock.root, rx, None).await.unwrap();
+    let result = mock.wait_child(&id).await;
+    assert_eq!(result["evidence_refs"], json!(["src/discovered.rs:42", "src/initial.rs:1"]));
+    let requests = mock.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    let messages = requests[0]["messages"].as_array().unwrap();
+    assert!(messages.iter().any(|m| m["content"].as_str().is_some_and(|s| s.contains("恢复后显示运行中但没有新步骤"))));
+    assert!(messages[0]["content"].as_str().unwrap().contains("引用本身不代表宿主已核实"));
+}
+
+#[tokio::test]
 async fn current_review_accepts_no_scorecard_without_a_format_retry() {
     let mock = MockReviewer::new(vec![json!({
         "findings":[],"confidence":"confirmed","evidence_refs":[],"missing_evidence":[]

@@ -1,9 +1,6 @@
 //! 阶段级写入审查：补齐「方案批准后 → 收尾审查前」中段零独立审查的缺口。
 //!
-//! 双触发（取先到者）：
-//! 1. 语义触发：主 Agent 通过 todo_update 标记新阶段完成，且为已选方案讨论的复杂任务或存在真实写入；
-//! 2. 行为兜底：距上次阶段审查累计写入 N 个文件（防 todo 记账博弈——无论模型
-//!    怎么记账，写盘这个事实逃不掉）。
+//! 自动阶段审查按实际写入阈值触发，分别追踪工具写入及 Shell 探针发现的变更。
 //!
 //! 拦截语义：blocking_regardless（中间态即错）未解决时拦截写入，解套唯一路径是
 //! resume_child 对质撤回；blocking_if_final 只记账带入收尾审查。
@@ -64,6 +61,7 @@ pub(crate) fn milestone_instruction(context: &SandwichContext, instruction: &Age
 }
 
 /// Record the transition, rather than consuming it just because a todo is done.
+#[cfg(test)]
 pub(crate) fn record_milestones(cp: &mut AgentCheckpoint, step: usize, inst: &AgentInstruction) -> bool {
     if cp.stages.stage_review == Some(false) { return false; }
     if cp.stages.stage_review != Some(true) {
@@ -96,7 +94,7 @@ pub(crate) fn settle_milestones(cp: &mut AgentCheckpoint, db: &DbState) -> bool 
     complete
 }
 
-/// 双触发判定。返回 Some(原因) 表示应派发阶段审查。
+/// 返回达到自动阶段审查阈值的原因。
 pub fn should_fire(
     checkpoint: &AgentCheckpoint,
     db: &DbState,
@@ -166,21 +164,6 @@ pub fn should_fire(
         .side_effects
         .len()
         .saturating_sub(checkpoint.stage_review_baseline_side_effects as usize) as u32;
-
-    // 触发 1：todo 新阶段推进，复杂任务允许纯只读里程碑
-    let todo_advanced = instruction.todo_update.iter().any(|t| {
-        matches!(
-            t.status.trim().to_ascii_lowercase().as_str(),
-            "done" | "completed"
-        )
-    });
-    if (todo_advanced || !checkpoint.stage_review_pending_milestones.is_empty())
-        && (writes_since > 0 || explicitly_enabled || crate::agent::plan_gate::formal_plan_required(checkpoint)) {
-        return Some(format!(
-            "todo 阶段推进（复杂任务讨论或真实写入）；自上次审查以来有 {} 个写入动作",
-            writes_since
-        ));
-    }
 
     if writes_since == 0 { return None; }
 

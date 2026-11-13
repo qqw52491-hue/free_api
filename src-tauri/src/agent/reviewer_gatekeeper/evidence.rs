@@ -133,7 +133,7 @@ pub(crate) fn sniff_task_file_anomalies(files: &[std::path::PathBuf]) -> Vec<Str
 
 /// 流程审计用的最近记录：包含历史审批/交付状态，供分流复核等场景追溯。
 pub(crate) fn collect_step_trace_digest(db: &DbState, session_id: &str) -> Option<String> {
-    collect_trace_digest(db, session_id, false, None).map(|(digest, _)| digest)
+    collect_trace_digest(db, session_id, false, None, None).map(|(digest, _)| digest)
 }
 
 /// 终审沿用现有任务起点（续跑不变，新任务重建），只索引本任务工具回执。
@@ -144,16 +144,17 @@ pub(crate) fn collect_execution_evidence_digest(
     session_id: &str,
     task_started_at: chrono::DateTime<Utc>,
 ) -> Option<String> {
-    collect_execution_review_evidence(db, session_id, task_started_at).0
+    collect_execution_review_evidence(db, session_id, task_started_at, None).0
 }
 
 pub(crate) fn collect_execution_review_evidence(
     db: &DbState,
     session_id: &str,
     task_started_at: chrono::DateTime<Utc>,
+    delivery_text: Option<&str>,
 ) -> (Option<String>, Vec<String>) {
     let (mut digest, recent_refs) =
-        collect_trace_digest(db, session_id, true, Some(task_started_at)).unwrap_or_default();
+        collect_trace_digest(db, session_id, true, Some(task_started_at), delivery_text).unwrap_or_default();
     match crate::agent::evidence_store::review_digest(db, session_id, task_started_at) {
         Ok(Some(index)) => digest.push_str(&index),
         Ok(None) => {},
@@ -263,6 +264,7 @@ fn collect_trace_digest(
     session_id: &str,
     execution_only: bool,
     since: Option<chrono::DateTime<Utc>>,
+    delivery_text: Option<&str>,
 ) -> Option<(String, Vec<String>)> {
     // 分类依据是宿主保存的 tool/outcome，不根据输出正文里的词语猜测。
     // 先排除流程回执再取窗口，连续 finish 不会挤走取证/验证回执。
@@ -307,7 +309,24 @@ fn collect_trace_digest(
         None
     };
     let recent_refs = if execution_only {
-        items.iter().take(3).map(|(step, id, at, _, tool, status)| {
+        // Match exact IDs only within the host's current-task receipt window.
+        let cited_ids: std::collections::HashSet<&str> = delivery_text.unwrap_or_default()
+            .split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_')))
+            .collect();
+        let mut candidates: Vec<_> = items.iter().filter(|(_, id, _, _, tool, _)| {
+            cited_ids.contains(id.as_str())
+                || !matches!(tool.as_deref(), Some("async_result" | "child_reviewer" | "artifact_manager"))
+        }).collect();
+        candidates.sort_by_key(|(_, id, _, _, tool, _)| {
+            if cited_ids.contains(id.as_str()) {
+                0
+            } else if matches!(tool.as_deref(), Some("local_shell" | "shell_exec" | "pipeline" | "python")) {
+                1
+            } else {
+                2
+            }
+        });
+        candidates.into_iter().take(3).map(|(step, id, at, _, tool, status)| {
             format!("- step {step} | {at} | tool={} | status={} | output_id={id}",
                 tool.as_deref().unwrap_or("unknown"), status.as_deref().unwrap_or("unknown"))
         }).collect()
@@ -1132,7 +1151,17 @@ mod review_material_regressions {
         let start = Utc::now() - chrono::Duration::seconds(1);
         let raw = format!("\n[Step 1 Result]: {{\"message\":\"临时文件写入成功\",\"data\":\"{}\"}}\n<!-- 结构化元数据: PRIVATE_WRITER -->\n[Step 2 Result]: ℹ️ [进程正常退出] (exit_code: 0)\n$ curl http://localhost/audit\n{}\n--- STDOUT ---\nHTTP/1.1 302 Found\nLocation: /login\n<!-- 结构化元数据: PRIVATE_SHELL -->\n[Step 3 Result]: ℹ️ [进程正常退出] (exit_code: 0)\n$ mvn package; echo done\n--- STDOUT ---\nBUILD FAILURE\n--- STDERR ---\ncompiler failed\n<!-- 结构化元数据: PRIVATE_END -->\n流水线附加错误: LAST_ERROR", "中文🙂".repeat(1500), "# 长脚本\n".repeat(100));
         let id = put(&db, "s", 41, &Utc::now().to_rfc3339(), Some("pipeline"), "succeeded", &raw);
-        let digest = collect_execution_evidence_digest(&db, "s", start).unwrap();
+        let recent = Utc::now().to_rfc3339();
+        let read = put(&db, "s", 42, &recent, Some("read_file"), "succeeded", "cited file");
+        let flow = put(&db, "s", 43, &recent, Some("async_result"), "succeeded", "review returned");
+        let foreign = put(&db, "other", 44, &recent, Some("local_shell"), "succeeded", "foreign");
+        let delivery = format!("References: {read}, {foreign}");
+        let (digest, preview) = collect_execution_review_evidence(&db, "s", start, Some(&delivery));
+        let digest = digest.unwrap();
+        assert!(preview[0].contains(&format!("output_id={read}")));
+        assert!(preview[1].contains(&format!("output_id={id}")));
+        assert!(!preview.iter().any(|line| line.contains(&flow) || line.contains(&foreign)));
+        assert!(digest.contains(&flow), "flow remains in the full evidence directory");
         assert!(digest.contains("HTTP/1.1 302 Found") && digest.contains("Location: /login"), "{digest}");
         assert!(digest.contains("BUILD FAILURE") && digest.contains("compiler failed"));
         assert!(digest.contains("LAST_ERROR"), "metadata projection must not erase following error text");

@@ -54,6 +54,7 @@ fn commit(
         c,
         "run",
         "s",
+        std::path::Path::new("/tmp"),
         "goal",
         &[],
         "done",
@@ -63,6 +64,28 @@ fn commit(
 }
 fn context() -> SandwichContext {
     SandwichContext::new("system".into(), "goal".into())
+}
+
+#[test]
+fn commit_registers_workspace_relative_file_and_discloses_missing_file() {
+    let root = std::env::temp_dir().join(format!("finish-artifact-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("report.md"), "本次任务报告").unwrap();
+    let db = DbState(Arc::new(Mutex::new(crate::db::init_db(&root.join("test.db")).unwrap())));
+    db.0.lock().unwrap().execute("INSERT INTO chat_sessions (id,title,model_id,created_at,updated_at) VALUES ('s','test','m','now','now')", []).unwrap();
+    let mut c = context();
+    let mut cp = AgentCheckpoint::new("s".into(), &c);
+    let mut receipt = ready(&c, &cp);
+    receipt.finish_payload = json!({"summary":"完成","artifacts":["report.md", "missing.md"]});
+    receipt.acceptance_fingerprint = crate::agent::finalization::acceptance_fingerprint(&c, &cp, &receipt.finish_payload);
+    cp.pending_finalization = Some(receipt);
+    let result = commit_completed_run(&db, &mut cp, &mut c, "run", "s", &root, "goal", &[], "done", "m", None).unwrap();
+    assert_eq!(result["artifacts"][0]["canonical_path"], root.join("report.md").canonicalize().unwrap().to_string_lossy().as_ref());
+    assert_eq!(result["artifacts"][1], "missing.md");
+    assert!(result["summary"].as_str().unwrap().contains("missing.md 未能登记"));
+    let message: String = db.0.lock().unwrap().query_row("SELECT content FROM chat_messages WHERE role='assistant'", [], |row| row.get(0)).unwrap();
+    assert!(message.contains("missing.md 未能登记"));
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[tokio::test]
@@ -99,7 +122,7 @@ async fn finish_parameter_aliases_reach_evaluation_receipt_event_and_chat() {
         // 检查点恢复后，正式提交仍使用已评估的同一份完整正文。
         cp.pending_finalization = Some(evaluation.receipt);
         let mut cp: AgentCheckpoint = serde_json::from_value(serde_json::to_value(&cp).unwrap()).unwrap();
-        let emitted = commit_completed_run(&db, &mut cp, &mut c, "run", "s", "goal",
+        let emitted = commit_completed_run(&db, &mut cp, &mut c, "run", "s", &root, "goal",
             &[], &dispatched.stdout, "m", None).unwrap();
         assert_eq!(crate::agent::finalization::delivery_body(&emitted).as_deref(), Some(expected));
         let conn = db.0.lock().unwrap();
@@ -257,6 +280,7 @@ fn production_commit_uses_the_reviewed_body_in_event_trace_and_message() {
             &mut c,
             "run",
             "s",
+            std::path::Path::new("/tmp"),
             "goal",
             &[],
             raw,

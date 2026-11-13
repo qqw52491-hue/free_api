@@ -28,11 +28,33 @@ pub(super) async fn dispatch_child_reviewer(
     inst: &AgentInstruction,
 ) -> Result<ArmOutcome, String> {
     Ok(ArmOutcome::Done({
+        let items = inst.get_dispatch_items();
+        let mut purpose = None;
+        for item in &items {
+            let requested = match item.get("review_purpose") {
+                None => "plan_review",
+                Some(Value::String(value)) if value == "ad_hoc" => "ad_hoc",
+                _ => return Ok(ArmOutcome::Early(DispatchResult {
+                    view: None, stdout: String::new(), success: false,
+                    stderr: "review_purpose 仅允许 ad_hoc 或省略；本次未派发。".into(),
+                    route: "child_reviewer:invalid_purpose".into(),
+                })),
+            };
+            if purpose.is_some_and(|previous| previous != requested) {
+                return Ok(ArmOutcome::Early(DispatchResult {
+                    view: None, stdout: String::new(), success: false,
+                    stderr: "同一批次不能混合主动审查与方案审查；本次未派发。".into(),
+                    route: "child_reviewer:invalid_purpose".into(),
+                }));
+            }
+            purpose = Some(requested);
+        }
+        let ad_hoc = purpose == Some("ad_hoc");
         // 记录派发前的消费状态：若本次派发一个任务都没起来，需原样回滚，避免白耗一轮审查预算。
         let pre_dispatch_consumed = ctx.checkpoint.plan_reviewer_consumed;
         // 方案审查轮数上限只约束批准前的方案审查讨论；
         // 已批准后的 child_reviewer 属于交付验证等其他用途，不消耗该预算、也不改变方案阶段。
-        if !ctx.checkpoint.plan_phase.is_approved() {
+        if !ad_hoc && !ctx.checkpoint.plan_phase.is_approved() {
             if ctx.checkpoint.plan_reviewer_retry_count
                 >= crate::agent::checkpoint::max_plan_reviewer_rounds()
             {
@@ -93,7 +115,6 @@ pub(super) async fn dispatch_child_reviewer(
             .get(crate::agent::router::roles::REVIEWER)
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false);
-        let items = inst.get_dispatch_items();
         let total = items.len();
         let is_batch = total > 1;
         // 同批联合会审归组：全部成员共享 batch_id，台账可按批联查
@@ -313,53 +334,12 @@ pub(super) async fn dispatch_child_reviewer(
                 ctx.final_session_id,
                 "child_reviewer:evidence_scope",
             );
-            if !ctx.checkpoint.plan_phase.is_approved()
-                && effective_params.get("evidence_scope_refs").is_none()
-            {
-                let targets: Vec<String> = effective_params
-                    .get("custom_inputs")
-                    .and_then(|v| v.get("target_files"))
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let cited_refs: Vec<String> = effective_params
-                    .get("evidence_refs")
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let scope = crate::agent::impact_pack::evidence_scope_refs(
-                    &targets,
-                    &cited_refs,
-                    Some(ctx.workspace_dir),
-                );
-                if !scope.is_empty() {
-                    if let Some(obj) = effective_params.as_object_mut() {
-                        let scope_str = scope.join(", ");
-                        obj.insert("evidence_scope_refs".to_string(), json!(scope));
-                        let exc = obj
-                            .get("evidence_excerpt")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        obj.insert(
-                            "evidence_excerpt".to_string(),
-                            json!(format!(
-                                "{}\n\n【📎 证据范围对账】以下文件被方案引为证据但未列入拟修改目标：{}",
-                                exc,
-                                scope_str
-                            )),
-                        );
-                    }
-                }
-            }
+            apply_plan_evidence_scope(
+                &mut effective_params,
+                ad_hoc,
+                ctx.checkpoint.plan_phase.is_approved(),
+                ctx.workspace_dir,
+            );
 
             let slot_bound=ctx.model_routing.role_override("reviewer").is_some();
             let parent_model=ctx.context.last_execution_model.as_deref().unwrap_or(&routing.model_id);
@@ -373,6 +353,10 @@ pub(super) async fn dispatch_child_reviewer(
             reviewer_model=selection.model_id.clone();
             effective_params["model_selection"]=json!(selection);
 
+            if ad_hoc {
+                effective_params["plan_review_can_finalize"] = json!(false);
+                effective_params["plan_review"] = json!(false);
+            }
             if is_batch {
                 // 与正式方案多人入口一致：成员审同一版本，不按到达先后独立定稿。
                 effective_params["plan_review_can_finalize"] = json!(false);
@@ -384,7 +368,7 @@ pub(super) async fn dispatch_child_reviewer(
                 &reviewer_persona,
                 effective_params.clone(),
             )
-            .with_purpose("plan_review")
+            .with_purpose(if ad_hoc { "ad_hoc" } else { "plan_review" })
             .with_batch_id(batch_id.clone());
             crate::agent::control::mark_stage(
                 ctx.final_session_id,
@@ -420,7 +404,7 @@ pub(super) async fn dispatch_child_reviewer(
                     );
                     ctx.checkpoint.reviewer_dispatches.insert(child_run_id.clone(), snapshot.clone());
                     // 派发快照：供消费端在 reviewer 故障（invalid_output/超时）时自动故障转移重派
-                    if !ctx.checkpoint.plan_phase.is_approved() {
+                    if !ad_hoc && !ctx.checkpoint.plan_phase.is_approved() {
                         ctx.checkpoint.set_plan_reviewer_dispatch_snapshot(&snapshot);
                     }
                     let question_str = effective_params.get("question").and_then(|v| v.as_str()).unwrap_or("");
@@ -449,11 +433,11 @@ pub(super) async fn dispatch_child_reviewer(
         // 一个审查任务都没起来（角色卡未授权/不存在、参数非法等）时回滚本轮审查预算：
         // 否则失败也会消耗仅有的 2 轮额度，额度耗尽后派发被限流、结论又永远收不到，
         // 交叉审查模式将陷入「既派不出、也写不了」的永久阻塞。
-        if success_count == 0 && !ctx.checkpoint.plan_phase.is_approved() {
+        if !ad_hoc && success_count == 0 && !ctx.checkpoint.plan_phase.is_approved() {
             ctx.checkpoint.rollback_plan_review_dispatch(pre_dispatch_consumed);
         }
 
-        if success_count > 0 {
+        if !ad_hoc && success_count > 0 {
             ctx.checkpoint.set_plan_review_batch(&batch_id, spawned_ids.len());
         }
 
@@ -525,4 +509,54 @@ pub(super) async fn dispatch_child_reviewer(
         }
     // --- B2.6 持续监听：注册周期巡检，外部变化以 watch_event 经 durable inbox 自动注入 ---
     }))
+}
+
+fn apply_plan_evidence_scope(params: &mut Value, ad_hoc: bool, plan_approved: bool, workspace: &Path) {
+    let Some(params) = params.as_object_mut() else { return };
+    if ad_hoc {
+        params.remove("evidence_scope_refs");
+        return;
+    }
+    if plan_approved || params.contains_key("evidence_scope_refs") {
+        return;
+    }
+
+    let targets = params.get("custom_inputs").and_then(|inputs| inputs.get("target_files"));
+    let file_refs = |value: Option<&Value>| {
+        value.and_then(Value::as_array).into_iter().flatten()
+            .filter_map(Value::as_str).map(str::to_owned).collect::<Vec<_>>()
+    };
+    let scope = crate::agent::impact_pack::evidence_scope_refs(
+        &file_refs(targets), &file_refs(params.get("evidence_refs")), Some(workspace),
+    );
+    if scope.is_empty() {
+        return;
+    }
+    let scope_str = scope.join(", ");
+    let excerpt = params.get("evidence_excerpt").and_then(Value::as_str).unwrap_or_default();
+    let excerpt = format!("{excerpt}\n\n【📎 证据范围对账】以下文件被方案引为证据但未列入拟修改目标：{scope_str}");
+    params.insert("evidence_excerpt".to_string(), json!(excerpt));
+    params.insert("evidence_scope_refs".to_string(), json!(scope));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ad_hoc_keeps_file_evidence_without_plan_scope_verdicts() {
+        let workspace = Path::new("/tmp");
+        let original = json!({"evidence_refs":["src/state.rs:42"], "evidence_excerpt":"现场回执"});
+        let mut ad_hoc = original.clone();
+        apply_plan_evidence_scope(&mut ad_hoc, true, false, workspace);
+        assert_eq!(ad_hoc, original);
+        ad_hoc["evidence_scope_refs"] = json!(["src/state.rs"]);
+        apply_plan_evidence_scope(&mut ad_hoc, true, false, workspace);
+        assert_eq!(ad_hoc, original);
+
+        let mut formal = original;
+        apply_plan_evidence_scope(&mut formal, false, false, workspace);
+        assert_eq!(formal["evidence_scope_refs"], json!(["src/state.rs"]));
+        assert!(formal["evidence_excerpt"].as_str().unwrap().contains("证据范围对账"));
+    }
 }

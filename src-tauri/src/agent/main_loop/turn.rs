@@ -781,8 +781,7 @@ pub(super) async fn turn_main<'a, 'b>(
         );
         // Reconcile only committed receipt statuses, including contract downgrades.
         let milestones_settled=crate::agent::stage_review::settle_milestones(&mut checkpoint, state.inner());
-        let milestones_recorded=crate::agent::stage_review::record_milestones(&mut checkpoint, step_id, &stage_review_instruction);
-        if milestones_settled || milestones_recorded {
+        if milestones_settled {
             checkpoint.refresh_context(&context);
             save_checkpoint(state.inner(), &mut checkpoint)?;
         }
@@ -956,10 +955,13 @@ pub(super) async fn turn_main<'a, 'b>(
             }
             let mut receipt = evaluation.receipt;
             if receipt.is_ready() {
-                let current_hash = git_baseline
-                    .collect_review_material(&workspace_dir, &context, task_started_at)
-                    .map(|(_, h)| h)
-                    .unwrap_or_default();
+                let delivery_paths = crate::agent::reviewer_gatekeeper::delivery_file_paths(
+                    state.inner(), &final_session_id, &receipt.finish_payload,
+                );
+                let current_hash = crate::agent::reviewer_gatekeeper::task_review_snapshot(
+                    state.inner(), &final_session_id, &workspace_dir, &context,
+                    &git_baseline, task_started_at, &delivery_paths,
+                ).0.hash;
                 // 文件变化的意义由终审裁量；此处只披露审查后的窄窗变化。
                 // scope/契约和用户停止仍按既有事实边界处理。
                 if !receipt.diff_hash.starts_with("unsettled:") {
@@ -1266,6 +1268,7 @@ pub(super) async fn turn_main<'a, 'b>(
                     &mut context,
                     &run_id,
                     &final_session_id,
+                    &workspace_dir,
                     &goal,
                     &run_trace_steps,
                     &output_text,

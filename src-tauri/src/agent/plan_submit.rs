@@ -91,7 +91,7 @@ pub async fn handle_submit_plan(
         return record_plan_without_review(checkpoint, submission, step_id).unwrap_or_else(|error|reject(error,"plan_liveness:submit_plan_invalid"));
     }
     // DB 在途守卫：崩溃孤儿行（spawn 成功但批次未注册）也要挡住重复提交
-    if crate::agent::child_reviewer::has_running_child_runs(db, parent_run_id) {
+    if crate::agent::child_reviewer::has_running_plan_children(db, parent_run_id) {
         // 披露可并行路径而非只指 wait_jobs：子任务结论产出后主循环自动注入，
         // 有未完成待办时干等是纯烧 token（实测单场 21 次串行轮询）。
         let open_todos = context

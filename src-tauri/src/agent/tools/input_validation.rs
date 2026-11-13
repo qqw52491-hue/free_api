@@ -148,6 +148,12 @@ pub(crate) fn validate_native(tool: &str, action: &str, params: &Value) -> Resul
                 "dispatch" => {
                     optional(&tool, params, "profile", "string")?;
                     crate::agent::execution::runtime::ExecutionConfig::parse_declaration(params)?;
+                    if params.get("action").is_none() && params.get("task").is_none()
+                        && params["child_run_id"].as_str().is_some()
+                        && (act.is_empty() || act.eq_ignore_ascii_case("child_task"))
+                    {
+                        return Err("child_task 缺少 action；仅提供 child_run_id 不会查询。查状态用 action='status'，查交付用 action='read_agent_result'，等待用 action='wait'。本次未执行。".into());
+                    }
                     text(&tool, params, &["task"], false)?;
                     optional(&tool, params, "context", "string")?;
                     let size = params["task"].as_str().unwrap().chars().count()

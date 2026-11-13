@@ -119,6 +119,20 @@ pub(crate) async fn reduce_child_receipt(
     let raw = receipt.raw_text.clone().unwrap_or_else(|| serde_json::to_string(receipt).unwrap_or_default());
     crate::agent::work_history::record_async_result(env.db, env.session_id, &receipt.child_run_id, &receipt.status, &raw);
 
+    if receipt.purpose.as_deref() == Some("ad_hoc") {
+        let findings = receipt.findings();
+        let raw_excerpt: String = raw.chars().take(4000).collect();
+        let truncated = raw.chars().count() > raw_excerpt.chars().count();
+        return ReceiptEffects {
+            model_text: format!("【主动审查结果 (child_run_id: {})】状态：{}；结论：{}\n发现：{}\n原始结果{}：{}\n可用 child_task.read_agent_result 按任务 ID 分页回查完整结果。",
+                receipt.child_run_id, receipt.status, receipt.confidence(),
+                if findings.is_empty() { "（无）".to_string() } else { format_findings(&findings) },
+                if truncated { "（节选）" } else { "" }, raw_excerpt),
+            contract_violation,
+            ..Default::default()
+        };
+    }
+
     if matches!(receipt.kind.as_str(), "review" | "reviewer")
         && checkpoint.plan_review_batch_id.is_some()
         && !checkpoint.is_stage_review_target(env.db, &receipt.child_run_id)
@@ -539,6 +553,7 @@ mod tests {
             task_id: run_id.to_string(),
             attempt_id: 1,
             kind: kind.to_string(),
+            purpose: None,
             status: if error_kind.is_some() { "timed_out".to_string() } else { "succeeded".to_string() },
             duration_ms: 10,
             completion_tokens: 5,
@@ -641,6 +656,89 @@ mod tests {
                 if consumed { Some("2024-01-01T00:00:00Z".to_string()) } else { None }
             ],
         ).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ad_hoc_receipts_do_not_replace_formal_batch_or_approve_plan() {
+        let (base, db) = test_db("ad-hoc-separate");
+        let ws = base.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let env = test_env(&db, &ws);
+        let mut context = SandwichContext::new("sys".into(), "goal".into());
+        let mut cp = AgentCheckpoint::new("run-1".into(), &context);
+        seed_run(&db, "formal", "run-1", "formal-batch", "plan_review", "running", false);
+        seed_run(&db, "peer-a", "run-1", "peer-batch-a", "ad_hoc", "succeeded", true);
+        seed_run(&db, "peer-b", "run-1", "peer-batch-b", "ad_hoc", "timed_out", true);
+        cp.set_plan_review_batch("formal-batch", 1);
+        db.0.lock().unwrap().execute("UPDATE agent_child_runs SET status='succeeded' WHERE id='formal'", []).unwrap();
+        db.0.lock().unwrap().execute("UPDATE agent_child_runs SET status='running' WHERE id='peer-a'", []).unwrap();
+        assert!(crate::agent::child_reviewer::has_running_child_runs(&db, "run-1"));
+        assert!(!crate::agent::child_reviewer::has_running_plan_children(&db, "run-1"));
+        for (id, status, error_kind, forged_id, claimed_purpose) in [
+            ("peer-a", "succeeded", None, "formal", "plan_review"),
+            ("peer-b", "timed_out", Some("timeout"), "peer-b", "plan_review"),
+            ("formal", "succeeded", None, "formal", "ad_hoc"),
+        ] {
+            let result = json!({
+                "child_run_id": forged_id, "status": status, "error_kind": error_kind,
+                "findings": [], "confidence": "confirmed", "decision": "approved",
+                "evidence_refs": [], "missing_evidence": [], "duration_ms": 1,
+                "completion_tokens": 1, "purpose": claimed_purpose
+            });
+            db.0.lock().unwrap().execute(
+                "UPDATE agent_child_runs SET status=?2, result_json=?3 WHERE id=?1",
+                rusqlite::params![id, status, result.to_string()],
+            ).unwrap();
+        }
+        cp.refresh_context(&context);
+        crate::agent::checkpoint::save_checkpoint(&db, &mut cp).unwrap();
+        cp = crate::agent::checkpoint::load_checkpoint(&db, "run-1").unwrap().unwrap();
+        let before = serde_json::to_value(&cp).unwrap();
+        let mut polled = crate::agent::child_reviewer::poll_completed_delivery_receipts(
+            &db, "run-1", Some(&["peer-a".into()]),
+        ).unwrap();
+        assert_eq!(polled.len(), 1);
+        let from_poll = polled.pop().unwrap();
+        assert_eq!(from_poll.child_run_id, "peer-a");
+        let from_wait = crate::agent::job_engine::wait_for_jobs(
+            &db, "run-1", Some(&["peer-b".into()]), 1, None,
+        ).await.unwrap();
+        assert_eq!(from_wait.len(), 1);
+        for result in [from_poll, from_wait[0].to_delivery_receipt()] {
+            let effect = reduce_child_receipt(&env, &mut cp, &mut context, &result).await;
+            assert!(effect.model_text.contains("主动审查结果"));
+            assert!(effect.model_text.contains(&result.child_run_id));
+            assert_eq!(serde_json::to_value(&cp).unwrap(), before);
+        }
+        assert_eq!(cp.plan_review_batch_id.as_deref(), Some("formal-batch"));
+        // 旧行的 NULL 是合法台账值；模型声称 ad_hoc 不能改变方案归属。
+        seed_run(&db, "unreadable", "run-1", "peer-batch-c", "ad_hoc", "succeeded", false);
+        {
+            let conn = db.0.lock().unwrap();
+            conn.execute("UPDATE agent_child_runs SET purpose=NULL WHERE id='formal'", []).unwrap();
+            conn.execute(
+                "UPDATE agent_child_runs SET purpose=CAST('ad_hoc' AS BLOB),
+                 result_json=(SELECT result_json FROM agent_child_runs WHERE id='peer-a')
+                 WHERE id='unreadable'",
+                [],
+            ).unwrap();
+        }
+        let mut polled = crate::agent::child_reviewer::poll_completed_delivery_receipts(
+            &db, "run-1", Some(&["formal".into(), "unreadable".into()]),
+        ).unwrap();
+        assert_eq!(polled.len(), 1);
+        let formal = polled.pop().unwrap();
+        assert_eq!(formal.child_run_id, "formal");
+        let consumed: Option<String> = db.0.lock().unwrap().query_row(
+            "SELECT consumed_at FROM agent_child_runs WHERE id='unreadable'", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(consumed, None);
+        let effect = reduce_child_receipt(&env, &mut cp, &mut context, &formal).await;
+        assert!(effect.model_text.contains("formal"));
+        assert!(cp.plan_review_deliveries.contains_key("formal"));
+        assert!(!cp.plan_review_deliveries.contains_key("peer-a"));
+        assert!(!cp.plan_review_deliveries.contains_key("peer-b"));
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[tokio::test]
@@ -1183,6 +1281,7 @@ mod tests {
     #[test]
     fn job_result_normalizes_into_delivery_receipt() {
         let job = crate::agent::job_engine::BackgroundJobResult {
+            purpose: None,
             job_id: "j-1".to_string(),
             job_type: "child_reviewer".to_string(),
             title: "审查".to_string(),

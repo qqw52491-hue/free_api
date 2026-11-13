@@ -158,6 +158,19 @@ async fn material_changes_are_reviewed_and_real_blockers_are_preserved() {
                 &["runtime/status.json".into()],
             ).0;
             assert_eq!(evaluation.receipt.diff_hash, current.hash);
+            let mut final_check = evaluation.receipt.clone();
+            final_check.note_later_material_change(&current.hash);
+            assert!(!final_check.diff_hash.starts_with("unsettled:"));
+            assert!(!final_check.material_notices.iter().any(|n| n.contains("审查结束后材料仍有变化")));
+            std::fs::write(scenario.workspace.join("runtime/status.json"), r#"{"count":999}"#).unwrap();
+            let changed = crate::agent::reviewer_gatekeeper::task_review_snapshot(
+                &scenario.mock.db, &scenario.session, &scenario.workspace,
+                &scenario.context, &scenario.baseline, scenario.start,
+                &["runtime/status.json".into()],
+            ).0;
+            final_check.note_later_material_change(&changed.hash);
+            assert!(final_check.diff_hash.starts_with("unsettled:"));
+            std::fs::write(scenario.workspace.join("runtime/status.json"), r#"{"count":1}"#).unwrap();
             scenario.checkpoint.pending_finalization = Some(evaluation.receipt);
             let cached = scenario.evaluate(&mut rx).await;
             assert!(cached.receipt.is_ready());

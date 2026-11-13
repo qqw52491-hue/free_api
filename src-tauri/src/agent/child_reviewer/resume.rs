@@ -62,6 +62,7 @@ pub(crate) fn spawn_review_resume(
         ));
     }
     let stage = checkpoint.is_stage_review_target(db, target);
+    let ad_hoc = identity.purpose.as_deref() == Some("ad_hoc");
     let mut identity = ChildRunIdentity::inherited(
         &identity,
         if stage {
@@ -97,7 +98,7 @@ pub(crate) fn spawn_review_resume(
         return Err(error("resume_child:final_review_transport","该记录是终审回执，使用原正式交付入口复审；未按 findings 对质协议派发。".into()));
     }
     let old_consumed = checkpoint.plan_reviewer_consumed;
-    if !checkpoint.plan_phase.is_approved() {
+    if !ad_hoc && !checkpoint.plan_phase.is_approved() {
         checkpoint
             .reserve_plan_review_round()
             .map_err(|e| error("plan_gatekeeper:reviewer_retry_limit", e))?;

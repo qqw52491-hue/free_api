@@ -126,6 +126,7 @@ pub async fn spawn_child_reviewer(
     crate::agent::control::mark_stage(parent_session_id, "child_spawn:evidence");
     let (evidence_excerpt, allowed_refs) =
         build_managed_resource_evidence(db, parent_session_id, &request)?;
+    let ad_hoc = identity.purpose.as_deref() == Some("ad_hoc");
     // 配置失败时尚未登记任务，不留下没有执行者的 running 行。
     let mut config = ModelConfig::from_db_state(db, model_id)?;
     let custom_cap = params.get("max_concurrency").and_then(|v| v.as_i64());
@@ -275,6 +276,12 @@ pub async fn spawn_child_reviewer(
     };
 
     system_prompt.push_str(crate::agent::review_tools::TEST_EVIDENCE_GUIDANCE);
+    if ad_hoc {
+        system_prompt = system_prompt.replace(
+            "仅可使用父Agent给定的引用",
+            "可填写父Agent提供或本次调查发现的证据引用，注明来源；引用本身不代表宿主已核实",
+        );
+    }
     let mut messages = vec![
         json!({
             "role": "system",
@@ -304,6 +311,10 @@ pub async fn spawn_child_reviewer(
             )
         }),
     ];
+
+    if let Some(context) = params.get("context").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+        messages.push(json!({"role":"user", "content":format!("【派发方提供的背景，作为待核对材料】\n{context}")}));
+    }
 
     // Host workflow facts have their own message, outside the bounded evidence
     // excerpt; a long task goal must not hide which task owns the stage settings.
@@ -429,7 +440,7 @@ pub async fn spawn_child_reviewer(
     if let Some(handle) = app.as_ref() {
         let program = main_executor::ReviewProgram {
             parent_session: parent_session_id.into(), workspace: workspace_root.into(),
-            messages: messages.clone(), allowed_refs: allowed_refs.clone(), schema: custom_schema.clone(),
+            messages: messages.clone(), allowed_refs: if ad_hoc { vec![] } else { allowed_refs.clone() }, schema: custom_schema.clone(),
             has_verify_obligation: Some(has_verify_obligation), role: param_role.clone(), role_label: param_role_label.clone(),
             model: config.model_name.clone(), can_finalize: is_plan_review.then_some(can_finalize),
             evidence_scope_refs: evidence_scope_refs.clone(), final_fingerprint: None, verify_obligations: vec![],
@@ -576,7 +587,7 @@ pub async fn spawn_child_reviewer(
         let param_role = &param_role;
         let param_role_label = &param_role_label;
         let db_clone = &db_clone;
-        let allowed_refs = &allowed_refs;
+        let allowed_refs = if ad_hoc { &[][..] } else { allowed_refs.as_slice() };
         let Some((messages, duration_ms, completion_tokens, prompt_tokens, mut result_val)) =
             crate::agent::execution::run(ReviewCursor { snapshot, messages, tool_steps_used, non_compliant_strikes, budget_warned, llm_call_index, timeout_retried, cur_timeout_secs, coverage_fix_attempts, cur_effort, think_overflows, on_stream_event, interrupt_rx },
                 move |ReviewCursor { mut snapshot, mut messages, mut tool_steps_used, mut non_compliant_strikes, mut budget_warned, mut llm_call_index, mut timeout_retried, mut cur_timeout_secs, mut coverage_fix_attempts, mut cur_effort, mut think_overflows, mut on_stream_event, mut interrupt_rx }| async move {

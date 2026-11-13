@@ -102,9 +102,9 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     },
     BuiltinToolSpec {
         name: "child_reviewer",
-        summary: "受限只读子调查：审查父证据包，回交带 ID/严重级别/物理行号的结构化 findings 与 routing（certain/needs_alignment/blocked）；收到结果后必须先分诊再行动：逐条判定接受/反驳(须附证据)/需澄清，不要直接照改，也不要直接忽略；不会调用工具或写入文件；支持单发或 dispatches 批量并发派发多个专家会审",
+        summary: "受限只读子调查：审查父证据包，回交带 ID/严重级别/物理行号的结构化 findings 与 routing（certain/needs_alignment/blocked）；收到结果后必须先分诊再行动：逐条判定接受/反驳(须附证据)/需澄清，不要直接照改，也不要直接忽略；可使用宿主授权的只读取证工具，不可写入文件；支持单发或 dispatches 批量并发派发多个专家会审",
         actions: &[
-            "investigate(question: string, role?: string [挂载专精角色卡标识], evidence_refs?: string[] [去重后合计 <=16384 字符，含分隔；无固定条数或单条长度限制], evidence_excerpt?: string <=6000 chars, resource_ids?: string[] <=2 [仅当前项目会话的受管资源；不得传路径] 【⚠️证据三选一必填：refs/excerpt/resource_ids 至少供给一项（通常为你刚读过的文件路径列表），本次调用未提供三者中的任一项会被拒】, custom_inputs?: object [专项业务参数；角色卡声明必填项必须供给；verified_facts/hard_constraints/definition_of_done 分节呈现，字段名不认证来源；入口分流另以可修正的 triage_reference 附带；注意 plan_summary 不算证据], dispatches?: Array<{question, role?, evidence_refs|evidence_excerpt|resource_ids 三选一必填, ...}> [一步批量并发派发多个审查员会审])",
+            "investigate(question: string, context?: string [派发方背景，作为待核对材料], review_purpose?: ad_hoc [主动专项审查，独立结果，不参与方案审批；可引用本次调查发现的证据，引用本身不代表宿主已核实；例如 params 中填 review_purpose=ad_hoc；省略沿用方案审查], role?: string [挂载专精角色卡标识], evidence_refs?: string[] [去重后合计 <=16384 字符，含分隔；无固定条数或单条长度限制], evidence_excerpt?: string <=6000 chars, resource_ids?: string[] <=2 [仅当前项目会话的受管资源；不得传路径] 【⚠️证据三选一必填：refs/excerpt/resource_ids 至少供给一项（通常为你刚读过的文件路径列表），本次调用未提供三者中的任一项会被拒】, custom_inputs?: object [专项业务参数；角色卡声明必填项必须供给；verified_facts/hard_constraints/definition_of_done 分节呈现，字段名不认证来源；入口分流另以可修正的 triage_reference 附带；注意 plan_summary 不算证据], dispatches?: Array<{question, review_purpose?, role?, evidence_refs|evidence_excerpt|resource_ids 三选一必填, ...}> [每项 review_purpose 必须一致；一步批量并发派发多个审查员会审])",
         ],
     },
     BuiltinToolSpec {

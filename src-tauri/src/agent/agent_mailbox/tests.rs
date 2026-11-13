@@ -103,6 +103,13 @@ fn observation_reads_interrupted_review_and_new_attempt_without_rebinding_or_col
     assert_eq!(page["has_more"], true);
     let result = replies::read_result(&f.db, &next, &json!({"child_run_id":old.run,"view":"result"})).unwrap();
     assert_eq!(result["total_chars"], 0);
+    assert_eq!(result["historical_reference"], true);
+    assert_eq!(result["has_more"], false);
+    f.db.0.lock().unwrap().execute("UPDATE agent_child_runs SET result_json=?2 WHERE id=?1", params![latest.run, "{\"summary\":\"当前结果\"}"]).unwrap();
+    let current_result = replies::read_result(&f.db, &next, &json!({"child_run_id":latest.run,"view":"result","limit":4})).unwrap();
+    assert_eq!(current_result["historical_reference"], false);
+    assert_eq!(current_result["has_more"], true);
+    assert_eq!(current_result["next_offset"], 4);
     let raw = replies::read_result(&f.db, &next, &json!({"child_run_id":old.run,"view":"step_output","output_id":proof})).unwrap();
     assert!(raw.to_string().contains("service.log evidence"));
     assert!(replies::read_result(&f.db, &next, &json!({"child_run_id":latest.run,"view":"step_output","output_id":proof})).is_err());

@@ -140,9 +140,12 @@ pub(crate) fn read_result(db: &DbState, actor: &Actor, params: &Value) -> Result
     let limit = params["limit"].as_u64().unwrap_or(8192).clamp(1, 8192) as usize;
     let total = text.chars().count();
     let page: String = text.chars().skip(offset).take(limit).collect();
-    Ok(
-        json!({"child_run_id":id,"execution_status":status,"source_field":source,"offset":offset,"next_offset":offset.saturating_add(page.chars().count()),"total_chars":total,"text":page,"historical_reference":true}),
-    )
+    let next_offset = offset.saturating_add(page.chars().count());
+    Ok(json!({
+        "child_run_id":id,"execution_status":status,"source_field":source,"offset":offset,
+        "next_offset":next_offset,"has_more":next_offset < total,"total_chars":total,
+        "text":page,"historical_reference":kind == "historical_child",
+    }))
 }
 
 fn insert_message(

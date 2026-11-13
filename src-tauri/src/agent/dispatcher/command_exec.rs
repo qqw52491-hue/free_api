@@ -630,7 +630,9 @@ pub(crate) fn take_mcp_durable_output(
 /// native sibling results, rather than replacing the entire batch with MCP-only data.
 pub(crate) fn take_tool_durable_output(result: &mut DispatchResult, fallback: &str) -> String {
     let complete = if !result.success && !result.stdout.is_empty() {
-        if !result.stderr.is_empty() && result.stdout != result.stderr {
+        // Review parallel stderr summarizes the same branches for retry feedback.
+        // Keep the structured report at the start so branch_id can locate it.
+        if result.route != "review:parallel" && !result.stderr.is_empty() && result.stdout != result.stderr {
             format!("--- STDOUT ---\n{}\n--- STDERR ---\n{}", result.stdout, result.stderr)
         } else {
             result.stdout.clone()

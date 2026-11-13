@@ -45,7 +45,7 @@
     #[test]
     fn committee_choice_does_not_add_stage_review_triggers() {
         let mut context=SandwichContext::new("sys".into(),"goal".into());
-        context.record_side_effect(1,"edit_file".into(),"src/a.rs".into());
+        for i in 0..stage_review_max_files() { context.record_side_effect(i as usize,"edit_file".into(),format!("src/{i}.rs")); }
         let mut cp=approved_checkpoint();
         let (root,db)=mk_db("people-trigger");
         let instruction=instruction_with_todo_done();
@@ -119,12 +119,12 @@
         let (_db_base, db) = mk_db("t");
         assert!(should_fire(&cp, &db, &context, &instruction, &routing).is_none());
 
-        // 有写入 + todo 阶段完成：触发
+        // 一个写入 + todo 完成不足以触发审查
         let mut context2 = SandwichContext::new("system".to_string(), "goal".to_string());
         context2.record_side_effect(1, "write_file".to_string(), "a.rs".to_string());
         let cp = approved_checkpoint();
         let (_db_base, db) = mk_db("t");
-        assert!(should_fire(&cp, &db, &context2, &instruction, &routing).is_some());
+        assert!(should_fire(&cp, &db, &context2, &instruction, &routing).is_none());
     }
 
     #[test]
@@ -238,7 +238,7 @@
     #[test]
     fn should_fire_short_circuits_when_triage_disables_stage_review() {
         let mut context = SandwichContext::new("system".to_string(), "goal".to_string());
-        context.record_side_effect(1, "write_file".to_string(), "a.rs".to_string());
+        for i in 0..stage_review_max_files() { context.record_side_effect(i as usize, "write_file".into(), format!("f{i}.rs")); }
         let instruction = instruction_with_todo_done();
         let routing = default_routing();
         let (_db_base, _db) = mk_db("t");
@@ -292,7 +292,7 @@
     #[test]
     fn should_fire_respects_stage_reviewer_override_disabled_and_roles() {
         let mut context = SandwichContext::new("system".to_string(), "goal".to_string());
-        context.record_side_effect(1, "write_file".to_string(), "a.rs".to_string());
+        for i in 0..stage_review_max_files() { context.record_side_effect(i as usize, "write_file".into(), format!("f{i}.rs")); }
         let instruction = instruction_with_todo_done();
         let cp = approved_checkpoint();
         let (_db_base, db) = mk_db("t");
@@ -425,6 +425,7 @@
             task_id: "reb-1".to_string(),
             attempt_id: 1,
             kind: "review".to_string(),
+            purpose: None,
             status: "invalid_output".to_string(),
             duration_ms: 100,
             completion_tokens: 0,
@@ -457,6 +458,7 @@
             task_id: "receipt-1".to_string(),
             attempt_id: 1,
             kind: "review".to_string(),
+            purpose: None,
             status: "timed_out".to_string(),
             duration_ms: 60000,
             completion_tokens: 0,
@@ -492,6 +494,7 @@
             task_id: "stage_review_1_fe".to_string(),
             attempt_id: 1,
             kind: "review".to_string(),
+            purpose: None,
             status: "succeeded".to_string(),
             duration_ms: 1200,
             completion_tokens: 150,
@@ -521,6 +524,7 @@
             task_id: "stage_review_1_be".to_string(),
             attempt_id: 1,
             kind: "review".to_string(),
+            purpose: None,
             status: "succeeded".to_string(),
             duration_ms: 1500,
             completion_tokens: 200,
@@ -555,6 +559,7 @@
             task_id: "stage_rebuttal_1".to_string(),
             attempt_id: 1,
             kind: "review".to_string(),
+            purpose: None,
             status: "succeeded".to_string(),
             duration_ms: 800,
             completion_tokens: 80,
@@ -609,6 +614,7 @@
         crate::agent::protocol::DeliveryReceipt {
             child_run_id:id.into(), task_id:task.into(), attempt_id:attempt,
             kind:"review".into(), status:"succeeded".into(), duration_ms:1,
+            purpose: None,
             completion_tokens:1,prompt_tokens:1,error_kind:None,
             payload:Some(payload),raw_text:None,
         }
@@ -954,11 +960,11 @@
         assert!(!record_milestones(&mut cp, 1, &instruction));
         assert!(should_fire(&cp,&db,&c,&instruction,&default_routing()).is_none());
         cp.stages.stage_review = Some(true);
-        assert!(should_fire(&cp,&db,&c,&instruction,&default_routing()).is_some());
+        assert!(should_fire(&cp,&db,&c,&instruction,&default_routing()).is_none());
         cp.stages.stage_review = None;
         cp.triage_verdict.as_mut().unwrap().apply_plan_review_overrides("", "milestone");
         assert!(record_milestones(&mut cp, 1, &instruction));
-        assert!(should_fire(&cp,&db,&c,&instruction_with_todo_done(),&default_routing()).is_some());
+        assert!(should_fire(&cp,&db,&c,&instruction_with_todo_done(),&default_routing()).is_none());
         cp.stage_review_pending_milestones.clear();
         // No milestone transition, no periodic review just for reading.
         assert!(should_fire(&cp,&db,&c,&AgentInstruction::default(),&default_routing()).is_none());
@@ -989,12 +995,12 @@
         mark_consumed(&db,"previous","succeeded");
         let next=milestone_instruction(&c,&update);
         assert!(next.todo_update.is_empty());
-        assert!(should_fire(&cp,&db,&c,&next,&default_routing()).is_some());
+        assert!(should_fire(&cp,&db,&c,&next,&default_routing()).is_none());
         // Failed dispatch/receipt leaves the event pending for an ordinary next step.
         cp.stage_review_milestone_cutoff=Some(5);
         mark_consumed(&db,"previous","failed");settle_milestones(&mut cp,&db);
         assert_eq!(cp.stage_review_pending_milestones.len(),1);
-        assert!(should_fire(&cp,&db,&c,&AgentInstruction::default(),&default_routing()).is_some());
+        assert!(should_fire(&cp,&db,&c,&AgentInstruction::default(),&default_routing()).is_none());
         // A later milestone during review must not be consumed with the old one.
         assert!(record_milestones(&mut cp,6,&transition));
         mark_consumed(&db,"previous","succeeded");settle_milestones(&mut cp,&db);
@@ -1010,7 +1016,7 @@
         let c=SandwichContext::new("sys".into(),"只读调查".into());
         let (root,db)=mk_db("audit-explicit");let mut cp=approved_checkpoint();
         cp.stages.plan_review=Some(false);cp.stages.stage_review=Some(true);
-        assert!(should_fire(&cp,&db,&c,&instruction_with_todo_done(),&default_routing()).is_some());
+        assert!(should_fire(&cp,&db,&c,&instruction_with_todo_done(),&default_routing()).is_none());
         cp.stages.stage_review=Some(false);
         assert!(should_fire(&cp,&db,&c,&instruction_with_todo_done(),&default_routing()).is_none());
         std::fs::remove_dir_all(root).unwrap();

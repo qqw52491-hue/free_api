@@ -869,7 +869,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
                 context.turns_history.push(crate::agent::context::ChatMessage {
                     role: "user".to_string(),
                     content: json!(format!(
-                        "【🧭 入口调查参考（入口分流给出）】\n{}\n{}\n【审查方式随方案选择】submit_plan 可填写 final_review_mode（mechanical_only|artifact_quality|code_review|operational_verification|panel）。视频/动画/PPT/页面/报表等成品用 artifact_quality（终审员可对视频抽帧、对页面/PPT 截图核对内容）。跨模块测试和运行验证可选 operational_verification，核对实际命令、回执和未覆盖项。入口已选择机械校验的简单任务可沿用 mechanical_only。自动阶段审查沿用入口选择。若调查发现有需要提前复核的风险，可用 stage_review_mode=milestone 补开。用户固定设置优先，放宽已选的独立终审、多人终审或 milestone 由人工决定。\n【非代码产物（视频/PPT/表格/报告等）的方案要求】产出文件时 target_files 填真实产出路径；仅对话报告、只读调查或测试任务可填 []；方案须写明产物规格、分步清单、每步可核对的验证方式与关键假设；验证以真实打开/渲染/检查产物内容为准，不要只确认文件存在。",
+                        "【🧭 入口调查参考（入口分流给出）】\n{}\n{}\n【审查方式随方案选择】submit_plan 可填写 final_review_mode（mechanical_only|artifact_quality|code_review|operational_verification|panel）。视频/动画/PPT/页面/报表等成品用 artifact_quality（终审员可对视频抽帧、对页面/PPT 截图核对内容）。跨模块测试和运行验证可选 operational_verification，核对实际命令、回执和未覆盖项。入口已选择机械校验的简单任务可沿用 mechanical_only。自动阶段审查沿用入口选择；stage_review_mode=milestone 启用按实际写入阈值触发的自动阶段审查。需要立即复核某个具体问题时，调用 child_reviewer，在 params 填 \"review_purpose\": \"ad_hoc\" 并提供问题和证据。用户固定设置优先，放宽已选的独立终审、多人终审或 milestone 由人工决定。\n【非代码产物（视频/PPT/表格/报告等）的方案要求】产出文件时 target_files 填真实产出路径；仅对话报告、只读调查或测试任务可填 []；方案须写明产物规格、分步清单、每步可核对的验证方式与关键假设；验证以真实打开/渲染/检查产物内容为准，不要只确认文件存在。",
                         brief, investigation_hint
                     )),
                 });

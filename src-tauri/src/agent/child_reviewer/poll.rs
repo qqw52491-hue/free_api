@@ -19,19 +19,28 @@ pub fn poll_completed_child_runs_filtered(
     parent_run_id: &str,
     targets: Option<&[String]>,
 ) -> Result<Vec<ChildReviewResult>, String> {
+    poll_child_results_with_purpose(db, parent_run_id, targets)
+        .map(|rows| rows.into_iter().map(|(result, _)| result).collect())
+}
+
+fn poll_child_results_with_purpose(
+    db: &DbState,
+    parent_run_id: &str,
+    targets: Option<&[String]>,
+) -> Result<Vec<(ChildReviewResult, Option<String>)>, String> {
     // 每次收割前先巡检僵尸 running 行（panic/悬挂兜底，见 reap_stale_child_runs）
     reap_stale_child_runs(db, parent_run_id);
     let conn = db.0.lock().map_err(|error| error.to_string())?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, result_json, kind, COALESCE(task_id, id), COALESCE(attempt_id, 1) FROM agent_child_runs
+            "SELECT id, result_json, kind, COALESCE(task_id, id), COALESCE(attempt_id, 1), purpose FROM agent_child_runs
              WHERE parent_run_id = ?1 AND kind != 'task'
                AND status IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted', 'invalid_output')
                AND result_json IS NOT NULL
                AND (applied_at IS NULL OR applied_at = '')",
         )
         .map_err(|error| error.to_string())?;
-    let rows: Vec<(String, String, String, String, i64)> = stmt
+    let rows = stmt
         .query_map(params![parent_run_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -39,14 +48,21 @@ pub fn poll_completed_child_runs_filtered(
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, i64>(4)?,
+                row.get::<_, Option<String>>(5)?,
             ))
         })
         .map_err(|error| error.to_string())?
-        .filter_map(|r| r.ok())
-        .collect();
+        .filter_map(|row| match row {
+            Ok(row) => Some(row),
+            Err(error) => {
+                eprintln!("[child-reviewer] 父任务 {parent_run_id} 的回执行无法读取，保留待回收：{error}");
+                None
+            }
+        })
+        .collect::<Vec<_>>();
     let mut results = Vec::new();
     let now = chrono::Utc::now().to_rfc3339();
-    for (id, json_str, kind, task_id, attempt_id) in rows {
+    for (id, json_str, kind, task_id, attempt_id, purpose) in rows {
         // 定向模式：非目标 ID 的结果不消费，保留给后续 wait_jobs 或信箱轮询
         if let Some(targets) = targets {
             if !targets.iter().any(|t| t == &id) {
@@ -55,11 +71,12 @@ pub fn poll_completed_child_runs_filtered(
         }
         match serde_json::from_str::<ChildReviewResult>(&json_str) {
             Ok(mut result) => {
+                result.child_run_id.clone_from(&id);
                 result.raw_result_json = Some(json_str);
                 result.kind = Some(kind);
                 result.task_id = Some(task_id);
                 result.attempt_id = Some(attempt_id.max(1) as u32);
-                results.push(result);
+                results.push((result, purpose));
                 // consumed_at = 已投递（信息位）；applied_at 由消费方在
                 // checkpoint 落账的同一事务里写——投递与落账解耦是崩溃重放的根基。
                 let _ = conn.execute(
@@ -95,13 +112,17 @@ pub fn poll_completed_delivery_receipts(
     parent_run_id: &str,
     targets: Option<&[String]>,
 ) -> Result<Vec<crate::agent::protocol::DeliveryReceipt>, String> {
-    let raw = poll_completed_child_runs_filtered(db, parent_run_id, targets)?;
-    let mut receipts:Vec<crate::agent::protocol::DeliveryReceipt>=raw.into_iter().map(Into::into).collect();
+    let raw = poll_child_results_with_purpose(db, parent_run_id, targets)?;
+    let mut receipts: Vec<crate::agent::protocol::DeliveryReceipt> = raw.into_iter().map(|(result, purpose)| {
+        let mut receipt = crate::agent::protocol::DeliveryReceipt::from(result);
+        receipt.purpose = purpose;
+        receipt
+    }).collect();
     let conn=db.0.lock().map_err(|e|e.to_string())?;
     let mut stmt=conn.prepare("SELECT id,COALESCE(task_id,id),attempt_id,status,duration_ms,result_json FROM agent_child_runs WHERE parent_run_id=?1 AND kind='task' AND status!='running' AND result_json IS NOT NULL AND (applied_at IS NULL OR applied_at='') ORDER BY started_at").map_err(|e|e.to_string())?;
     let rows=stmt.query_map([parent_run_id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,u32>(2)?,r.get::<_,String>(3)?,r.get::<_,Option<u64>>(4)?,r.get::<_,String>(5)?))).map_err(|e|e.to_string())?;
     for row in rows {let(id,task,attempt,status,duration,raw)=row.map_err(|e|e.to_string())?;if targets.is_some_and(|ids|!ids.contains(&id)){continue}
-        receipts.push(crate::agent::protocol::DeliveryReceipt{child_run_id:id,task_id:task,attempt_id:attempt,kind:"task".into(),status,duration_ms:duration.unwrap_or(0),completion_tokens:0,prompt_tokens:0,error_kind:None,payload:serde_json::from_str(&raw).ok(),raw_text:Some(raw)});
+        receipts.push(crate::agent::protocol::DeliveryReceipt{child_run_id:id,task_id:task,attempt_id:attempt,kind:"task".into(),purpose:None,status,duration_ms:duration.unwrap_or(0),completion_tokens:0,prompt_tokens:0,error_kind:None,payload:serde_json::from_str(&raw).ok(),raw_text:Some(raw)});
     }
     Ok(receipts)
 }
@@ -244,6 +265,16 @@ pub fn has_running_child_runs(db: &DbState, parent_run_id: &str) -> bool {
     count > 0
 }
 
+/// Formal plan admission still tracks the same children as before, excluding
+/// only explicitly registered independent reviews.
+pub(crate) fn has_running_plan_children(db: &DbState, parent_run_id: &str) -> bool {
+    let Ok(conn) = db.0.lock() else { return false; };
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_child_runs WHERE parent_run_id=?1 AND status IN ('queued','running') AND COALESCE(purpose,'')!='ad_hoc')",
+        [parent_run_id], |row| row.get(0),
+    ).unwrap_or(false)
+}
+
 /// 检查当前 parent_run 是否存在「已到终态但尚未被回收」的审查结论（wait_jobs 可直接收取）。
 ///
 /// 与 `has_running_child_runs` 互补：前者代表结论还在路上，后者代表结论已产出但还没进入主 Agent 上下文。
@@ -257,7 +288,8 @@ pub fn has_pending_review_results(db: &DbState, parent_run_id: &str) -> bool {
                AND status IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted', 'invalid_output')
                AND result_json IS NOT NULL
                AND (applied_at IS NULL OR applied_at = '')
-               AND (kind IS NULL OR kind = '' OR kind = 'review')",
+               AND (kind IS NULL OR kind = '' OR kind = 'review')
+               AND COALESCE(purpose,'') != 'ad_hoc'",
             params![parent_run_id],
             |row| row.get(0),
         )

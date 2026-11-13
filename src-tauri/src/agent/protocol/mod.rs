@@ -776,6 +776,9 @@ pub struct DeliveryReceipt {
     pub attempt_id: u32,
     /// 任务类型（"review", "writer", "worker"）
     pub kind: String,
+    /// 宿主台账用途，仅由回执传输层填充。
+    #[serde(skip)]
+    pub(crate) purpose: Option<String>,
     /// 宿主观测的执行状态（"succeeded", "timed_out", "failed", "cancelled", "invalid_output" 等）
     pub status: String,
     /// 真实执行耗时（毫秒）
@@ -945,6 +948,7 @@ impl From<crate::agent::child_reviewer::ChildReviewResult> for DeliveryReceipt {
             task_id: res.task_id.clone().unwrap_or_else(|| res.child_run_id.clone()),
             attempt_id: res.attempt_id.unwrap_or(1),
             kind,
+            purpose: None,
             status: res.status,
             duration_ms: res.duration_ms,
             completion_tokens: res.completion_tokens,

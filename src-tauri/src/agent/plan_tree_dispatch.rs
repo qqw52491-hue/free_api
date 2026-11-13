@@ -160,8 +160,8 @@ where
                 return Err("❌ 本批未执行：并行分支不支持 child_task。请将原动作单独调用，例如查回执仍用 receipt。需要派发多个任务时可逐次 dispatch，已受理任务在后台并行运行。".into());
             }
             return Err(format!(
-                "❌ 「{}」是异步后台子 Agent，不能放在 parallel 同步执行树中。请直接使用对应工具的 dispatches 数组，例如：{{\"tool\":\"{}\",\"dispatches\":[{{\"task\":\"任务 A\"}},{{\"task\":\"任务 B\"}}]}}；也可逐次派发，任务会在后台并行运行。",
-                tool.as_ref(), tool.as_ref()
+                "❌ 本批未执行：「{}」是异步后台子 Agent，不能放在 parallel 同步执行树中。请把原工具和动作放到独立调用中，保留原参数。需要派发多个任务时，可逐次派发，已受理任务在后台并行运行。",
+                tool.as_ref()
             ));
         }
     }
@@ -365,7 +365,8 @@ mod tests {
         ];
         let err = validate_controlled_parallel_batch(&steps).unwrap_err();
         assert!(err.contains("异步后台子 Agent"));
-        assert!(err.contains("dispatches 数组"));
+        assert!(err.contains("保留原参数"));
+        assert!(!err.contains("dispatches"));
 
         let child_task_error = validate_controlled_parallel_batch(&[json!({"tool":"child_task","params":{"task":"A"}})]).unwrap_err();
         assert!(child_task_error.contains("逐次"));

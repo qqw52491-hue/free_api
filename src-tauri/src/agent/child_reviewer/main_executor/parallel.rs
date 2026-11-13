@@ -75,6 +75,22 @@ pub(super) async fn run(
     .await;
     let successful_steps = results.iter().filter(|node| node.ok).count();
     let failed_steps = results.len() - successful_steps;
+    let stderr = if failed_steps == 0 {
+        String::new()
+    } else {
+        let summaries = results.iter().map(|node| {
+            let id = node.id.as_deref().unwrap_or("?");
+            let tool = node.tool.as_deref().unwrap_or("parallel");
+            let (status, detail) = if node.ok {
+                ("成功", node.data.as_ref().and_then(|data| data["output"].as_str()).unwrap_or_default())
+            } else {
+                ("失败", node.error.as_deref().unwrap_or("未提供原因"))
+            };
+            let excerpt: String = detail.chars().take(220).collect();
+            format!("- {id} {tool} {status}：{excerpt}")
+        }).collect::<Vec<_>>().join("\n");
+        format!("并行取证：{successful_steps} 个成功，{failed_steps} 个失败。已成功的分支可继续使用。\n{summaries}\n回查完整分支时使用本批 output_id 和 run_id={id:?}。")
+    };
     let report = PlanExecutionReport {
         success: failed_steps == 0,
         total_steps: results.len(),
@@ -92,7 +108,7 @@ pub(super) async fn run(
     stdout.push_str(&format!("回查本批审查回执时，请同时传入 run_id={id:?}。\n"));
     DispatchResult {
         stdout,
-        stderr: String::new(),
+        stderr,
         success: report.success,
         route: "review:parallel".into(),
         view: None,

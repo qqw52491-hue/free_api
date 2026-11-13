@@ -55,7 +55,7 @@ export function historicalReviewer(value: unknown): AgentWorkerItem | undefined 
     if (!id) return;
     const purpose = toText(raw.purpose);
     const label = toText(raw.label) || ({
-        plan_review: "方案审查员", stage_review: "阶段审查员", final_review: "终审员", rebuttal: "复审员",
+        ad_hoc: "主动审查员", plan_review: "方案审查员", stage_review: "阶段审查员", final_review: "终审员", rebuttal: "复审员",
     } as Record<string, string>)[purpose] || "审查员";
     const status = raw.status === "succeeded" ? "succeeded" : raw.status === "running" ? "challenged" : "failed";
     const currentStep = status === "succeeded" ? "已保存审查结果"

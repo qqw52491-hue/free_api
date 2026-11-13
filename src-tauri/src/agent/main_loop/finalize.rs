@@ -16,6 +16,7 @@ pub(crate) fn commit_completed_run(
     context: &mut SandwichContext,
     run_id: &str,
     final_session_id: &str,
+    workspace_dir: &std::path::Path,
     goal: &str,
     run_trace_steps: &[serde_json::Value],
     output_text: &str,
@@ -118,6 +119,7 @@ pub(crate) fn commit_completed_run(
     // 产物登记是提交前的派生写入：路径幂等去重，失败降级为原始条目；
     // 它不在终态事务内（register_workspace_artifact 自带锁，嵌套会死锁），
     // 事务回滚时留下的是可去重的普通产物行，不会污染权威终态。
+    let mut artifact_disclosures = Vec::new();
     if let serde_json::Value::Object(ref mut map) = emitted_finish {
         if let Some(artifacts_val) = map.get_mut("artifacts") {
             if let Some(arr) = artifacts_val.as_array_mut() {
@@ -134,12 +136,22 @@ pub(crate) fn commit_completed_run(
                         _ => None,
                     };
                     if let Some(path_str) = raw_candidate {
-                        if let Ok(rec) = crate::agent::artifact_manager::register_workspace_artifact(
-                            db,
-                            final_session_id,
-                            Some(run_id),
-                            &path_str,
-                        ) {
+                        let resolved = crate::agent::path_guard::ensure_readable_path(
+                            &path_str, workspace_dir, Some(final_session_id), false,
+                        ).map(|path| path.canonical_path).or_else(|error| {
+                            let canonical = std::path::Path::new(&path_str).canonicalize().ok();
+                            let registered = crate::agent::artifact_manager::list_session_artifacts(db, final_session_id)
+                                .unwrap_or_default().into_iter()
+                                .any(|record| canonical.as_ref().is_some_and(|path| path == std::path::Path::new(&record.canonical_path)));
+                            if registered { Ok(canonical.unwrap()) } else { Err(error) }
+                        });
+                        let registration = resolved.and_then(|path| {
+                            crate::agent::artifact_manager::register_workspace_artifact(
+                                db, final_session_id, Some(run_id),
+                                &path.to_string_lossy(),
+                            )
+                        });
+                        if let Ok(rec) = registration {
                             resolved_artifacts.push(json!({
                                 "artifact_id": rec.id,
                                 "name": rec.display_name,
@@ -150,6 +162,9 @@ pub(crate) fn commit_completed_run(
                                 "local_path": rec.canonical_path,
                             }));
                         } else {
+                            if let Err(error) = registration {
+                                artifact_disclosures.push(format!("交付文件 {path_str} 未能登记：{error}"));
+                            }
                             resolved_artifacts.push(item.clone());
                         }
                     } else {
@@ -157,6 +172,20 @@ pub(crate) fn commit_completed_run(
                     }
                 }
                 *artifacts_val = serde_json::Value::Array(resolved_artifacts);
+            }
+        }
+    }
+    if !artifact_disclosures.is_empty() {
+        let disclosure = artifact_disclosures.join("\n");
+        persisted_summary.push_str(&format!("\n\n{disclosure}"));
+        if let serde_json::Value::Object(ref mut map) = emitted_finish {
+            if let Some(details) = map.get("details").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                let same = map.get("summary").and_then(|v| v.as_str()) == Some(details);
+                let updated = format!("{details}\n\n{disclosure}");
+                if same { map.insert("summary".into(), json!(updated)); }
+                map.insert("details".into(), json!(updated));
+            } else {
+                map.insert("summary".into(), json!(persisted_summary));
             }
         }
     }

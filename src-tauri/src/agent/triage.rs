@@ -458,7 +458,7 @@ pub async fn run_triage<R: tauri::Runtime>(
   - expert_panel：跨域高风险，需多专家联合会审；
   - user_clarification：需求歧义必须先问用户，澄清前不得写入。
 - pre_review_roles / stage_review_roles / final_review_roles：按优先顺序推荐候选，不是必派人员名单；宿主在显式角色设置和权限范围内优先选可用候选，人数由单人/会审配置另定。
-- stage_review_mode：独立于方案路由选择。若中途复核能在后续操作前发现具体风险或避免返工，选 milestone，宿主按里程碑/写入阈值派审。若中途复核只会重复交付时的核对，选 none。用户明确的阶段审查设置优先。
+- stage_review_mode：独立于方案路由选择。若中途复核能在后续操作前发现具体风险或避免返工，选 milestone，宿主按写入阈值派审。若中途复核只会重复交付时的核对，选 none。用户明确的阶段审查设置优先。
 - final_review_mode：mechanical_only=机械校验即可交付（简单产物）；artifact_quality=非代码产物按产物质量标准终审（需求覆盖/结构完整/可用性）；code_review=代码级终审；operational_verification=须运行验证证据的终审；panel=多专家终审。route 为 technical_plan/expert_panel 时保留独立终审。规划阶段可按实际产物选择独立终审类型，或加强阶段审查。放宽已选的独立终审、milestone 或 panel 由人类通过固定环节配置或既有仲裁决定。
 - evidence_policy：none=方案不需证据引用；source_refs=资料/需求来源即可；code_refs=须引用已读代码证据；operational_probes=须命令输出/探针证据。
 - investigation_questions / required_evidence：仅当 route 为 technical_plan/expert_panel 时填写，其他路由留空数组——你负责定调查方向，规划阶段的主 Agent 会先摸底，按需要把互相独立的问题派给只读探针并行取证，再依据实际发现提交方案；此清单是调查先验，不是必须逐条核销的验收清单。

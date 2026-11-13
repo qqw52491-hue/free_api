@@ -37,7 +37,7 @@ pub(crate) fn render_prepare_finish(
     };
     let mut output_text = if receipt.is_ready() {
         format!(
-            "✅ 终态预检就绪（receipt {}）：当前版本验收已就绪。\n现在用本次预检的同一份 summary 和 details 调用 finish；交付内容、scope、契约和验收状态未变时复用本收据，不再重复验证与终审。补充或修改正文后需要重新核验。",
+            "✅ 终态预检就绪（receipt {}）：当前版本验收已就绪。\n现在用本次预检的完整交付内容调用 finish，包括 summary、details、附件和角色要求的其他字段；交付内容、scope、契约和验收状态未变时复用本收据，不再重复验证与终审。补充或修改正文后需要重新核验。",
             receipt.receipt_id
         )
     } else {

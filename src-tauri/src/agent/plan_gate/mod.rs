@@ -568,7 +568,7 @@ fn gate_interception(
             // 先探测后台是否仍有审查任务在跑：用于区分「结论还在路上」与「派发压根没产生任务」。
             // 若不区分，后者会让模型只会反复调用 wait_jobs 收空信箱，而 consumed 永远置不上位，写入被无限拦截。
             let reviewer_running =
-                crate::agent::child_reviewer::has_running_child_runs(db, parent_run_id);
+                crate::agent::child_reviewer::has_running_plan_children(db, parent_run_id);
             // 齐套判定由台账推导：批次有成员且仍有回执未消费 = 未齐套
             let is_batch_incomplete = checkpoint.plan_review_batch_id.is_some()
                 && !checkpoint.plan_review_batch_complete(db);
