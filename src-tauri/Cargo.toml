@@ -1,6 +1,6 @@
 [package]
 name = "free-api-chat"
-version = "0.5.1"
+version = "0.5.2"
 description = "Free API AI Chat - High Performance Tauri App"
 authors = ["wx"]
 edition = "2021"
