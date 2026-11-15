@@ -63,6 +63,7 @@ impl ReviewResult {
             model_id: "none".to_string(),
             diff_hash: String::new(),
             missing_evidence: Vec::new(),
+            role_outputs: Vec::new(),
         }
     }
 
@@ -77,6 +78,7 @@ impl ReviewResult {
             model_id: model_id.to_string(),
             diff_hash: diff_hash.to_string(),
             missing_evidence: Vec::new(),
+            role_outputs: Vec::new(),
         }
     }
 
@@ -92,6 +94,7 @@ impl ReviewResult {
             model_id: "triage:mechanical_only".to_string(),
             diff_hash: String::new(),
             missing_evidence: Vec::new(),
+            role_outputs: Vec::new(),
         }
     }
 
@@ -110,6 +113,7 @@ impl ReviewResult {
             model_id: "scope_drift_guard".to_string(),
             diff_hash: diff_hash.to_string(),
             missing_evidence: Vec::new(),
+            role_outputs: Vec::new(),
         }
     }
 }

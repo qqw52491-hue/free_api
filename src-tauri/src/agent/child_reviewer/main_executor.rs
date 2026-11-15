@@ -60,6 +60,8 @@ pub(crate) struct ReviewProgram {
     pub can_finalize: Option<bool>,
     pub evidence_scope_refs: Vec<String>,
     pub final_fingerprint: Option<String>,
+    #[serde(default)]
+    pub execution_config: Option<crate::agent::execution::runtime::ExecutionConfig>,
     pub verify_obligations: Vec<crate::agent::review_contract::ReviewObligation>,
     #[serde(default)]
     pub evidence_since: Option<chrono::DateTime<chrono::Utc>>,
@@ -102,11 +104,12 @@ pub(crate) fn validate(
     elapsed: u64,
 ) -> Result<Value, String> {
     if let Some(fingerprint) = program.final_fingerprint.as_ref() {
-        let mut result = crate::agent::reviewer_gatekeeper::parse_reviewer_json(
+        let mut result = crate::agent::reviewer_gatekeeper::parse_final_review_json(
             &payload.to_string(),
             &program.model,
             fingerprint,
             elapsed,
+            program.role.as_ref().and_then(Value::as_str).zip(program.schema.as_ref()),
         )?;
         let snapshot = Snapshot::load(db, id, "reviewer")?.ok_or("审查执行记录缺失")?;
         let rechecks: std::collections::BTreeMap<
@@ -592,6 +595,7 @@ fn recover_final_review(
             || saved.has_verify_obligation != program.has_verify_obligation
             || saved.can_finalize != program.can_finalize || saved.evidence_scope_refs != program.evidence_scope_refs
             || saved.final_fingerprint != program.final_fingerprint
+            || saved.execution_config != program.execution_config
             || saved.verify_obligations != program.verify_obligations
             || saved.evidence_since != program.evidence_since {
             continue;
@@ -626,6 +630,8 @@ pub(crate) async fn run_final(
     role_name: Option<&str>,
     role_label: Option<&str>,
     parent_step_id: Option<usize>,
+    execution_config: Option<crate::agent::execution::runtime::ExecutionConfig>,
+    schema: Option<crate::agent::protocol::ContractSchema>,
 ) -> Result<crate::agent::reviewer_gatekeeper::ReviewResult, FinalReviewError> {
     let parent_step_occurrence = parent_step_id.and_then(|step_id| {
         crate::agent::run_trace::load_run_steps(db, parent).ok().map(|steps| {
@@ -640,7 +646,7 @@ pub(crate) async fn run_final(
         workspace: workspace.into(),
         messages: messages.into(),
         allowed_refs: vec![],
-        schema: None,
+        schema,
         has_verify_obligation: None,
         role: role_name.map(|s| Value::String(s.to_string())),
         role_label: role_label.map(|s| Value::String(s.to_string())),
@@ -648,6 +654,7 @@ pub(crate) async fn run_final(
         can_finalize: None,
         evidence_scope_refs: vec![],
         final_fingerprint: Some(fingerprint.into()),
+        execution_config: execution_config.clone(),
         verify_obligations: obligations,
         evidence_since: Some(evidence_since),
         parent_step_id,
@@ -656,9 +663,12 @@ pub(crate) async fn run_final(
     if let Some(result) = recover_final_review(db, parent, session, &program)? {
         return Ok(result);
     }
+    let mut identity = ChildRunIdentity::fresh("final_review");
+    identity.execution_config = execution_config.as_ref().map(serde_json::to_string).transpose().map_err(|error| error.to_string())?;
+    identity.contract_schema = program.schema.as_ref().map(serde_json::to_string).transpose().map_err(|error| error.to_string())?;
     let id = begin_child_run_extended(
         db, parent, session, workspace, &config.model_id, 0, "review", Some(3), None, None,
-        &ChildRunIdentity::fresh("final_review"),
+        &identity,
     )?;
     if let Err(error) = start(
         app,

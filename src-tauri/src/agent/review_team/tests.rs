@@ -67,6 +67,35 @@ async fn review_team_selection_caps_three_preserves_primary_and_respects_exclusi
 }
 
 #[tokio::test]
+async fn single_final_review_fingerprint_changes_with_its_selected_role() {
+    let fixture = TestDb::new();
+    seed_cards(&fixture.db, 2);
+    let config = crate::agent::router::ModelRoutingConfig::default();
+    let roles = vec!["review_0".to_string()];
+    let before = final_review_policy_fingerprint(&fixture.db, &config, &roles);
+    crate::agent::tools::role_manager::upsert_card(&fixture.db, &json!({
+        "name":"review_1", "persona_prompt":"unrelated change"
+    })).unwrap();
+    assert_eq!(before, final_review_policy_fingerprint(&fixture.db, &config, &roles));
+    crate::agent::tools::role_manager::upsert_card(&fixture.db, &json!({
+        "name":"review_0", "persona_prompt":"changed review instructions"
+    })).unwrap();
+    assert_ne!(before, final_review_policy_fingerprint(&fixture.db, &config, &roles));
+}
+
+#[test]
+fn final_reviewer_selection_skips_roles_with_missing_required_inputs() {
+    let fixture = TestDb::new();
+    seed_cards(&fixture.db, 2);
+    let schema = json!({"fields":[{"name":"scope","field_type":"string","required":true,"description":"scope"}]}).to_string();
+    crate::agent::tools::role_manager::upsert_card(&fixture.db, &json!({
+        "name":"review_0", "input_schema":schema
+    })).unwrap();
+    let card = final_review_primary(&fixture.db, &["review_0".into(), "review_1".into()], &[]).unwrap();
+    assert_eq!(card.name, "review_1");
+}
+
+#[tokio::test]
 async fn review_policy_fingerprint_tracks_people_and_role_changes_without_changing_defaults() {
     let mock = TestDb::new();
     seed_cards(&mock.db, 3);

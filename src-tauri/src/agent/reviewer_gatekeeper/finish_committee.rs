@@ -29,13 +29,11 @@ pub(super) async fn evaluate_committee<R: tauri::Runtime>(
     finish_summary: Option<&str>,
     delivery_paths: &[String],
 ) -> ReviewResult {
-    let primary = crate::agent::review_team::recommended_primary(
+    let primary = crate::agent::review_team::final_review_primary(
         db, triage.map(|v| v.final_review_roles.as_slice()).unwrap_or(&[]),
         &model_routing.disabled_role_cards,
-    ).or_else(|| crate::agent::review_team::recommended_primary(
-        db, &["reviewer".into()], &model_routing.disabled_role_cards,
-    ));
-    let cards = crate::agent::review_team::review_team(
+    );
+    let mut cards = crate::agent::review_team::review_team(
         db,
         context,
         approved_target_files.unwrap_or(&[]),
@@ -43,6 +41,15 @@ pub(super) async fn evaluate_committee<R: tauri::Runtime>(
         true,
         primary,
     );
+    cards.retain(|card| {
+        match crate::agent::tools::role_manager::validate_dispatch_inputs(card, None) {
+            Ok(()) => true,
+            Err(error) => {
+                let _ = app.emit(&format!("agent-log-{session_id}"), format!("终审跳过角色 {}：{error}", card.name));
+                false
+            }
+        }
+    });
     if cards.is_empty() {
         let mut result = evaluate_finish_diff_single(
             app,
@@ -196,6 +203,7 @@ fn aggregate_committee_results(results: Vec<(String, ReviewResult)>) -> ReviewRe
         if !effective {
             continue;
         }
+        merged.role_outputs.extend(result.role_outputs);
         for mut issue in result.blocking_issues {
             issue.issue = format!("【{}】{}", label, issue.issue);
             merged.blocking_issues.push(issue);

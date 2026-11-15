@@ -18,11 +18,22 @@ use tokio::sync::watch;
 
 /// 只做字段类型/非空校验和明确别名转换，不判断缺陷语义。
 /// 禁止把解析失败的缺陷列表当成 []，或把未知字段对象当成空白缺陷。
+#[cfg(test)]
 pub(crate) fn parse_reviewer_json(
     raw_text: &str,
     model_id: &str,
     diff_hash: &str,
     duration_ms: u64,
+) -> Result<ReviewResult, String> {
+    parse_final_review_json(raw_text, model_id, diff_hash, duration_ms, None)
+}
+
+pub(crate) fn parse_final_review_json(
+    raw_text: &str,
+    model_id: &str,
+    diff_hash: &str,
+    duration_ms: u64,
+    role_contract: Option<(&str, &crate::agent::protocol::ContractSchema)>,
 ) -> Result<ReviewResult, String> {
     use serde_json::Value;
     let value: Value = serde_json::from_str(&extract_json_str(raw_text))
@@ -114,6 +125,25 @@ pub(crate) fn parse_reviewer_json(
             .map_err(|e| format!("missing_evidence 类型错误：必须为字符串数组（{e}）"))?,
         None => Vec::new(),
     };
+    let mut role_outputs = Vec::new();
+    if let Some((role, schema)) = role_contract {
+        let mut extensions = value;
+        if let Some(fields) = extensions.as_object_mut() {
+            for name in [
+                "verdict", "score", "summary", "conclusion", "verdict_reason", "decision_basis",
+                "blocking_issues", "nit_issues", "missing_evidence",
+            ] {
+                if !schema.fields.iter().any(|field| field.name == name) {
+                    fields.remove(name);
+                }
+            }
+        }
+        schema.validate_shape(&extensions)?;
+        let fields = schema.sanitize_extra(&extensions).into_iter().collect::<std::collections::BTreeMap<_, _>>();
+        if !fields.is_empty() {
+            role_outputs.push(FinalReviewRoleOutput { role: role.to_owned(), fields });
+        }
+    }
     Ok(ReviewResult {
         // 有有效阻塞项时仍以阻塞项为准，不能因 verdict=passed 放行。
         verdict: if blocking_issues.is_empty() {
@@ -130,6 +160,7 @@ pub(crate) fn parse_reviewer_json(
         model_id: model_id.into(),
         diff_hash: diff_hash.into(),
         missing_evidence,
+        role_outputs,
     })
 }
 

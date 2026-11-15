@@ -26,7 +26,7 @@ const MAX_SCOPE_CHARS: usize = 500;
 const MAX_TEST_COMMAND_CHARS: usize = 200;
 
 mod execution;
-pub(crate) use execution::merge_execution_defaults;
+pub(crate) use execution::{merge_execution_defaults, merge_execution_defaults_for_card};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RoleCard {

@@ -4,7 +4,31 @@ use serde_json::{json, Value};
 
 pub(crate) enum PreparedDispatch {
     Receipt(Value),
-    Params(Value),
+    Params(Value, Option<crate::agent::tools::role_manager::RoleCard>),
+}
+
+/// Older registrations do not contain a role snapshot and must use their
+/// existing compatibility path. New snapshots retain the original prompt.
+pub(crate) fn registered_role(
+    db: &crate::db::DbState,
+    id: &str,
+) -> Result<Option<(Option<crate::agent::tools::role_manager::RoleCard>, String)>, String> {
+    let Some(snapshot) = crate::agent::execution::runtime::Snapshot::load(db, id, "task")? else {
+        return Ok(None);
+    };
+    let input = &snapshot.state["dispatch_input"];
+    let Some(card) = input.get("role_card") else {
+        return Ok(None);
+    };
+    let card = if card.is_null() {
+        None
+    } else {
+        Some(serde_json::from_value(card.clone())
+            .map_err(|error| format!("已登记角色快照损坏：{error}"))?)
+    };
+    let context = input.get("role_context").and_then(Value::as_str)
+        .ok_or("已登记子任务缺少角色上下文，无法安全恢复。")?;
+    Ok(Some((card, context.to_owned())))
 }
 
 pub(crate) fn prepare(
@@ -16,7 +40,7 @@ pub(crate) fn prepare(
     action: &str,
 ) -> Result<PreparedDispatch, String> {
     if !matches!(action, "dispatch" | "resume") {
-        return Ok(PreparedDispatch::Params(requested));
+        return Ok(PreparedDispatch::Params(requested, None));
     }
     // The declaration key and owner identify an existing execution. Returning
     // its receipt/status must not reapply defaults intended for new tasks.
@@ -31,12 +55,27 @@ pub(crate) fn prepare(
         if let Some(body) = super::recover_finished(db, session, parent_run, &id)? {
             return Ok(PreparedDispatch::Receipt(body));
         }
+        if let Some(snapshot) = crate::agent::execution::runtime::Snapshot::load(db, &id, "task")? {
+            let params = snapshot.state["dispatch_input"]["params"].clone();
+            if params.is_object() {
+                return Ok(PreparedDispatch::Params(params, None));
+            }
+        }
     }
-    let params = crate::agent::tools::role_manager::merge_execution_defaults(db, &requested, None)?;
+    let card = if let Some(role) = requested["role"].as_str() {
+        Some(crate::agent::tools::role_manager::resolve_enabled_card(db, role)?
+            .ok_or_else(|| format!("角色不存在或已禁用：{role}"))?)
+    } else {
+        None
+    };
+    let params = match &card {
+        Some(card) => crate::agent::tools::role_manager::merge_execution_defaults_for_card(&requested, None, card)?,
+        None => requested,
+    };
     if params["execution"]["workspace"] == "isolated" {
         return Err(crate::agent::child_writer::ISOLATED_WRITER_RETIRED.into());
     }
-    Ok(PreparedDispatch::Params(params))
+    Ok(PreparedDispatch::Params(params, card))
 }
 
 pub(crate) fn key(task: &str, step: usize, params: &Value, slot: Option<usize>) -> String {
@@ -167,7 +206,7 @@ mod tests {
             .err().expect("inherited isolation must also fail");
         assert_eq!(error, crate::agent::child_writer::ISOLATED_WRITER_RETIRED);
         let shared = prepare(&f.db, "owner", "parent", "shared-key", json!({"task":"implement","profile":"writer"}), "dispatch").unwrap();
-        assert!(matches!(shared, PreparedDispatch::Params(params) if params["profile"]=="writer"));
+        assert!(matches!(shared, PreparedDispatch::Params(params, _) if params["profile"]=="writer"));
         assert_eq!(f.db.0.lock().unwrap().query_row("SELECT COUNT(*) FROM agent_child_runs", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
     }
 
@@ -240,10 +279,103 @@ mod tests {
     }
 
     #[test]
+    fn registered_unattached_dispatch_survives_role_disabling() {
+        let f = Fixture::new();
+        let requested = json!({"task":"inspect","role":"original_role"});
+        crate::agent::tools::role_manager::upsert_card(
+            &f.db,
+            &json!({"name":"original_role","allowed_kinds":"task"}),
+        ).unwrap();
+        let key = key("task", 1, &requested, None);
+        let saved = json!({
+            "task":"inspect", "role":"original_role", "profile":"task",
+            "context":"original follow-up material", "specialized_context":"original focus material",
+            "execution":{"allowed_tools":["read_file"]}
+        });
+        f.register("parent", &key, &saved).unwrap();
+        crate::agent::tools::role_manager::toggle_card(&f.db, &json!({"name":"original_role"})).unwrap();
+        let PreparedDispatch::Params(params, _) = prepare(&f.db, "owner", "parent", &key, requested.clone(), "dispatch").unwrap() else {
+            panic!("unfinished registration should retain its parameters")
+        };
+        assert_eq!(params, saved);
+        assert!(prepare(&f.db, "owner", "parent", "new-key", requested, "dispatch").is_err());
+    }
+
+    #[test]
+    fn registered_role_snapshot_preserves_original_persona_and_contract() {
+        let f = Fixture::new();
+        crate::agent::tools::role_manager::upsert_card(&f.db, &json!({
+            "name":"original_role", "allowed_kinds":"task", "persona_prompt":"original instructions"
+        })).unwrap();
+        let card = crate::agent::tools::role_manager::resolve_enabled_card(&f.db, "original_role")
+            .unwrap().unwrap();
+        let id = f.register("parent", "snapshot-key", &json!({"task":"inspect"})).unwrap();
+        let mut snapshot = crate::agent::execution::runtime::Snapshot::load(&f.db, &id, "task")
+            .unwrap().unwrap();
+        assert!(registered_role(&f.db, &id).unwrap().is_none());
+        snapshot.state["dispatch_input"]["role_card"] = json!(card);
+        snapshot.state["dispatch_input"]["role_context"] = json!("original role and contract");
+        snapshot.save(&f.db).unwrap();
+        crate::agent::tools::role_manager::upsert_card(&f.db, &json!({
+            "name":"original_role", "persona_prompt":"changed instructions"
+        })).unwrap();
+        crate::agent::tools::role_manager::toggle_card(&f.db, &json!({"name":"original_role"})).unwrap();
+        let (card, context) = registered_role(&f.db, &id).unwrap().unwrap();
+        assert_eq!(card.unwrap().persona_prompt, "original instructions");
+        assert_eq!(context, "original role and contract");
+        snapshot.state["dispatch_input"]["role_context"] = Value::Null;
+        snapshot.save(&f.db).unwrap();
+        assert!(registered_role(&f.db, &id).is_err());
+    }
+
+    #[test]
+    fn new_dispatch_uses_one_role_version_for_defaults_and_persona() {
+        let f = Fixture::new();
+        crate::agent::tools::role_manager::upsert_card(&f.db, &json!({
+            "name":"versioned_role", "allowed_kinds":"task", "persona_prompt":"original instructions",
+            "execution_defaults":{"profile":"task","execution":{"allowed_tools":["read_file"]}}
+        })).unwrap();
+        let PreparedDispatch::Params(params, Some(card)) = prepare(
+            &f.db, "owner", "parent", "new", json!({"task":"inspect","role":"versioned_role"}), "dispatch"
+        ).unwrap() else {
+            panic!("fresh role dispatch must carry its resolved card")
+        };
+        crate::agent::tools::role_manager::upsert_card(&f.db, &json!({
+            "name":"versioned_role", "persona_prompt":"new instructions",
+            "execution_defaults":{"profile":"task","execution":{"allowed_tools":["write_file"]}}
+        })).unwrap();
+        assert_eq!(params["execution"]["allowed_tools"], json!(["read_file"]));
+        assert_eq!(card.persona_prompt, "original instructions");
+    }
+
+    #[test]
+    fn legacy_alias_preflight_keeps_registered_request_when_role_schema_changes() {
+        let f = Fixture::new();
+        crate::agent::tools::role_manager::upsert_card(&f.db, &json!({
+            "name":"investigator", "allowed_kinds":"worker"
+        })).unwrap();
+        let item = json!({"task":"inspect", "role":"investigator"});
+        let inst: AgentInstruction = serde_json::from_value(json!({"tool":"child_worker", "params":item})).unwrap();
+        let requested = super::super::presets::requested(item, Some("worker")).unwrap();
+        let key = key("parent-task", 7, &requested, None);
+        f.register("parent", &key, &requested).unwrap();
+        let schema = json!({"fields":[{"name":"new_required", "field_type":"string", "required":true, "description":"new input"}]}).to_string();
+        crate::agent::tools::role_manager::upsert_card(&f.db, &json!({
+            "name":"investigator", "input_schema":schema
+        })).unwrap();
+        assert!(crate::agent::tools::input_validation::instruction_rejection_for_run(
+            &f.db, &inst, "owner", "parent-task", 7
+        ).is_none());
+        assert!(crate::agent::tools::input_validation::instruction_rejection_for_run(
+            &f.db, &inst, "owner", "other-task", 7
+        ).is_some());
+    }
+
+    #[test]
     fn unroled_task_keeps_default_permissions_and_routes_to_the_actual_parent_model() {
         let f = Fixture::new();
         let requested = super::super::presets::requested(json!({"task":"inspect"}), None).unwrap();
-        let PreparedDispatch::Params(params) =
+        let PreparedDispatch::Params(params, _) =
             prepare(&f.db, "owner", "parent", "new-key", requested, "dispatch").unwrap()
         else {
             panic!("new task must return dispatch params")
@@ -289,7 +421,7 @@ mod tests {
             }
             crate::agent::tools::role_manager::upsert_card(&f.db, &card).unwrap();
             let request = json!({"task":"check evidence","role":name});
-            let PreparedDispatch::Params(params) =
+            let PreparedDispatch::Params(params, _) =
                 prepare(&f.db, "owner", &parent, name, request, "dispatch").unwrap()
             else {
                 panic!("a new role dispatch must return parameters");

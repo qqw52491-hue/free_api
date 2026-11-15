@@ -197,6 +197,10 @@ pub(crate) fn native_rejection(tool: &str, action: &str, params: &Value) -> Opti
 }
 
 pub(crate) fn validate_child_item(db: &DbState, tool: &str, params: &Value) -> Result<(), String> {
+    validate_child_item_with_role(db, tool, params, true)
+}
+
+fn validate_child_item_with_role(db: &DbState, tool: &str, params: &Value, validate_role: bool) -> Result<(), String> {
     if !params.is_object() {
         return Err(type_error(tool, "params", "object", params));
     }
@@ -207,7 +211,7 @@ pub(crate) fn validate_child_item(db: &DbState, tool: &str, params: &Value) -> R
         optional(tool, params, "test_command", "string")?;
     }
     let mut effective = params.clone();
-    if let Some(role) = params.get("role").and_then(Value::as_str) {
+    if let Some(role) = params.get("role").and_then(Value::as_str).filter(|_| validate_role) {
         // 角色不存在/已禁用/DB 读取失败仍交给原权限派发层；预检不替代权限裁决。
         if let Ok(Some(card)) = super::role_manager::resolve_enabled_card(db, role) {
             super::role_manager::validate_dispatch_inputs(&card, params.get("custom_inputs"))?;
@@ -234,6 +238,24 @@ pub(crate) fn validate_child_item(db: &DbState, tool: &str, params: &Value) -> R
 pub(crate) fn instruction_rejection(
     db: &DbState,
     inst: &AgentInstruction,
+) -> Option<DispatchResult> {
+    instruction_rejection_inner(db, inst, None)
+}
+
+pub(crate) fn instruction_rejection_for_run(
+    db: &DbState,
+    inst: &AgentInstruction,
+    session: &str,
+    task: &str,
+    step: usize,
+) -> Option<DispatchResult> {
+    instruction_rejection_inner(db, inst, Some((session, task, step)))
+}
+
+fn instruction_rejection_inner(
+    db: &DbState,
+    inst: &AgentInstruction,
+    run: Option<(&str, &str, usize)>,
 ) -> Option<DispatchResult> {
     if inst.submit_plan.is_some() || inst.prepare_finish.is_some() {
         return None;
@@ -276,7 +298,14 @@ pub(crate) fn instruction_rejection(
             .iter()
             .enumerate()
             .filter_map(|(i, item)| {
-                validate_child_item(db, tool, item)
+                let registered = run.is_some_and(|(session, task, step)| {
+                    let profile = match tool { "child_worker" => "worker", "child_writer" => "writer", _ => return false };
+                    let Ok(requested) = crate::agent::child_task::presets::requested(item.clone(), Some(profile)) else { return false };
+                    let slot = (items.len() > 1).then_some(i);
+                    let key = crate::agent::child_task::dispatch::key(task, step, &requested, slot);
+                    crate::agent::child_task::find_task(db, session, &key).ok().flatten().is_some()
+                });
+                validate_child_item_with_role(db, tool, item, !registered)
                     .err()
                     .map(|e| format!("[{}/{}] {e}", i + 1, items.len()))
             })

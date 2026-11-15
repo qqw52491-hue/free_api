@@ -64,6 +64,7 @@ impl Fixture {
             verification: ReceiptVerification::NotRequired,
             review: ReceiptReview::NotRequired,
             material_notices: vec![],
+            final_review_role_outputs: vec![],
             blockers: vec![],
             risk_flags: vec![],
             finish_payload: json!({"summary":"read-only findings"}),

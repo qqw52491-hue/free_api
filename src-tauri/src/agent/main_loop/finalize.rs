@@ -112,6 +112,9 @@ pub(crate) fn commit_completed_run(
                 "finalization_receipt".to_string(),
                 json!(receipt.receipt_id),
             );
+            if !receipt.final_review_role_outputs.is_empty() {
+                map.insert("final_review_role_outputs".into(), json!(receipt.final_review_role_outputs));
+            }
         }
     }
 

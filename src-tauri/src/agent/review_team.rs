@@ -5,6 +5,31 @@ pub(crate) const MAX_REVIEWERS: usize = 3;
 #[cfg(test)]
 pub(crate) mod tests;
 
+pub(crate) fn final_review_policy_fingerprint(
+    db: &DbState,
+    routing: &crate::agent::router::ModelRoutingConfig,
+    recommended: &[String],
+) -> String {
+    if routing.stage_review_committee {
+        return policy_fingerprint(db, routing);
+    }
+    use sha2::{Digest, Sha256};
+    let card = final_review_primary(db, recommended, &routing.disabled_role_cards);
+    format!("{:x}", Sha256::digest(serde_json::json!({
+        "card": card,
+        "reviewer": routing.role_models.get("reviewer"),
+        "fallback_models": [&routing.pro, &routing.flash, &routing.vision],
+        "backup": routing.reviewer_backup_model,
+        "cross_family": routing.auto_cross_family_reviewer,
+    }).to_string().as_bytes()))
+}
+
+pub(crate) fn final_review_primary(db: &DbState, names: &[String], disabled: &[String]) -> Option<RoleCard> {
+    names.iter().map(String::as_str).chain(std::iter::once("reviewer"))
+        .find_map(|name| recommended_primary(db, &[name.to_owned()], disabled)
+            .filter(|card| crate::agent::tools::role_manager::validate_dispatch_inputs(card, None).is_ok()))
+}
+
 /// 人数/角色配置变化后不能复用旧单人就绪收据；不影响冻结验证命令的执行事实。
 pub(crate) fn policy_fingerprint(
     db: &DbState,

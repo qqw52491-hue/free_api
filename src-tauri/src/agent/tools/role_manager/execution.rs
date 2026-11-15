@@ -63,13 +63,21 @@ pub(crate) fn merge_execution_defaults(
     params: &Value,
     fixed_profile: Option<&str>,
 ) -> Result<Value, String> {
-    let mut merged = params.clone();
     let Some(role) = params["role"].as_str() else {
-        return Ok(merged);
+        return Ok(params.clone());
     };
     let Some(card) = resolve_enabled_card(db, role)? else {
         return Err(format!("角色不存在或已禁用：{role}"));
     };
+    merge_execution_defaults_for_card(params, fixed_profile, &card)
+}
+
+pub(crate) fn merge_execution_defaults_for_card(
+    params: &Value,
+    fixed_profile: Option<&str>,
+    card: &RoleCard,
+) -> Result<Value, String> {
+    let mut merged = params.clone();
     if card.execution_defaults.is_empty() {
         if fixed_profile.is_none() && params.get("profile").is_none() {
             let kinds = ["task", "worker", "writer", "reviewer"]

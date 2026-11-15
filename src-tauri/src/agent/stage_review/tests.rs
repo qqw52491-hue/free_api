@@ -1123,3 +1123,19 @@ fn stage_role_recommendation_respects_explicit_role_off_switch_and_exclusions() 
     cp.stages.stage_review = Some(false);
     assert!(select_stage_cards(&fixture.db, &context, &cp, &config).is_none());
 }
+#[test]
+fn stage_review_does_not_dispatch_roles_without_required_inputs() {
+    let required = crate::agent::tools::role_manager::RoleCard {
+        name: "expert".into(),
+        input_schema: serde_json::json!({"fields":[{"name":"scope","field_type":"string","required":true,"description":"required scope"}]}).to_string(),
+        ..Default::default()
+    };
+    let ordinary = crate::agent::tools::role_manager::RoleCard {
+        name: "general".into(), ..Default::default()
+    };
+    let (available, notices) = super::stage_cards_with_available_inputs(vec![required.clone(), ordinary], None).unwrap();
+    assert_eq!(available.len(), 1);
+    assert_eq!(available[0].name, "general");
+    assert!(notices[0].contains("scope"));
+    assert!(super::stage_cards_with_available_inputs(vec![required], Some("expert")).unwrap_err().contains("scope"));
+}

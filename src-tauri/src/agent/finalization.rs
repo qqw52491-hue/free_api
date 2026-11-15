@@ -198,6 +198,8 @@ pub struct FinalizationReceipt {
     pub step_id: usize,
     pub verification: ReceiptVerification,
     pub review: ReceiptReview,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub final_review_role_outputs: Vec<crate::agent::reviewer_gatekeeper::FinalReviewRoleOutput>,
     /// 材料变化的观察与审查覆盖边界，只作披露，不自动阻断交付。
     #[serde(default)]
     pub material_notices: Vec<String>,
@@ -633,6 +635,7 @@ mod tests {
         review_policy_fingerprint: String::new(),
             frozen_verification_run: None,
             material_notices: vec![],
+            final_review_role_outputs: vec![],
             step_id: 10,
             verification: ReceiptVerification::Verified {
                 evidence: "cargo test ok".to_string(),

@@ -277,6 +277,25 @@ fn select_stage_cards(
     Some(role_cards)
 }
 
+fn stage_cards_with_available_inputs(
+    cards: Vec<crate::agent::tools::role_manager::RoleCard>,
+    explicit: Option<&str>,
+) -> Result<(Vec<crate::agent::tools::role_manager::RoleCard>, Vec<String>), String> {
+    let mut available = Vec::new();
+    let mut notices = Vec::new();
+    for card in cards {
+        if let Err(error) = crate::agent::tools::role_manager::validate_dispatch_inputs(&card, None) {
+            if explicit.is_some_and(|name| name.trim() == card.name) {
+                return Err(format!("阶段审查缺少指定角色所需输入：{error}"));
+            }
+            notices.push(format!("阶段审查跳过角色 {}：{error}", card.name));
+        } else {
+            available.push(card);
+        }
+    }
+    Ok((available, notices))
+}
+
 /// 派发一次阶段审查。证据包由宿主组装（任务目标 + 阶段计划 + 当前累计 diff），
 /// reviewer 走自适应专家挂载或跨家族异构模型优选。在联合会审模式下，并发唤起多位专家。
 pub async fn dispatch(
@@ -294,6 +313,12 @@ pub async fn dispatch(
     let Some(role_cards) = select_stage_cards(db, context, checkpoint, model_routing) else {
         return Ok(());
     };
+    let (role_cards, notices) = stage_cards_with_available_inputs(
+        role_cards, model_routing.stage_reviewer_override.as_deref(),
+    )?;
+    for notice in notices {
+        let _ = app.emit(&format!("agent-log-{session_id}"), notice);
+    }
     let routing = AgentRouter::route_for_role(
         context,
         model_routing,
@@ -441,6 +466,14 @@ pub async fn dispatch(
             "parent_workflow_context": crate::agent::review_team::parent_workflow_context(checkpoint),
             "parent_task_goal": context.effective_goal(),
         });
+
+        let params = match crate::agent::tools::role_manager::merge_execution_defaults_for_card(&params, Some("reviewer"), card) {
+            Ok(params) => params,
+            Err(error) => {
+                let _ = app.emit(&format!("agent-log-{session_id}"), format!("{} 的角色配置无效：{error}", card.label));
+                continue;
+            }
+        };
 
         let mut envelope = crate::agent::protocol::DispatchEnvelope::reviewer(
             parent_run_id,

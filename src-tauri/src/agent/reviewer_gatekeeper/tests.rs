@@ -137,6 +137,7 @@ index 789..abc 100644
             model_id: "test-model".to_string(),
             diff_hash: diff_hash.to_string(),
             missing_evidence: vec![],
+            role_outputs: vec![],
         };
 
         // 无豁免时：命中防敷衍拦截 (Diff 未变)

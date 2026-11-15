@@ -168,6 +168,7 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
                 acceptance_fingerprint:acceptance_fingerprint(context,checkpoint,&request_payload),evidence_index_fingerprint:None,
                 review_policy_fingerprint:String::new(),frozen_verification_run:None,step_id,
                 verification:ReceiptVerification::NotRequired,review:ReceiptReview::NotRequired,
+                final_review_role_outputs: vec![],
                 material_notices:vec![],blockers,risk_flags:vec![],finish_payload:request_payload,created_at:Utc::now().to_rfc3339(),
             },review_result:None,
         };
@@ -230,7 +231,10 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
         "pending_stage_milestones_has_more":checkpoint.stage_review_pending_milestones.len()>20,
     })));
     let state_fp = acceptance_fingerprint(context, checkpoint, &request_payload);
-    let review_policy_fingerprint = crate::agent::review_team::policy_fingerprint(db, model_routing);
+    let review_policy_fingerprint = crate::agent::review_team::final_review_policy_fingerprint(
+        db, model_routing,
+        checkpoint.triage_verdict.as_ref().map(|verdict| verdict.final_review_roles.as_slice()).unwrap_or(&[]),
+    );
     let child_state = crate::agent::reviewer_gatekeeper::review_history_tool(
         db, run_id, "list_child_runs", &json!({"limit":1}),
     );
@@ -555,6 +559,9 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
             step_id,
             verification,
             review,
+            final_review_role_outputs: review_result.as_ref()
+                .map(|result| result.role_outputs.clone())
+                .unwrap_or_default(),
             material_notices,
             blockers,
             risk_flags: detect_risk_flags(&context.new_affected_paths()),

@@ -73,6 +73,14 @@ pub struct ReviewResult {
     /// 让"我看不见/没查完"从 summary 散文变成结构化可观测信号。
     #[serde(default)]
     pub missing_evidence: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub role_outputs: Vec<FinalReviewRoleOutput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FinalReviewRoleOutput {
+    pub role: String,
+    pub fields: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 #[cfg(test)]

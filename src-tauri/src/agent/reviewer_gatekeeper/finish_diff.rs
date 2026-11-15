@@ -21,6 +21,19 @@ const FINISH_REVIEW_RULES_VERSION: &str = "review-search-v19-inherited-model";
 const MAX_FINISH_FORMAT_RETRIES: u32 = 5;
 const MAX_FINISH_REQUEST_RETRIES: u32 = 5;
 
+fn final_review_tool_allowed(
+    config: Option<&crate::agent::execution::runtime::ExecutionConfig>,
+    tool: &str,
+    request: &serde_json::Value,
+) -> bool {
+    config.is_none_or(|config| {
+        let tool = tool.to_ascii_lowercase();
+        let action = request.get("action").and_then(serde_json::Value::as_str).unwrap_or("");
+        config.permits(&tool)
+            || (!action.is_empty() && config.permits(&format!("{}.{}", tool, action.to_ascii_lowercase())))
+    })
+}
+
 /// Reviewer 主动发起的真实复验若失败，不能再按旧通过回执放行。
 pub(crate) fn enforce_failed_rechecks(
     result: &mut ReviewResult,
@@ -576,6 +589,10 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     let review_fingerprint = if excluded.is_empty() { review_fingerprint } else {
         with_execution_evidence_fingerprint(&review_fingerprint, Some(&serde_json::to_string(&excluded).unwrap_or_default()))
     };
+    let review_policy = crate::agent::review_team::final_review_policy_fingerprint(
+        db, model_routing, triage.map(|verdict| verdict.final_review_roles.as_slice()).unwrap_or(&[]),
+    );
+    let review_fingerprint = with_execution_evidence_fingerprint(&review_fingerprint, Some(&review_policy));
 
     // 机械嗅探异常预警：物理异常只报不判——伪格式可能任务授权（实测
     // fakefmt），由审查者取证后裁量。mechanical_only 模式下本预警即
@@ -674,22 +691,43 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
 
     // 3. 解析评审模型与角色人设（要求角色卡明确授权 allows_kind("reviewer")）。
     // 分流判决指定 final_review_roles 时优先挂载第一位可用角色；查不到/未授权回退默认 "reviewer"。
-    let resolved_card = crate::agent::review_team::recommended_primary(
+    if let Some(verdict) = triage {
+        for name in &verdict.final_review_roles {
+            if let Some(card) = crate::agent::review_team::recommended_primary(db, &[name.clone()], &model_routing.disabled_role_cards) {
+                if let Err(error) = crate::agent::tools::role_manager::validate_dispatch_inputs(&card, None) {
+                    let _ = app.emit(&format!("agent-log-{session_id}"), format!("终审跳过角色 {}：{error}", card.name));
+                }
+            }
+        }
+    }
+    let resolved_card = crate::agent::review_team::final_review_primary(
         db, triage.map(|v| v.final_review_roles.as_slice()).unwrap_or(&[]),
         &model_routing.disabled_role_cards,
-    ).or_else(|| crate::agent::review_team::recommended_primary(
-        db, &["reviewer".into()], &model_routing.disabled_role_cards,
-    ));
+    );
     let reviewer_role = resolved_card.as_ref().map(|c| c.name.clone());
     let reviewer_label = resolved_card.as_ref().map(|c| c.label.clone()).unwrap_or_else(|| "基础审查员".into());
-    let (mut model_id, persona_extra) = if let Some(card) = resolved_card {
+    let mut role_schema = resolved_card.as_ref().and_then(|card| card.parse_custom_schema());
+    if let Some(schema) = role_schema.as_mut() {
+        crate::agent::child_reviewer::retire_consumer_schema(schema);
+    }
+    let role_schema = role_schema.filter(|schema| !schema.is_empty());
+    let role_execution = match resolved_card.as_ref() {
+        Some(card) => match crate::agent::tools::role_manager::merge_execution_defaults_for_card(&json!({}), Some("reviewer"), card)
+            .and_then(|params| crate::agent::execution::runtime::ExecutionConfig::parse(&params, "reviewer")) {
+                Ok(config) => Some(config),
+                Err(error) => return ReviewResult::failed_open(&format!("终审角色配置无效：{error}"), "none", &review_fingerprint),
+            },
+        None => None,
+    };
+    let (mut model_id, persona_extra) = if let Some(card) = resolved_card.as_ref() {
         if card.allows_kind("reviewer") {
             let mid = if !card.model_id.trim().is_empty() {
                 card.model_id.trim().to_string()
             } else {
                 AgentRouter::route_for_role(context, model_routing, step_id, roles::REVIEWER).model_id
             };
-            (mid, card.persona_prompt)
+            (mid, crate::agent::tools::role_manager::persona_block(card)
+                + &crate::agent::tools::role_manager::skills_block(db, card))
         } else {
             let decision = AgentRouter::route_for_role(context, model_routing, step_id, roles::REVIEWER);
             (decision.model_id, String::new())
@@ -733,6 +771,13 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
         verify_obligations.len(),
         &persona_extra,
     );
+    if let Some(schema) = &role_schema {
+        if uses_main_executor {
+            system_prompt.push_str("\n\n请把以下角色扩展字段与标准判决字段一起放在 finish.params 对象内。");
+        }
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(&schema.render_prompt_instructions());
+    }
 
     // 动态拼接目标块的 Checklist、Scope 边界与执行者自述
     let mut block_sections = Vec::new();
@@ -866,6 +911,8 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
                     reviewer_role.as_deref(),
                     Some(reviewer_label.as_str()),
                     Some(step_id),
+                    role_execution.clone(),
+                    role_schema.clone(),
                 ))
                 .await;
             if !_registration.complete() {
@@ -966,7 +1013,10 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
             .as_ref()
             .map(|v| v.get("tool").is_some() && v.get("verdict").is_none())
             .unwrap_or(false);
-        let parsed = parse_reviewer_json(&raw, &model_id, &review_fingerprint, duration_ms);
+        let parsed = parse_final_review_json(
+            &raw, &model_id, &review_fingerprint, duration_ms,
+            reviewer_role.as_deref().zip(role_schema.as_ref()),
+        );
         let format_error = if is_tool_request {
             None
         } else {
@@ -1010,7 +1060,10 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
                 progress.phase("tool", &format!("正在取证：{}（第 {}/{} 步）", display_tool, tool_steps_used + 1, forensic_budget));
                 // verify 工具在环内直接处理：需异步跑宿主执行器 + 访问契约当前命令，
                 // review_tools::execute 保持同步纯函数
-                let observation = if matches!(tool_name.as_str(), "read_step_output" | "get_step_output") {
+                let allowed = final_review_tool_allowed(role_execution.as_ref(), &tool_name, &req);
+                let observation = if !allowed {
+                    format!("执行配置未允许工具 {tool_name}；本次未执行。")
+                } else if matches!(tool_name.as_str(), "read_step_output" | "get_step_output") {
                     read_review_step_output(db, session_id, &req, run_started_at)
                         .unwrap_or_else(|e| format!("取证请求被拒绝: {e}"))
                 } else if matches!(tool_name.as_str(), "list_execution_steps" | "list_child_runs" | "read_child_result") {
@@ -1164,6 +1217,17 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
 #[cfg(test)]
 mod contract_handoff_tests {
     use super::*;
+
+    #[test]
+    fn final_review_tool_limit_respects_role_configuration() {
+        let config = crate::agent::execution::runtime::ExecutionConfig {
+            allowed_tools: Some(vec!["read_file".into()]), ..Default::default()
+        };
+        assert!(final_review_tool_allowed(Some(&config), "read_file", &json!({})));
+        assert!(final_review_tool_allowed(Some(&config), "local_file", &json!({"action":"read"})));
+        assert!(!final_review_tool_allowed(Some(&config), "run_command", &json!({})));
+        assert!(final_review_tool_allowed(None, "run_command", &json!({})));
+    }
 
     #[test]
     fn physical_anomalies_still_override_mechanical_and_read_only_bypass() {
@@ -1465,6 +1529,11 @@ mod finish_review_regression_tests {
         let fingerprint = with_execution_evidence_fingerprint(&fingerprint, Some(&collect_write_origin_evidence(&context)));
         let fingerprint = with_execution_evidence_fingerprint(&fingerprint,
             collect_execution_evidence_digest(&mock.db,&session_id, run_started_at).as_deref());
+        let policy = crate::agent::review_team::final_review_policy_fingerprint(
+            &mock.db, &ModelRoutingConfig::default(),
+            triage.map(|verdict| verdict.final_review_roles.as_slice()).unwrap_or(&[]),
+        );
+        let fingerprint = with_execution_evidence_fingerprint(&fingerprint, Some(&policy));
         let result = evaluate_finish_diff_once(
             app.handle(),
             &mock.db,
@@ -1781,6 +1850,7 @@ mod finish_review_regression_tests {
                 }],
                 nit_issues: vec![],
                 missing_evidence: vec![],
+                role_outputs: vec![],
                 duration_ms: 0,
                 model_id: "mock".into(),
                 diff_hash: String::new(),
@@ -1796,6 +1866,33 @@ mod finish_review_regression_tests {
                 assert!(result.summary.contains("复用上次拦截"));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn final_review_corrects_and_keeps_role_output_fields() {
+        let first = rejected_alias_response();
+        let mut corrected = first.clone();
+        corrected["review_scope"] = json!("routing");
+        let mock = MockReviewer::new(vec![first, corrected]).await;
+        let schema = json!({"fields":[{
+            "name":"review_scope", "field_type":"string", "required":true,
+            "description":"Scope of this review",
+        }]});
+        crate::agent::tools::role_manager::upsert_card(&mock.db, &json!({
+            "name":"scope_reviewer", "allowed_kinds":"reviewer", "model_id":"mock",
+            "custom_schema":schema.to_string(),
+        })).unwrap();
+        let mut triage = crate::agent::triage::TriageVerdict::fallback("test");
+        triage.final_review_roles = vec!["scope_reviewer".into()];
+        let (result, _) = run_finish_with_triage(&mock, None, false, None, Some(&triage)).await;
+        assert_eq!(result.verdict, "rejected");
+        assert_eq!(result.role_outputs[0].role, "scope_reviewer");
+        assert_eq!(result.role_outputs[0].fields["review_scope"], json!("routing"));
+        let requests = mock.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0]["messages"][0]["content"].as_str().unwrap().contains("review_scope"));
+        assert!(requests[1]["messages"].as_array().unwrap().last().unwrap()["content"]
+            .as_str().unwrap().contains("review_scope"));
     }
 
     #[tokio::test]

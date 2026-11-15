@@ -223,6 +223,26 @@ fn committee_skipped_and_unavailable_are_not_effective_reviews() {
 }
 
 #[test]
+fn committee_preserves_each_roles_custom_output() {
+    let make_result = |role: &str, value: &str| {
+        let mut result = super::super::parse_reviewer_json(&passed().to_string(), "m", "hash", 1).unwrap();
+        result.role_outputs.push(crate::agent::reviewer_gatekeeper::FinalReviewRoleOutput {
+            role: role.into(),
+            fields: [("scope".into(), json!(value))].into_iter().collect(),
+        });
+        ("Same display label".into(), result)
+    };
+    let result = aggregate_committee_results(vec![
+        make_result("api", "backend"),
+        make_result("ui", "frontend"),
+    ]);
+    assert_eq!(result.role_outputs[0].role, "api");
+    assert_eq!(result.role_outputs[0].fields["scope"], json!("backend"));
+    assert_eq!(result.role_outputs[1].role, "ui");
+    assert_eq!(result.role_outputs[1].fields["scope"], json!("frontend"));
+}
+
+#[test]
 fn committee_partial_pass_is_overridden_by_explicit_stop() {
     let pass = super::super::parse_reviewer_json(&passed().to_string(), "m", "hash", 1).unwrap();
     let out = settle_committee_results(vec![

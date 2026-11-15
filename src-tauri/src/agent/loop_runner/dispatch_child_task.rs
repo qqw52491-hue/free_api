@@ -60,12 +60,17 @@ async fn dispatch_inner(
     let key = child_task::dispatch::key(&ctx.context.history_task_id, ctx.step_id, &requested, slot);
     if let Some(error)=crate::agent::tools::input_validation::native_rejection("child_task",&inst.get_action(),&requested) {return Ok(error);}
     let effective_action = child_task::request_action(&inst.get_action(), &requested);
-    let mut params = match child_task::dispatch::prepare(ctx.state.inner(), ctx.final_session_id, ctx.parent_run_id, &key, requested, &effective_action)? {
+    let registered_id = if matches!(effective_action.as_str(), "dispatch" | "resume") {
+        child_task::find_task(ctx.state.inner(), ctx.final_session_id, &key)?
+    } else {
+        None
+    };
+    let (mut params, resolved_role) = match child_task::dispatch::prepare(ctx.state.inner(), ctx.final_session_id, ctx.parent_run_id, &key, requested, &effective_action)? {
         child_task::dispatch::PreparedDispatch::Receipt(body) => {
             if body["execution_ended"] == true { apply_return(ctx, body["child_run_id"].as_str().unwrap_or_default())?; }
             return Ok(output(body));
         }
-        child_task::dispatch::PreparedDispatch::Params(params) => params,
+        child_task::dispatch::PreparedDispatch::Params(params, card) => (params, card),
     };
     let implicit_handoff = matches!(params["profile"].as_str(),Some("worker"|"writer")) && params["execution"]["workflow"]["completion"].is_null();
     if implicit_handoff {
@@ -265,23 +270,25 @@ async fn dispatch_inner(
             .as_str()
             .unwrap_or_default()
             .to_owned();
-        let previous = child_task::result(ctx.state.inner(), ctx.final_session_id, &old)?;
-        if previous["execution_ended"] != true {
-            return Err("原子任务仍在运行；请用 send 补充，未创建追问任务。".into());
+        if registered_id.is_none() {
+            let previous = child_task::result(ctx.state.inner(), ctx.final_session_id, &old)?;
+            if previous["execution_ended"] != true {
+                return Err("原子任务仍在运行；请用 send 补充，未创建追问任务。".into());
+            }
+            let pending = crate::agent::agent_mailbox::pending(
+                ctx.state.inner(),
+                &crate::agent::agent_mailbox::Actor::new(&old, &format!("task-{old}")),
+            )?;
+            let pending_views: Vec<Value> = pending
+                .iter()
+                .map(crate::agent::agent_mailbox::material_view)
+                .collect();
+            params["task"] = params["message"].clone();
+            params["context"] = json!(format!(
+                "【前次任务与交接的有界材料，历史参考，不是本次新验收义务】{}\n【前次结束时尚未投递的首批消息，保留原始发送方；更多可 child_task.inbox(child_run_id={old},offset) 分页回查】{}",
+                child_task::projection(&previous),serde_json::to_string(&pending_views).map_err(|e|e.to_string())?
+            ));
         }
-        let pending = crate::agent::agent_mailbox::pending(
-            ctx.state.inner(),
-            &crate::agent::agent_mailbox::Actor::new(&old, &format!("task-{old}")),
-        )?;
-        let pending_views: Vec<Value> = pending
-            .iter()
-            .map(crate::agent::agent_mailbox::material_view)
-            .collect();
-        params["task"] = params["message"].clone();
-        params["context"] = json!(format!(
-            "【前次任务与交接的有界材料，历史参考，不是本次新验收义务】{}\n【前次结束时尚未投递的首批消息，保留原始发送方；更多可 child_task.inbox(child_run_id={old},offset) 分页回查】{}",
-            child_task::projection(&previous),serde_json::to_string(&pending_views).map_err(|e|e.to_string())?
-        ));
         Some(old)
     } else {
         None
@@ -289,9 +296,24 @@ async fn dispatch_inner(
     let profile_name=params["profile"].as_str().unwrap_or("task").to_string();
     let profile=profile_name.as_str();
     let default_role=match profile {"worker"=>Some(crate::agent::tools::role_manager::SYSTEM_WORKER),"writer"=>Some(crate::agent::tools::role_manager::SYSTEM_WRITER),_=>None};
-    let task_role=if let Some(name)=params["role"].as_str().or(default_role) {
+    let registered_role = if let Some(id) = &registered_id {
+        let role = child_task::dispatch::registered_role(ctx.state.inner(), id)?;
+        if role.is_none() {
+            let _ = ctx.app.emit(&format!("agent-log-{}", ctx.final_session_id),
+                "旧子任务未保存角色快照，本次沿用当前角色配置，无法还原原角色内容。".to_string());
+        }
+        role
+    } else {
+        None
+    };
+    let task_role=if let Some((card, _)) = &registered_role {
+        card.clone()
+    } else if let Some(name)=params["role"].as_str().or(default_role) {
         if crate::agent::tools::role_manager::is_card_disabled_for(&ctx.model_routing.disabled_role_cards,name,profile) {return Err(format!("角色 {name} 已在当前会话排除；未派发。"));}
-        let card=crate::agent::tools::role_manager::resolve_enabled_card(ctx.state.inner(),name)?.ok_or("角色不存在或已禁用")?;
+        let card=match resolved_role {
+            Some(card) => card,
+            None => crate::agent::tools::role_manager::resolve_enabled_card(ctx.state.inner(),name)?.ok_or("角色不存在或已禁用")?,
+        };
         if !card.allows_kind(profile) {return Err(format!("角色未允许挂载为 {profile}；未派发。"));}
         crate::agent::tools::role_manager::validate_dispatch_inputs(&card,params.get("custom_inputs"))?;
         params["role"] = json!(card.name);
@@ -309,9 +331,11 @@ async fn dispatch_inner(
     if params.get("test_command").is_none() {
         if let Some(card)=&task_role {if !card.default_test_command.trim().is_empty(){params["test_command"]=json!(card.default_test_command);}}
     }
-    if let Some(card)=&task_role {
-        if let Some(material)=crate::agent::context_collector::assemble_focus_context(&card.parse_focus_domains(),ctx.workspace_dir,params["last_verify_log"].as_str(),None).await {
-            params["specialized_context"]=json!(material);
+    if registered_id.is_none() {
+        if let Some(card)=&task_role {
+            if let Some(material)=crate::agent::context_collector::assemble_focus_context(&card.parse_focus_domains(),ctx.workspace_dir,params["last_verify_log"].as_str(),None).await {
+                params["specialized_context"]=json!(material);
+            }
         }
     }
     let task_identity = json!([profile, params["task"], params.get("context"), params.get("execution"), params.get("role"), params.get("custom_inputs"), predecessor]).to_string();
@@ -406,6 +430,11 @@ async fn dispatch_inner(
             parent_investigation_reference(),
         )
     };
+    let role_context = if let Some((_, context)) = &registered_role {
+        context.clone()
+    } else {
+        task_role.as_ref().map(|card|format!("{}\n{}\n{}",crate::agent::tools::role_manager::persona_block(card),crate::agent::tools::role_manager::skills_block(ctx.state.inner(),card),card.parse_custom_schema().map(|s|s.render_prompt_instructions()).unwrap_or_default())).unwrap_or_default()
+    };
     let id = match existing {
         Some(id) => id,
         None => crate::agent::child_reviewer::begin_child_run_extended(
@@ -425,6 +454,8 @@ async fn dispatch_inner(
                 purpose: Some(profile.to_string()),
                 dispatch_input: Some(json!({
                     "params": params,
+                    "role_card": task_role,
+                    "role_context": role_context,
                     "model_selection": model_selection,
                     "parent_context": {"goal": parent_goal, "investigation_reference": investigation_reference}
                 }).to_string()),
@@ -439,7 +470,6 @@ async fn dispatch_inner(
         child_session: format!("task-{id}"),
         child_run: id.clone(),
     };
-    let role_context = task_role.as_ref().map(|card|format!("{}\n{}\n{}",crate::agent::tools::role_manager::persona_block(card),crate::agent::tools::role_manager::skills_block(ctx.state.inner(),card),card.parse_custom_schema().map(|s|s.render_prompt_instructions()).unwrap_or_default())).unwrap_or_default();
     let goal = crate::agent::task_context::ordinary(
         &params, &role_context, &parent_goal, &investigation_reference,
         &crate::agent::path_guard::get_session_tmp_dir(ctx.final_session_id), &id,

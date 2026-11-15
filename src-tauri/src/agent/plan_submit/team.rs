@@ -13,6 +13,13 @@ pub(super) async fn prepare_snapshots(
     mut primary: PlanReviewerDispatchSnapshot,
     cards: &[RoleCard],
 ) -> Vec<PlanReviewerDispatchSnapshot> {
+    let declared_execution = primary.params.get("execution").cloned();
+    if let Some(card) = cards.first() {
+        match crate::agent::tools::role_manager::merge_execution_defaults_for_card(&primary.params, Some("reviewer"), card) {
+            Ok(params) => primary.params = params,
+            Err(error) => primary.params["host_input_error"] = json!(error),
+        }
+    }
     primary.params["model"] = json!(primary.model);
     let mut snapshots = vec![primary.clone()];
     for card in cards.iter().skip(1) {
@@ -40,6 +47,17 @@ pub(super) async fn prepare_snapshots(
         snapshot.params["role"] = json!(card.name);
         snapshot.params["role_label"] = json!(card.label);
         snapshot.params["model"] = json!(snapshot.model);
+        if let Some(params) = snapshot.params.as_object_mut() {
+            match &declared_execution {
+                Some(execution) => { params.insert("execution".into(), execution.clone()); }
+                None => { params.remove("execution"); }
+            }
+            params.remove("host_input_error");
+        }
+        match crate::agent::tools::role_manager::merge_execution_defaults_for_card(&snapshot.params, Some("reviewer"), card) {
+            Ok(params) => snapshot.params = params,
+            Err(error) => snapshot.params["host_input_error"] = json!(error),
+        }
         snapshot.custom_schema = card.parse_custom_schema().unwrap_or_default();
         // 输入约束不凭主审的卡片推断；无法承接相同材料的专家在派发时披露。
         let inputs = snapshot.params.get("custom_inputs").cloned();

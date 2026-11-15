@@ -56,6 +56,7 @@ impl Fixture {
             can_finalize: Some(false),
             evidence_scope_refs: vec![],
             final_fingerprint: None,
+            execution_config: None,
             verify_obligations: vec![],
             evidence_since: None,
             parent_step_id: None, parent_step_occurrence: None,
@@ -90,6 +91,31 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn final_review_validates_and_preserves_persisted_role_contract() {
+    let f = Fixture::new();
+    let mut program = f.program.clone();
+    program.final_fingerprint = Some("fingerprint".into());
+    program.schema = Some(serde_json::from_value(json!({"fields":[{
+        "name":"cases_checked", "field_type":"number", "required":true, "description":"Cases",
+    }]})).unwrap());
+    prepare(&f.db, &f.id, &program).unwrap();
+    let saved = load(&f.db, &f.id).unwrap().unwrap();
+    let mut payload = json!({
+        "verdict":"passed", "score":90, "summary":"checked",
+        "blocking_issues":[], "nit_issues":[], "missing_evidence":[],
+    });
+    assert!(validate(&f.db, &f.id, &saved, &payload, 1).unwrap_err().contains("cases_checked"));
+    payload["cases_checked"] = json!("two");
+    assert!(validate(&f.db, &f.id, &saved, &payload, 1).unwrap_err().contains("cases_checked"));
+    payload["cases_checked"] = json!(2);
+    payload["typo"] = json!(true);
+    assert!(validate(&f.db, &f.id, &saved, &payload, 1).unwrap_err().contains("typo"));
+    payload.as_object_mut().unwrap().remove("typo");
+    let result = validate(&f.db, &f.id, &saved, &payload, 1).unwrap();
+    assert_eq!(result["role_outputs"], json!([{"role":"reviewer","fields":{"cases_checked":2}}]));
+}
+
+#[test]
 fn final_review_recovery_requires_matching_interrupted_task_and_review_input() {
     let f = Fixture::new();
     let mut program = f.program.clone();
@@ -112,6 +138,11 @@ fn final_review_recovery_requires_matching_interrupted_task_and_review_input() {
     assert!(recover_final_review(&f.db, "new-run", "owner", &changed).unwrap().is_none());
     changed = program.clone();
     changed.role = Some(json!("different"));
+    assert!(recover_final_review(&f.db, "new-run", "owner", &changed).unwrap().is_none());
+    changed = program.clone();
+    changed.execution_config = Some(crate::agent::execution::runtime::ExecutionConfig {
+        allowed_tools: Some(vec!["read_file".into()]), ..Default::default()
+    });
     assert!(recover_final_review(&f.db, "new-run", "owner", &changed).unwrap().is_none());
     f.db.0.lock().unwrap().execute("UPDATE agent_run_traces SET status='cancelled',completion_json=NULL WHERE id='parent-run'", []).unwrap();
     assert!(recover_final_review(&f.db, "new-run", "owner", &program).unwrap().is_none());

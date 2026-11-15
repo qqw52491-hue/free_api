@@ -130,7 +130,17 @@ pub(super) async fn dispatch_child_reviewer(
 
         for (idx, child_params) in items.iter().enumerate() {
             if let Err(error)=crate::agent::tools::input_validation::validate_child_item(ctx.state.inner(),"child_reviewer",child_params) {item_reports.push(format!("[{}/{}] {error}",idx+1,total));fail_count+=1;dispatch_input_incomplete=true;continue;}
-            let merged=crate::agent::tools::role_manager::merge_execution_defaults(ctx.state.inner(),child_params,Some("reviewer"));
+            let explicit_card = if let Some(name) = child_params.get("role").and_then(Value::as_str) {
+                match crate::agent::tools::role_manager::resolve_enabled_card(ctx.state.inner(), name) {
+                    Ok(Some(card)) => Some(card),
+                    Ok(None) => { item_reports.push(format!("[{}/{}] 角色不存在或已禁用：{name}",idx+1,total)); fail_count+=1; continue; }
+                    Err(error) => { item_reports.push(format!("[{}/{}] {error}",idx+1,total)); fail_count+=1; continue; }
+                }
+            } else { None };
+            let merged=match &explicit_card {
+                Some(card) => crate::agent::tools::role_manager::merge_execution_defaults_for_card(child_params,Some("reviewer"),card),
+                None => Ok(child_params.clone()),
+            };
             let child_params=match merged {Ok(value)=>value,Err(error)=>{item_reports.push(format!("[{}/{}] {error}",idx+1,total));fail_count+=1;continue;}};
             let child_params=&child_params;
             let item_num = idx + 1;
@@ -158,8 +168,8 @@ pub(super) async fn dispatch_child_reviewer(
                     fail_count += 1;
                     continue;
                 }
-                match crate::agent::tools::role_manager::resolve_enabled_card(ctx.state.inner(), role_name) {
-                    Ok(Some(card)) => {
+                match explicit_card {
+                    Some(card) => {
                         if !card.allows_kind("reviewer") {
                             item_reports.push(format!(
                                 "[{}/{}] ❌ 角色卡「{}」未授权挂载为 reviewer（允许类型: {}）。",
@@ -223,18 +233,10 @@ pub(super) async fn dispatch_child_reviewer(
                             effective_params["custom_inputs"] = merged;
                         }
                     }
-                    Ok(None) => {
+                    None => {
                         item_reports.push(format!(
                             "[{}/{}] ❌ 角色卡不存在或已禁用：{}；可用角色见角色池菜单，或先用 role_manager.upsert 创建。",
                             item_num, total, role_name
-                        ));
-                        fail_count += 1;
-                        continue;
-                    }
-                    Err(error) => {
-                        item_reports.push(format!(
-                            "[{}/{}] ❌ 角色卡查询失败：{}。",
-                            item_num, total, error
                         ));
                         fail_count += 1;
                         continue;
@@ -245,7 +247,7 @@ pub(super) async fn dispatch_child_reviewer(
                 let auto_card = {
                     let cards = crate::agent::tools::role_manager::list_cards(ctx.state.inner(), false).unwrap_or_default();
                     let active: Vec<_> = cards.into_iter().filter(|c| {
-                        !c.is_system && c.enabled && c.allows_kind("reviewer") && !crate::agent::tools::role_manager::is_card_disabled_for(&ctx.model_routing.disabled_role_cards, &c.name, "reviewer")
+                        eligible_auto_reviewer(c, &ctx.model_routing.disabled_role_cards, child_params.get("custom_inputs"))
                     }).collect();
 
                     let q_text = child_params.get("question").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
@@ -275,6 +277,16 @@ pub(super) async fn dispatch_child_reviewer(
                     )?,
                 };
                 if let Some(card) = auto_card {
+                    if let Err(error) = crate::agent::tools::role_manager::validate_dispatch_inputs(&card, child_params.get("custom_inputs")) {
+                        item_reports.push(format!("[{}/{}] ❌ {}", item_num, total, error));
+                        fail_count += 1;
+                        dispatch_input_incomplete = true;
+                        continue;
+                    }
+                    effective_params = match crate::agent::tools::role_manager::merge_execution_defaults_for_card(&effective_params, Some("reviewer"), &card) {
+                        Ok(params) => params,
+                        Err(error) => { item_reports.push(format!("[{}/{}] ❌ {}", item_num, total, error)); fail_count+=1; continue; }
+                    };
                     reviewer_persona = crate::agent::tools::role_manager::persona_block(&card);
                     reviewer_persona += &crate::agent::tools::role_manager::skills_block(ctx.state.inner(), &card);
                     effective_params["role"] = json!(card.name);
@@ -512,6 +524,12 @@ pub(super) async fn dispatch_child_reviewer(
     }))
 }
 
+fn eligible_auto_reviewer(card: &crate::agent::tools::role_manager::RoleCard, disabled: &[String], inputs: Option<&Value>) -> bool {
+    !card.is_system && card.enabled && card.allows_kind("reviewer")
+        && !crate::agent::tools::role_manager::is_card_disabled_for(disabled, &card.name, "reviewer")
+        && crate::agent::tools::role_manager::validate_dispatch_inputs(card, inputs).is_ok()
+}
+
 fn apply_plan_evidence_scope(params: &mut Value, ad_hoc: bool, plan_approved: bool, workspace: &Path) {
     let Some(params) = params.as_object_mut() else { return };
     if ad_hoc {
@@ -543,6 +561,24 @@ fn apply_plan_evidence_scope(params: &mut Value, ad_hoc: bool, plan_approved: bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_reviewer_respects_role_inputs_and_tool_limits() {
+        let card = crate::agent::tools::role_manager::RoleCard {
+            name: "expert".into(), enabled: true, allowed_kinds: "reviewer".into(),
+            input_schema: json!({"fields":[{"name":"scope","field_type":"string","required":true,"description":"review scope"}]}).to_string(),
+            execution_defaults: json!({"profile":"reviewer","execution":{"allowed_tools":["read_file"]}}).to_string(),
+            ..Default::default()
+        };
+        assert!(!eligible_auto_reviewer(&card, &[], None));
+        let inputs = json!({"scope":"api"});
+        assert!(eligible_auto_reviewer(&card, &[], Some(&inputs)));
+        let params = crate::agent::tools::role_manager::merge_execution_defaults_for_card(
+            &json!({"question":"check","execution":{"allowed_tools":["read_file","write_file"]}}),
+            Some("reviewer"), &card,
+        ).unwrap();
+        assert_eq!(params["execution"]["allowed_tools"], json!(["read_file"]));
+    }
 
     #[test]
     fn ad_hoc_keeps_file_evidence_without_plan_scope_verdicts() {

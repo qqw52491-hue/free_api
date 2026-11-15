@@ -175,6 +175,22 @@ async fn plan_team_discloses_one_member_and_complete_dispatch_failure_without_ap
 }
 
 #[tokio::test]
+async fn plan_review_members_keep_their_own_tool_limits() {
+    let fixture = crate::agent::review_team::tests::TestDb::new();
+    let mut cards = crate::agent::review_team::tests::seed_cards(&fixture.db, 2);
+    for (card, tool) in cards.iter_mut().zip(["read_file", "list_dir"]) {
+        card.execution_defaults = json!({"profile":"reviewer","execution":{"allowed_tools":[tool]}}).to_string();
+    }
+    let context = crate::agent::context::SandwichContext::new("sys".into(), "goal".into());
+    let config = crate::agent::router::ModelRoutingConfig::default();
+    let routing = crate::agent::router::AgentRouter::route_for_role(&context, &config, 1, "reviewer");
+    let primary = PlanReviewerDispatchSnapshot::new("mock", "flash", "auto", "", json!({"question":"review"}));
+    let snapshots = prepare_snapshots(&fixture.db, &fixture.root, &config, &routing, primary, &cards).await;
+    assert_eq!(snapshots[0].params["execution"]["allowed_tools"], json!(["read_file"]));
+    assert_eq!(snapshots[1].params["execution"]["allowed_tools"], json!(["list_dir"]));
+}
+
+#[tokio::test]
 async fn unit_plan_team_snapshots_share_batch_and_cannot_overwrite_each_others_plan() {
     let fixture = crate::agent::review_team::tests::TestDb::new();
     let cards = crate::agent::review_team::tests::seed_cards(&fixture.db, 3);

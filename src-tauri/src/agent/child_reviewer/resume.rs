@@ -137,7 +137,7 @@ pub(crate) fn spawn_review_resume(
         let mut program=prior_main_program.unwrap_or(super::main_executor::ReviewProgram {
             parent_session:session.into(),workspace:workspace.into(),messages:vec![],allowed_refs:vec![],schema:None,
             has_verify_obligation:None,role:None,role_label:None,model:config.model_name.clone(),can_finalize,
-            evidence_scope_refs:vec![],final_fingerprint:None,verify_obligations:vec![],
+            evidence_scope_refs:vec![],final_fingerprint:None,execution_config:None,verify_obligations:vec![],
             evidence_since:None,parent_step_id:None,parent_step_occurrence:None,
         });
         program.messages=messages;program.schema=schema;program.can_finalize=can_finalize;program.model=config.model_name.clone();

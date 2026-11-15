@@ -178,7 +178,9 @@ pub async fn run_tool_phase(
             return Ok(crate::agent::child_reviewer::main_executor::tool(state.inner(),parent_run_id,&program,inst,registry_state.inner(),interrupt_rx).await);
         }
     }
-    if let Some(result) = crate::agent::tools::input_validation::instruction_rejection(state.inner(), inst) {
+    if let Some(result) = crate::agent::tools::input_validation::instruction_rejection_for_run(
+        state.inner(), inst, final_session_id, &context.history_task_id, step_id,
+    ) {
         emit_tool_event(app, final_session_id, parent_run_id, step_id, inst, "failed",
             Some(result.route.clone()), Some(false), &result.stderr, Some(0), None);
         return Ok(result);

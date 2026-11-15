@@ -29,6 +29,7 @@ fn ready(c: &SandwichContext, cp: &AgentCheckpoint) -> FinalizationReceipt {
         review_policy_fingerprint: String::new(),
         frozen_verification_run: None,
         material_notices: vec![],
+        final_review_role_outputs: vec![],
         verification: ReceiptVerification::Verified {
             evidence: "host exit 0".into(),
         },
@@ -64,6 +65,24 @@ fn commit(
 }
 fn context() -> SandwichContext {
     SandwichContext::new("system".into(), "goal".into())
+}
+
+#[test]
+fn finalization_preserves_reviewer_role_outputs_in_run_history() {
+    let db = db();
+    let mut c = context();
+    let mut cp = AgentCheckpoint::new("s".into(), &c);
+    let mut receipt = ready(&c, &cp);
+    let outputs = json!([{"role":"api_review","fields":{"routes_checked":2}}]);
+    receipt.final_review_role_outputs = serde_json::from_value(outputs.clone()).unwrap();
+    cp.pending_finalization = Some(receipt);
+    let result = commit(&db, &mut cp, &mut c).unwrap();
+    assert_eq!(result["final_review_role_outputs"], outputs);
+    let raw: String = db.0.lock().unwrap().query_row(
+        "SELECT completion_json FROM agent_run_traces WHERE id='run'", [], |row| row.get(0),
+    ).unwrap();
+    let saved: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(saved["final_review_role_outputs"], outputs);
 }
 
 #[test]

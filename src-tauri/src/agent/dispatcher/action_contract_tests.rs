@@ -131,9 +131,15 @@ fn host_run_ownership_survives_single_batch_parallel_and_timeout_dispatch() {
         assert!(poll_targeted_inbox(&f.db, "another-run", &ids).unwrap().is_empty());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         let mut completed = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         while completed.len() < ids.len() && std::time::Instant::now() < deadline {
-            completed.extend(rt.block_on(crate::agent::job_engine::wait_for_jobs(
-                &f.db, &run_id, Some(&ids), 5, None)).unwrap());
+            let pending: Vec<String> = ids.iter().filter(|id| !seen.contains(*id)).cloned().collect();
+            for job in rt.block_on(crate::agent::job_engine::wait_for_jobs(
+                &f.db, &run_id, Some(&pending), 5, None)).unwrap() {
+                if seen.insert(job.job_id.clone()) {
+                    completed.push(job);
+                }
+            }
         }
         assert_eq!(completed.len(), ids.len());
         assert!(completed.iter().all(|r| r.status == "succeeded" && r.result_json.contains("host-owned")));
