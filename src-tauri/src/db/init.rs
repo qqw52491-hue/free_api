@@ -709,6 +709,8 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
     // 而非 checkpoint 里手动维护的名单。
     let _ = conn.execute("ALTER TABLE agent_child_runs ADD COLUMN task_id TEXT;", []);
     let _ = conn.execute("ALTER TABLE agent_run_traces ADD COLUMN goal_message_id TEXT;", []);
+    let _ = conn.execute("ALTER TABLE agent_run_traces ADD COLUMN history_task_id TEXT;", []);
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_run_task ON agent_run_traces(session_id, history_task_id);", [])?;
     let _ = conn.execute("ALTER TABLE chat_messages ADD COLUMN run_id TEXT;", []);
     let _ = conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_messages_run ON chat_messages(run_id);",

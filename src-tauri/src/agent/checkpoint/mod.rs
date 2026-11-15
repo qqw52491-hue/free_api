@@ -793,7 +793,18 @@ pub fn save_checkpoint_and_consume(
     context: &crate::agent::context::SandwichContext,
     applied: &[AppliedReceipt],
 ) -> Result<(), String> {
-    if applied.is_empty() {
+    save_checkpoint_and_consume_jobs(db, checkpoint, context, applied, "", &[])
+}
+
+pub(crate) fn save_checkpoint_and_consume_jobs(
+    db: &DbState,
+    checkpoint: &mut AgentCheckpoint,
+    context: &crate::agent::context::SandwichContext,
+    applied: &[AppliedReceipt],
+    parent_run_id: &str,
+    job_ids: &[String],
+) -> Result<(), String> {
+    if applied.is_empty() && job_ids.is_empty() {
         return save_checkpoint(db, checkpoint);
     }
     save_checkpoint_in_tx(
@@ -814,6 +825,12 @@ pub fn save_checkpoint_and_consume(
                         params![updated_at, receipt.run_id],
                     ).map_err(|error| error.to_string())?;
                 }
+            }
+            for id in job_ids {
+                tx.execute(
+                    "UPDATE agent_background_jobs SET consumed=1 WHERE id=?1 AND consumed=0 AND (parent_run_id=?2 OR parent_run_id IN (SELECT old.id FROM agent_run_traces current JOIN agent_run_traces old ON old.session_id=current.session_id AND old.history_task_id=current.history_task_id WHERE current.id=?2 AND current.history_task_id IS NOT NULL))",
+                    params![id, parent_run_id],
+                ).map_err(|error| error.to_string())?;
             }
             Ok(())
         },
@@ -856,6 +873,43 @@ pub(crate) fn save_checkpoint_and_claim_chats(
     context: &mut crate::agent::context::SandwichContext,
 ) -> Result<(), String> {
     save_checkpoint_with_chat_claims(db, checkpoint, run_id, context)?;
+    context.pending_claim_chat_ids.clear();
+    Ok(())
+}
+
+pub(crate) fn save_checkpoint_and_claim_chats_and_jobs(
+    db: &DbState, checkpoint: &mut AgentCheckpoint, run: &str,
+    context: &mut crate::agent::context::SandwichContext, jobs: &[String],
+) -> Result<(), String> {
+    let session = checkpoint.run_id.clone();
+    save_checkpoint_in_tx(db, checkpoint, context, "检查点保存冲突，Shell 结果未确认", |tx, _| {
+        crate::agent::conversation::claim_messages_on(tx, &session, run, &context.pending_claim_chat_ids)?;
+        for id in jobs {
+            let changed = tx.execute("UPDATE agent_background_jobs SET consumed=1 WHERE id=?1 AND parent_run_id=?2 AND parent_session_id=?3 AND consumed=0 AND status IN ('succeeded','failed')", params![id, run, session]).map_err(|e|e.to_string())?;
+            if changed != 1 { return Err(format!("Shell 结果 {id} 无法确认，检查点未保存")); }
+        }
+        Ok(())
+    })?;
+    context.pending_claim_chat_ids.clear();
+    Ok(())
+}
+
+/// Atomically register this physical run under the current logical task before dispatch.
+pub(crate) fn bind_run_and_save_checkpoint(
+    db: &DbState,
+    checkpoint: &mut AgentCheckpoint,
+    run_id: &str,
+    context: &mut crate::agent::context::SandwichContext,
+) -> Result<(), String> {
+    let session_id = checkpoint.run_id.clone();
+    save_checkpoint_in_tx(db, checkpoint, context, "任务身份绑定冲突，请重新加载", |tx, _| {
+        let updated = tx.execute(
+            "UPDATE agent_run_traces SET history_task_id=?1 WHERE id=?2 AND session_id=?3 AND (history_task_id IS NULL OR history_task_id=?1)",
+            params![context.history_task_id, run_id, session_id],
+        ).map_err(|error| error.to_string())?;
+        if updated != 1 { return Err("无法绑定当前运行的任务身份".into()); }
+        crate::agent::conversation::claim_messages_on(tx, &session_id, run_id, &context.pending_claim_chat_ids)
+    })?;
     context.pending_claim_chat_ids.clear();
     Ok(())
 }
@@ -956,7 +1010,7 @@ pub(crate) fn save_checkpoint_and_messages(
         |tx, updated_at| {
             for id in ids {
                 tx.execute(
-                    "UPDATE agent_messages SET delivered_at=?1 WHERE id=?2 AND target_run_id=?3 AND target_session_id=?4 AND delivered_at IS NULL",
+                    "UPDATE agent_messages SET delivered_at=?1 WHERE id=?2 AND target_session_id=?4 AND claimed_run_id IS NULL AND delivered_at IS NULL AND (target_run_id=?3 OR target_run_id IN (SELECT old.id FROM agent_run_traces current JOIN agent_run_traces old ON old.session_id=current.session_id AND old.history_task_id=current.history_task_id WHERE current.id=?3 AND current.session_id=?4 AND current.history_task_id IS NOT NULL))",
                     params![updated_at, id, run, session],
                 ).map_err(|e| e.to_string())?;
             }

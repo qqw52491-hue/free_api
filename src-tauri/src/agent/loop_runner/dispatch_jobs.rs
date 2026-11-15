@@ -117,6 +117,7 @@ pub(super) async fn dispatch_wait_jobs(
                     std::collections::HashSet::new();
                 let mut projections: std::collections::HashMap<String, String> =
                     std::collections::HashMap::new();
+                let mut deferred_ids = std::collections::HashSet::new();
                 for job in completed_jobs.iter() {
                     if job.job_type.starts_with("child_") || job.job_type.contains("reviewer") {
                         if !seen_receipt_ids.insert(job.job_id.clone()) {
@@ -131,7 +132,12 @@ pub(super) async fn dispatch_wait_jobs(
                         )
                         .await;
                         stage_refund_pending |= effects.stage_refund_pending;
-                        if effects.application_deferred { ctx.context.add_host_feedback(&effects.model_text); continue; }
+                        if effects.application_deferred {
+                            deferred_ids.insert(job.job_id.clone());
+                            ctx.context.add_host_feedback(&effects.model_text);
+                            projections.insert(job.job_id.clone(), effects.model_text);
+                            continue;
+                        }
                         applied_receipts.push(crate::agent::checkpoint::AppliedReceipt {
                             run_id: job.job_id.clone(),
                             verdict: effects
@@ -156,16 +162,6 @@ pub(super) async fn dispatch_wait_jobs(
                 } else {
                     ""
                 };
-                // 回执提交点：checkpoint（含 context 投影）+ applied_at + 裁决回写
-                // 同事务原子落账——崩溃重投/重放安全由此保证。
-                if !applied_receipts.is_empty() {
-                    crate::agent::checkpoint::save_checkpoint_and_consume(
-                        ctx.state.inner(),
-                        ctx.checkpoint,
-                        ctx.context,
-                        &applied_receipts,
-                    )?;
-                }
                 let mut out = String::new();
                 if completed_jobs.is_empty() {
                     match crate::agent::job_engine::empty_wait_message(
@@ -178,8 +174,8 @@ pub(super) async fn dispatch_wait_jobs(
                     }
                 } else {
                     out.push_str(refund_note);
-                    out.push_str(&format!("✅ 已成功等待并接收到 {} 个后台任务结果：\n", completed_jobs.len()));
-                    for job in completed_jobs {
+                    out.push_str(&format!("后台任务返回 {} 条结果（其中 {} 条暂未接收，将继续等待处理）：\n", completed_jobs.len(), deferred_ids.len()));
+                    for job in &completed_jobs {
                         out.push_str(&format!(
                             "\n- 【任务 ID: {} | 类型: {}】状态: {}, 耗时: {}ms\n  描述: {}\n  输出: {}\n",
                             job.job_id,
@@ -191,9 +187,19 @@ pub(super) async fn dispatch_wait_jobs(
                             projections
                                 .get(&job.job_id)
                                 .cloned()
-                                .unwrap_or_else(|| project_job_result_for_model(&job))
+                                .unwrap_or_else(|| project_job_result_for_model(job))
                         ));
                     }
+                }
+                if !completed_jobs.is_empty() {
+                    let job_ids: Vec<String> = completed_jobs.iter()
+                        .filter(|job| !deferred_ids.contains(&job.job_id))
+                        .map(|job| job.job_id.clone()).collect();
+                    ctx.context.add_error_feedback(&out);
+                    crate::agent::checkpoint::save_checkpoint_and_consume_jobs(
+                        ctx.state.inner(), ctx.checkpoint, ctx.context, &applied_receipts,
+                        ctx.parent_run_id, &job_ids,
+                    )?;
                 }
                 DispatchResult { view: None,
                     stdout: out,
@@ -258,8 +264,12 @@ pub(super) async fn dispatch_job_cancel(
         };
         let row: Option<(String, String, String)> = conn
             .query_row(
-                "SELECT status, job_type, params_json FROM agent_background_jobs WHERE id=?1",
-                rusqlite::params![job_id],
+                "SELECT status, job_type, params_json FROM agent_background_jobs
+                 WHERE id=?1 AND parent_session_id=?2 AND (parent_run_id=?3 OR parent_run_id IN (
+                    SELECT old.id FROM agent_run_traces current JOIN agent_run_traces old
+                    ON old.session_id=current.session_id AND old.history_task_id=current.history_task_id
+                    WHERE current.id=?3 AND current.history_task_id IS NOT NULL))",
+                rusqlite::params![job_id, ctx.final_session_id, ctx.parent_run_id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .ok();
@@ -298,6 +308,14 @@ pub(super) async fn dispatch_job_cancel(
             }));
         }
 
+        if !crate::agent::job_engine::shell_has_local_watcher(job_id) {
+            return Ok(ArmOutcome::Done(DispatchResult { view: None,
+                stdout: String::new(),
+                stderr: "此后台任务没有本进程的看守线程，无法凭历史 PID 确认进程身份。可以通过 wait_jobs 等待退出回执。".into(),
+                success: false,
+                route: "job_cancel:unverified_process".to_string(),
+            }));
+        }
         let pid = serde_json::from_str::<serde_json::Value>(&params_json)
             .ok()
             .and_then(|v| v.get("pid").and_then(|p| p.as_u64()))
@@ -320,7 +338,8 @@ pub(super) async fn dispatch_job_cancel(
             std::thread::sleep(std::time::Duration::from_millis(800));
             #[cfg(unix)]
             {
-                std::path::Path::new(&format!("/proc/{}", pid)).exists()
+                crate::agent::job_engine::shell_has_local_watcher(job_id)
+                    && crate::agent::tools::local_shell::process_group_exists(pid)
             }
             #[cfg(not(unix))]
             {

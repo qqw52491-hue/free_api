@@ -379,13 +379,12 @@ pub fn upsert_card(db: &DbState, params: &Value) -> Result<RoleCard, String> {
             allowed_skills=excluded.allowed_skills,
             allowed_mcp=excluded.allowed_mcp,
             execution_defaults=COALESCE(?16,agent_role_cards.execution_defaults),
-            enabled=1, updated_at=excluded.updated_at",
+            updated_at=excluded.updated_at",
         params![id, name, label, model_id, persona_prompt, scope_hints, default_test_command, allowed_kinds, max_concurrency, custom_schema, focus_domains, input_schema, allowed_skills, allowed_mcp, now, execution_defaults],
     )
     .map_err(|e| e.to_string())?;
-    drop(conn);
-    resolve_enabled_card(db, &name)?
-        .ok_or_else(|| "角色卡写入后无法读取（意外状态）。".to_string())
+    conn.query_row(&format!("SELECT {CARD_COLUMNS} FROM agent_role_cards WHERE name = ?1"),
+        params![name], map_card).map_err(|error| error.to_string())
 }
 
 pub fn toggle_card(db: &DbState, params: &Value) -> Result<String, String> {

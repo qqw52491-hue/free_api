@@ -629,8 +629,7 @@ pub fn apply_stage_receipt(
     oracle_index: Option<u32>,
 ) -> StageReceiptOutcome {
     let source = crate::agent::checkpoint::ReviewDeliverySource::from_run(db, &receipt.child_run_id);
-    if checkpoint.stage_review_batch_id.is_some() && source.batch_id.is_some()
-        && checkpoint.stage_review_batch_id != source.batch_id {
+    if source.batch_id.is_some() && checkpoint.stage_review_batch_id != source.batch_id {
         return StageReceiptOutcome { note: "该回执属于旧阶段批次，保留历史，不更新当前阶段阻塞。".into(), refund_pending: false };
     }
     // 对质判定由台账 purpose='rebuttal' 盖章承担（resume 落库时盖戳），

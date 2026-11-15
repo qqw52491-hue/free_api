@@ -133,8 +133,9 @@ pub(crate) async fn reduce_child_receipt(
         };
     }
 
+    let source = crate::agent::checkpoint::ReviewDeliverySource::from_run(env.db, &receipt.child_run_id);
     if matches!(receipt.kind.as_str(), "review" | "reviewer")
-        && checkpoint.plan_review_batch_id.is_some()
+        && (checkpoint.plan_review_batch_id.is_some() || source.batch_id.is_some())
         && !checkpoint.is_stage_review_target(env.db, &receipt.child_run_id)
         && !checkpoint.run_belongs_to_plan_batch(env.db, &receipt.child_run_id)
     {
@@ -1261,6 +1262,27 @@ mod tests {
         assert!(!cp.plan_reviewer_consumed);
         assert!(cp.plan_review_deliveries.is_empty());
         assert!(effects.redispatched_to.is_none());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn old_batched_reviews_cannot_change_a_reset_task() {
+        let (base, db) = test_db("reset-old-batches");
+        let env = test_env(&db, &base);
+        let mut context = SandwichContext::new("sys".into(), "goal".into());
+        let mut cp = AgentCheckpoint::new("run-1".into(), &context);
+        cp.submitted_plan = Some(crate::agent::types::PlanSubmission { plan_summary: "新方案".into(), ..Default::default() });
+        seed_run(&db, "old-plan", "run-1", "old-plan-batch", "plan_review", "succeeded", true);
+        seed_run(&db, "old-stage", "run-1", "old-stage-batch", "stage_review", "succeeded", true);
+        let plan = receipt("review", "old-plan", None, json!({"decision":"approved","revised_plan":"旧方案","confidence":"supported","findings":[]}));
+        let effects = reduce_child_receipt(&env, &mut cp, &mut context, &plan).await;
+        assert!(effects.model_text.contains("其他批次"));
+        assert_eq!(cp.submitted_plan.as_ref().unwrap().plan_summary, "新方案");
+        assert!(cp.plan_review_deliveries.is_empty());
+        let stage = receipt("review", "old-stage", None, json!({"findings":[{"id":"F1","severity":"blocking","why":"旧阶段问题"}]}));
+        let effects = reduce_child_receipt(&env, &mut cp, &mut context, &stage).await;
+        assert!(effects.model_text.contains("旧阶段批次"));
+        assert_eq!(cp.stage_review_blockers_open, 0);
         std::fs::remove_dir_all(base).unwrap();
     }
 

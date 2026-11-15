@@ -6,7 +6,7 @@
 
 use crate::agent::dispatcher::{
     append_mcp_raw_results, emit_tool_event, execute_command_with_images,
-    append_file_tool_result, composite_results_view,
+    append_file_tool_result, composite_results_view, collect_shell_result_id, attach_shell_result_ids,
 };
 use crate::agent::mcp::PluginRegistry;
 use crate::agent::plan_tree::PlanNode;
@@ -55,6 +55,8 @@ pub(crate) fn run_plan_tree_sync_with_images(
     let mcp_raw_collector = mcp_raw_items.clone();
     let file_views = Arc::new(Mutex::new(Vec::<Value>::new()));
     let file_collector = file_views.clone();
+    let shell_jobs = Arc::new(Mutex::new(Vec::<String>::new()));
+    let shell_collector = shell_jobs.clone();
 
     let pending = pending.cloned();
     let run_id = run_id.map(str::to_owned);
@@ -65,6 +67,7 @@ pub(crate) fn run_plan_tree_sync_with_images(
         let reg_c = reg_clone.clone();
         let items_c = mcp_raw_items.clone();
         let files_c = file_views.clone();
+        let shell_jobs_c = shell_jobs.clone();
         let ws_c = ws_owned.clone();
         let pending_c = pending.clone();
         let run_id_c = run_id.clone();
@@ -94,6 +97,9 @@ pub(crate) fn run_plan_tree_sync_with_images(
                 );
                 if let Ok(mut files) = files_c.lock() {
                     append_file_tool_result(&mut files, &tool, &args, &result);
+                }
+                if let Ok(mut jobs) = shell_jobs_c.lock() {
+                    collect_shell_result_id(&mut jobs, &result);
                 }
                 result
             })
@@ -128,7 +134,8 @@ pub(crate) fn run_plan_tree_sync_with_images(
         .unwrap_or_default();
 
     let files = file_collector.lock().map(|files| files.clone()).unwrap_or_default();
-    DispatchResult { view: composite_results_view(collected, files),
+    let jobs = shell_collector.lock().map(|jobs| jobs.clone()).unwrap_or_default();
+    DispatchResult { view: attach_shell_result_ids(composite_results_view(collected, files), jobs),
         stdout: feedback.clone(),
         stderr: if success { String::new() } else { feedback },
         success,

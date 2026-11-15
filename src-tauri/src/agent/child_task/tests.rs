@@ -179,6 +179,24 @@ fn formal_subtask_delivery_is_separate_from_parent_and_recovers_without_reexecut
 }
 
 #[test]
+fn startup_recovers_committed_child_delivery_before_marking_orphans() {
+    let f = Fixture::new();
+    f.finish_readonly();
+    let before = load_checkpoint(&f.db, &f.binding.child_session).unwrap().unwrap();
+    assert_eq!(crate::agent::child_reviewer::recover_orphaned_child_runs_on_session_start(
+        &f.db, &f.binding.parent_session
+    ).unwrap(), 1);
+    let body = result(&f.db, &f.binding.parent_session, &f.binding.child_run).unwrap();
+    assert_eq!(body["execution_status"], "succeeded");
+    assert_eq!(body["delivery_accepted"], true);
+    assert_eq!(crate::agent::child_reviewer::recover_orphaned_child_runs_on_session_start(
+        &f.db, &f.binding.parent_session
+    ).unwrap(), 0);
+    let after = load_checkpoint(&f.db, &f.binding.child_session).unwrap().unwrap();
+    assert_eq!(before.version, after.version);
+}
+
+#[test]
 fn returned_ok_or_claimed_success_without_ready_receipt_is_not_delivery() {
     for status in ["running", "succeeded", "failed", "cancelled"] {
         let f = Fixture::new();

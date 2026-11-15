@@ -6,6 +6,8 @@ mod crash_report;
 mod db;
 mod llm;
 mod llm_breaker;
+#[doc(hidden)]
+pub mod shell_receipt;
 pub(crate) mod task_registry;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,6 +27,13 @@ fn report_startup_error(message: &str) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let db_path = get_db_path();
+    let database_lock = match lock_database_instance(&db_path) {
+        Ok(lock) => lock,
+        Err(error) => {
+            report_startup_error(&format!("无法启动数据库：{error}"));
+            return;
+        }
+    };
     let crash_session = crash_report::CrashSession::new(&db_path);
     crash_session.install_panic_hook();
     let conn = match init_db(&db_path) {
@@ -57,6 +66,7 @@ pub fn run() {
     let db_state = DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
     db::set_global_db(&db_state);
 
+    let _database_lock = database_lock;
     builder
         .manage(db_state)
         .manage(registry)
@@ -275,4 +285,38 @@ pub fn run() {
                 });
             }
         });
+}
+
+fn lock_database_instance(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    // An existing database can also be opened through a symlink.
+    let resolved = match path.canonicalize() {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => path.to_owned(),
+        Err(error) => return Err(error),
+    };
+    let path = resolved.as_path();
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let parent = parent.canonicalize()?;
+    let name = path.file_name().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "数据库路径无文件名"))?;
+    let lock_path = parent.join(format!("{}.instance.lock", name.to_string_lossy()));
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(lock_path)?;
+    file.try_lock().map_err(|e| std::io::Error::other(format!("数据库可能已被另一应用实例使用：{e}")))?;
+    Ok(file)
+}
+
+#[cfg(test)]
+mod database_instance_tests {
+    #[test]
+    fn same_database_cannot_be_opened_by_two_instances() {
+        let dir = std::env::temp_dir().join(format!("free-api-lock-{}", uuid::Uuid::new_v4()));
+        let db = dir.join("data.db");
+        let first = super::lock_database_instance(&db).unwrap();
+        assert!(super::lock_database_instance(&db).is_err());
+        let other = super::lock_database_instance(&dir.join("other.db")).unwrap();
+        drop(first);
+        assert!(super::lock_database_instance(&db).is_ok());
+        drop(other);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

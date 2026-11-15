@@ -34,6 +34,34 @@ use crate::agent::finish_guard::{
 };
 use crate::agent::workspace_lock::{acquire_workspace_lock, ChildWorkspaceGuard};
 
+fn reconcile_previous_runs(db: &DbState, session: &str, current: &str) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE agent_run_traces SET status='cancelled', completed_at=?3, completion_json=json_object('summary','先前运行已退出，任务等待恢复') WHERE session_id=?1 AND id!=?2 AND status IN ('running','waiting_human')",
+        rusqlite::params![session, current, chrono::Utc::now().to_rfc3339()],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    #[test]
+    fn reconciliation_changes_only_old_active_runs_in_same_session() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE agent_run_traces(id TEXT, session_id TEXT, status TEXT, completed_at TEXT, completion_json TEXT);
+            INSERT INTO agent_run_traces VALUES ('a','s','running',NULL,NULL),('b','s','running',NULL,NULL),('done','s','succeeded',NULL,NULL),('other','other','running',NULL,NULL);").unwrap();
+        let db = DbState(Arc::new(std::sync::Mutex::new(conn)));
+        reconcile_previous_runs(&db, "s", "b").unwrap();
+        let conn = db.0.lock().unwrap();
+        for (id, expected) in [("a", "cancelled"), ("b", "running"), ("done", "succeeded"), ("other", "running")] {
+            let status: String = conn.query_row("SELECT status FROM agent_run_traces WHERE id=?1", [id], |row| row.get(0)).unwrap();
+            assert_eq!(status, expected);
+        }
+    }
+}
+
 /// 推进后端运行状态，并向前端发送独立于旧进度事件的权威状态快照。
 /// 旧的 agent-progress-* 事件保持不变，以便前端逐步迁移。
 pub fn advance_run_state<R: tauri::Runtime>(
@@ -90,6 +118,7 @@ pub async fn run_agent_main_loop(
         plan_mode,
         None,
         task_start_mode,
+        None,
     ))
     .await
 }
@@ -111,6 +140,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
     plan_mode: Option<String>,
     run_budget: Option<AgentRunBudget>,
     task_start_mode: Option<crate::agent::conversation::TaskStartMode>,
+    admitted: Option<crate::agent::control::SessionExecutionOwner>,
 ) -> Result<(), String> {
     let final_session_id = session_id.unwrap_or_else(|| {
         std::time::SystemTime::now()
@@ -120,10 +150,15 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
     });
     // 极早期启动占位：覆盖附件搬迁等前置 I/O，保证刚启动即点停止也不会漏掉取消信号。
     let _starting_guard = crate::agent::control::StartingSessionGuard::enter(&final_session_id);
+    let run_id = run_id_override.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let _owner = match admitted {
+        Some(owner) => owner,
+        None => crate::agent::control::SessionExecutionOwner::acquire(&final_session_id, &run_id)?,
+    };
+    reconcile_previous_runs(state.inner(), &final_session_id, &run_id)?;
     let (goal, attachments) = crate::commands::chat::attachment_storage::adopt_draft_attachments(
         &final_session_id, goal, attachments,
     )?;
-    let run_id = run_id_override.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let retries = transient_llm_request_retries
         .unwrap_or(DEFAULT_TRANSIENT_LLM_REQUEST_RETRIES)
         .clamp(1, MAX_TRANSIENT_LLM_REQUEST_RETRIES);

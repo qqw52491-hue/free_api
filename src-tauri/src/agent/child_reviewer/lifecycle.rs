@@ -125,7 +125,12 @@ pub(crate) fn live_attempt_for_task(
     let conn = db.0.lock().ok()?;
     conn.query_row(
         "SELECT id FROM agent_child_runs
-         WHERE parent_run_id = ?1 AND task_id = ?2 AND id != ?3
+         WHERE (parent_run_id = ?1 OR parent_run_id IN (
+             SELECT old.id FROM agent_run_traces current
+             JOIN agent_run_traces old ON old.session_id = current.session_id
+                 AND old.history_task_id = current.history_task_id
+             WHERE current.id = ?1 AND current.history_task_id IS NOT NULL
+         )) AND task_id = ?2 AND id != ?3
            AND COALESCE(attempt_id, 1) > ?4
            AND (status IN ('queued','running') OR applied_at IS NULL OR applied_at = '')
          ORDER BY COALESCE(attempt_id, 1) DESC LIMIT 1",
@@ -250,16 +255,20 @@ pub(crate) fn begin_child_run_extended(
             }
         }
     }
-    // attempt_id 按 (parent_run_id, task_id) 自动推导：同逻辑任务的已有
+    // attempt_id 按同一会话的持久任务及子任务身份推导：同逻辑任务的已有
     // 最大 attempt + 1，调用方显式给的更大的值优先。重试/failover/resume
     // 只需继承 task_id，attempt 计数在这里自动正确，调用方想传错都难。
     let derived_attempt: i64 = conn
         .query_row(
-            "SELECT COALESCE(MAX(attempt_id), 0) + 1 FROM agent_child_runs WHERE task_id = ?1 AND parent_run_id = ?2",
+            "SELECT COALESCE(MAX(attempt_id), 0) + 1 FROM agent_child_runs WHERE task_id = ?1 AND (parent_run_id = ?2 OR parent_run_id IN (
+                SELECT old.id FROM agent_run_traces current
+                JOIN agent_run_traces old ON old.session_id = current.session_id AND old.history_task_id = current.history_task_id
+                WHERE current.id = ?2 AND current.history_task_id IS NOT NULL
+            ))",
             params![identity.task_id, parent_run_id],
             |row| row.get(0),
         )
-        .unwrap_or(1);
+        .map_err(|error| error.to_string())?;
     let attempt_id = derived_attempt.max(identity.attempt_id as i64);
 
     let mut initial=crate::agent::execution::runtime::Snapshot::new(&child_run_id,if kind=="review" {"reviewer"}else{kind},json!({"dispatch_input":identity.dispatch_input.as_ref().and_then(|raw|serde_json::from_str::<Value>(raw).ok())}));

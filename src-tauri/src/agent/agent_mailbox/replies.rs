@@ -44,6 +44,15 @@ pub(crate) fn pending_on(conn: &Connection, run: &str) -> Result<bool, String> {
     if super::coordination::pending_on(conn, run)? {
         return Ok(true);
     }
+    let direct: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM agent_messages m WHERE m.delivered_at IS NULL AND m.claimed_run_id IS NULL AND (m.target_run_id=?1 OR m.target_run_id IN (SELECT old.id FROM agent_run_traces current JOIN agent_run_traces old ON old.session_id=current.session_id AND old.history_task_id=current.history_task_id WHERE current.id=?1 AND current.history_task_id IS NOT NULL)) AND m.target_session_id=(SELECT session_id FROM agent_run_traces WHERE id=?1))", [run], |r| r.get(0)).map_err(|e|e.to_string())?;
+    if direct { return Ok(true); }
+    let jobs_table: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_background_jobs')", [], |r|r.get(0)).map_err(|e|e.to_string())?;
+    if jobs_table {
+        let pending: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM agent_background_jobs WHERE consumed=0 AND (parent_run_id=?1 OR parent_run_id IN (SELECT old.id FROM agent_run_traces current JOIN agent_run_traces old ON old.session_id=current.session_id AND old.history_task_id=current.history_task_id WHERE current.id=?1 AND current.history_task_id IS NOT NULL)) AND status IN ('running','succeeded','failed','cancelled','timed_out','interrupted'))", [run], |r|r.get(0)).map_err(|e|e.to_string())?;
+        if pending { return Ok(true); }
+    }
+    let outstanding_child: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM agent_child_runs WHERE (parent_run_id=?1 OR parent_run_id IN (SELECT old.id FROM agent_run_traces current JOIN agent_run_traces old ON old.session_id=current.session_id AND old.history_task_id=current.history_task_id WHERE current.id=?1 AND current.history_task_id IS NOT NULL)) AND COALESCE(purpose,'')!='final_review' AND (status IN ('queued','running') OR (result_json IS NOT NULL AND (applied_at IS NULL OR applied_at=''))))", [run], |r|r.get(0)).map_err(|e|e.to_string())?;
+    if outstanding_child { return Ok(true); }
     conn.query_row("SELECT EXISTS(SELECT 1 FROM agent_child_runs WHERE parent_run_id=?1 AND purpose IN (?2,'readonly_inbox') AND (status IN ('queued','running') OR applied_at IS NULL OR applied_at=''))",
         params![run, PURPOSE], |r| r.get(0)).map_err(|e| e.to_string())
 }

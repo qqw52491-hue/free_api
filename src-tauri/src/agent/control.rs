@@ -7,6 +7,61 @@ use std::sync::{Arc, OnceLock};
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::{mpsc, watch, Mutex};
 
+/// Owns one root execution from admission through terminal cleanup.
+pub(crate) struct SessionExecutionOwner {
+    session: String,
+    run: String,
+}
+
+fn execution_owners() -> &'static std::sync::Mutex<HashMap<String, String>> {
+    static OWNERS: OnceLock<std::sync::Mutex<HashMap<String, String>>> = OnceLock::new();
+    OWNERS.get_or_init(Default::default)
+}
+
+fn recovering_runs() -> &'static std::sync::Mutex<HashSet<String>> {
+    static RUNS: OnceLock<std::sync::Mutex<HashSet<String>>> = OnceLock::new();
+    RUNS.get_or_init(Default::default)
+}
+
+pub(crate) fn run_can_receive_inbox(session: &str, run: &str) -> bool {
+    let Ok(owners) = execution_owners().lock() else { return false };
+    match owners.get(session) {
+        Some(owner) if owner == run => recovering_runs().lock()
+            .is_ok_and(|runs| !runs.contains(run)),
+        // Database-level unit tests can construct a task tree without starting the runtime.
+        None => cfg!(test),
+        _ => false,
+    }
+}
+
+pub(crate) fn finish_run_recovery(run: &str) {
+    if let Ok(mut runs) = recovering_runs().lock() { runs.remove(run); }
+}
+
+impl SessionExecutionOwner {
+    pub(crate) fn acquire(session: &str, run: &str) -> Result<Self, String> {
+        let mut owners = execution_owners().lock().map_err(|e| e.to_string())?;
+        if owners.contains_key(session) {
+            return Err("该会话已有运行正在执行或收尾，请等待结束后重试。".into());
+        }
+        let mut recovering = recovering_runs().lock().map_err(|e| e.to_string())?;
+        owners.insert(session.to_owned(), run.to_owned());
+        recovering.insert(run.to_owned());
+        Ok(Self { session: session.to_owned(), run: run.to_owned() })
+    }
+}
+
+impl Drop for SessionExecutionOwner {
+    fn drop(&mut self) {
+        if let Ok(mut owners) = execution_owners().lock() {
+            if owners.get(&self.session) == Some(&self.run) {
+                owners.remove(&self.session);
+            }
+        }
+        finish_run_recovery(&self.run);
+    }
+}
+
 // 每个 session 的控制通道区分 ask_human 回答、替换目标与停止请求。
 // 替换只在模型/工具/等待人工三个安全边界消费，绝不硬杀未知副作用工具。
 #[derive(Debug, Clone)]
@@ -412,6 +467,17 @@ pub(crate) async fn finish_interrupted_run<R: tauri::Runtime>(
 mod tests {
     use super::*;
     use crate::agent::channel::{runs_store, RunRecord};
+
+    #[test]
+    fn execution_ownership_serializes_a_session_and_releases_on_drop() {
+        let session = format!("owner-test-{}", uuid::Uuid::new_v4());
+        let first = SessionExecutionOwner::acquire(&session, "a").unwrap();
+        assert!(SessionExecutionOwner::acquire(&session, "b").is_err());
+        let other = SessionExecutionOwner::acquire(&format!("{session}-other"), "b").unwrap();
+        drop(first);
+        let successor = SessionExecutionOwner::acquire(&session, "b").unwrap();
+        drop((other, successor));
+    }
 
     fn test_run_record(run_id: &str, session_id: &str, status: &str) -> RunRecord {
         RunRecord {

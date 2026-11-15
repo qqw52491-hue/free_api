@@ -567,6 +567,47 @@ impl From<String> for FinalReviewError {
     fn from(message: String) -> Self { Self { message, kind: "unknown" } }
 }
 
+// Only a result from an interrupted earlier run of this exact task can be
+// recovered. Compare the complete review input as well as the host fingerprint:
+// a changed role, evidence window, prompt, workspace or obligation needs a new review.
+fn recover_final_review(
+    db: &DbState,
+    parent: &str,
+    session: &str,
+    program: &ReviewProgram,
+) -> Result<Option<crate::agent::reviewer_gatekeeper::ReviewResult>, String> {
+    let candidates: Vec<(String, String, Option<String>)> = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare("SELECT c.id,c.status,c.result_json FROM agent_child_runs c JOIN agent_run_traces old ON old.id=c.parent_run_id JOIN agent_run_traces current ON current.id=?1 AND current.session_id=?2 AND current.history_task_id IS NOT NULL AND old.session_id=current.session_id AND old.history_task_id=current.history_task_id WHERE old.id!=current.id AND (old.status='interrupted' OR (old.status='cancelled' AND CASE WHEN json_valid(old.completion_json) THEN json_extract(old.completion_json,'$.summary') IN ('应用重启，任务已中断','先前运行已退出，任务等待恢复') ELSE 0 END)) AND c.parent_session_id=?2 AND c.purpose='final_review' ORDER BY c.started_at DESC,c.id DESC").map_err(|e|e.to_string())?;
+        let rows = stmt.query_map(params![parent, session], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(|e|e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e|e.to_string())?
+    };
+    for (id, status, raw) in candidates {
+        let Some(saved) = load(db, &id)? else { continue };
+        if saved.parent_session != program.parent_session || saved.workspace != program.workspace
+            || saved.messages != program.messages || saved.role != program.role
+            || saved.role_label != program.role_label || saved.model != program.model
+            || saved.allowed_refs != program.allowed_refs
+            || serde_json::to_value(&saved.schema).map_err(|e|e.to_string())? != serde_json::to_value(&program.schema).map_err(|e|e.to_string())?
+            || saved.has_verify_obligation != program.has_verify_obligation
+            || saved.can_finalize != program.can_finalize || saved.evidence_scope_refs != program.evidence_scope_refs
+            || saved.final_fingerprint != program.final_fingerprint
+            || saved.verify_obligations != program.verify_obligations
+            || saved.evidence_since != program.evidence_since {
+            continue;
+        }
+        if status != "succeeded" { return Ok(None); }
+        let Some(raw) = raw else { return Ok(None) };
+        let Ok(result) = serde_json::from_str::<crate::agent::reviewer_gatekeeper::ReviewResult>(&raw) else { return Ok(None) };
+        if matches!(result.verdict.as_str(), "passed" | "rejected")
+            && Some(result.diff_hash.as_str()) == program.final_fingerprint.as_deref()
+            && result.model_id == program.model {
+            return Ok(Some(result));
+        }
+    }
+    Ok(None)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_final(
     app: AppHandle,
@@ -586,19 +627,6 @@ pub(crate) async fn run_final(
     role_label: Option<&str>,
     parent_step_id: Option<usize>,
 ) -> Result<crate::agent::reviewer_gatekeeper::ReviewResult, FinalReviewError> {
-    let id = begin_child_run_extended(
-        db,
-        parent,
-        session,
-        workspace,
-        &config.model_id,
-        0,
-        "review",
-        Some(3),
-        None,
-        None,
-        &ChildRunIdentity::fresh("final_review"),
-    )?;
     let parent_step_occurrence = parent_step_id.and_then(|step_id| {
         crate::agent::run_trace::load_run_steps(db, parent).ok().map(|steps| {
             steps.iter().filter(|step| {
@@ -625,6 +653,13 @@ pub(crate) async fn run_final(
         parent_step_id,
         parent_step_occurrence,
     };
+    if let Some(result) = recover_final_review(db, parent, session, &program)? {
+        return Ok(result);
+    }
+    let id = begin_child_run_extended(
+        db, parent, session, workspace, &config.model_id, 0, "review", Some(3), None, None,
+        &ChildRunIdentity::fresh("final_review"),
+    )?;
     if let Err(error) = start(
         app,
         db,

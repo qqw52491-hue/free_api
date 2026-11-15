@@ -4,6 +4,22 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+static LIVE_SHELLS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+pub(crate) struct ShellWatcher(String);
+
+pub(crate) fn register_shell_watcher(id: &str) -> ShellWatcher {
+    LIVE_SHELLS.lock().unwrap_or_else(|e| e.into_inner()).insert(id.to_owned());
+    ShellWatcher(id.to_owned())
+}
+
+impl Drop for ShellWatcher {
+    fn drop(&mut self) {
+        LIVE_SHELLS.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+    }
+}
+
 /// 异步后台任务描述
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BackgroundJob {
@@ -199,12 +215,32 @@ pub fn finish_job(
     Ok(())
 }
 
-/// 轮询待消费信箱 (Pending Inbox)，批量获取未消费的已完成任务并原子置 consumed = 1
+/// 读取待消费结果；由调用方将消费标记与 checkpoint 在同一事务提交。
 pub fn poll_pending_inbox(
     db: &DbState,
     parent_run_id: &str,
     max_batch: usize,
 ) -> Result<Vec<BackgroundJobResult>, String> {
+    let runs = task_runs(db, parent_run_id)?;
+    let mut results = Vec::new();
+    let limit = if max_batch == 0 { 5 } else { max_batch };
+    for run in runs {
+        if results.len() >= limit { break; }
+        results.extend(poll_pending_inbox_one(db, &run, limit - results.len())?);
+    }
+    Ok(results)
+}
+
+pub(crate) fn task_runs(db: &DbState, current: &str) -> Result<Vec<String>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare("SELECT old.id FROM agent_run_traces current JOIN agent_run_traces old ON old.session_id=current.session_id AND old.history_task_id=current.history_task_id WHERE current.id=?1 AND current.history_task_id IS NOT NULL ORDER BY old.started_at, old.id").map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([current], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?;
+    let mut runs = rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+    if !runs.iter().any(|run| run == current) { runs.push(current.to_owned()); }
+    Ok(runs)
+}
+
+fn poll_pending_inbox_one(db: &DbState, parent_run_id: &str, max_batch: usize) -> Result<Vec<BackgroundJobResult>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
 
     let limit = if max_batch == 0 { 5 } else { max_batch };
@@ -238,11 +274,6 @@ pub fn poll_pending_inbox(
 
     let mut results = Vec::new();
     for (id, job_type, title, status, duration_ms, result_json, error_kind) in rows {
-        let _ = conn.execute(
-            "UPDATE agent_background_jobs SET consumed = 1 WHERE id = ?1",
-            params![id],
-        );
-
         results.push(BackgroundJobResult {
             job_id: id,
             job_type,
@@ -260,7 +291,7 @@ pub fn poll_pending_inbox(
     Ok(results)
 }
 
-/// 定向轮询信箱：只消费 `target_job_ids` 列表中指定 ID 的已完成任务，不影响其余任务的 consumed 状态。
+/// 定向读取信箱：只返回 `target_job_ids` 列表中指定 ID 的已完成任务。
 ///
 /// 用于 `wait_jobs` 指定等待特定任务时，防止误消费与本次等待无关的后台任务结果。
 pub fn poll_targeted_inbox(
@@ -268,6 +299,14 @@ pub fn poll_targeted_inbox(
     parent_run_id: &str,
     target_job_ids: &[String],
 ) -> Result<Vec<BackgroundJobResult>, String> {
+    let mut results = Vec::new();
+    for run in task_runs(db, parent_run_id)? {
+        results.extend(poll_targeted_inbox_one(db, &run, target_job_ids)?);
+    }
+    Ok(results)
+}
+
+fn poll_targeted_inbox_one(db: &DbState, parent_run_id: &str, target_job_ids: &[String]) -> Result<Vec<BackgroundJobResult>, String> {
     if target_job_ids.is_empty() {
         return Ok(vec![]);
     }
@@ -294,10 +333,6 @@ pub fn poll_targeted_inbox(
                 )),
             );
         if let Ok((id, job_type, title, status, duration_ms, result_json, error_kind)) = row {
-            let _ = conn.execute(
-                "UPDATE agent_background_jobs SET consumed = 1 WHERE id = ?1",
-                params![id],
-            );
             results.push(BackgroundJobResult {
                 job_id: id,
                 job_type,
@@ -318,7 +353,8 @@ pub fn poll_targeted_inbox(
 
 /// 检查指定 parent_run 是否仍有处于 running 状态的异步任务（包含通用任务与子审查任务）
 pub fn has_any_running_jobs(db: &DbState, parent_run_id: &str) -> bool {
-    has_running_jobs(db, parent_run_id) || crate::agent::child_reviewer::has_running_child_runs(db, parent_run_id)
+    task_runs(db, parent_run_id).unwrap_or_else(|_| vec![parent_run_id.to_owned()]).iter()
+        .any(|run| has_running_jobs(db, run) || crate::agent::child_reviewer::has_running_child_runs(db, run))
 }
 
 /// 定向语义：给定目标 id 集合中是否还有处于 running 的任务（两张表都查）。
@@ -328,17 +364,19 @@ fn has_running_targets(db: &DbState, parent_run_id: &str, targets: &[String]) ->
     if targets.is_empty() {
         return false;
     }
+    let runs = task_runs(db, parent_run_id).unwrap_or_else(|_| vec![parent_run_id.to_owned()]);
     let Ok(conn) = db.0.lock() else { return false; };
     let marks = std::iter::repeat("?")
         .take(targets.len())
         .collect::<Vec<_>>()
         .join(",");
-    for table in ["agent_background_jobs", "agent_child_runs"] {
+    for run in &runs {
+      for table in ["agent_background_jobs", "agent_child_runs"] {
         let sql = format!(
             "SELECT COUNT(*) FROM {} WHERE parent_run_id = ? AND status IN ('queued','running') AND id IN ({})",
             table, marks
         );
-        let params_vec: Vec<&dyn rusqlite::ToSql> = std::iter::once(&parent_run_id as &dyn rusqlite::ToSql)
+        let params_vec: Vec<&dyn rusqlite::ToSql> = std::iter::once(run as &dyn rusqlite::ToSql)
             .chain(targets.iter().map(|t| t as &dyn rusqlite::ToSql))
             .collect();
         let count: i64 = conn
@@ -347,6 +385,7 @@ fn has_running_targets(db: &DbState, parent_run_id: &str, targets: &[String]) ->
         if count > 0 {
             return true;
         }
+      }
     }
     false
 }
@@ -456,6 +495,7 @@ pub(crate) fn empty_wait_message(
     waited_secs: u64,
 ) -> Result<String, String> {
     if crate::agent::agent_mailbox::has_pending(db,parent_run_id) {return Ok("收到协作消息，等待已提前返回；原后台任务继续运行，消息将在当前安全边界注入。".into())}
+    let runs = task_runs(db, parent_run_id)?;
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare(
         "SELECT id, status, consumed, 1 FROM agent_background_jobs WHERE parent_run_id = ?1
@@ -464,15 +504,16 @@ pub(crate) fn empty_wait_message(
                 CASE WHEN result_json IS NULL THEN 0 ELSE 1 END
          FROM agent_child_runs WHERE parent_run_id = ?1"
     ).map_err(|e| e.to_string())?;
-    let rows = stmt.query_map(params![parent_run_id], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
-            row.get::<_, bool>(2)?, row.get::<_, bool>(3)?))
-    }).map_err(|e| e.to_string())?;
     let mut matched = std::collections::HashSet::new();
     let mut running = 0;
     let mut pending = 0;
     let mut unavailable = 0;
-    for row in rows {
+    for run in runs {
+      let rows = stmt.query_map(params![run], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+            row.get::<_, bool>(2)?, row.get::<_, bool>(3)?))
+      }).map_err(|e| e.to_string())?;
+      for row in rows {
         let (id, status, consumed, has_result) = row.map_err(|e| e.to_string())?;
         if targets.is_some_and(|ids| !ids.contains(&id)) { continue; }
         matched.insert(id);
@@ -485,6 +526,7 @@ pub(crate) fn empty_wait_message(
                 unavailable += 1;
             }
         }
+      }
     }
     let mut parts = Vec::new();
     if running > 0 {
@@ -677,10 +719,10 @@ pub(crate) fn running_job_finish_blockers(
     let conn = db.0.lock().map_err(|error| error.to_string())?;
     let mut stmt = conn.prepare(
         "SELECT id, job_type, title FROM agent_background_jobs
-         WHERE parent_run_id = ?1 AND status = 'running'
+         WHERE (parent_run_id = ?1 OR parent_run_id IN (SELECT old.id FROM agent_run_traces current JOIN agent_run_traces old ON old.session_id=current.session_id AND old.history_task_id=current.history_task_id WHERE current.id=?1 AND current.history_task_id IS NOT NULL)) AND status = 'running'
          UNION ALL
          SELECT id, 'child_' || COALESCE(NULLIF(kind, ''), 'review'), COALESCE(purpose, '')
-         FROM agent_child_runs WHERE parent_run_id = ?1 AND status = 'running'
+         FROM agent_child_runs WHERE (parent_run_id = ?1 OR parent_run_id IN (SELECT old.id FROM agent_run_traces current JOIN agent_run_traces old ON old.session_id=current.session_id AND old.history_task_id=current.history_task_id WHERE current.id=?1 AND current.history_task_id IS NOT NULL)) AND status = 'running'
          ORDER BY 1",
     ).map_err(|error| error.to_string())?;
     let rows = stmt.query_map(params![parent_run_id], |row| {
@@ -744,19 +786,104 @@ pub fn recover_orphaned_jobs_on_session_start(
     db: &DbState,
     parent_session_id: &str,
 ) -> Result<usize, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    let now = Utc::now().to_rfc3339();
-    let rows_updated = conn
-        .execute(
-            "UPDATE agent_background_jobs 
-             SET status = 'interrupted', finished_at = ?2, error_kind = 'interrupted' 
-             WHERE parent_session_id = ?1 AND status = 'running'",
-            params![parent_session_id, now],
-        )
-        .map_err(|e| e.to_string())?;
+    let rows = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT id, job_type, params_json FROM agent_background_jobs
+             WHERE parent_session_id=?1 AND status='running'",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([parent_session_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        }).map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+    };
+    let mut recovered = 0;
+    for (id, kind, params) in rows {
+        if shell_has_local_watcher(&id) { continue; }
+        let token = serde_json::from_str::<serde_json::Value>(&params).ok()
+            .and_then(|v| v["exit_receipt_id"].as_str().map(str::to_owned));
+        match (kind.as_str(), token) {
+            ("shell", Some(token)) => {
+                let database = crate::shell_receipt::database_path(db).map_err(|e| e.to_string())?;
+                match crate::shell_receipt::inspect(&database, &token)
+                    .map_err(|e| format!("无法读取后台任务 {id} 的退出回执：{e}"))? {
+                    crate::shell_receipt::ReceiptState::Finished(receipt) => {
+                        apply_shell_receipt(db, &id, receipt)?;
+                        crate::shell_receipt::discard(&database, &token);
+                    }
+                    crate::shell_receipt::ReceiptState::Running => {
+                        watch_recovered_shell(db.clone(), id, database, token)?;
+                        continue;
+                    }
+                    crate::shell_receipt::ReceiptState::Unknown => mark_unknown_shell(db, &id)?,
+                }
+            }
+            ("shell", None) => mark_unknown_shell(db, &id)?,
+            _ => finish_job(db, &id, "interrupted", 0, None, Some("interrupted"))?,
+        }
+        recovered += 1;
+    }
+    Ok(recovered)
+}
 
-    notify_job_state_changed();
-    Ok(rows_updated)
+pub(crate) fn shell_has_local_watcher(id: &str) -> bool {
+    LIVE_SHELLS.lock().unwrap_or_else(|e| e.into_inner()).contains(id)
+}
+
+fn apply_shell_receipt(db: &DbState, id: &str, receipt: crate::shell_receipt::ExitReceipt) -> Result<(), String> {
+    let result = serde_json::json!({
+        "exit_code": receipt.exit_code,
+        "exit_scope": "shell_process",
+        "verification_status": "not_assessed",
+        "recovered": true,
+    }).to_string();
+    let error = (!receipt.success).then(|| format!("exit_code:{}", receipt.exit_code.unwrap_or(-1)));
+    finish_job(db, id, if receipt.success { "succeeded" } else { "failed" },
+        receipt.duration_ms, Some(&result), error.as_deref())
+}
+
+fn mark_unknown_shell(db: &DbState, id: &str) -> Result<(), String> {
+    let result = serde_json::json!({
+        "status": "unknown",
+        "message": "未取得退出回执，命令可能仍在执行或已执行完毕。请先核对进程、日志及副作用，再决定后续操作。"
+    }).to_string();
+    finish_job(db, id, "interrupted", 0, Some(&result), Some("result_unknown"))
+}
+
+fn watch_recovered_shell(db: DbState, id: String, database: std::path::PathBuf, token: String) -> Result<(), String> {
+    static RECOVERED_WATCHERS: LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    struct Registration(String);
+    impl Drop for Registration {
+        fn drop(&mut self) {
+            RECOVERED_WATCHERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+        }
+    }
+    let runtime = tokio::runtime::Handle::try_current().map_err(|e| e.to_string())?;
+    if !RECOVERED_WATCHERS.lock().map_err(|e| e.to_string())?.insert(id.clone()) {
+        return Ok(());
+    }
+    let registration = Registration(id.clone());
+    runtime.spawn(async move {
+        let _registration = registration;
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            match crate::shell_receipt::inspect(&database, &token) {
+                Ok(crate::shell_receipt::ReceiptState::Running) => continue,
+                Ok(crate::shell_receipt::ReceiptState::Finished(receipt)) => {
+                    if apply_shell_receipt(&db, &id, receipt).is_ok() {
+                        crate::shell_receipt::discard(&database, &token);
+                        break;
+                    }
+                }
+                Ok(crate::shell_receipt::ReceiptState::Unknown) => {
+                    if mark_unknown_shell(&db, &id).is_ok() { break; }
+                }
+                Err(error) => eprintln!("[shell-recovery] {id}: {error}"),
+            }
+        }
+    });
+    Ok(())
 }
 
 #[cfg(test)]
@@ -764,12 +891,108 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
+    #[test]
+    fn synchronous_results_and_checkpoint_commit_or_roll_back_together() {
+        use crate::agent::checkpoint::{save_checkpoint, save_checkpoint_and_claim_chats_and_jobs, load_checkpoint, AgentCheckpoint};
+        use crate::agent::context::SandwichContext;
+        let (base, db) = setup_test_db();
+        let first = begin_job(&db, "run", "session", "shell", "first", "{}").unwrap();
+        let second = begin_job(&db, "run", "session", "shell", "second", "{}").unwrap();
+        finish_job(&db, &first, "succeeded", 0, Some("first"), None).unwrap();
+        finish_job(&db, &second, "failed", 0, Some("second"), None).unwrap();
+        let mut context = SandwichContext::new("system".into(), "goal".into());
+        let mut checkpoint = AgentCheckpoint::new("session".into(), &context);
+        save_checkpoint(&db, &mut checkpoint).unwrap();
+        let mut stale = checkpoint.clone();
+        save_checkpoint(&db, &mut checkpoint).unwrap();
+        context.add_error_feedback("both shell results");
+        assert!(save_checkpoint_and_claim_chats_and_jobs(&db, &mut stale, "run", &mut context, &[first.clone(), second.clone()]).is_err());
+        assert_eq!(poll_pending_inbox(&db, "run", 10).unwrap().len(), 2);
+        let mut current = load_checkpoint(&db, "session").unwrap().unwrap();
+        save_checkpoint_and_claim_chats_and_jobs(&db, &mut current, "run", &mut context, &[first, second]).unwrap();
+        assert!(poll_pending_inbox(&db, "run", 10).unwrap().is_empty());
+        assert!(serde_json::to_string(&load_checkpoint(&db, "session").unwrap().unwrap()).unwrap().contains("both shell results"));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restart_imports_a_saved_exit_code_and_reports_missing_receipts() {
+        let (base, db) = setup_test_db();
+        let path = crate::shell_receipt::database_path(&db).unwrap();
+        let (token, receipt) = crate::shell_receipt::prepare(&path).unwrap();
+        let params = serde_json::json!({"exit_receipt_id": token}).to_string();
+        let completed = begin_job(&db, "a", "s", "shell", "saved", &params).unwrap();
+        let unknown = begin_job(&db, "a", "s", "shell", "legacy", "{}").unwrap();
+        assert_eq!(crate::shell_receipt::supervise(&receipt, std::ffi::OsStr::new("exit 7")).unwrap(), 7);
+        drop(db);
+        let db = DbState(Arc::new(Mutex::new(crate::db::init_db(&path).unwrap())));
+        assert_eq!(recover_orphaned_jobs_on_session_start(&db, "s").unwrap(), 2);
+        assert_eq!(recover_orphaned_jobs_on_session_start(&db, "s").unwrap(), 0);
+        let rows = poll_pending_inbox(&db, "a", 10).unwrap();
+        let saved = rows.iter().find(|row| row.job_id == completed).unwrap();
+        assert_eq!(saved.status, "failed");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&saved.result_json).unwrap()["exit_code"], 7);
+        let uncertain = rows.iter().find(|row| row.job_id == unknown).unwrap();
+        assert_eq!(uncertain.error_kind.as_deref(), Some("result_unknown"));
+        drop(db);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_waits_for_a_supervisor_still_holding_the_receipt() {
+        let (base, db) = setup_test_db();
+        let path = crate::shell_receipt::database_path(&db).unwrap();
+        let (token, receipt) = crate::shell_receipt::prepare(&path).unwrap();
+        let params = serde_json::json!({"exit_receipt_id": token}).to_string();
+        let id = begin_job(&db, "a", "s", "shell", "running", &params).unwrap();
+        let supervisor = std::thread::spawn(move || {
+            crate::shell_receipt::supervise(&receipt, std::ffi::OsStr::new("sleep 1; exit 0")).unwrap()
+        });
+        // The marker is written with the file lock already held.
+        let receipt_path = base.join("shell-receipts").join(&token);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while std::fs::metadata(&receipt_path).unwrap().len() == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        assert_eq!(recover_orphaned_jobs_on_session_start(&db, "s").unwrap(), 0);
+        assert!(has_running_jobs(&db, "a"));
+        let results = wait_for_jobs(&db, "a", None, 5, None).await.unwrap();
+        assert_eq!(results[0].job_id, id);
+        assert_eq!(results[0].status, "succeeded");
+        assert_eq!(supervisor.join().unwrap(), 0);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn recovery_keeps_a_live_shell_watcher_until_result_is_saved() {
+        let (base, db) = setup_test_db();
+        let id = begin_job(&db, "a", "session", "shell", "job", "{}").unwrap();
+        let watcher = register_shell_watcher(&id);
+        recover_orphaned_jobs_on_session_start(&db, "session").unwrap();
+        assert!(has_running_jobs(&db, "a"));
+        finish_job(&db, &id, "succeeded", 1, Some("result"), None).unwrap();
+        drop(watcher);
+        let result = poll_pending_inbox(&db, "a", 5).unwrap();
+        assert_eq!(result[0].status, "succeeded");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     fn setup_test_db() -> (std::path::PathBuf, DbState) {
         let base = std::env::temp_dir().join(format!("free-api-job-engine-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&base).unwrap();
         let conn = crate::db::init_db(&base.join("test.db")).unwrap();
         let state = DbState(Arc::new(Mutex::new(conn)));
         (base, state)
+    }
+
+    fn commit_jobs(db: &DbState, parent: &str, ids: &[String]) {
+        let context = crate::agent::context::SandwichContext::new("system".into(), "goal".into());
+        let mut checkpoint = crate::agent::checkpoint::load_checkpoint(db, parent).unwrap()
+            .unwrap_or_else(|| crate::agent::checkpoint::AgentCheckpoint::new(parent.into(), &context));
+        crate::agent::checkpoint::save_checkpoint_and_consume_jobs(db, &mut checkpoint, &context, &[], parent, ids).unwrap();
     }
 
     #[test]
@@ -793,14 +1016,15 @@ mod tests {
         finish_job(&db, &job_id, "succeeded", 120, Some(r#"{"exit_code":0}"#), None).unwrap();
         assert!(!has_running_jobs(&db, parent_run));
 
-        // 5. 轮询信箱：获取到结果，且 consumed 自动置 1
+        // 读取不会提前消费；保存父任务状态后才确认消费。
         let pending_after = poll_pending_inbox(&db, parent_run, 10).unwrap();
         assert_eq!(pending_after.len(), 1);
         assert_eq!(pending_after[0].job_id, job_id);
         assert_eq!(pending_after[0].status, "succeeded");
         assert_eq!(pending_after[0].result_json, r#"{"exit_code":0}"#);
 
-        // 6. 第二次轮询：不再重复消费（严格幂等）
+        assert_eq!(poll_pending_inbox(&db, parent_run, 10).unwrap().len(), 1);
+        commit_jobs(&db, parent_run, &[job_id]);
         let pending_again = poll_pending_inbox(&db, parent_run, 10).unwrap();
         assert_eq!(pending_again.len(), 0);
 
@@ -826,17 +1050,98 @@ mod tests {
         assert_eq!(batch_1.len(), 2);
         assert_eq!(batch_1[0].job_id, job_1);
         assert_eq!(batch_1[1].job_id, job_2);
+        commit_jobs(&db, parent_run, &[job_1, job_2]);
 
         // 下一次拉取剩下的 1 条
         let batch_2 = poll_pending_inbox(&db, parent_run, 2).unwrap();
         assert_eq!(batch_2.len(), 1);
         assert_eq!(batch_2[0].job_id, job_3);
+        commit_jobs(&db, parent_run, &[job_3]);
 
         // 再次拉取全空
         let batch_3 = poll_pending_inbox(&db, parent_run, 2).unwrap();
         assert_eq!(batch_3.len(), 0);
 
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn background_result_is_redelivered_after_checkpoint_conflict() {
+        use crate::agent::checkpoint::{AgentCheckpoint, save_checkpoint, save_checkpoint_and_consume_jobs};
+        use crate::agent::context::SandwichContext;
+        let (_base, db) = setup_test_db();
+        let id = begin_job(&db, "parent", "session", "shell", "job", "{}").unwrap();
+        finish_job(&db, &id, "succeeded", 10, Some("result"), None).unwrap();
+        let context = SandwichContext::new("system".into(), "goal".into());
+        let mut original = AgentCheckpoint::new("session".into(), &context);
+        save_checkpoint(&db, &mut original).unwrap();
+        let mut stale = original.clone();
+        save_checkpoint(&db, &mut original).unwrap();
+        assert_eq!(poll_targeted_inbox(&db, "parent", &[id.clone()]).unwrap().len(), 1);
+        assert!(save_checkpoint_and_consume_jobs(&db, &mut stale, &context, &[], "parent", &[id.clone()]).is_err());
+        assert_eq!(poll_pending_inbox(&db, "parent", 5).unwrap().len(), 1);
+        let mut updated = crate::agent::checkpoint::load_checkpoint(&db, "session").unwrap().unwrap();
+        let mut context_with_result = context;
+        context_with_result.add_error_feedback("result");
+        save_checkpoint_and_consume_jobs(&db, &mut updated, &context_with_result, &[], "parent", &[id]).unwrap();
+        assert!(poll_pending_inbox(&db, "parent", 5).unwrap().is_empty());
+        let saved = crate::agent::checkpoint::load_checkpoint(&db, "session").unwrap().unwrap();
+        assert!(serde_json::to_string(&saved).unwrap().contains("result"));
+    }
+
+    #[test]
+    fn run_task_binding_follows_resume_and_isolates_new_task() {
+        use crate::agent::checkpoint::{AgentCheckpoint, bind_run_and_save_checkpoint, load_checkpoint};
+        use crate::agent::context::SandwichContext;
+        let (_base, db) = setup_test_db();
+        let mut context = SandwichContext::new("system".into(), "goal".into());
+        let task = context.history_task_id.clone();
+        let mut cp = AgentCheckpoint::new("session".into(), &context);
+        for run in ["a", "b", "c"] {
+            crate::agent::run_trace::upsert_snapshot(&db, run, "session", "goal", "running", &[], None).unwrap();
+            bind_run_and_save_checkpoint(&db, &mut cp, run, &mut context).unwrap();
+        }
+        let mut next = SandwichContext::new("system".into(), "new goal".into());
+        let mut fresh = AgentCheckpoint::new("session".into(), &next);
+        fresh.version = load_checkpoint(&db, "session").unwrap().unwrap().version;
+        crate::agent::run_trace::upsert_snapshot(&db, "d", "session", "new goal", "running", &[], None).unwrap();
+        bind_run_and_save_checkpoint(&db, &mut fresh, "d", &mut next).unwrap();
+        let conn = db.0.lock().unwrap();
+        let count: i64 = conn.query_row("SELECT count(*) FROM agent_run_traces WHERE session_id=?1 AND history_task_id=?2", params!["session", task], |r| r.get(0)).unwrap();
+        assert_eq!(count, 3);
+        assert_ne!(context.history_task_id, next.history_task_id);
+    }
+
+    #[test]
+    fn resumed_run_receives_old_results_once_without_crossing_tasks() {
+        use crate::agent::checkpoint::{AgentCheckpoint, bind_run_and_save_checkpoint, load_checkpoint, save_checkpoint_and_consume_jobs};
+        use crate::agent::context::SandwichContext;
+        let (_base, db) = setup_test_db();
+        let mut context = SandwichContext::new("system".into(), "goal".into());
+        let mut cp = AgentCheckpoint::new("session".into(), &context);
+        for run in ["a", "b", "c"] {
+            crate::agent::run_trace::upsert_snapshot(&db, run, "session", "goal", "running", &[], None).unwrap();
+            bind_run_and_save_checkpoint(&db, &mut cp, run, &mut context).unwrap();
+        }
+        let id = begin_job(&db, "a", "session", "shell", "work", "{}").unwrap();
+        finish_job(&db, &id, "succeeded", 5, Some("evidence"), None).unwrap();
+        let child = crate::agent::child_reviewer::begin_child_run(&db, "a", "session", &_base, "model", 0, "task", None).unwrap();
+        db.0.lock().unwrap().execute("UPDATE agent_child_runs SET status='succeeded', result_json=?2 WHERE id=?1", params![child, r#"{"delivery_accepted":true}"#]).unwrap();
+        assert_eq!(crate::agent::child_reviewer::poll_completed_delivery_receipts(&db, "c", Some(&[child.clone()])).unwrap().len(), 1);
+        assert_eq!(poll_pending_inbox(&db, "c", 5).unwrap().len(), 1);
+        assert_eq!(poll_targeted_inbox(&db, "c", &[id.clone()]).unwrap().len(), 1);
+        context.add_error_feedback("evidence");
+        save_checkpoint_and_consume_jobs(&db, &mut cp, &context, &[], "c", &[id.clone()]).unwrap();
+        assert!(poll_pending_inbox(&db, "c", 5).unwrap().is_empty());
+        let mut fresh_context = SandwichContext::new("system".into(), "new goal".into());
+        let mut fresh = AgentCheckpoint::new("session".into(), &fresh_context);
+        fresh.version = load_checkpoint(&db, "session").unwrap().unwrap().version;
+        crate::agent::run_trace::upsert_snapshot(&db, "d", "session", "new goal", "running", &[], None).unwrap();
+        bind_run_and_save_checkpoint(&db, &mut fresh, "d", &mut fresh_context).unwrap();
+        let old = begin_job(&db, "a", "session", "shell", "old", "{}").unwrap();
+        finish_job(&db, &old, "succeeded", 1, Some("old"), None).unwrap();
+        assert!(poll_pending_inbox(&db, "d", 5).unwrap().is_empty());
+        assert!(crate::agent::child_reviewer::poll_completed_delivery_receipts(&db, "d", Some(&[child])).unwrap().is_empty());
     }
 
     #[test]
@@ -966,6 +1271,7 @@ mod tests {
         assert_eq!(result[0].job_id, id);
         assert_eq!(result[0].status, "failed");
         assert!(result[0].result_json.contains("124"));
+        commit_jobs(&db, "run-shell", &ids);
         let message = empty_wait_message(&db, "run-shell", Some(&ids), 600).unwrap();
         assert!(message.contains("均已到终态且结果已回收"));
         assert!(message.contains("是否成功请以已回收的结果为准"));

@@ -322,6 +322,7 @@ fn run_agent_step_internal(
         let mut total_stdout = String::new();
         let mut mcp_raw_items = Vec::new();
         let mut file_views = Vec::new();
+        let mut shell_jobs = Vec::new();
 
         for (idx, cmd_val) in batch_commands.iter().enumerate() {
             let step_idx = idx + 1;
@@ -368,7 +369,7 @@ fn run_agent_step_internal(
             let step_params = match prepared_params {
                 Ok(params) => params,
                 Err(error) => return DispatchResult {
-                    view: composite_results_view(mcp_raw_items, file_views),
+                    view: attach_shell_result_ids(composite_results_view(mcp_raw_items, file_views), shell_jobs),
                     stdout: total_stdout,
                     stderr: format!("流水线第 {step_idx} 步参数预检拒绝：当前子步骤与后续步骤尚未执行；此前成功步骤已执行。\n{error}"),
                     success: false,
@@ -379,6 +380,7 @@ fn run_agent_step_internal(
                 execute_command_with_images(db, session_id, step_tool, &step_action, &step_params, registry, workspace_root, pending, run_id, shell_guard);
             append_mcp_raw_results(&mut mcp_raw_items, res.view.as_ref());
             append_file_tool_result(&mut file_views, step_tool, &step_params, &res);
+            collect_shell_result_id(&mut shell_jobs, &res);
 
             // 拼接输出结果
             if !res.stdout.is_empty() {
@@ -391,7 +393,7 @@ fn run_agent_step_internal(
                     "   🚫 Step {} 执行失败，流水线立即熔断！原因: {}",
                     step_idx, res.stderr
                 );
-                return DispatchResult { view: composite_results_view(mcp_raw_items, file_views),
+                return DispatchResult { view: attach_shell_result_ids(composite_results_view(mcp_raw_items, file_views), shell_jobs),
                     stdout: total_stdout,
                     stderr: format!("流水线在第 {} 步崩溃: {}", step_idx, res.stderr),
                     success: false,
@@ -400,7 +402,7 @@ fn run_agent_step_internal(
             }
         }
 
-        return DispatchResult { view: composite_results_view(mcp_raw_items, file_views),
+        return DispatchResult { view: attach_shell_result_ids(composite_results_view(mcp_raw_items, file_views), shell_jobs),
             stdout: total_stdout,
             stderr: String::new(),
             success: true,

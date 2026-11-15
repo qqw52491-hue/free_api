@@ -36,6 +36,17 @@
         assert!(upsert_card(&db, &json!({"name": "overflow_role"})).is_err());
     }
 
+    #[test]
+    fn editing_disabled_card_preserves_current_enabled_state() {
+        let db = setup_db();
+        upsert_card(&db, &json!({"name":"disabled_role"})).unwrap();
+        toggle_card(&db, &json!({"name":"disabled_role"})).unwrap();
+        let saved = upsert_card(&db, &json!({"name":"disabled_role", "label":"updated", "enabled":true})).unwrap();
+        assert!(!saved.enabled);
+        assert_eq!(saved.label, "updated");
+        assert!(resolve_enabled_card(&db, "disabled_role").unwrap().is_none());
+    }
+
 #[test]
 fn system_basics_seeded_with_native_contracts() {
     let db = setup_db();

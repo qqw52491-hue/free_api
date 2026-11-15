@@ -12,6 +12,17 @@ struct Fixture {
     b: Actor,
     c: Actor,
 }
+
+#[test]
+fn completed_background_result_blocks_commit_until_consumed() {
+    let f = Fixture::new();
+    db_status(&f.db, &f.c.run, "succeeded");
+    let job = crate::agent::job_engine::begin_job(&f.db, &f.root.run, &f.root.session, "shell", "late", "{}").unwrap();
+    crate::agent::job_engine::finish_job(&f.db, &job, "failed", 1, Some("exit 7"), Some("exit_code:7")).unwrap();
+    assert_eq!(f.commit().unwrap_err(), PENDING_REPLY);
+    f.db.0.lock().unwrap().execute("UPDATE agent_background_jobs SET consumed=1 WHERE id=?1", [&job]).unwrap();
+    f.commit().unwrap();
+}
 impl Fixture {
     fn new() -> Self {
         let path =
@@ -63,6 +74,11 @@ impl Fixture {
     }
     fn question(&self) -> Value {
         json!({"target":self.b.run,"message":"为什么保留旧接口？","data":{"test_id":"reply-test"}})
+    }
+    fn receive_root_messages(&self) {
+        let mut context = SandwichContext::new("system".into(), "goal".into());
+        let mut checkpoint = crate::agent::checkpoint::load_checkpoint(&self.db, &self.root.session).unwrap().unwrap();
+        super::super::deliver_main(&self.db, &self.root, &mut context, &mut checkpoint).unwrap();
     }
     fn commit(&self) -> Result<(), String> {
         let context = SandwichContext::new("system".into(), "goal".into());
@@ -163,6 +179,8 @@ fn admission_completion_and_receipt_consumption_share_one_authoritative_ledger()
     let inbox = pending(&f.db, &f.c).unwrap();
     assert_eq!(inbox.len(), 1);
     super::super::deliver_specialist(&f.db, &f.c.run, &mut vec![]).unwrap();
+    f.receive_root_messages();
+    db_status(&f.db, &f.c.run, "succeeded");
     f.commit().unwrap();
     let duplicate = register(&f.db, &f.c, &f.question(), "question-1").unwrap();
     assert!(duplicate.1.is_none());
@@ -399,6 +417,8 @@ async fn admitted_start_failure_is_reported_and_does_not_leave_a_running_attempt
     assert_eq!(f.commit().unwrap_err(), PENDING_REPLY);
     f.apply(id);
     super::super::deliver_specialist(&f.db, &f.c.run, &mut vec![]).unwrap();
+    f.receive_root_messages();
+    db_status(&f.db, &f.c.run, "succeeded");
     f.commit().unwrap();
 }
 

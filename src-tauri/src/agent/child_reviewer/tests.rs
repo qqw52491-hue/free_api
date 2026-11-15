@@ -1277,6 +1277,29 @@
         let _ = other_session_child;
     }
 
+    #[test]
+    fn interrupted_inbox_releases_only_undelivered_claims() {
+        let base = std::env::temp_dir().join(format!("inbox-orphan-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let state = DbState(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::db::init_db(&base.join("test.db")).unwrap(),
+        )));
+        let id = begin_child_run(&state, "parent", "session", &base, "model", 0, "worker", None).unwrap();
+        {
+            let conn = state.0.lock().unwrap();
+            conn.execute("UPDATE agent_child_runs SET purpose='readonly_inbox' WHERE id=?1", [&id]).unwrap();
+            for (message, delivered) in [("pending", None), ("delivered", Some("then"))] {
+                conn.execute("INSERT INTO agent_messages(id,session_id,root_run_id,sender_run_id,sender_session_id,sender_kind,target_run_id,target_session_id,payload_json,created_at,claimed_run_id,delivered_at) VALUES (?1,'session','parent','sender','session','agent_material','target','target-session','{}','now',?2,?3)", params![message, id, delivered]).unwrap();
+            }
+        }
+        assert_eq!(recover_orphaned_child_runs_on_session_start(&state, "session").unwrap(), 1);
+        let conn = state.0.lock().unwrap();
+        let pending: Option<String> = conn.query_row("SELECT claimed_run_id FROM agent_messages WHERE id='pending'", [], |r| r.get(0)).unwrap();
+        let delivered: Option<String> = conn.query_row("SELECT claimed_run_id FROM agent_messages WHERE id='delivered'", [], |r| r.get(0)).unwrap();
+        assert_eq!(pending, None);
+        assert_eq!(delivered.as_deref(), Some(id.as_str()));
+    }
+
     #[tokio::test]
     async fn cancelling_child_runs_wakes_parked_waiters_immediately() {
         let base = std::env::temp_dir().join(format!("free-api-child-cancel-wake-{}", Uuid::new_v4()));
@@ -1547,6 +1570,30 @@
             )
             .unwrap();
         assert_eq!(count, 2, "认养不得新增台账行（重复 failover 会被拒）");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn retry_attempts_follow_task_across_parent_runs_without_crossing_sessions() {
+        let base = std::env::temp_dir().join(format!("free-api-lineage-{}", Uuid::new_v4()));
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let state = DbState(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::db::init_db(&base.join("test.db")).unwrap(),
+        )));
+        {
+            let conn = state.0.lock().unwrap();
+            for (id, session, task) in [("a", "s", "t"), ("b", "s", "t"), ("c", "s", "t"), ("other", "other-s", "t")] {
+                conn.execute("INSERT INTO agent_run_traces (id,session_id,goal,status,steps_json,started_at,updated_at,history_task_id) VALUES (?1,?2,'','running','[]','1','1',?3)", params![id, session, task]).unwrap();
+            }
+        }
+        let identity = ChildRunIdentity { task_id: "child-task".into(), attempt_id: 1, purpose: Some("plan_review".into()), batch_id: Some("batch".into()), contract_id: None, contract_schema: None, execution_config: None, dispatch_input: None };
+        let first = begin_child_run_extended(&state, "a", "s", &workspace, "m", 0, "review", None, None, None, &identity).unwrap();
+        finish_child_run(&state, &first, "timed_out", 0, 0, 0, None, Some("{}"));
+        let retry = begin_child_run_extended(&state, "b", "s", &workspace, "m", 0, "review", None, None, None, &identity).unwrap();
+        assert_eq!(load_run_identity(&state, &retry).unwrap().attempt_id, 2);
+        assert_eq!(live_attempt_for_task(&state, "c", "child-task", &first, 1), Some(retry));
+        assert_eq!(live_attempt_for_task(&state, "other", "child-task", &first, 1), None);
         let _ = std::fs::remove_dir_all(base);
     }
 

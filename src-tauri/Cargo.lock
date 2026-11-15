@@ -1265,6 +1265,7 @@ dependencies = [
  "dirs-next",
  "futures",
  "futures-util",
+ "libc",
  "pdf-extract",
  "qrcode",
  "quick-xml 0.37.5",

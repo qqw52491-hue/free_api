@@ -90,6 +90,34 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn final_review_recovery_requires_matching_interrupted_task_and_review_input() {
+    let f = Fixture::new();
+    let mut program = f.program.clone();
+    program.final_fingerprint = Some("fingerprint".into());
+    prepare(&f.db, &f.id, &program).unwrap();
+    let result = json!({"verdict":"passed","score":100,"blocking_issues":[],"nit_issues":[],"summary":"ok","model_id":"mock","diff_hash":"fingerprint"});
+    {
+        let conn = f.db.0.lock().unwrap();
+        for (id, session, task, status) in [("parent-run", "owner", "task", "interrupted"), ("new-run", "owner", "task", "running"), ("other-run", "owner", "other-task", "running")] {
+            conn.execute("INSERT INTO agent_run_traces(id,session_id,goal,status,steps_json,started_at,updated_at,history_task_id) VALUES (?1,?2,'goal',?3,'[]','1','1',?4)", params![id,session,status,task]).unwrap();
+        }
+        conn.execute("UPDATE agent_child_runs SET purpose='final_review',status='succeeded',result_json=?1 WHERE id=?2", params![result.to_string(), f.id]).unwrap();
+    }
+    assert_eq!(recover_final_review(&f.db, "new-run", "owner", &program).unwrap().unwrap().verdict, "passed");
+    f.db.0.lock().unwrap().execute("UPDATE agent_run_traces SET status='cancelled',completion_json=json_object('summary','应用重启，任务已中断') WHERE id='parent-run'", []).unwrap();
+    assert!(recover_final_review(&f.db, "new-run", "owner", &program).unwrap().is_some());
+    assert!(recover_final_review(&f.db, "other-run", "owner", &program).unwrap().is_none());
+    let mut changed = program.clone();
+    changed.messages.push(json!({"role":"user","content":"new evidence"}));
+    assert!(recover_final_review(&f.db, "new-run", "owner", &changed).unwrap().is_none());
+    changed = program.clone();
+    changed.role = Some(json!("different"));
+    assert!(recover_final_review(&f.db, "new-run", "owner", &changed).unwrap().is_none());
+    f.db.0.lock().unwrap().execute("UPDATE agent_run_traces SET status='cancelled',completion_json=NULL WHERE id='parent-run'", []).unwrap();
+    assert!(recover_final_review(&f.db, "new-run", "owner", &program).unwrap().is_none());
+}
+
+#[test]
 fn review_program_roundtrips_and_preserves_permission_ceiling_and_legacy_resume_config() {
     let f = Fixture::new();
     f.db.0
@@ -349,7 +377,16 @@ async fn review_delivery_requires_atomic_main_terminal_and_cancelled_record_is_n
         if cancelled {
             crate::agent::review_control::cancel_child_on(&f.db.0.lock().unwrap(), &f.id).unwrap();
         }
-        let body = settle(&f.db, &binding, &Ok(()), 10).unwrap();
+        let body = if cancelled {
+            settle(&f.db, &binding, &Ok(()), 10).unwrap()
+        } else {
+            assert_eq!(crate::agent::child_reviewer::recover_orphaned_child_runs_on_session_start(&f.db, "owner").unwrap(), 1);
+            assert_eq!(crate::agent::child_reviewer::recover_orphaned_child_runs_on_session_start(&f.db, "owner").unwrap(), 0);
+            let raw: String = f.db.0.lock().unwrap().query_row(
+                "SELECT result_json FROM agent_child_runs WHERE id=?1", [&f.id], |row| row.get(0)
+            ).unwrap();
+            serde_json::from_str(&raw).unwrap()
+        };
         if !cancelled {
             assert_eq!(body["child_run_id"], f.id);
             assert_eq!(body["plan_review_can_finalize"], false);
@@ -392,6 +429,33 @@ async fn failed_final_recheck_survives_a_passed_model_verdict() {
     assert!(retry.stderr.contains("未知"));
     assert_eq!(result["verdict"], "rejected");
     assert!(!result["blocking_issues"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn final_review_committed_child_is_settled_after_restart() {
+    let f = Fixture::new();
+    let binding = f.binding();
+    let mut program = f.program.clone();
+    program.final_fingerprint = Some("final-fingerprint".into());
+    prepare(&f.db, &f.id, &program).unwrap();
+    f.db.0.lock().unwrap().execute("UPDATE agent_child_runs SET purpose='final_review' WHERE id=?1", [&f.id]).unwrap();
+    let mut context = SandwichContext::new("system".into(), "review".into());
+    let mut cp = AgentCheckpoint::new(binding.child_session.clone(), &context);
+    let inst = serde_json::from_value(json!({"tool":"finish","params":{"verdict":"passed","score":100,"summary":"checked","blocking_issues":[],"nit_issues":[],"missing_evidence":[]}})).unwrap();
+    let app = tauri::test::mock_app();
+    let (_tx, mut rx) = watch::channel(0);
+    let evaluation = crate::agent::finalization::evaluate_completion(app.handle(), &f.db, &mut context, &mut cp, &f.id, &binding.child_session, 1, &f.root, &crate::agent::reviewer_gatekeeper::GitBaseline::non_git(), chrono::Utc::now(), &Default::default(), &mut rx, &inst, crate::agent::finalization::CompletionMode::Finish, false, false).await;
+    assert!(evaluation.receipt.is_ready());
+    let receipt_id = evaluation.receipt.receipt_id.clone();
+    cp.pending_finalization = Some(evaluation.receipt);
+    cp.mark_done(&context);
+    crate::agent::finalization::commit_finalization(&f.db, &mut cp, &f.id, &binding.child_session, "review", &[], &json!({"summary":"done","finalization_receipt":receipt_id}), "done", "mock").unwrap();
+    assert_eq!(crate::agent::child_reviewer::recover_orphaned_child_runs_on_session_start(&f.db, "owner").unwrap(), 1);
+    let (status, raw): (String, String) = f.db.0.lock().unwrap().query_row("SELECT status,result_json FROM agent_child_runs WHERE id=?1", [&f.id], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    assert_eq!(status, "succeeded");
+    let result: crate::agent::reviewer_gatekeeper::ReviewResult = serde_json::from_str(&raw).unwrap();
+    assert_eq!(result.diff_hash, "final-fingerprint");
+    assert_eq!(result.verdict, "passed");
 }
 
 #[tokio::test]

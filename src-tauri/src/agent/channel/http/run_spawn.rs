@@ -275,16 +275,9 @@ pub(crate) fn register_and_spawn_run(
     plan_mode: Option<String>,
     caller_notifies: bool,
 ) -> Result<String, SubmitError> {
-    {
-        let runs = runs_store().lock().expect("runs store poisoned");
-        if runs.values().any(|r| {
-            r.session_id == session_id && matches!(r.status.as_str(), "running" | "waiting_human")
-        }) {
-            return Err(SubmitError::InFlight);
-        }
-    }
-
     let run_id = uuid::Uuid::new_v4().to_string();
+    let admitted = crate::agent::control::SessionExecutionOwner::acquire(&session_id, &run_id)
+        .map_err(|_| SubmitError::InFlight)?;
     let started_at = now_ts();
     println!(
         "[channel] run {run_id} 启动 session={session_id} 重试上限={}",
@@ -357,6 +350,7 @@ pub(crate) fn register_and_spawn_run(
             Some(spawn_plan_mode),
             None,
             None,
+            Some(admitted),
         )
         .await;
     });

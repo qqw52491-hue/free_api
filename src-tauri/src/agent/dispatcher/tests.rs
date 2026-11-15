@@ -1475,6 +1475,35 @@ async fn shell_params_parallel_and_plan_tree_share_the_canonical_contract() {
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn composite_shell_results_keep_their_persisted_job_ids() {
+    let (root, db, registry) = shell_params_fixture();
+    for raw in [json!({"commands":[
+        {"tool":"local_shell","command":"printf one"},
+        {"tool":"local_shell","command":"printf two"}
+    ]}), json!({"parallel":[
+        {"tool":"local_shell","command":"printf one"},
+        {"tool":"local_shell","command":"printf two"}
+    ]})] {
+        let instruction: AgentInstruction = serde_json::from_value(raw).unwrap();
+        let pending = crate::agent::tools::view_image::PendingImageQueue::default();
+        let db_task = db.clone();
+        let root_task = root.clone();
+        let registry_task = registry.clone();
+        let result = tokio::task::spawn_blocking(move || run_agent_step_with_images(&db_task, "shell-session", &instruction, &registry_task, Some(&root_task), &pending, Some("shell-run"), None)).await.unwrap();
+        assert!(result.success, "{}", result.stderr);
+        let ids = result.view.as_ref().unwrap()["completed_shell_job_ids"].as_array().unwrap();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1]);
+        let conn = db.0.lock().unwrap();
+        for id in ids {
+            let status: String = conn.query_row("SELECT status FROM agent_background_jobs WHERE id=?1", [id.as_str().unwrap()], |row|row.get(0)).unwrap();
+            assert_eq!(status, "succeeded");
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn shell_params_parallel_conflict_reports_error_without_running_bad_branch() {
     let (root,db,registry)=shell_params_fixture();

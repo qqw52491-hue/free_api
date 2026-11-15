@@ -1175,7 +1175,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
         &final_session_id,
     )?);
     checkpoint.refresh_context(&context);
-    crate::agent::checkpoint::save_checkpoint_and_claim_chats(
+    crate::agent::checkpoint::bind_run_and_save_checkpoint(
         state.inner(),
         &mut checkpoint,
         &run_id,
@@ -1338,14 +1338,16 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
     }
 
     // 🧹 会话启动时，自动收敛历史由于断电或异常退出的孤儿后台任务与子审查任务
-    let _ = crate::agent::job_engine::recover_orphaned_jobs_on_session_start(
+    crate::agent::job_engine::recover_orphaned_jobs_on_session_start(
         state.inner(),
         &final_session_id,
-    );
-    let _ = crate::agent::child_reviewer::recover_orphaned_child_runs_on_session_start(
+    )?;
+    crate::agent::child_reviewer::recover_orphaned_child_runs_on_session_start(
         state.inner(),
         &final_session_id,
-    );
+    )?;
+    crate::agent::control::finish_run_recovery(&run_id);
+    crate::agent::agent_mailbox::coordination::kick(state.inner());
 
     // durable cursor 是调度权威：每个普通步骤提交后推进 step_id；恢复时也从这里继续。
     // 不再使用启动瞬间捕获范围的 for-loop，避免 checkpoint 更新后调度器仍沿旧游标运行。

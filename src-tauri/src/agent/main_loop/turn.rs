@@ -222,6 +222,7 @@ pub(super) async fn turn_main<'a, 'b>(
             }
         }
 
+        let mut background_job_ids = Vec::new();
         // ⚡ 通用后台任务信箱 (Durable Pending Inbox) 轮询：获取任意后台任务完成结果
         if let Ok(jobs) = crate::agent::job_engine::poll_pending_inbox(state.inner(), &run_id, 5) {
             if !jobs.is_empty() {
@@ -246,6 +247,7 @@ pub(super) async fn turn_main<'a, 'b>(
                             context.add_host_feedback(&effects.model_text);
                             continue;
                         }
+                        background_job_ids.push(job.job_id.clone());
                         applied_receipts.push(crate::agent::checkpoint::AppliedReceipt {
                             run_id: job.job_id.clone(),
                             verdict: effects
@@ -260,6 +262,7 @@ pub(super) async fn turn_main<'a, 'b>(
                         }
                         continue;
                     }
+                    background_job_ids.push(job.job_id.clone());
                     job_injection.push_str(&format!(
                         "\n【⚡ 后台异步任务已完成 (ID: {}, 类型: {})】\n任务描述: {}\n执行状态: {}\n耗时: {}ms\n输出/结论:\n{}\n",
                         job.job_id,
@@ -292,12 +295,10 @@ pub(super) async fn turn_main<'a, 'b>(
         // 🔒 回执提交点：checkpoint 快照（含 context 最新投影）+ applied_at +
         // 契约裁决回写 同事务原子落账。此点之前崩溃 = 两笔账一起回滚、回执重投；
         // 此点之后 = 永不重投。投递与落账之间不再有"已消费但效果未持久化"的窗口。
-        if !applied_receipts.is_empty() {
-            crate::agent::checkpoint::save_checkpoint_and_consume(
-                state.inner(),
-                &mut checkpoint,
-                &context,
-                &applied_receipts,
+        if !applied_receipts.is_empty() || !background_job_ids.is_empty() {
+            crate::agent::checkpoint::save_checkpoint_and_consume_jobs(
+                state.inner(), &mut checkpoint, &context, &applied_receipts,
+                &run_id, &background_job_ids,
             )?;
         }
 
@@ -1336,11 +1337,21 @@ pub(super) async fn turn_main<'a, 'b>(
         } else {
             // 被质询或失败的 finish 也要推进 durable cursor，恢复后继续下一轮而不是误判终态。
             checkpoint.complete_step(step_id, &context);
-            crate::agent::checkpoint::save_checkpoint_and_claim_chats(
+            let mut shell_jobs = Vec::new();
+            if let Some(view) = result.view.as_ref() {
+                if let Some(id) = view.get("completed_shell_job_id").and_then(serde_json::Value::as_str) {
+                    shell_jobs.push(id.to_owned());
+                }
+                if let Some(ids) = view.get("completed_shell_job_ids").and_then(serde_json::Value::as_array) {
+                    shell_jobs.extend(ids.iter().filter_map(serde_json::Value::as_str).map(str::to_owned));
+                }
+            }
+            crate::agent::checkpoint::save_checkpoint_and_claim_chats_and_jobs(
                 state.inner(),
                 &mut checkpoint,
                 &run_id,
                 &mut context,
+                &shell_jobs,
             )?;
         }
 

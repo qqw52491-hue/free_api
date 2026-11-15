@@ -355,11 +355,14 @@ impl AgentCheckpoint {
     ) {
         // 批次归属守卫必须最先执行：迟到回执属其他批次时整体忽略——
         // 否则其 decision/blocking 会污染当前批的升级判定与聚合计数。
-        // fail-open：当前批锚点不存在时无批可污染，照常受理。
+        // 有批次标识的旧回执必须匹配当前批；仅无批次的旧格式兼容受理。
         let in_batch = match run_id {
             Some(id) => {
-                self.plan_review_batch_id.is_none()
-                    || self.run_belongs_to_plan_batch(db, id)
+                if self.plan_review_batch_id.is_none() {
+                    ReviewDeliverySource::from_run(db, id).batch_id.is_none()
+                } else {
+                    self.run_belongs_to_plan_batch(db, id)
+                }
             }
             None => true, // 无 run_id 的旧接口兼容路径
         };

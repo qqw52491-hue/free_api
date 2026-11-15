@@ -610,6 +610,19 @@ pub(crate) fn composite_results_view(mcp: Vec<serde_json::Value>, files: Vec<ser
     view
 }
 
+pub(crate) fn collect_shell_result_id(ids: &mut Vec<String>, result: &DispatchResult) {
+    if let Some(id) = result.view.as_ref().and_then(|view| view.get("completed_shell_job_id")).and_then(|v| v.as_str()) {
+        ids.push(id.to_owned());
+    }
+}
+
+pub(crate) fn attach_shell_result_ids(mut view: Option<serde_json::Value>, ids: Vec<String>) -> Option<serde_json::Value> {
+    if !ids.is_empty() {
+        view.get_or_insert_with(|| json!({"kind":"tool_results"}))["completed_shell_job_ids"] = json!(ids);
+    }
+    view
+}
+
 pub(crate) fn take_mcp_durable_output(
     view: &mut Option<serde_json::Value>,
 ) -> Option<String> {
@@ -622,6 +635,10 @@ pub(crate) fn take_mcp_durable_output(
     // attached to the step so both live events and history retain the same diff.
     if let Some(files) = value.get("tool_views").and_then(|v| v.as_array()) {
         *view = composite_results_view(vec![], files.clone());
+    }
+    if let Some(ids) = value.get("completed_shell_job_ids").and_then(|v| v.as_array()) {
+        let target = view.get_or_insert_with(|| json!({"kind":"tool_results"}));
+        target["completed_shell_job_ids"] = json!(ids);
     }
     Some(serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()))
 }

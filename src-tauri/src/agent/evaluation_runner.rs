@@ -590,6 +590,7 @@ pub async fn start_background_agent_evaluation(
                 }
             }),
             Some(crate::agent::conversation::TaskStartMode::New),
+            None,
         ));
 
         let monitor_app = event_app.clone();

@@ -79,7 +79,13 @@ fn resolve(conn: &Connection, sender: &Actor, target: &str) -> Result<(Actor, St
     };
     let target_root = root(conn, &actor)?;
     if target_root.run != own_root.run || target_root.session != own_root.session {
-        return Err("接收方属于其他任务，消息未发送。".into());
+        let same_task: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_run_traces a JOIN agent_run_traces b ON b.session_id=a.session_id AND b.history_task_id=a.history_task_id WHERE a.id=?1 AND b.id=?2 AND a.session_id=?3 AND a.history_task_id IS NOT NULL)",
+            params![own_root.run, target_root.run, own_root.session], |r| r.get(0),
+        ).map_err(|e| e.to_string())?;
+        if !same_task || target_root.session != own_root.session {
+            return Err("接收方属于其他任务，消息未发送。".into());
+        }
     }
     Ok((actor, kind))
 }
@@ -266,7 +272,15 @@ pub(crate) fn deliver_main(
     if checkpoint.run_id != actor.session {
         return Err("消息接收会话与检查点归属不一致，未注入或核销。".into());
     }
-    let messages = pending(db, actor)?;
+    let messages = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare("SELECT id,sender_run_id,sender_kind,payload_json,created_at FROM agent_messages WHERE target_session_id=?2 AND claimed_run_id IS NULL AND delivered_at IS NULL AND (target_run_id=?1 OR target_run_id IN (SELECT old.id FROM agent_run_traces current JOIN agent_run_traces old ON old.session_id=current.session_id AND old.history_task_id=current.history_task_id WHERE current.id=?1 AND current.session_id=?2 AND current.history_task_id IS NOT NULL)) ORDER BY rowid LIMIT 16").map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(params![actor.run, actor.session], |r| {
+            let raw: String = r.get(3)?;
+            Ok(json!({"message_id":r.get::<_,String>(0)?,"sender_run_id":r.get::<_,String>(1)?,"sender_kind":r.get::<_,String>(2)?,"payload":serde_json::from_str::<Value>(&raw).unwrap_or(Value::Null),"created_at":r.get::<_,String>(4)?}))
+        }).map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+    };
     if messages.is_empty() {
         return Ok(0);
     }

@@ -34,7 +34,7 @@ fn poll_child_results_with_purpose(
     let mut stmt = conn
         .prepare(
             "SELECT id, result_json, kind, COALESCE(task_id, id), COALESCE(attempt_id, 1), purpose FROM agent_child_runs
-             WHERE parent_run_id = ?1 AND kind != 'task'
+             WHERE parent_run_id = ?1 AND kind != 'task' AND COALESCE(purpose,'') != 'final_review'
                AND status IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted', 'invalid_output')
                AND result_json IS NOT NULL
                AND (applied_at IS NULL OR applied_at = '')",
@@ -112,6 +112,14 @@ pub fn poll_completed_delivery_receipts(
     parent_run_id: &str,
     targets: Option<&[String]>,
 ) -> Result<Vec<crate::agent::protocol::DeliveryReceipt>, String> {
+    let mut receipts = Vec::new();
+    for run in crate::agent::job_engine::task_runs(db, parent_run_id)? {
+        receipts.extend(poll_delivery_receipts_one(db, &run, targets)?);
+    }
+    Ok(receipts)
+}
+
+fn poll_delivery_receipts_one(db: &DbState, parent_run_id: &str, targets: Option<&[String]>) -> Result<Vec<crate::agent::protocol::DeliveryReceipt>, String> {
     let raw = poll_child_results_with_purpose(db, parent_run_id, targets)?;
     let mut receipts: Vec<crate::agent::protocol::DeliveryReceipt> = raw.into_iter().map(|(result, purpose)| {
         let mut receipt = crate::agent::protocol::DeliveryReceipt::from(result);
@@ -324,39 +332,89 @@ pub fn recover_orphaned_child_runs_on_session_start(
     db: &DbState,
     parent_session_id: &str,
 ) -> Result<usize, String> {
-    let conn = db.0.lock().map_err(|error| error.to_string())?;
-    let stale_ids: Vec<String> = {
+    let stale_ids: Vec<(String, Option<String>)> = {
+        let conn = db.0.lock().map_err(|error| error.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT id FROM agent_child_runs
+                "SELECT id, kind FROM agent_child_runs
                  WHERE parent_session_id = ?1 AND status IN ('queued','running')",
             )
             .map_err(|error| error.to_string())?;
         let rows = stmt
-            .query_map(params![parent_session_id], |row| row.get::<_, String>(0))
+            .query_map(params![parent_session_id], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(|error| error.to_string())?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
         rows
     };
     let now = chrono::Utc::now().to_rfc3339();
-    for child_run_id in &stale_ids {
-        let _ = conn.execute(
+    let mut recovered = 0;
+    for (child_run_id, kind) in &stale_ids {
+        if crate::agent::child_task::runtime::attached(child_run_id) {
+            continue;
+        }
+        if kind.as_deref() == Some("task")
+            && crate::agent::child_task::recover_finished(db, parent_session_id, "", child_run_id)?.is_some()
+        {
+            recovered += 1;
+            continue;
+        }
+        if kind.as_deref() == Some("review") {
+            if super::main_executor::load(db, child_run_id)?.is_some() {
+                let terminal = {
+                    let conn = db.0.lock().map_err(|error| error.to_string())?;
+                    conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM agent_run_traces WHERE id=?1 AND session_id=?2 AND status IN ('succeeded','failed','cancelled','interrupted'))",
+                        params![child_run_id, format!("task-{child_run_id}")],
+                        |row| row.get::<_, bool>(0),
+                    ).map_err(|error| error.to_string())?
+                };
+                if terminal {
+                    let parent_run = {
+                        let conn = db.0.lock().map_err(|error| error.to_string())?;
+                        conn.query_row("SELECT parent_run_id FROM agent_child_runs WHERE id=?1 AND parent_session_id=?2",
+                            params![child_run_id, parent_session_id], |row| row.get::<_, String>(0))
+                            .map_err(|error| error.to_string())?
+                    };
+                    let binding = crate::agent::child_task::TaskBinding {
+                        parent_session: parent_session_id.to_owned(), parent_run,
+                        child_session: format!("task-{child_run_id}"), child_run: child_run_id.clone(),
+                    };
+                    super::main_executor::settle(db, &binding, &Ok(()), 0)?;
+                    recovered += 1;
+                    continue;
+                }
+            }
+        }
+        let mut conn = db.0.lock().map_err(|error| error.to_string())?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let changed = tx.execute(
             "UPDATE agent_child_runs
              SET status = 'interrupted', finished_at = ?2, error_kind = 'interrupted',
                  result_json = ?3
-             WHERE id = ?1",
+             WHERE id = ?1 AND status IN ('queued','running')",
             params![
                 child_run_id,
                 now,
                 child_error_result_json(child_run_id, "interrupted", &ChildErrorKind::Interrupted, 0, 0, 0, None)
             ],
-        );
+        ).map_err(|error| error.to_string())?;
+        if changed > 0 {
+            tx.execute(
+                "UPDATE agent_messages SET claimed_run_id=NULL WHERE claimed_run_id=?1 AND delivered_at IS NULL AND EXISTS (SELECT 1 FROM agent_child_runs WHERE id=?1 AND purpose='readonly_inbox' AND status='interrupted')",
+                [child_run_id],
+            ).map_err(|error| error.to_string())?;
+        }
+        tx.commit().map_err(|error| error.to_string())?;
+        recovered += changed;
     }
-    if !stale_ids.is_empty() {
+    if recovered > 0 {
         crate::agent::job_engine::notify_job_state_changed();
     }
-    Ok(stale_ids.len())
+    // A previous root may have left unclaimed mail even if no child row needed
+    // recovery in this invocation.
+    crate::agent::agent_mailbox::coordination::kick(db);
+    Ok(recovered)
 }
 
 /// 子任务结果的模型可见投影：强类型字段全量保留，raw_result_json 里的

@@ -136,6 +136,15 @@ pub(crate) fn kill_process_group(pid: u32, signal: &str) {
     }
 }
 
+#[cfg(unix)]
+pub(crate) fn process_group_exists(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else { return false };
+    if pid <= 1 { return false; }
+    // Signal 0 checks existence without signalling the process group.
+    let result = unsafe { libc::kill(-pid, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
 /// 向子进程统一应用 PATH/会话 tmp/stdin-stdio 与 IDE 调试器注入净化。
 /// custom_env 在净化之后应用，显式传参始终优先（保留刻意调试的逃生门）。
 fn apply_child_env(
@@ -441,7 +450,7 @@ pub(crate) fn dispatch_in_run(
                 }
             }
         }
-        _ => ws_root.to_path_buf(),
+        _ => ws_root.canonicalize().unwrap_or_else(|_| ws_root.to_path_buf()),
     };
 
     let timeout_secs = params
@@ -531,6 +540,63 @@ pub(crate) fn dispatch_in_run(
     execute_command_blocking(db, session_id, run_id, &final_cmd, &execution_cwd, timeout_secs, custom_env)
 }
 
+fn shell_command(script: &str, receipt: Option<&Path>) -> std::io::Result<std::process::Command> {
+    let mut command = if let Some(path) = receipt {
+        let mut command = std::process::Command::new(std::env::current_exe()?);
+        command.arg(crate::shell_receipt::MODE).arg(path).arg(script);
+        command
+    } else {
+        #[cfg(windows)]
+        let (shell, flag) = ("cmd.exe", "/C");
+        #[cfg(not(windows))]
+        let (shell, flag) = ("sh", "-c");
+        let mut command = std::process::Command::new(shell);
+        command.arg(flag).arg(script);
+        command
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    Ok(command)
+}
+
+fn prepare_exit_receipt(db: &DbState, enabled: bool) -> std::io::Result<Option<(String, PathBuf)>> {
+    // A unit test executable uses Rust's test harness as its entrypoint.
+    if enabled && !cfg!(test) { crate::shell_receipt::prepare(&crate::shell_receipt::database_path(db)?).map(Some) } else { Ok(None) }
+}
+
+fn receipt_setup_error(error: std::io::Error) -> DispatchResult {
+    DispatchResult {
+        view: None,
+        stdout: String::new(),
+        stderr: format!("Shell 退出回执初始化失败，命令未执行：{error}"),
+        success: false,
+        route: "local_shell:receipt_setup".into(),
+    }
+}
+
+fn background_shell_exit(
+    status: &std::io::Result<std::process::ExitStatus>,
+    receipt_path: Option<&Path>,
+) -> (&'static str, Option<i32>, Option<String>) {
+    if let Some(path) = receipt_path {
+        return match crate::shell_receipt::inspect_path(path) {
+            Ok(crate::shell_receipt::ReceiptState::Finished(receipt)) if receipt.success =>
+                ("succeeded", receipt.exit_code, None),
+            Ok(crate::shell_receipt::ReceiptState::Finished(receipt)) =>
+                ("failed", receipt.exit_code, Some(format!("exit_code:{}", receipt.exit_code.unwrap_or(-1)))),
+            _ => ("interrupted", None, Some("result_unknown".into())),
+        };
+    }
+    match status {
+        Ok(status) if status.success() => ("succeeded", status.code(), None),
+        Ok(status) => ("failed", status.code(), Some(format!("exit_code:{}", status.code().unwrap_or(-1)))),
+        Err(error) => ("failed", None, Some(format!("wait_error:{error}"))),
+    }
+}
+
 /// 后台命令执行：spawn 后立即返回，进程在独立进程组中长跑。
 /// stdout/stderr 追加写入 <session_tmp>/jobs/<job_id>.log——进程脱离
 /// 步骤存活期间日志持续可见；看守线程收尸后把退出码+日志尾写回
@@ -554,9 +620,14 @@ fn spawn_background_shell(
         };
     }
 
+    let receipt = match prepare_exit_receipt(db, true) {
+        Ok(receipt) => receipt,
+        Err(error) => return receipt_setup_error(error),
+    };
     let preview: String = cmd_str.chars().take(120).collect();
     let params_json = json!({
         "command": cmd_str,
+        "exit_receipt_id": receipt.as_ref().map(|(id, _)| id),
         "cwd": cwd.display().to_string(),
     })
     .to_string();
@@ -597,6 +668,9 @@ fn spawn_background_shell(
     let log_err = match log_out.try_clone() {
         Ok(f) => f,
         Err(e) => {
+            let _ = crate::agent::job_engine::finish_job(
+                db, &job_id, "failed", 0, None, Some(&e.to_string()),
+            );
             return DispatchResult { view: None,
                 stdout: String::new(),
                 stderr: format!("❌ 日志句柄复制失败: {}", e),
@@ -609,19 +683,12 @@ fn spawn_background_shell(
     let enriched_path = get_enriched_path_env();
     let session_tmp_str = session_tmp_dir.to_string_lossy().to_string();
 
-    #[cfg(target_os = "windows")]
-    let mut c = {
-        let mut c = std::process::Command::new("cmd.exe");
-        c.arg("/C").arg(cmd_str);
-        c
-    };
-    #[cfg(not(target_os = "windows"))]
-    let mut c = {
-        use std::os::unix::process::CommandExt;
-        let mut c = std::process::Command::new("sh");
-        c.arg("-c").arg(cmd_str);
-        c.process_group(0); // 独立进程组：宿主退出/步骤结束不拖垮它
-        c
+    let mut c = match shell_command(cmd_str, receipt.as_ref().map(|(_, path)| path.as_path())) {
+        Ok(command) => command,
+        Err(error) => {
+            let _ = crate::agent::job_engine::finish_job(db, &job_id, "failed", 0, None, Some("receipt_setup"));
+            return receipt_setup_error(error);
+        }
     };
     c.current_dir(cwd);
     c.stdin(std::process::Stdio::null())
@@ -674,17 +741,16 @@ fn spawn_background_shell(
     let db_state = DbState(db.0.clone());
     let job_id_w = job_id.clone();
     let log_path_w = log_path.clone();
+    let receipt_path = receipt.map(|(_, path)| path);
+    let watcher = crate::agent::job_engine::register_shell_watcher(&job_id);
     std::thread::spawn(move || {
+        let _watcher = watcher;
         let status = child.wait();
         let duration_ms = background_started.elapsed().as_millis() as u64;
         let tail = tail_of_file(&log_path_w, 4096);
-        let (status_str, error_kind) = match &status {
-            Ok(s) if s.success() => ("succeeded", None),
-            Ok(s) => ("failed", Some(format!("exit_code:{}", s.code().unwrap_or(-1)))),
-            Err(e) => ("failed", Some(format!("wait_error:{}", e))),
-        };
+        let (status_str, exit_code, error_kind) = background_shell_exit(&status, receipt_path.as_deref());
         let result = json!({
-            "exit_code": status.ok().and_then(|s| s.code()),
+            "exit_code": exit_code,
             "exit_scope": "shell_process",
             "verification_status": "not_assessed",
             "status_note": PROCESS_EXIT_NOTE,
@@ -692,7 +758,7 @@ fn spawn_background_shell(
             "log_path": log_path_w.display().to_string(),
             "tail": tail,
         });
-        let _ = crate::agent::job_engine::finish_job(
+        let stored = crate::agent::job_engine::finish_job(
             &db_state,
             &job_id_w,
             status_str,
@@ -700,14 +766,15 @@ fn spawn_background_shell(
             Some(&result.to_string()),
             error_kind.as_deref(),
         );
+        if stored.is_ok() {
+            if let Some(path) = receipt_path { let _ = std::fs::remove_file(path); }
+        }
     });
 
     DispatchResult { view: None,
         stdout: format!(
-            "✅ 已转入后台执行（不受步骤超时上限约束）\njob_id: {}\npid: {}（需要中止时可 local_shell `kill {}`，或对进程组 `kill -- -{}`）\n日志（实时追加，可随时 read/tail 查进度）: {}\n回收方式: `wait_jobs` 传 job_ids:[\"{}\"] 挂起等待完成；也可继续推进其他操作，完成会进收件箱自动送达。\n注意：后台进程独立于本步骤存活，若任务本身是终态交付物请确保用 wait_jobs 等到结果再 finish。",
+            "✅ 已转入后台执行（不受步骤超时上限约束）\njob_id: {}\npid: {}（需要中止时用 job_cancel，传入上面的 job_id）\n日志（实时追加，可随时 read/tail 查进度）: {}\n回收方式: `wait_jobs` 传 job_ids:[\"{}\"] 挂起等待完成；也可继续推进其他操作，完成会进收件箱自动送达。\n注意：后台进程独立于本步骤存活，若任务本身是终态交付物请确保用 wait_jobs 等到结果再 finish。",
             job_id,
-            child_pid,
-            child_pid,
             child_pid,
             log_path.display(),
             job_id
@@ -901,7 +968,7 @@ enum ExecWaitOutcome {
 #[allow(clippy::too_many_arguments)]
 fn promote_timed_out_shell(
     db: &DbState,
-    run_id: &str,
+    _run_id: &str,
     rt: tokio::runtime::Runtime,
     mut child: tokio::process::Child,
     drain_stdout: tokio::task::JoinHandle<(Vec<u8>, bool)>,
@@ -912,26 +979,21 @@ fn promote_timed_out_shell(
     session_id_owned: String,
     cmd_owned: String,
     child_pid: Option<u32>,
-    cwd: &Path,
+    _cwd: &Path,
     waited_secs: u64,
+    job_id: String,
+    receipt: Option<(String, PathBuf)>,
 ) -> DispatchResult {
     let session_tmp_dir = crate::agent::path_guard::get_session_tmp_dir(&session_id_owned);
     let jobs_dir = session_tmp_dir.join("jobs");
     let _ = std::fs::create_dir_all(&jobs_dir);
 
-    let preview: String = cmd_owned.chars().take(120).collect();
-    let params_json = json!({
-        "command": cmd_owned,
-        "cwd": cwd.display().to_string(),
-        "pid": child_pid,
-        "promoted_from": "sync_timeout",
-        "waited_secs": waited_secs,
-    })
-    .to_string();
-    let job_id = crate::agent::job_engine::begin_job(
-        db, run_id, &session_id_owned, "shell", &preview, &params_json,
-    )
-    .unwrap_or_else(|_| format!("untracked-{}", child_pid.unwrap_or(0)));
+    if let Ok(conn) = db.0.lock() {
+        let _ = conn.execute(
+            "UPDATE agent_background_jobs SET params_json=json_set(params_json,'$.pid',?2,'$.promoted_from','sync_timeout','$.waited_secs',?3) WHERE id=?1 AND status='running'",
+            rusqlite::params![job_id, child_pid, waited_secs],
+        );
+    }
 
     let log_path = jobs_dir.join(format!("{}.log", job_id));
 
@@ -946,7 +1008,10 @@ fn promote_timed_out_shell(
     let db_state = DbState(db.0.clone());
     let job_id_w = job_id.clone();
     let log_path_w = log_path.clone();
+    let receipt_path = receipt.map(|(_, path)| path);
+    let watcher = crate::agent::job_engine::register_shell_watcher(&job_id);
     std::thread::spawn(move || {
+        let _watcher = watcher;
         rt.block_on(async move {
             let status = child.wait().await;
             let ((o, out_complete), (e, err_complete)) = join_drains(drain_stdout, drain_stderr, Duration::from_secs(3)).await;
@@ -966,15 +1031,11 @@ fn promote_timed_out_shell(
                 String::from_utf8_lossy(&e)
             );
             let _ = std::fs::write(&log_path_w, &combined);
-            let (status_str, error_kind) = match &status {
-                Ok(s) if s.success() => ("succeeded", None),
-                Ok(s) => ("failed", Some(format!("exit_code:{}", s.code().unwrap_or(-1)))),
-                Err(e) => ("failed", Some(format!("wait_error:{}", e))),
-            };
+            let (status_str, exit_code, error_kind) = background_shell_exit(&status, receipt_path.as_deref());
             if !job_id_w.starts_with("untracked-") {
                 let tail = tail_of_file(&log_path_w, 4096);
                 let result = json!({
-                    "exit_code": status.as_ref().ok().and_then(|s| s.code()),
+                    "exit_code": exit_code,
                     "exit_scope": "shell_process",
                     "verification_status": "not_assessed",
                     "status_note": PROCESS_EXIT_NOTE,
@@ -984,7 +1045,7 @@ fn promote_timed_out_shell(
                     "promoted_from": "sync_timeout",
                     "output_capture_complete": out_complete && err_complete,
                 });
-                let _ = crate::agent::job_engine::finish_job(
+                let stored = crate::agent::job_engine::finish_job(
                     &db_state,
                     &job_id_w,
                     status_str,
@@ -992,14 +1053,17 @@ fn promote_timed_out_shell(
                     Some(&result.to_string()),
                     error_kind.as_deref(),
                 );
+                if stored.is_ok() {
+                    if let Some(path) = receipt_path { let _ = std::fs::remove_file(path); }
+                }
             }
         });
     });
 
     let pid_txt = child_pid.map(|p| p.to_string()).unwrap_or_else(|| "?".into());
     let mut stdout = format!(
-        "⏱ [同步等待到点] 命令已运行 {} 秒仍未结束——未杀死，已转后台任务，去留由你裁决\njob_id: {}\npid: {}\n命令仍在运行中，下一步任选其一：\n· 继续等它跑完 → wait_jobs(job_ids:[\"{}\"]) 挂起等待\n· 判断卡死/跑偏要中止 → job_cancel(job_id:\"{}\")（或 local_shell `kill {}`）\n· 先干别的 → 完成自动进收件箱；但 finish 前必须回收本任务\n日志文件（命令结束后写入）: {}",
-        waited_secs, job_id, pid_txt, job_id, job_id, pid_txt, log_path.display()
+        "⏱ [同步等待到点] 命令已运行 {} 秒仍未结束——未杀死，已转后台任务，去留由你裁决\njob_id: {}\npid: {}\n命令仍在运行中，下一步任选其一：\n· 继续等它跑完 → wait_jobs(job_ids:[\"{}\"]) 挂起等待\n· 判断卡死/跑偏要中止 → job_cancel(job_id:\"{}\")\n· 先干别的 → 完成自动进收件箱；但 finish 前必须回收本任务\n日志文件（命令结束后写入）: {}",
+        waited_secs, job_id, pid_txt, job_id, job_id, log_path.display()
     );
     if !partial.is_empty() {
         stdout.push_str(&format!("\n--- 已产生的输出尾部 ---\n{}", partial));
@@ -1036,39 +1100,32 @@ fn execute_command_blocking(
     let session_id_owned = session_id.to_string();
     let cmd_owned = cmd_str.to_string();
 
-    // 使用 tokio 异步派发并挂载独立 Reactor 与超时控制
+    let receipt = match prepare_exit_receipt(db, run_id.is_some()) {
+        Ok(receipt) => receipt,
+        Err(error) => return receipt_setup_error(error),
+    };
+    let sync_job_id = if let Some(run) = run_id {
+        let params = json!({"command":cmd_str,"cwd":cwd.display().to_string(),
+            "exit_receipt_id":receipt.as_ref().map(|(id,_)| id),"execution_mode":"synchronous"}).to_string();
+        match crate::agent::job_engine::begin_job(db, run, session_id, "shell", &cmd_str.chars().take(120).collect::<String>(), &params) {
+            Ok(id) => Some(id),
+            Err(error) => {
+                if let Some((_, path)) = &receipt { let _ = std::fs::remove_file(path); }
+                return DispatchResult { view: None, stdout: String::new(), stderr: format!("Shell 登记失败，命令未执行：{error}"), success: false, route: "local_shell:register".into() };
+            }
+        }
+    } else { None };
+    let command = shell_command(cmd_str, receipt.as_ref().map(|(_, path)| path.as_path()));
     let fut = async move {
-        #[cfg(target_os = "windows")]
-        let mut child = {
-            let mut c = tokio::process::Command::new("cmd.exe");
-            c.arg("/C").arg(cmd_str);
-            c.current_dir(cwd);
-            apply_child_env(&mut c, &enriched_path, &session_tmp_str, custom_env.as_ref());
-            match c.spawn() {
-                Ok(ch) => ch,
-                Err(e) => {
-                    return ExecWaitOutcome::Finished(Err(format_spawn_error(
-                        e, cmd_str, cwd, &enriched_path,
-                    )))
-                }
-            }
+        let mut command = match command {
+            Ok(command) => tokio::process::Command::from(command),
+            Err(error) => return ExecWaitOutcome::Finished(Err(format_spawn_error(error, cmd_str, cwd, &enriched_path))),
         };
-
-        #[cfg(not(target_os = "windows"))]
-        let mut child = {
-            let mut c = tokio::process::Command::new("sh");
-            c.arg("-c").arg(cmd_str);
-            c.current_dir(cwd);
-            c.process_group(0); // 独立进程组：超时转后台按组发信号可整棵树中止
-            apply_child_env(&mut c, &enriched_path, &session_tmp_str, custom_env.as_ref());
-            match c.spawn() {
-                Ok(ch) => ch,
-                Err(e) => {
-                    return ExecWaitOutcome::Finished(Err(format_spawn_error(
-                        e, cmd_str, cwd, &enriched_path,
-                    )))
-                }
-            }
+        command.current_dir(cwd);
+        apply_child_env(&mut command, &enriched_path, &session_tmp_str, custom_env.as_ref());
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => return ExecWaitOutcome::Finished(Err(format_spawn_error(error, cmd_str, cwd, &enriched_path))),
         };
 
         let child_pid = child.id();
@@ -1231,13 +1288,22 @@ fn execute_command_blocking(
                 child_pid,
                 cwd,
                 timeout_secs,
+                sync_job_id.expect("有运行归属的命令必须已登记"),
+                receipt,
             );
         }
     };
 
+    let result = if let (Ok(_), Some((_, path))) = (&result, &receipt) {
+        match crate::shell_receipt::inspect_path(path) {
+            Ok(crate::shell_receipt::ReceiptState::Finished(_)) => result,
+            _ => Err(("result_unknown".into(), false, false, "inspect_effects_before_retry".into(),
+                "未取得 Shell 退出回执，命令可能仍在运行或已经产生副作用；请先核对现场再决定是否重试。".into())),
+        }
+    } else { result };
     let duration_ms = start_time.elapsed().as_millis();
 
-    match result {
+    let mut dispatch_result = match result {
         Ok((status, (stdout_bytes, stdout_complete), (stderr_bytes, stderr_complete))) => {
             let exit_code = status.code().unwrap_or(-1);
             let success = status.success();
@@ -1465,7 +1531,26 @@ fn execute_command_blocking(
                 route: format!("local_shell:{}", kind),
             }
         }
+    };
+    if let Some(id) = sync_job_id {
+        let result_json = serde_json::json!({
+            "stdout": dispatch_result.stdout,
+            "stderr": dispatch_result.stderr,
+            "view": dispatch_result.view,
+            "route": dispatch_result.route,
+        }).to_string();
+        let unknown = dispatch_result.route == "local_shell:result_unknown";
+        let status = if unknown { "interrupted" } else if dispatch_result.success { "succeeded" } else { "failed" };
+        if crate::agent::job_engine::finish_job(db, &id, status, duration_ms.min(u64::MAX as u128) as u64, Some(&result_json), unknown.then_some("result_unknown")).is_ok() {
+            if !unknown {
+                if let Some((_, path)) = receipt { let _ = std::fs::remove_file(path); }
+            }
+            if !unknown { if let Some(view) = dispatch_result.view.as_mut().and_then(serde_json::Value::as_object_mut) {
+                view.insert("completed_shell_job_id".into(), serde_json::Value::String(id));
+            } }
+        }
     }
+    dispatch_result
 }
 
 /// 取命令里最后一段（按引号外的 `|` `;` `&&` 切分）。
@@ -1629,6 +1714,52 @@ fn truncate_output(s: &str, max_bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn synchronous_shell_registration_failure_does_not_execute_command() {
+        let temp = TempDirGuard::new();
+        let db = test_db();
+        db.0.lock().unwrap().execute("DROP TABLE agent_background_jobs", []).unwrap();
+        let marker = temp.path().join("must-not-run");
+        let command = format!("touch '{}'", marker.display());
+        let result = dispatch_in_run(&db, "sync-test", "exec", &json!({"command":command}), Some(temp.path()), Some("root"));
+        assert!(!result.success);
+        assert_eq!(result.route, "local_shell:register");
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn synchronous_shell_registers_one_completed_job() {
+        let temp = TempDirGuard::new();
+        let db = test_db();
+        let result = dispatch_in_run(&db, "sync-test", "exec", &json!({"command":"printf evidence"}), Some(temp.path()), Some("root"));
+        assert!(result.success, "{}", result.stderr);
+        let id = result.view.as_ref().unwrap()["completed_shell_job_id"].as_str().unwrap();
+        let conn = db.0.lock().unwrap();
+        let (count, status, consumed): (i64, String, i64) = conn.query_row("SELECT COUNT(*), status, consumed FROM agent_background_jobs WHERE id=?1", [id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        assert_eq!((count, status.as_str(), consumed), (1, "succeeded", 0));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn ignored_term_is_followed_by_process_group_kill() {
+        use std::io::BufRead;
+        use std::os::unix::process::CommandExt;
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "trap '' TERM; echo ready; while :; do sleep 1; done"])
+            .stdout(std::process::Stdio::piped()).process_group(0);
+        let mut child = command.spawn().unwrap();
+        let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut ready = String::new();
+        output.read_line(&mut ready).unwrap();
+        assert_eq!(ready.trim(), "ready");
+        let pid = child.id();
+        super::kill_process_group(pid, "TERM");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let still_alive = super::process_group_exists(pid);
+        super::kill_process_group(pid, "KILL");
+        let status = child.wait().unwrap();
+        assert!(still_alive);
+        assert!(!status.success());
+    }
     #[cfg(unix)]
     #[test]
     fn output_observation_reports_empty_whitespace_and_content_without_changing_exit() {
@@ -2198,6 +2329,16 @@ mod tests {
         );
         assert!(res.success, "转后台应返回成功句柄而非超时错误: {}", res.stderr);
         assert!(res.stdout.contains("去留由你裁决"), "应告知裁决权移交: {}", res.stdout);
+        let job_id = res.stdout.split("job_id: ").nth(1).and_then(|text| text.lines().next()).unwrap().trim();
+        {
+            let conn = db.0.lock().unwrap();
+            let (count, stored_id): (i64, String) = conn.query_row(
+                "SELECT COUNT(*), id FROM agent_background_jobs WHERE parent_run_id='host-shell-test-run'",
+                [], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).unwrap();
+            assert_eq!(count, 1, "转后台必须沿用启动前的登记");
+            assert_eq!(stored_id, job_id);
+        }
         assert!(
             !res.stderr.contains("已被系统强制终止") && !res.stdout.contains("已被系统强制终止"),
             "到点不应再出现杀死措辞"
