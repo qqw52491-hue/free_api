@@ -41,29 +41,30 @@ async fn review_team_selection_caps_three_preserves_primary_and_respects_exclusi
     let mock = TestDb::new();
     let cards = seed_cards(&mock.db, 5);
     let context = SandwichContext::new("sys".into(), "goal".into());
-    let single = review_team(&mock.db, &context, &[], &[], false, Some(cards[4].clone()));
+    let single = review_team_where(&mock.db, &context, &[], &[], false, Some(cards[4].clone()), |_| true);
     assert_eq!(
         single.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
         vec!["review_4"]
     );
-    let selected = review_team(
+    let selected = review_team_where(
         &mock.db,
         &context,
         &["src/a.vue".into()],
         &["review_1".into()],
         true,
         Some(cards[4].clone()),
+        |_| true,
     );
     assert_eq!(selected.len(), 3);
     assert_eq!(selected[0].name, "review_4");
     assert!(!selected.iter().any(|c| c.name == "review_1"));
     seed_cards(&mock.db, 1);
     assert_eq!(
-        review_team(&mock.db, &context, &[], &[], true, None).len(),
+        review_team_where(&mock.db, &context, &[], &[], true, None, |_| true).len(),
         1
     );
     seed_cards(&mock.db, 0);
-    assert!(review_team(&mock.db, &context, &[], &[], true, None).is_empty());
+    assert!(review_team_where(&mock.db, &context, &[], &[], true, None, |_| true).is_empty());
 }
 
 #[tokio::test]
@@ -100,20 +101,59 @@ async fn review_policy_fingerprint_tracks_people_and_role_changes_without_changi
     let mock = TestDb::new();
     seed_cards(&mock.db, 3);
     let mut config = crate::agent::router::ModelRoutingConfig::default();
-    assert_eq!(policy_fingerprint(&mock.db, &config), "");
+    let single = final_review_policy_fingerprint(&mock.db, &config, &[]);
     config.stage_review_committee = true;
-    let before = policy_fingerprint(&mock.db, &config);
-    assert!(!before.is_empty());
-    assert_eq!(before, policy_fingerprint(&mock.db, &config));
+    let before = final_review_policy_fingerprint(&mock.db, &config, &[]);
+    assert_ne!(before, single);
+    assert_eq!(before, final_review_policy_fingerprint(&mock.db, &config, &[]));
     config.disabled_role_cards.push("review_1".into());
-    assert_ne!(before, policy_fingerprint(&mock.db, &config));
+    assert_ne!(before, final_review_policy_fingerprint(&mock.db, &config, &[]));
     config.disabled_role_cards.clear();
     crate::agent::tools::role_manager::upsert_card(
         &mock.db,
         &json!({"name":"review_0","label":"changed"}),
     )
     .unwrap();
-    assert_ne!(before, policy_fingerprint(&mock.db, &config));
+    assert_ne!(before, final_review_policy_fingerprint(&mock.db, &config, &[]));
+}
+
+#[test]
+fn plan_review_selection_uses_the_inputs_supplied_for_the_batch() {
+    let fixture = TestDb::new();
+    seed_cards(&fixture.db, 4);
+    for (role, field) in [("review_0", "scope"), ("review_1", "approval_note")] {
+        let schema = json!({"fields":[{
+            "name":field, "field_type":"string", "required":true, "description":field,
+        }]}).to_string();
+        crate::agent::tools::role_manager::upsert_card(&fixture.db, &json!({
+            "name":role, "input_schema":schema,
+        })).unwrap();
+    }
+    let context = SandwichContext::new("sys".into(), "goal".into());
+    let inputs = json!({"scope":"api"});
+    let primary = recommended_primary(&fixture.db, &["review_0".into()], &[]);
+    let cards = review_team_where(&fixture.db, &context, &[], &[], true, primary, |card| {
+        crate::agent::tools::role_manager::validate_dispatch_inputs(card, Some(&inputs)).is_ok()
+    });
+    assert_eq!(cards[0].name, "review_0");
+    let mut names: Vec<_> = cards.iter().map(|card| card.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["review_0", "review_2", "review_3"]);
+}
+
+#[test]
+fn final_committee_policy_tracks_the_recommended_primary() {
+    let fixture = TestDb::new();
+    seed_cards(&fixture.db, 4);
+    let config = crate::agent::router::ModelRoutingConfig {
+        stage_review_committee: true, ..Default::default()
+    };
+    let original = final_review_policy_fingerprint(&fixture.db, &config, &["review_0".into()]);
+    let changed = final_review_policy_fingerprint(&fixture.db, &config, &["review_3".into()]);
+    assert_ne!(original, changed);
+    assert_eq!(changed, final_review_policy_fingerprint(
+        &fixture.db, &config, &["missing".into(), "review_3".into(), "review_0".into()],
+    ));
 }
 
 #[test]
@@ -133,16 +173,17 @@ fn recommendations_skip_missing_disabled_and_wrong_kind_without_increasing_headc
     let primary = recommended_primary(&fixture.db, &names, &disabled).unwrap();
     assert_eq!(primary.name, "review_2");
     let context = SandwichContext::new("sys".into(), "goal".into());
-    let single = review_team(
+    let single = review_team_where(
         &fixture.db,
         &context,
         &[],
         &disabled,
         false,
         Some(primary.clone()),
+        |_| true,
     );
     assert_eq!(single.len(), 1);
-    let committee = review_team(&fixture.db, &context, &[], &disabled, true, Some(primary));
+    let committee = review_team_where(&fixture.db, &context, &[], &disabled, true, Some(primary), |_| true);
     assert_eq!(committee.len(), 3);
     assert_eq!(committee[0].name, "review_2");
     assert!(!committee.iter().any(|c| c.name == "review_0"));

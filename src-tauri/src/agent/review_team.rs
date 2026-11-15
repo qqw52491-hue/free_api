@@ -10,54 +10,20 @@ pub(crate) fn final_review_policy_fingerprint(
     routing: &crate::agent::router::ModelRoutingConfig,
     recommended: &[String],
 ) -> String {
-    if routing.stage_review_committee {
-        return policy_fingerprint(db, routing);
-    }
     use sha2::{Digest, Sha256};
     let card = final_review_primary(db, recommended, &routing.disabled_role_cards);
-    format!("{:x}", Sha256::digest(serde_json::json!({
-        "card": card,
-        "reviewer": routing.role_models.get("reviewer"),
-        "fallback_models": [&routing.pro, &routing.flash, &routing.vision],
-        "backup": routing.reviewer_backup_model,
-        "cross_family": routing.auto_cross_family_reviewer,
-    }).to_string().as_bytes()))
-}
-
-pub(crate) fn final_review_primary(db: &DbState, names: &[String], disabled: &[String]) -> Option<RoleCard> {
-    names.iter().map(String::as_str).chain(std::iter::once("reviewer"))
-        .find_map(|name| recommended_primary(db, &[name.to_owned()], disabled)
-            .filter(|card| crate::agent::tools::role_manager::validate_dispatch_inputs(card, None).is_ok()))
-}
-
-/// 人数/角色配置变化后不能复用旧单人就绪收据；不影响冻结验证命令的执行事实。
-pub(crate) fn policy_fingerprint(
-    db: &DbState,
-    routing: &crate::agent::router::ModelRoutingConfig,
-) -> String {
-    if !routing.stage_review_committee {
-        return String::new();
-    }
-    use sha2::{Digest, Sha256};
-    let cards = crate::agent::tools::role_manager::list_cards(db, false)
-        .ok()
-        .map(|cards| {
-            cards
-                .into_iter()
-                .filter(|card| {
-                    card.allows_kind("reviewer")
-                        && !crate::agent::tools::role_manager::is_card_disabled_for(
-                            &routing.disabled_role_cards,
-                            &card.name,
-                            "reviewer",
-                        )
-                })
-                .collect::<Vec<_>>()
-        });
+    let cards = routing.stage_review_committee.then(|| {
+        crate::agent::tools::role_manager::list_cards(db, false).ok().map(|cards| {
+            cards.into_iter().filter(|candidate| {
+                available_reviewer(candidate, &routing.disabled_role_cards)
+                    && review_inputs_available(candidate)
+            }).collect::<Vec<_>>()
+        })
+    }).flatten();
     format!(
         "{:x}",
         Sha256::digest(
-            serde_json::json!({"committee":true,"cards":cards,
+            serde_json::json!({"committee":routing.stage_review_committee,"primary":card,"cards":cards,
                 "reviewer":routing.role_models.get("reviewer"),
                 "fallback_models":[routing.pro,routing.flash,routing.vision],
                 "backup":routing.reviewer_backup_model,
@@ -68,27 +34,34 @@ pub(crate) fn policy_fingerprint(
     )
 }
 
+fn available_reviewer(card: &RoleCard, disabled: &[String]) -> bool {
+    card.enabled && card.allows_kind("reviewer")
+        && !crate::agent::tools::role_manager::is_card_disabled_for(disabled, &card.name, "reviewer")
+}
+
+pub(crate) fn review_inputs_available(card: &RoleCard) -> bool {
+    crate::agent::tools::role_manager::validate_dispatch_inputs(card, None).is_ok()
+}
+
+pub(crate) fn final_review_primary(db: &DbState, names: &[String], disabled: &[String]) -> Option<RoleCard> {
+    names.iter().map(String::as_str).chain(std::iter::once("reviewer"))
+        .find_map(|name| find_reviewer(db, name, disabled).filter(review_inputs_available))
+}
+
 pub(crate) fn select_review_cards(
     db: &DbState,
     context: &SandwichContext,
     extra_paths: &[String],
     disabled_cards: &[String],
     is_committee: bool,
+    eligible: impl Fn(&RoleCard) -> bool,
 ) -> Vec<crate::agent::tools::role_manager::RoleCard> {
     let Ok(cards) = crate::agent::tools::role_manager::list_cards(db, false) else {
         return Vec::new();
     };
     let active_reviewers: Vec<crate::agent::tools::role_manager::RoleCard> = cards
         .into_iter()
-        .filter(|c| {
-            c.enabled
-                && c.allows_kind("reviewer")
-                && !crate::agent::tools::role_manager::is_card_disabled_for(
-                    disabled_cards,
-                    &c.name,
-                    "reviewer",
-                )
-        })
+        .filter(|card| available_reviewer(card, disabled_cards) && eligible(card))
         .collect();
 
     if active_reviewers.is_empty() {
@@ -220,18 +193,27 @@ pub(crate) fn recommended_primary(
     names: &[String],
     disabled: &[String],
 ) -> Option<RoleCard> {
-    names.iter().find_map(|name| {
-        let name = name.trim();
-        if name.is_empty()
-            || crate::agent::tools::role_manager::is_card_disabled_for(disabled, name, "reviewer")
-        {
-            return None;
-        }
-        crate::agent::tools::role_manager::resolve_enabled_card(db, name)
-            .ok()
-            .flatten()
-            .filter(|card| card.allows_kind("reviewer"))
-    })
+    recommended_primary_where(db, names, disabled, |_| true)
+}
+
+pub(crate) fn recommended_primary_where(
+    db: &DbState,
+    names: &[String],
+    disabled: &[String],
+    eligible: impl Fn(&RoleCard) -> bool,
+) -> Option<RoleCard> {
+    names.iter().find_map(|name| find_reviewer(db, name, disabled).filter(&eligible))
+}
+
+fn find_reviewer(db: &DbState, name: &str, disabled: &[String]) -> Option<RoleCard> {
+    let name = name.trim();
+    if name.is_empty()
+        || crate::agent::tools::role_manager::is_card_disabled_for(disabled, name, "reviewer")
+    {
+        return None;
+    }
+    crate::agent::tools::role_manager::resolve_enabled_card(db, name)
+        .ok().flatten().filter(|card| available_reviewer(card, disabled))
 }
 
 /// Shared parent workflow facts, separate from the review executor's own stages.
@@ -255,18 +237,20 @@ pub(crate) fn parent_workflow_context(cp: &crate::agent::checkpoint::AgentCheckp
 }
 
 /// 保留本环节既有主审角色，其余名额从同一专家池中选择。
-pub(crate) fn review_team(
+pub(crate) fn review_team_where(
     db: &DbState,
     context: &SandwichContext,
     paths: &[String],
     disabled: &[String],
     committee: bool,
     primary: Option<RoleCard>,
+    eligible: impl Fn(&RoleCard) -> bool,
 ) -> Vec<RoleCard> {
+    let primary = primary.filter(&eligible);
     if !committee {
         return primary.into_iter().collect();
     }
-    let candidates = select_review_cards(db, context, paths, disabled, true);
+    let candidates = select_review_cards(db, context, paths, disabled, true, eligible);
     let mut cards: Vec<_> = primary.into_iter().collect();
     for card in candidates {
         if cards.len() >= MAX_REVIEWERS {

@@ -114,6 +114,8 @@ pub(crate) fn commit_completed_run(
             );
             if !receipt.final_review_role_outputs.is_empty() {
                 map.insert("final_review_role_outputs".into(), json!(receipt.final_review_role_outputs));
+            } else {
+                map.remove("final_review_role_outputs");
             }
         }
     }

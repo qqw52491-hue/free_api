@@ -192,16 +192,18 @@ fn resolve_adaptive_reviewer_cards(
     is_committee: bool,
     recommended: &[String],
 ) -> Vec<crate::agent::tools::role_manager::RoleCard> {
+    use crate::agent::review_team::review_inputs_available;
     if let Some(primary) =
-        crate::agent::review_team::recommended_primary(db, recommended, disabled_cards)
+        crate::agent::review_team::recommended_primary_where(db, recommended, disabled_cards, review_inputs_available)
     {
-        crate::agent::review_team::review_team(
+        crate::agent::review_team::review_team_where(
             db,
             context,
             &[],
             disabled_cards,
             is_committee,
             Some(primary),
+            review_inputs_available,
         )
     } else {
         crate::agent::review_team::select_review_cards(
@@ -210,6 +212,7 @@ fn resolve_adaptive_reviewer_cards(
             &[],
             disabled_cards,
             is_committee,
+            review_inputs_available,
         )
     }
 }
@@ -294,6 +297,28 @@ fn stage_cards_with_available_inputs(
         }
     }
     Ok((available, notices))
+}
+
+fn record_stage_dispatch(
+    checkpoint: &mut AgentCheckpoint,
+    context: &SandwichContext,
+    batch_id: &str,
+    child_run_id: &str,
+    envelope: &crate::agent::protocol::DispatchEnvelope,
+) {
+    checkpoint.reviewer_dispatches.insert(
+        child_run_id.to_owned(),
+        crate::agent::child_reviewer::PlanReviewerDispatchSnapshot::from_envelope(envelope),
+    );
+    if checkpoint.stage_review_batch_id.as_deref() == Some(batch_id) {
+        return;
+    }
+    checkpoint.stage_review_batch_id = Some(batch_id.to_owned());
+    checkpoint.stage_review_milestone_cutoff = checkpoint.stage_review_pending_milestones
+        .last().map(|(step, _)| *step);
+    checkpoint.stage_review_budget_used += 1;
+    checkpoint.stage_review_shell_baseline = checkpoint.uncovered_shell_mutations;
+    checkpoint.stage_review_baseline_side_effects = context.side_effects.len() as u32;
 }
 
 /// 派发一次阶段审查。证据包由宿主组装（任务目标 + 阶段计划 + 当前累计 diff），
@@ -390,15 +415,7 @@ pub async fn dispatch(
             .dispatch(Some(app.clone()), db, workspace, interrupt_rx)
             .await?;
 
-        checkpoint.reviewer_dispatches.insert(child_run_id.clone(),
-            crate::agent::child_reviewer::PlanReviewerDispatchSnapshot::from_envelope(&envelope));
-
-        // 批次锚点落 checkpoint：在途/收口此后全部由台账推导
-        checkpoint.stage_review_batch_id = Some(stage_batch_id);
-        checkpoint.stage_review_milestone_cutoff=checkpoint.stage_review_pending_milestones.last().map(|(step,_)|*step);
-        checkpoint.stage_review_budget_used += 1;
-        checkpoint.stage_review_shell_baseline = checkpoint.uncovered_shell_mutations;
-        checkpoint.stage_review_baseline_side_effects = context.side_effects.len() as u32;
+        record_stage_dispatch(checkpoint, context, &stage_batch_id, &child_run_id, &envelope);
 
         let note_text = cross_family_note.map(|n| format!(":{}", n)).unwrap_or_default();
         let _ = app.emit(
@@ -412,6 +429,7 @@ pub async fn dispatch(
     // 同批专家共享 batch_id：台账可按批联查这批审查的全部成本与交付
     let stage_batch_id = format!("stage-batch-{}-{}", checkpoint.step_id, uuid::Uuid::new_v4());
     let mut dispatched_run_ids = Vec::new();
+    let mut launch_failures = Vec::new();
     for card in &role_cards {
         let model_to_use = {
             let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -496,16 +514,17 @@ pub async fn dispatch(
             envelope = envelope.with_custom_schema(schema);
         }
 
-        let child_run_id = envelope
-            .dispatch(Some(app.clone()), db, workspace, interrupt_rx.clone())
-            .await?;
-
-        checkpoint.reviewer_dispatches.insert(child_run_id.clone(),
-            crate::agent::child_reviewer::PlanReviewerDispatchSnapshot::from_envelope(&envelope));
-
-        // 成员身份由台账 batch_id 承担（dispatch 时已盖章）；锚点写一次即可
+        let child_run_id = match envelope.dispatch(Some(app.clone()), db, workspace, interrupt_rx.clone()).await {
+            Ok(id) => id,
+            Err(error) => {
+                let notice = format!("{} 未启动：{error}", card.label);
+                let _ = app.emit(&format!("agent-log-{session_id}"), &notice);
+                launch_failures.push(notice);
+                continue;
+            }
+        };
+        record_stage_dispatch(checkpoint, context, &stage_batch_id, &child_run_id, &envelope);
         dispatched_run_ids.push(child_run_id.clone());
-        checkpoint.stage_review_batch_id = Some(stage_batch_id.clone());
 
         let _ = app.emit(
             &format!("agent-log-{}", session_id),
@@ -513,13 +532,11 @@ pub async fn dispatch(
         );
     }
     if dispatched_run_ids.is_empty() {
+        if !launch_failures.is_empty() {
+            return Err(launch_failures.join("；"));
+        }
         return Err("本轮阶段审查没有启动可用成员；用户排除的模型未重新派发，尚无新的阶段审查结论。".into());
     }
-    // 预算语义：整轮联合会审无论派发 1 位还是多位，仅计 1 轮
-    checkpoint.stage_review_milestone_cutoff=checkpoint.stage_review_pending_milestones.last().map(|(step,_)|*step);
-    checkpoint.stage_review_budget_used += 1;
-    checkpoint.stage_review_shell_baseline = checkpoint.uncovered_shell_mutations;
-    checkpoint.stage_review_baseline_side_effects = context.side_effects.len() as u32;
 
     if dispatched_run_ids.len() > 1 {
         let _ = app.emit(

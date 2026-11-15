@@ -33,23 +33,15 @@ pub(super) async fn evaluate_committee<R: tauri::Runtime>(
         db, triage.map(|v| v.final_review_roles.as_slice()).unwrap_or(&[]),
         &model_routing.disabled_role_cards,
     );
-    let mut cards = crate::agent::review_team::review_team(
+    let cards = crate::agent::review_team::review_team_where(
         db,
         context,
         approved_target_files.unwrap_or(&[]),
         &model_routing.disabled_role_cards,
         true,
         primary,
+        crate::agent::review_team::review_inputs_available,
     );
-    cards.retain(|card| {
-        match crate::agent::tools::role_manager::validate_dispatch_inputs(card, None) {
-            Ok(()) => true,
-            Err(error) => {
-                let _ = app.emit(&format!("agent-log-{session_id}"), format!("终审跳过角色 {}：{error}", card.name));
-                false
-            }
-        }
-    });
     if cards.is_empty() {
         let mut result = evaluate_finish_diff_single(
             app,

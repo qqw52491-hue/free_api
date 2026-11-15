@@ -223,6 +223,27 @@ fn committee_skipped_and_unavailable_are_not_effective_reviews() {
 }
 
 #[test]
+fn committee_fills_slots_after_filtering_unavailable_role_inputs() {
+    let fixture = crate::agent::review_team::tests::TestDb::new();
+    crate::agent::review_team::tests::seed_cards(&fixture.db, 6);
+    let schema = json!({"fields":[{
+        "name":"scope", "field_type":"string", "required":true, "description":"Scope",
+    }]}).to_string();
+    for name in ["review_0", "review_1", "review_2"] {
+        crate::agent::tools::role_manager::upsert_card(&fixture.db, &json!({
+            "name":name, "input_schema":schema,
+        })).unwrap();
+    }
+    let context = SandwichContext::new("sys".into(), "goal".into());
+    let cards = crate::agent::review_team::review_team_where(
+        &fixture.db, &context, &[], &[], true, None,
+        crate::agent::review_team::review_inputs_available,
+    );
+    assert_eq!(cards.iter().map(|card| card.name.as_str()).collect::<Vec<_>>(),
+        ["review_3", "review_4", "review_5"]);
+}
+
+#[test]
 fn committee_preserves_each_roles_custom_output() {
     let make_result = |role: &str, value: &str| {
         let mut result = super::super::parse_reviewer_json(&passed().to_string(), "m", "hash", 1).unwrap();

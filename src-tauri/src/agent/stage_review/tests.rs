@@ -1124,6 +1124,50 @@ fn stage_role_recommendation_respects_explicit_role_off_switch_and_exclusions() 
     assert!(select_stage_cards(&fixture.db, &context, &cp, &config).is_none());
 }
 #[test]
+fn stage_batch_bookkeeping_is_ready_after_first_member_starts() {
+    let mut context = SandwichContext::new("sys".into(), "goal".into());
+    context.record_side_effect(6, "write_file".into(), "a.rs".into());
+    let mut checkpoint = AgentCheckpoint::new("owner".into(), &context);
+    checkpoint.uncovered_shell_mutations = 2;
+    checkpoint.stage_review_pending_milestones.push((6, Vec::new()));
+    let batch = "stage-batch";
+    let envelope = crate::agent::protocol::DispatchEnvelope::reviewer(
+        "parent", "owner", "mock", serde_json::json!({"question":"review"}),
+    ).with_batch_id(batch).with_purpose("stage_review");
+
+    record_stage_dispatch(&mut checkpoint, &context, batch, "first", &envelope);
+    assert_eq!(checkpoint.stage_review_batch_id.as_deref(), Some(batch));
+    assert_eq!(checkpoint.stage_review_milestone_cutoff, Some(6));
+    assert_eq!(checkpoint.stage_review_budget_used, 1);
+    assert_eq!(checkpoint.stage_review_shell_baseline, 2);
+    assert_eq!(checkpoint.stage_review_baseline_side_effects, 1);
+    assert!(checkpoint.reviewer_dispatches.contains_key("first"));
+
+    record_stage_dispatch(&mut checkpoint, &context, batch, "second", &envelope);
+    assert_eq!(checkpoint.stage_review_budget_used, 1);
+    assert!(checkpoint.reviewer_dispatches.contains_key("second"));
+}
+
+#[test]
+fn automatic_stage_review_uses_the_next_role_with_available_inputs() {
+    let fixture = crate::agent::review_team::tests::TestDb::new();
+    crate::agent::review_team::tests::seed_cards(&fixture.db, 2);
+    let schema = serde_json::json!({"fields":[{
+        "name":"scope", "field_type":"string", "required":true, "description":"Scope",
+    }]}).to_string();
+    crate::agent::tools::role_manager::upsert_card(&fixture.db, &serde_json::json!({
+        "name":"review_0", "input_schema":schema,
+    })).unwrap();
+    let context = SandwichContext::new("sys".into(), "goal".into());
+    let recommended = vec!["review_0".into(), "review_1".into()];
+    for names in [recommended.as_slice(), &[]] {
+        let cards = resolve_adaptive_reviewer_cards(&fixture.db, &context, &[], false, names);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].name, "review_1");
+    }
+}
+
+#[test]
 fn stage_review_does_not_dispatch_roles_without_required_inputs() {
     let required = crate::agent::tools::role_manager::RoleCard {
         name: "expert".into(),

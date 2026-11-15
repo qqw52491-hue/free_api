@@ -448,9 +448,12 @@ pub async fn handle_submit_plan(
         snapshot = snapshot.with_specialized_context(spec);
     }
 
-    let cards = crate::agent::review_team::review_team(
+    let cards = crate::agent::review_team::review_team_where(
         db, context, &target_files, &model_routing.disabled_role_cards,
         model_routing.stage_review_committee, Some(card),
+        |candidate| crate::agent::tools::role_manager::validate_dispatch_inputs(
+            candidate, effective_params.get("custom_inputs"),
+        ).is_ok(),
     );
     let snapshots = team::prepare_snapshots(
         db, workspace_dir, model_routing, &routing, snapshot, &cards,
