@@ -229,6 +229,35 @@ select option {
   cursor: pointer;
 }
 
+.form-select.workflow-select {
+  min-width: 0;
+  min-height: 36px;
+  padding: 6px 34px 6px 11px;
+  border-radius: 8px;
+  background-color: var(--bg-2);
+  background-size: 14px;
+  box-shadow: inset 0 1px 0 var(--surface-2);
+  font: inherit;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  transition: background-color var(--motion-quick), border-color var(--motion-quick), box-shadow var(--motion-quick);
+}
+
+.workflow-select:hover:enabled {
+  background-color: var(--bg-3);
+  border-color: var(--border-3);
+}
+
+.form-select.workflow-select:focus:enabled {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+.workflow-select:disabled {
+  opacity: .55;
+  cursor: default;
+}
+
 .form-select option, .form-select optgroup, select option, select optgroup {
   background-color: var(--theme-bg-panel, #141b26) !important;
   color: var(--theme-text-primary, #f4f4f5) !important;

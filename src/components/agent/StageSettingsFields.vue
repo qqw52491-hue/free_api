@@ -3,7 +3,7 @@
     <legend>固定环节</legend>
     <label v-for="field in fields" :key="field.key">
       <span>{{ field.label }}</span>
-      <select :value="mode(field.key)" :disabled="field.key === 'plan' && approval" @change="change(field.key, ($event.target as HTMLSelectElement).value)">
+      <select class="form-select workflow-select" :value="mode(field.key)" :disabled="field.key === 'plan' && approval" @change="change(field.key, ($event.target as HTMLSelectElement).value)">
         <option value="auto">自动 / 沿用默认</option><option value="on">开启</option><option value="off" :disabled="field.key === 'plan' && requiresPlan">关闭</option>
       </select>
     </label>
@@ -38,6 +38,5 @@ function change(key: keyof StageSettings, mode: string) {
 .stage-fields { margin: 14px 0; padding: 12px; border: 1px solid var(--border-1, #7775); border-radius: 8px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 legend, label { font-size: 12px; color: var(--theme-text-primary); }
 label { display: flex; flex-direction: column; gap: 6px; }
-select { padding: 7px; border-radius: 6px; background: var(--theme-inset-bg); color: var(--theme-text-primary); border: 1px solid var(--border-1, #7775); }
 p { grid-column: 1 / -1; margin: 0; font-size: 12px; line-height: 1.6; color: var(--theme-text-muted); }
 </style>

@@ -6,7 +6,7 @@
       <section class="settings-block" aria-label="工具权限">
         <h5>工具权限</h5>
         <label class="tool-mode">可选工具范围
-          <select :value="toolMode" @change="changeToolMode($event)">
+          <select class="form-select workflow-select" :value="toolMode" @change="changeToolMode($event)">
             <option value="inherit">由 AI 按需选择（默认）</option>
             <option value="allowlist">仅允许指定工具</option>
           </select>
@@ -23,11 +23,11 @@
       <section class="settings-block" aria-label="工作流程">
         <h5>工作流程 <span class="section-tag">{{ flowMode === 'custom' && !specialized ? '角色自定义' : specialized ? '专用结果契约' : '继承公共默认' }}</span></h5>
         <p class="hint">只决定方案、审查和交付安排，不改变上面的工具权限。</p>
-        <label class="tool-mode">流程来源<select :value="flowMode" :disabled="specialized" @change="changeFlowMode($event)"><option value="inherit">继承子任务默认流程</option><option value="custom">为这个角色自定义</option></select></label>
+        <label class="tool-mode">流程来源<select class="form-select workflow-select" :value="flowMode" :disabled="specialized" @change="changeFlowMode($event)"><option value="inherit">继承子任务默认流程</option><option value="custom">为这个角色自定义</option></select></label>
         <template v-if="flowMode === 'custom' && !specialized">
           <div class="controls">
-            <label>方案安排<select v-model="planMode" @change="publish()"><option value="">继承公共默认</option><option value="auto">自动 / 原有策略</option><option value="cross_review">先讨论并审查方案</option><option value="plan_approval">方案需要人工批准</option></select></label>
-            <label>结果如何结束<select v-model="completion" @change="publish()"><option value="">继承公共默认</option><option value="delivery">完整交付，执行适用验证和审查</option><option value="handoff">交回结果，由父任务集成验收</option></select></label>
+            <label>方案安排<select class="form-select workflow-select" v-model="planMode" @change="publish()"><option value="">继承公共默认</option><option value="auto">自动 / 原有策略</option><option value="cross_review">先讨论并审查方案</option><option value="plan_approval">方案需要人工批准</option></select></label>
+            <label>结果如何结束<select class="form-select workflow-select" v-model="completion" @change="publish()"><option value="">继承公共默认</option><option value="delivery">完整交付，执行适用验证和审查</option><option value="handoff">交回结果，由父任务集成验收</option></select></label>
           </div>
           <StageSettingsFields v-model="stages" :approval="planMode === 'plan_approval'" @update:model-value="publish()" />
         </template>
@@ -35,7 +35,7 @@
       </section>
       <section class="settings-block" aria-label="执行方式">
         <h5>执行方式 <span class="section-tag">高级选项</span></h5>
-        <label class="tool-mode">默认执行方式<select :value="profile" @change="changeProfile($event)"><option value="">沿用派发入口</option><option value="task">通用子任务</option><option value="worker">调查助手</option><option value="writer">实施助手</option><option value="reviewer">专用审查</option></select></label>
+        <label class="tool-mode">默认执行方式<select class="form-select workflow-select" :value="profile" @change="changeProfile($event)"><option value="">沿用派发入口</option><option value="task">通用子任务</option><option value="worker">调查助手</option><option value="writer">实施助手</option><option value="reviewer">专用审查</option></select></label>
         <p v-if="workspace === 'isolated'" class="hint">此角色仍有历史隔离配置。请先改为共享工作区再派发新任务。<button type="button" class="workflow-link" @click="changeWorkspace()">改为共享工作区</button></p>
         <p class="hint">普通方式共用通用执行器；调查名称不自动保证只读。切到专用方式时会说明不兼容的流程变化。</p>
         <details class="preset-details"><summary>快捷组合（同时调整执行方式与流程）</summary><div class="presets"><button v-for="preset in presets" :key="preset.id" type="button" :aria-pressed="matches(preset)" :class="{selected:matches(preset)}" @click="applyPreset(preset)"><strong>{{ preset.label }}</strong><span>{{ preset.description }}</span></button></div></details>
@@ -197,8 +197,7 @@ p { margin: 7px 0 0; }
 .settings-block .controls { margin-top: 12px; }
 .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); gap: 12px; }
 .controls label, .tool-list, .tool-mode { min-width: 0; display: flex; flex-direction: column; gap: 7px; font-size: 12px; color: var(--theme-text-primary, #e4e4e7); }
-select, textarea { width: 100%; box-sizing: border-box; padding: 9px; border: 1px solid var(--border-1, #3f3f46); border-radius: 7px; background: var(--theme-inset-bg, #202024); color: var(--theme-text-primary, #e4e4e7); font: inherit; }
-select:disabled { opacity: .55; }
+textarea { width: 100%; box-sizing: border-box; padding: 9px; border: 1px solid var(--border-1, #3f3f46); border-radius: 7px; background: var(--theme-inset-bg, #202024); color: var(--theme-text-primary, #e4e4e7); font: inherit; }
 textarea { resize: vertical; }
 details { margin-top: 14px; border-top: 1px solid var(--border-1, #3f3f46); padding-top: 12px; }
 summary { cursor: pointer; font-size: 13px; color: var(--theme-text-primary, #e4e4e7); }
