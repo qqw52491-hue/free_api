@@ -84,7 +84,7 @@ pub(crate) fn spawn_review_resume(
             )
         })?;
     messages.push(json!({"role":"user","content":format!(
-        "【父 Agent 反驳与对质】\n{message}\n\n【对质研判规则】\n请提交完整的更新审查 JSON。旧问题沿用原 finding_id，新问题使用未用过的编号；编号含义不要改变。\n若反驳或修复证据成立，在 objection_verdicts 中将对应 finding_id 标为 withdraw 并给出理由；仍成立则 maintain。没有提及旧发现不等于撤回，也不要撤回其他审查任务的发现。重新判断 decision 和 routing。" )}));
+        "【父 Agent 反驳与对质】\n{message}\n\n【对质研判规则】\n请提交完整的更新审查 JSON。旧问题沿用原 finding_id，新问题使用未用过的编号；编号含义不要改变。\n逐项核对当前证据：原发现被证伪或修复已生效时，在 objection_verdicts 中将对应 finding_id 标为 withdraw 并给出理由；仍成立则 maintain。仅有拟改代码、修复承诺或预定测试时，保留原裁决并说明还缺什么证据；对修复方案的评价写进理由。没有提及旧发现不等于撤回，也不要撤回其他审查任务的发现。重新判断 decision 和 routing。" )}));
     if let Some(schema) = schema.as_ref() {
         messages.push(json!({"role":"user","content":format!("请重新提交完整审查结果，不能只提交差异或省略仍适用的必填字段。\n{}", schema.render_prompt_instructions())}));
     }

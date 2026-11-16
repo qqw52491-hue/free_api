@@ -113,7 +113,8 @@ impl AgentCheckpoint {
                 context.add_error_feedback(&format!("【人类回复】{}", reply));
             }
             if self.phase == AgentPhase::WaitUser && self.pending.is_none()
-                && !self.auto_plan_approval_pending {
+                && !self.auto_plan_approval_pending
+                && self.stage_arbitration.is_none() {
                 self.begin_planning(self.step_id, context);
             }
         }

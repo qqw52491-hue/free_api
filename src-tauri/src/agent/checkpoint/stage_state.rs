@@ -3,8 +3,30 @@ use super::*;
 use crate::agent::child_reviewer::{ReviewFinding, ReviewerDeliveryData};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct StageArbitration {
+    pub id: String,
+    pub findings: Vec<(String, String, String, String)>,
+}
+
+impl StageArbitration {
+    pub(crate) fn form(&self, message: &str) -> serde_json::Value {
+        let issues = self.findings.iter().map(|(_, run, id, detail)| {
+            format!("- 审查 `{run}` · `{id}` · {detail}")
+        }).collect::<Vec<_>>().join("\n");
+        serde_json::json!({
+            "kind": "stage_review_arbitration",
+            "title": "允许继续修复这些问题？",
+            "description": format!("{issues}\n\n{message}\n\n批准后，上列问题移交终审核对。"),
+            "request_id": self.id,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct StageReviewState {
+    #[serde(default)]
+    arbitrated: BTreeMap<String, BTreeMap<String, String>>,
     receipts: BTreeMap<String, StageReceipt>,
     // 无法从旧台账还原归属的计数不能被任意成员的撤回扣掉。
     legacy_blockers: u32,
@@ -41,15 +63,15 @@ fn is_blocking(finding: &ReviewFinding) -> bool {
 
 impl StageReviewState {
     fn view(&self) -> (u32, Option<String>, Vec<String>, u32, Option<String>) {
-        let mut view = self.reduce(false);
+        let mut view = self.reduce(false, &mut Vec::new());
         if !self.cleared_through.is_empty() {
             // 清账只解除中间态写入阻塞，跨阶段移交仍从完整观察历史重算。
-            view.2 = self.reduce(true).2;
+            view.2 = self.reduce(true, &mut Vec::new()).2;
         }
         view
     }
 
-    fn reduce(&self, include_cleared: bool) -> (u32, Option<String>, Vec<String>, u32, Option<String>) {
+    fn reduce(&self, include_cleared: bool, open_findings: &mut Vec<(String, String, String, String)>) -> (u32, Option<String>, Vec<String>, u32, Option<String>) {
         let mut history: Vec<_> = self.receipts.iter().collect();
         history.sort_by(|a, b| a.1.source.cmp(&b.1.source).then(a.0.cmp(b.0)));
         let mut members: BTreeMap<String, Member> = BTreeMap::new();
@@ -147,11 +169,21 @@ impl StageReviewState {
         let mut source = None;
         let mut rounds = 0;
         let mut target = None;
-        for (key, member) in members {
+        for (key, mut member) in members {
+            for (id, finding) in &member.findings {
+                if is_blocking(finding) && !member.deferred.contains(id) {
+                    if self.arbitrated.get(&key).and_then(|ids| ids.get(id)) == Some(&member.latest_run) {
+                        final_only.insert(format!("【人工仲裁移交终审】[审查 {}] {}", member.latest_run, finding.display_line()));
+                        member.deferred.insert(id.clone());
+                    } else {
+                        open_findings.push((key.clone(), member.latest_run.clone(), id.clone(), finding.display_line()));
+                    }
+                }
+            }
             if let Some(owner) = member.latest_source.as_ref() {
                 for (id, finding) in &member.findings {
                     if finding.severity.eq_ignore_ascii_case("blocking")
-                        && (finding.finality.eq_ignore_ascii_case("final_only") || member.deferred.contains(id))
+                        && (finding.finality.eq_ignore_ascii_case("final_only") || (member.deferred.contains(id) && self.arbitrated.get(&key).and_then(|ids| ids.get(id)) != Some(&member.latest_run)))
                     {
                         let kind = if member.deferred.contains(id) {
                             "对质未撤回自动降级"
@@ -202,6 +234,52 @@ impl StageReviewState {
 }
 
 impl AgentCheckpoint {
+    pub(crate) fn apply_stage_arbitration_reply(&mut self, reply: &str) -> Option<usize> {
+        let request = self.stage_arbitration.as_ref()?;
+        let approved = reply.trim_end().ends_with(&format!("<!--stage-review-approval:{}-->", request.id));
+        if !approved && reply.trim() != "【阶段仲裁】不批准继续修复。" {
+            return None;
+        }
+        let request = self.stage_arbitration.take().unwrap();
+        Some(if approved { self.defer_arbitrated_findings(&request.findings) } else { 0 })
+    }
+
+    pub(crate) fn hydrate_stage_arbitration_findings(&mut self, db: &DbState) {
+        if self.stage_review_state.is_none() {
+            if let Some(run) = self.stage_review_resume_hint(db) {
+                let source = ReviewDeliverySource::from_run(db, &run);
+                self.stage_review_state = Some(self.hydrate_stage_review_state(db, "", &source));
+            }
+        }
+    }
+
+    pub(crate) fn stage_arbitration_findings(&self) -> Vec<(String, String, String, String)> {
+        let mut findings = Vec::new();
+        if let Some(state) = &self.stage_review_state {
+            state.reduce(false, &mut findings);
+        }
+        findings
+    }
+
+    pub(crate) fn defer_arbitrated_findings(&mut self, approved: &[(String, String, String, String)]) -> usize {
+        let current = self.stage_arbitration_findings();
+        let Some(state) = self.stage_review_state.as_mut() else { return 0 };
+        let mut applied = 0;
+        for (member, run, id, _) in current.iter().filter(|finding| approved.contains(finding)) {
+            state.arbitrated.entry(member.clone()).or_default().insert(id.clone(), run.clone());
+            applied += 1;
+        }
+        let (count, source, final_only, rounds, target) = state.view();
+        self.stage_review_blockers_open = count;
+        self.stage_review_blocker_source_run_id = source;
+        self.stage_review_confrontation_failures = rounds;
+        self.stage_review_confrontation_target = target;
+        self.stage_review_final_only.retain(|line| !state.final_only_projection.contains(line));
+        state.final_only_projection = final_only.iter().cloned().collect();
+        self.stage_review_final_only.extend(final_only);
+        applied
+    }
+
     /// 仅旧检查点首次遇到后续回执时尝试收养同批已消费的有效历史。
     fn hydrate_stage_review_state(
         &self,

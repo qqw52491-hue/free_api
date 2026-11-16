@@ -104,6 +104,15 @@
       </div>
     </div>
 
+    <div v-if="formKind === 'stage_review_arbitration'" class="plan-decision-actions">
+      <button type="button" class="choice-btn approve-btn" :disabled="isSending || !humanForm?.requestId" @click="approveStageRepair">
+        允许继续修复
+      </button>
+      <button type="button" class="choice-btn revise-btn" :disabled="isSending" @click="emit('submit', '【阶段仲裁】不批准继续修复。')">
+        不批准
+      </button>
+    </div>
+
     <!-- 1. 二次确认 (Confirm) -->
     <div v-if="formKind === 'confirm'" class="options-container confirm-box">
       <button
@@ -213,7 +222,7 @@
 
     <!-- 7. 兜底/附加补充输入框 (在选择题/确认题下方提供可选补充说明) -->
     <div
-      v-if="formKind !== 'custom_html' && formKind !== 'text' && formKind !== 'plan_approval' && !customHtmlCode"
+      v-if="formKind !== 'custom_html' && formKind !== 'text' && formKind !== 'plan_approval' && formKind !== 'stage_review_arbitration' && !customHtmlCode"
       class="write-in-wrap"
       @click="focusWriteInInput"
     >
@@ -232,7 +241,7 @@
     </div>
 
     <!-- 提交动作栏 (非自定义 HTML 时展示标准提交按钮) -->
-    <div v-if="formKind !== 'custom_html' && formKind !== 'plan_approval' && !customHtmlCode" class="intervention-actions">
+    <div v-if="formKind !== 'custom_html' && formKind !== 'plan_approval' && formKind !== 'stage_review_arbitration' && !customHtmlCode" class="intervention-actions">
       <button
         type="button"
         class="submit-intervention-btn"
@@ -348,6 +357,7 @@ const formTypeLabel = computed(() => {
     case "multi_select": return "多项选择";
     case "file_picker": return "文件上传";
     case "custom_html": return "自定义交互应用";
+    case "stage_review_arbitration": return "阶段审查仲裁";
     case "plan_approval": return "方案审查与审批";
     case "text": return "问答输入";
     default: return "问答输入";
@@ -367,6 +377,12 @@ function toggleRevisionInput() {
       planRevisionRef.value?.focus();
     });
   }
+}
+
+function approveStageRepair() {
+  const id = props.humanForm?.requestId;
+  if (!id || props.isSending) return;
+  emit("submit", `【阶段仲裁】允许继续修复，问题移交终审。\n<!--stage-review-approval:${id}-->`);
 }
 
 function handlePlanApprove() {

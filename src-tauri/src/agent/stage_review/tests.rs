@@ -624,6 +624,37 @@
     }
 
     #[test]
+    fn stage_arbitration_snapshot_survives_restore_without_approving_new_findings() {
+        let (base, db) = mk_db("stage-arbitration");
+        let mut cp = approved_checkpoint();
+        cp.stage_review_batch_id = Some("owned-stage".into());
+        let first = owned_stage_receipt(&db, &cp, "a", "task-a", 1, false, owned_blocking(), &[]);
+        apply_stage_receipt(&mut cp, &db, &first, None);
+        cp.stage_arbitration = Some(crate::agent::checkpoint::stage_state::StageArbitration {
+            id: "request-a".into(),
+            findings: cp.stage_arbitration_findings(),
+        });
+        let mut context = SandwichContext::new("system".into(), "修复问题".into());
+        cp.wait_for_human("是否允许继续修复？".into(), &context);
+        cp = serde_json::from_value(serde_json::to_value(&cp).unwrap()).unwrap();
+        cp.restore_task_for_entry(&mut context, "<!--stage-review-approval:request-a-->");
+        assert!(matches!(
+            crate::agent::checkpoint::recovery_decision(&cp),
+            crate::agent::checkpoint::RecoveryDecision::ResumeWaiting
+        ));
+        let second = owned_stage_receipt(&db, &cp, "b", "task-b", 1, false, owned_blocking(), &[]);
+        apply_stage_receipt(&mut cp, &db, &second, None);
+        assert_eq!(cp.stage_arbitration.as_ref().unwrap().form("修复建议")["request_id"], "request-a");
+        assert_eq!(cp.apply_stage_arbitration_reply("<!--stage-review-approval:old-->"), None);
+        assert_eq!(cp.apply_stage_arbitration_reply("<!--stage-review-approval:request-a-->"), Some(1));
+        assert_eq!(cp.stage_review_blockers_open, 1);
+        assert_eq!(cp.stage_arbitration_findings()[0].1, "b");
+        assert!(cp.stage_review_final_only.iter().any(|line| line.contains("人工仲裁移交终审")));
+        assert_eq!(cp.apply_stage_arbitration_reply("<!--stage-review-approval:request-a-->"), None);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn owned_stage_repeat_withdrawal_cannot_remove_another_members_f1() {
         let (base, db)=mk_db("owned-withdraw");
         let mut cp=approved_checkpoint();

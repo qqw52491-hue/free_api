@@ -211,10 +211,10 @@ pub fn reviewer_retry_limit() -> String {
 pub fn stage_review_blocking_open(count: u32, stage_run_id: &str, final_only_summary: &str) -> String {
     let mut text = format!(
         "【❌ 执行失败：写入已被拦截，目标文件未做任何修改！】\n\
-         【原因】上一阶段存在 {} 条未解决的 blocking_regardless 结构性缺陷，继续堆叠新写入只会放大返工成本。\n\
+         【原因】上一阶段存在 {} 条未解决的 blocking_regardless 异议。\n\
          【必须执行的操作】：\n\
-         - 路径 1（对质撤回）：调用 resume_child（child_run_id: \"{}\"），逐条提交处理说明与证据；问题确已解决或经证伪不成立时审查者会撤回（withdraw），全部撤回后自动放行；\n\
-         - 路径 2（人工仲裁）：若与审查者存在无法弥合的分歧，请调用 ask_human 工具向用户呈报阶段审查争议详情，申请人工裁决强制放行。\n",
+         - 路径 1（对质复核）：已有新证据表明原发现不成立或修复已生效时，调用 resume_child（child_run_id: \"{}\"），逐条提交发现编号和证据；全部阻塞异议撤回后自动放行。修复计划不代表写入已完成；\n\
+         - 路径 2（人工仲裁）：若认可发现但修复写入也被拦截，或与审查者存在分歧，调用 ask_human（kind: stage_review_arbitration）向用户说明相关发现、受阻改动、修复方案及验证方法，请求裁决。\n",
         count, stage_run_id
     );
     if !final_only_summary.is_empty() {

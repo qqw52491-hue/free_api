@@ -475,6 +475,7 @@ function normalizeHumanForm(raw, fallbackTitle) {
     confirm: "confirm", confirmation: "confirm", text: "text", input: "text",
     file: "file_picker", file_picker: "file_picker", upload: "file_picker", files: "file_picker",
     custom_html: "custom_html", html: "custom_html", custom: "custom_html",
+    stage_review_arbitration: "stage_review_arbitration",
     plan_approval: "plan_approval", plan: "plan_approval", approval: "plan_approval",
   };
   const kind = aliases[rawKind] || (data.options && data.options.length ? "single_select" : "text");
@@ -488,6 +489,7 @@ function normalizeHumanForm(raw, fallbackTitle) {
 
   return {
     kind,
+    requestId: String(data.request_id || ""),
     title: String(data.title || data.label || fallbackTitle || "请提供反馈或确认下一步"),
     description: String(data.description || data.help || ""),
     placeholder: String(data.placeholder || ""),
@@ -528,7 +530,12 @@ function renderAskCard(run) {
   const formTypeLabel = kindLabels[form.kind] || "问答输入";
 
   let bodyHtml = "";
-  if (form.kind === "plan_approval") {
+  if (form.kind === "stage_review_arbitration") {
+    bodyHtml = `<div class="human-confirm-box">
+      <button type="button" class="human-choice-btn confirm-btn" onclick="submitMobilePlanApproval(true)">允许继续修复</button>
+      <button type="button" class="human-choice-btn" onclick="submitMobilePlanApproval(false)">不批准</button>
+    </div>`;
+  } else if (form.kind === "plan_approval") {
     bodyHtml = `
       <div class="human-plan-approval-box">
         <div class="human-plan-banner">
@@ -617,7 +624,7 @@ function renderAskCard(run) {
 
   // 非纯文本问答或方案审批时展示可选补充输入框
   let writeInHtml = "";
-  if (form.kind !== "text" && form.kind !== "custom_html" && form.kind !== "plan_approval") {
+  if (form.kind !== "text" && form.kind !== "custom_html" && form.kind !== "plan_approval" && form.kind !== "stage_review_arbitration") {
     writeInHtml = `
       <div class="human-write-in-wrap">
         <label class="human-write-in-label" for="humanWriteInInput">补充说明 / 自定义要求（可选）:</label>
@@ -627,7 +634,7 @@ function renderAskCard(run) {
   }
 
   const isSubmitting = S.humanForm.isSubmitting;
-  const actionsBarHtml = form.kind === "plan_approval" ? "" : `
+  const actionsBarHtml = ["plan_approval", "stage_review_arbitration"].includes(form.kind) ? "" : `
       <div class="human-actions-bar">
         <button type="button" class="human-submit-btn" id="btnSubmitHuman" onclick="submitHumanIntervention()" ${isSubmitting ? "disabled" : ""}>
           <span>${isSubmitting ? "提交中…" : "提交反馈"}</span>
@@ -664,7 +671,14 @@ window.submitMobilePlanApproval = async function(approved) {
   if (!S.flow || !S.flow.run || S.humanForm.isSubmitting) return;
   const f = S.flow;
   let text = "";
-  if (approved) {
+  const form = normalizeHumanForm(f.run.paused_form, "");
+  const stage = form.kind === "stage_review_arbitration";
+  if (stage) {
+    if (approved && !form.requestId) return;
+    text = approved
+      ? `【阶段仲裁】允许继续修复，问题移交终审。\n<!--stage-review-approval:${form.requestId}-->`
+      : "【阶段仲裁】不批准继续修复。";
+  } else if (approved) {
     text = "【方案已批准】批准方案，请开始执行后续写入与测试步骤。\n<!--plan-decision:{\"approved\":true}-->";
   } else {
     const revEl = $("planRevisionInput");
@@ -679,7 +693,7 @@ window.submitMobilePlanApproval = async function(approved) {
       method: "POST",
       body: JSON.stringify({ text }),
     });
-    toast(approved ? "方案已批准，Agent 开始执行" : "方案已打回，Agent 重新推演");
+    toast(stage ? "阶段仲裁结果已提交" : (approved ? "方案已批准，Agent 开始执行" : "方案已打回，Agent 重新推演"));
     S.humanForm.runId = "";
     S.humanForm.writeInText = "";
     await loadFlow(f.sessionId);

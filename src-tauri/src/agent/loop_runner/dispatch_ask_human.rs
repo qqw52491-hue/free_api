@@ -38,6 +38,8 @@ pub(super) async fn dispatch_ask_human(
             .trim()
             .to_ascii_lowercase();
 
+        let is_stage_arbitration = ask_kind == "stage_review_arbitration";
+
         // 与前端 normalizeHumanForm 的别名表保持一致（plan_approval / plan / approval），
         // 显式声明为审批/门禁放行类型的表单
         let is_plan_approval_kind =
@@ -67,7 +69,7 @@ pub(super) async fn dispatch_ask_human(
             .collect();
 
         // 历史提问次数和文本相似度只作建议，不推断此前已有答案或本次不应询问。
-        if !is_plan_approval_kind {
+        if !is_plan_approval_kind && !is_stage_arbitration {
             if !crate::agent::checkpoint::is_credential_inquiry_kind(&ask_kind) {
                 let budget = crate::agent::channel::config::max_human_inquiry_budget();
                 if let Some(notice) = ctx.checkpoint.inquiry_budget_notice(budget) {
@@ -83,12 +85,11 @@ pub(super) async fn dispatch_ask_human(
         // 人工仲裁与放行上下文识别：
         // 明确带有 plan_approval/plan/approval kind，或门禁阻断/审查耗尽显式指示仲裁。
         let asks_git_operation = ctx.checkpoint.git_destructive_pending.iter().any(|command| ask_msg.contains(command));
-        let is_approval_context = is_plan_approval_kind || (!asks_git_operation && ( ctx.checkpoint.gate_human_escape_directed
-            || ctx.checkpoint.stage_review_blockers_open > 0
+        let is_approval_context = !is_stage_arbitration && (is_plan_approval_kind || (!asks_git_operation && ( ctx.checkpoint.gate_human_escape_directed
             || ctx.checkpoint.last_review_blocking_count > 0
             || (form_val.is_none()
                 && ctx.checkpoint.plan_reviewer_retry_count
-                    >= crate::agent::checkpoint::max_plan_reviewer_rounds())));
+                    >= crate::agent::checkpoint::max_plan_reviewer_rounds()))));
 
         // 若处于仲裁/审批上下文但模型未提供 form，自动补齐 plan_approval 结构化表单，
         // 使得前端直接渲染【批准方案】【打回修改】等可点击卡片，提升人机协作效率。
@@ -131,6 +132,56 @@ pub(super) async fn dispatch_ask_human(
             }
         }
 
+        if is_stage_arbitration {
+            if ctx.checkpoint.stage_arbitration.is_none() {
+                ctx.checkpoint.hydrate_stage_arbitration_findings(ctx.state.inner());
+                let findings = ctx.checkpoint.stage_arbitration_findings();
+                if findings.is_empty() {
+                    return Ok(ArmOutcome::Early(DispatchResult {
+                        view: None, success: false, stdout: String::new(),
+                        stderr: "当前无可定位的阶段阻塞项，未发起仲裁。请核对阶段审查记录。".into(),
+                        route: "stage_review:no_identified_blockers".into(),
+                    }));
+                }
+                ctx.checkpoint.stage_arbitration = Some(crate::agent::checkpoint::stage_state::StageArbitration {
+                    id: uuid::Uuid::new_v4().to_string(), findings,
+                });
+            }
+            let request = ctx.checkpoint.stage_arbitration.as_ref().unwrap();
+            final_form_val = Some(request.form(&ask_msg));
+        }
+
+        println!("⏸️ [阻塞点] 模型触发 ask_human 挂起，正在死等前端人类唤醒...");
+
+        // 方案审批与仲裁挂起时，将阶段设为 AwaitingApproval，供前端及 Checkpoint 呈现等待审批状态
+        if is_approval_context {
+            ctx.checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::AwaitingApproval;
+        }
+
+        // 真正的阻塞点：死等人类回复！
+        // ctx.rx 被我们在外层定义过了，这里可以直接 `.recv().await`
+        // git 破坏命令确认链路：若问题原文引用了挂起的命令指纹，标记为
+        // 「本次所问即该命令」——回复回来后按指纹核销（语义上确认与否归人类，
+        // 机械上只认命令原文在场）。
+        if !is_stage_arbitration {
+            ctx.checkpoint.git_destructive_mark_asked(&ask_msg);
+        }
+        ctx.checkpoint.wait_for_human(ask_msg.clone(), ctx.context);
+        if is_stage_arbitration || (is_plan_approval_kind && ctx.checkpoint.auto_plan_approval_pending) {
+            // wait_for_human clears prepared_instruction; keep the actual card so
+            // a restart can re-present the same approval with its decision semantics.
+            ctx.checkpoint.prepared_instruction = Some(inst.clone());
+        }
+        save_checkpoint(ctx.state.inner(), ctx.checkpoint)?;
+        crate::agent::advance_run_state(
+            ctx.app,
+            ctx.final_session_id,
+            ctx.parent_run_id,
+            ctx.run_machine,
+            AgentRunEvent::WaitForHuman {
+                question: ask_msg.clone(),
+            },
+        )?;
         // 通知前端进入暂停状态
         ctx.app.emit(
             &format!("agent-log-{}", ctx.final_session_id),
@@ -147,35 +198,6 @@ pub(super) async fn dispatch_ask_human(
         )
         .ok();
 
-        println!("⏸️ [阻塞点] 模型触发 ask_human 挂起，正在死等前端人类唤醒...");
-
-        // 方案审批与仲裁挂起时，将阶段设为 AwaitingApproval，供前端及 Checkpoint 呈现等待审批状态
-        if is_approval_context {
-            ctx.checkpoint.plan_phase = crate::agent::checkpoint::PlanPhase::AwaitingApproval;
-        }
-
-        // 真正的阻塞点：死等人类回复！
-        // ctx.rx 被我们在外层定义过了，这里可以直接 `.recv().await`
-        // git 破坏命令确认链路：若问题原文引用了挂起的命令指纹，标记为
-        // 「本次所问即该命令」——回复回来后按指纹核销（语义上确认与否归人类，
-        // 机械上只认命令原文在场）。
-        ctx.checkpoint.git_destructive_mark_asked(&ask_msg);
-        ctx.checkpoint.wait_for_human(ask_msg.clone(), ctx.context);
-        if is_plan_approval_kind && ctx.checkpoint.auto_plan_approval_pending {
-            // wait_for_human clears prepared_instruction; keep the actual card so
-            // a restart can re-present the same approval with its decision semantics.
-            ctx.checkpoint.prepared_instruction = Some(inst.clone());
-        }
-        save_checkpoint(ctx.state.inner(), ctx.checkpoint)?;
-        crate::agent::advance_run_state(
-            ctx.app,
-            ctx.final_session_id,
-            ctx.parent_run_id,
-            ctx.run_machine,
-            AgentRunEvent::WaitForHuman {
-                question: ask_msg.clone(),
-            },
-        )?;
         crate::agent::control::mark_stage(ctx.final_session_id, "ask_human:waiting_reply");
         let mut reply_message_id = None;
         let (reply, received_human_reply) = match ctx.rx.recv().await {
@@ -200,13 +222,18 @@ pub(super) async fn dispatch_ask_human(
                     route: RUN_INTERRUPTED_ROUTE.to_string(),
                 }))
             }
-            None if ctx.checkpoint.auto_plan_approval_pending => {
+            None if is_stage_arbitration || ctx.checkpoint.auto_plan_approval_pending => {
                 return Ok(ArmOutcome::Early(DispatchResult { view: None, success: true,
                     stdout: "人工审批通道已关闭，方案尚未批准。".into(), stderr: String::new(),
                     route: RUN_INTERRUPTED_ROUTE.to_string() }));
             }
             None => ("人类未回复，通道异常关闭".to_string(), false),
         };
+        if is_stage_arbitration {
+            let count = ctx.checkpoint.apply_stage_arbitration_reply(&reply).unwrap_or(0);
+            ctx.checkpoint.stage_arbitration = None;
+            ctx.context.add_host_feedback(&format!("人工阶段仲裁：{count} 条仍匹配卡片的问题移交终审。"));
+        }
         ctx.context.add_error_feedback(&format!("【人类回复】{}", reply));
         // 按钮是明确结构化操作；自由文本留给主模型正常下一轮理解。
         let explicit_plan = (received_human_reply && is_approval_context).then(|| parse_plan_approval_decision(&reply)).flatten();

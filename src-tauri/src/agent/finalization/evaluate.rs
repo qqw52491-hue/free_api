@@ -397,6 +397,12 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
     if !review_enabled {
         review=ReceiptReview::NotRequired;
         material_notices.push("按本轮配置未新增独立终审；实际验证及已有阻塞继续保留。".into());
+        if !checkpoint.stage_review_final_only.is_empty() {
+            material_notices.push(format!(
+                "以下阶段发现已保留，尚未经独立终审核对：\n{}",
+                checkpoint.stage_review_final_only.join("\n")
+            ));
+        }
         if let Some(previous)=checkpoint.last_review_result.as_ref().filter(|r|!r.is_passed()&&!r.is_service_failure()) {
             blockers.extend(previous.blocking_issues.iter().map(|issue|format!("已有审查阻塞未核销：[{}] {}",issue.file,issue.issue)));
         }
@@ -850,7 +856,7 @@ async fn collect_checks(
     }
     if checkpoint.stage_review_blockers_open > 0 {
         open_todos.push(format!(
-        "阶段审查仍有 {} 条未解决的 blocking 缺陷：请先调用 resume_child 对质撤回，或调用 ask_human 申请人工仲裁放行",
+        "阶段审查仍有 {} 条未解决的 blocking 缺陷：已有新证据时可调用 resume_child 逐项复核；认可问题但修复写入受阻时，可调用 ask_human（kind: stage_review_arbitration）说明受阻改动和验证方法，请求人工裁决。",
         checkpoint.stage_review_blockers_open
     ));
     }

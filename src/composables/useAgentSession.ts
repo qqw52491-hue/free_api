@@ -348,6 +348,7 @@ export function normalizeHumanForm(raw: unknown, fallbackTitle: string): AgentHu
         confirm: "confirm", confirmation: "confirm", text: "text", input: "text",
         file: "file_picker", file_picker: "file_picker", upload: "file_picker", files: "file_picker",
         custom_html: "custom_html", html: "custom_html", custom: "custom_html",
+        stage_review_arbitration: "stage_review_arbitration",
         plan_approval: "plan_approval", plan: "plan_approval", approval: "plan_approval",
     };
     const htmlCode = toText(data.html || data.custom_html || (rawKind === "custom_html" || rawKind === "html" ? data.description : ""));
@@ -368,6 +369,7 @@ export function normalizeHumanForm(raw: unknown, fallbackTitle: string): AgentHu
             : toText(defaultRaw) || undefined;
     return {
         kind,
+        requestId: toText(data.request_id) || undefined,
         title: toText(data.title || data.label || fallbackTitle) || fallbackTitle,
         description: kind === "custom_html" ? undefined : (toText(data.description || data.help) || undefined),
         placeholder: toText(data.placeholder).slice(0, 160) || undefined,

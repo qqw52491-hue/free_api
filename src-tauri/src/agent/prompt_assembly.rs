@@ -63,7 +63,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
     BuiltinToolSpec {
         name: "ask_human",
         summary: "请求人类输入、选择或确认；form支持 single_select|multi_select|confirm|text|file_picker|custom_html",
-        actions: &["ask_human(message: string, form?: {kind, title, options?: [{id, label}]})"],
+        actions: &["ask_human(message: string, kind?: plan_approval|stage_review_arbitration, form?: {kind, title, options?: [{id, label}]}) — 阶段仲裁用于修复写入被阶段审查拦截，message 说明拟修改内容和验证方法"],
     },
     BuiltinToolSpec {
         name: "get_step_output",

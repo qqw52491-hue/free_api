@@ -17,7 +17,7 @@ mod inquiry_ops;
 mod plan_batch;
 mod plan_ops;
 mod review_state;
-mod stage_state;
+pub(crate) mod stage_state;
 #[cfg(test)]
 mod review_state_tests;
 mod task_resume;
@@ -58,6 +58,8 @@ pub struct AgentCheckpoint {
     /// LLM 已返回且已确认的结构化决策；工具开始前也必须可恢复。
     #[serde(default)]
     pub prepared_instruction: Option<AgentInstruction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) stage_arbitration: Option<stage_state::StageArbitration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_dispatch_batch: Option<Box<ChildDispatchBatch>>,
     pub step_id: usize,
@@ -410,6 +412,7 @@ impl AgentCheckpoint {
             data: DurableAgentContext::capture(context),
             pending: None,
             prepared_instruction: None,
+            stage_arbitration: None,
             child_dispatch_batch: None,
             step_id: 0,
             retry_count: 0,
@@ -942,10 +945,13 @@ pub async fn get_agent_checkpoint(
 ) -> Result<Option<AgentCheckpointSummary>, String> {
     let checkpoint = load_checkpoint(state.inner(), &session_id)?;
     Ok(checkpoint.map(|cp| {
-        let form = cp
+        let form = cp.stage_arbitration.as_ref()
+            .filter(|_| cp.phase == AgentPhase::WaitUser)
+            .map(|request| request.form(cp.last_error.as_deref().unwrap_or_default()))
+            .or_else(|| cp
             .prepared_instruction
             .as_ref()
-            .and_then(|inst| inst.get_params().get("form").cloned())
+            .and_then(|inst| inst.get_params().get("form").cloned()))
             .or_else(|| {
                 cp.pending
                     .as_ref()

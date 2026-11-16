@@ -169,8 +169,9 @@ pub(super) fn finish_review_bypass(
     triage: Option<&crate::agent::triage::TriageVerdict>,
     mechanical_anomalies: &[String],
     has_task_files: bool,
+    stage_carry_over: &[String],
 ) -> Option<ReviewResult> {
-    if !mechanical_anomalies.is_empty() {
+    if !mechanical_anomalies.is_empty() || !stage_carry_over.is_empty() {
         return None;
     }
     if triage.is_some_and(|v| v.final_review_mode.eq_ignore_ascii_case("mechanical_only")) {
@@ -224,7 +225,7 @@ pub async fn evaluate_finish_diff<R: tauri::Runtime>(
     if model_routing.stage_review_committee {
         let (_, selected) = task_review_snapshot(db, session_id, workspace, context, baseline, run_started_at, delivery_paths);
         let anomalies = sniff_task_file_anomalies(&selected.paths);
-        if let Some(result) = finish_review_bypass(context, session_id, run_started_at, triage, &anomalies, !selected.paths.is_empty() || !delivery_paths.is_empty()) {
+        if let Some(result) = finish_review_bypass(context, session_id, run_started_at, triage, &anomalies, !selected.paths.is_empty() || !delivery_paths.is_empty(), stage_carry_over) {
             return result;
         }
         return super::finish_committee::evaluate_committee(app, db, context, model_routing, step_id, workspace, baseline, run_started_at, session_id, interrupt_rx, last_reviewed_hash, last_review_result, stage_carry_over, host_verification, human_waivers, gate_notices, approved_target_files, triage, _plan_mode, finish_summary, delivery_paths).await;
@@ -500,7 +501,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     let (snapshot, selected) = task_review_snapshot(db, session_id, workspace, context, baseline, run_started_at, delivery_paths);
     let mechanical_anomalies = sniff_task_file_anomalies(&selected.paths);
     if let Some(result) = finish_review_bypass(context, session_id, run_started_at, triage, &mechanical_anomalies,
-        !selected.paths.is_empty() || !delivery_paths.is_empty()) {
+        !selected.paths.is_empty() || !delivery_paths.is_empty(), stage_carry_over) {
         return result;
     }
     let (mut review_material, diff_hash) = (snapshot.material, snapshot.hash);
@@ -585,6 +586,11 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     let review_fingerprint = with_execution_evidence_fingerprint(
         &evidence_fingerprint, execution_evidence.as_deref(),
     );
+    let review_fingerprint = if stage_carry_over.is_empty() {
+        review_fingerprint
+    } else {
+        with_execution_evidence_fingerprint(&review_fingerprint, Some(&serde_json::to_string(stage_carry_over).unwrap_or_default()))
+    };
     let excluded = crate::agent::review_control::excluded_models(db, session_id).unwrap_or_default();
     let review_fingerprint = if excluded.is_empty() { review_fingerprint } else {
         with_execution_evidence_fingerprint(&review_fingerprint, Some(&serde_json::to_string(&excluded).unwrap_or_default()))
@@ -1235,9 +1241,9 @@ mod contract_handoff_tests {
         let mut triage = crate::agent::triage::TriageVerdict::fallback("fixture");
         triage.final_review_mode = "mechanical_only".into();
         assert!(finish_review_bypass(&context, "anomaly-fixture", chrono::Utc::now(),
-            Some(&triage), &["产物魔数不符".into()], true).is_none());
+            Some(&triage), &["产物魔数不符".into()], true, &[]).is_none());
         assert!(finish_review_bypass(&context, "anomaly-fixture", chrono::Utc::now(),
-            None, &["产物为零字节".into()], true).is_none());
+            None, &["产物为零字节".into()], true, &[]).is_none());
     }
 
     #[test]
@@ -1253,12 +1259,14 @@ mod contract_handoff_tests {
         ] {
             v.final_review_mode = mode.into();
             assert!(
-                finish_review_bypass(&c, "owner", chrono::Utc::now(), Some(&v), &[], false).is_none()
+                finish_review_bypass(&c, "owner", chrono::Utc::now(), Some(&v), &[], false, &[]).is_none()
             );
         }
         v.route = "direct".into();
         v.final_review_mode = "mechanical_only".into();
-        assert!(finish_review_bypass(&c, "owner", chrono::Utc::now(), Some(&v), &[], false).is_some());
+        assert!(finish_review_bypass(&c, "owner", chrono::Utc::now(), Some(&v), &[], false, &[]).is_some());
+        assert!(finish_review_bypass(&c, "owner", chrono::Utc::now(), Some(&v), &[], false,
+            &["【人工仲裁移交终审】F1 待核对".into()]).is_none());
     }
 
     #[test]

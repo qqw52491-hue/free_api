@@ -761,7 +761,7 @@ pub fn apply_stage_receipt(
     append_stage_review_details(&mut text, receipt);
     if checkpoint.stage_review_blockers_open > 0 {
         text.push_str(&format!(
-            "\n🚨 后续写入已被拦截，请用 resume_child 对质解套（child_run_id 见门禁提示）。"
+            "\n🚨 后续写入已被拦截。已有新证据可用 resume_child 逐项复核；认可问题但修复写入也受阻时，可通过 ask_human（kind: stage_review_arbitration）说明情况请求裁决（child_run_id 见门禁提示）。"
         ));
     }
     if !checkpoint.stage_review_final_only.is_empty() {

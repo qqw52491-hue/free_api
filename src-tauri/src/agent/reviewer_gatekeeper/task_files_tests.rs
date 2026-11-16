@@ -142,7 +142,8 @@ async fn registered_products_are_checked_without_scanning_unregistered_tmp_files
         start,
         Some(&triage),
         &sniff_task_file_anomalies(&files.paths),
-        true
+        true,
+        &[]
     )
     .is_none());
 }

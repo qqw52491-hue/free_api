@@ -18,5 +18,5 @@ export function withPlanDecision(text: string, approved: boolean): string {
 
 /** 日志与展示层剥离结构化标记，避免把 HTML 注释原样呈现给用户。 */
 export function stripPlanDecisionMarker(text: string): string {
-  return text.replace(/\n?<!--plan-decision:\s*\{[^}]*\}\s*-->/g, "");
+  return text.replace(/\n?<!--(?:plan-decision:\s*\{[^}]*\}\s*|stage-review-approval:[\w-]+)-->/g, "");
 }

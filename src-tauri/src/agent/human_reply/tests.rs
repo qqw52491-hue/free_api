@@ -105,3 +105,12 @@ fn model_plan_approval_cannot_be_borrowed_from_an_unrelated_question() {
         .unwrap();
     assert_eq!(cp.plan_phase, PlanPhase::Reviewing);
 }
+
+#[test]
+fn approving_a_plan_preserves_open_stage_findings() {
+    let (data, mut context, mut cp) = fixture("批准方案");
+    cp.stage_review_blockers_open = 2;
+    cp.apply_explicit_plan_decision(&data.db, &mut context, true, "批准当前方案？", "批准");
+    assert_eq!(cp.plan_phase, PlanPhase::Approved);
+    assert_eq!(cp.stage_review_blockers_open, 2);
+}

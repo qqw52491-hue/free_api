@@ -156,10 +156,6 @@ impl AgentCheckpoint {
         self.recent_gate_block_step = None;
         self.approved_plan_summary = Some(reply.chars().take(500).collect());
         self.record_human_review_waiver(db, context, &format!("问: {question} → 答: {reply}"));
-        if self.stage_review_blockers_open > 0 {
-            self.clear_stage_review_blockers();
-            self.stage_review_blocker_stage = None;
-        }
         self.last_review_blocking_count = 0;
         self.last_reviewed_diff_hash = None;
         self.last_review_result = None;

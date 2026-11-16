@@ -1206,6 +1206,17 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
                 recovered_instruction = None;
             }
         }
+        RecoveryDecision::ResumeWaiting if checkpoint.stage_arbitration.is_some() => {
+            if let Some(count) = checkpoint.apply_stage_arbitration_reply(&goal) {
+                context.add_host_feedback(&format!("人工阶段仲裁：{count} 条仍匹配卡片的问题移交终审。"));
+                checkpoint.begin_planning(checkpoint.step_id, &context);
+                crate::agent::checkpoint::save_checkpoint_and_claim_chats(
+                    state.inner(), &mut checkpoint, &run_id, &mut context,
+                )?;
+            } else {
+                recovered_instruction = checkpoint.prepared_instruction.clone();
+            }
+        }
         RecoveryDecision::ResumeWaiting if checkpoint.auto_plan_approval_pending
             && checkpoint.prepared_instruction.as_ref().is_some_and(|i| i.get_tool().eq_ignore_ascii_case("ask_human")) => {
             // 恢复已展示的审批卡：复用原 ask_human 表单与结构化按钮处理。
