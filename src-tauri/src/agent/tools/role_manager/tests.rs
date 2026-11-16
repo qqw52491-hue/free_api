@@ -445,7 +445,7 @@ fn explicit_tech_lead_choice_is_not_bypassed() {
 #[test]
 fn skills_block_whitelist_injects_listed_docs_only() {
     let card = RoleCard {
-        allowed_skills: "code_review, nonexistent_skill".into(),
+        allowed_skills: "workspace_fixture_review, nonexistent_skill".into(),
         ..RoleCard {
             execution_defaults: String::new(),
             id: "x".into(), name: "n".into(), label: "l".into(),
@@ -467,14 +467,13 @@ fn skills_block_whitelist_injects_listed_docs_only() {
             created_at TEXT NOT NULL, updated_at TEXT NOT NULL);",
     ).unwrap();
     let db = crate::db::DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
-    let block = skills_block(&db, &card);
-    if block.is_empty() {
-        // 开发环境若无 prompts/skills 目录则跳过断言
-        eprintln!("skills dir 不存在，跳过注入断言");
-    } else {
-        assert!(block.contains("code_review"));
-        assert!(block.contains("不存在"));
-    }
+    let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(root.join("skills")).unwrap();
+    std::fs::write(root.join("skills/workspace_fixture_review.md"), "工作区专属审查步骤").unwrap();
+    let block = skills_block(&db, &card, Some(&root));
+    assert!(block.contains("工作区专属审查步骤"));
+    assert!(block.contains("不存在"));
+    std::fs::remove_dir_all(&root).unwrap();
     // 空白名单不注入
     let empty = skills_block(&db, &RoleCard {
  execution_defaults: String::new(),
@@ -486,7 +485,7 @@ fn skills_block_whitelist_injects_listed_docs_only() {
         is_system: false,
         custom_schema: String::new(), focus_domains: String::new(),
         input_schema: String::new(), allowed_skills: String::new(), allowed_mcp: String::new(),
-    });
+    }, None);
     assert!(empty.is_empty());
 }
 

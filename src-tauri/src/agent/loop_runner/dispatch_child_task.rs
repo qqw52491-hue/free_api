@@ -433,7 +433,7 @@ async fn dispatch_inner(
     let role_context = if let Some((_, context)) = &registered_role {
         context.clone()
     } else {
-        task_role.as_ref().map(|card|format!("{}\n{}\n{}",crate::agent::tools::role_manager::persona_block(card),crate::agent::tools::role_manager::skills_block(ctx.state.inner(),card),card.parse_custom_schema().map(|s|s.render_prompt_instructions()).unwrap_or_default())).unwrap_or_default()
+        task_role.as_ref().map(|card|format!("{}\n{}\n{}",crate::agent::tools::role_manager::persona_block(card),crate::agent::tools::role_manager::skills_block(ctx.state.inner(),card,Some(ctx.workspace_dir)),card.parse_custom_schema().map(|s|s.render_prompt_instructions()).unwrap_or_default())).unwrap_or_default()
     };
     let id = match existing {
         Some(id) => id,

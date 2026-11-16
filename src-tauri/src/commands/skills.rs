@@ -150,8 +150,7 @@ fn normalized_custom_instruction(
 
 /// 已启用的用户条目只作为受控补充上下文，不替代内置系统约束、工具契约或当前任务。
 /// 分流语义：kind='prompt' 常驻注入（全局规则/偏好）；kind='skill' 不常驻——
-/// 走 triage 路由索引 + 按需懒加载（skill_routing_index_with_db /
-/// load_skill_doc_with_db），与文件技能同一口径，避免长手册常驻烧 token。
+/// 走入口路由索引和按需加载，与文件技能共用查找顺序。
 pub fn load_enabled_custom_instruction_context(db: &DbState) -> Result<String, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
@@ -392,151 +391,163 @@ pub async fn generate_skill_capability_card(
 pub struct BatchSkillImportResult {
     pub name: String,
     pub success: bool,
+    pub skipped: bool,
     pub description: String,
     pub error: Option<String>,
+    pub warning: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SkillImportItem {
+    name: String,
+    description: Option<String>,
+    content: String,
+}
+
+fn parse_skill_import(payload: &str) -> Result<Vec<SkillImportItem>, String> {
+    let text = payload.trim();
+    if text.is_empty() {
+        return Err("导入内容不能为空".into());
+    }
+    if text.starts_with(['[', '{']) {
+        let value: serde_json::Value = serde_json::from_str(text)
+            .map_err(|error| format!("JSON 格式错误：{error}"))?;
+        let items = if value.is_array() {
+            value
+        } else if let Some(items) = value.get("skills") {
+            items.clone()
+        } else {
+            serde_json::Value::Array(vec![value])
+        };
+        let items: Vec<SkillImportItem> = serde_json::from_value(items)
+            .map_err(|error| format!("每条 Skill 需有名称和正文：{error}"))?;
+        if items.is_empty() {
+            return Err("没有可导入的 Skill".into());
+        }
+        return Ok(items);
+    }
+
+    if !text.starts_with("### ") {
+        return Ok(vec![SkillImportItem { name: "自定义技能".into(), description: None, content: text.into() }]);
+    }
+    let mut items: Vec<SkillImportItem> = Vec::new();
+    let mut fence: Option<(char, usize)> = None;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let marker = trimmed.chars().next().filter(|c| matches!(c, '`' | '~'));
+        let width = marker.map_or(0, |c| trimmed.chars().take_while(|item| *item == c).count());
+        if let Some((c, min)) = fence {
+            if marker == Some(c) && width >= min && trimmed[width..].trim().is_empty() {
+                fence = None;
+            }
+        } else if let Some(title) = line.strip_prefix("### ") {
+            items.push(SkillImportItem { name: title.trim().into(), description: None, content: String::new() });
+            continue;
+        } else if let Some(c) = marker.filter(|_| width >= 3) {
+            fence = Some((c, width));
+        }
+        if let Some(item) = items.last_mut() {
+            item.content.push_str(line);
+            item.content.push('\n');
+        }
+    }
+    Ok(items)
+}
+
+fn insert_imported_skill(db: &DbState, item: &SkillImportItem) -> Result<Option<(String, String)>, String> {
+    let (_, name, description, content) = normalized_custom_instruction(
+        "skill", &item.name, item.description.as_deref(), &item.content,
+    )?;
+    let id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    let conn = db.0.lock().map_err(|error| error.to_string())?;
+    let inserted = conn.execute(
+        "INSERT INTO agent_custom_instructions (id,kind,name,description,content,enabled,created_at,updated_at)
+         SELECT ?1,'skill',?2,?3,?4,1,?5,?5
+         WHERE NOT EXISTS (SELECT 1 FROM agent_custom_instructions WHERE kind='skill' AND name=?2)",
+        params![id, name, description, content, now],
+    ).map_err(|error| error.to_string())?;
+    Ok((inserted == 1).then_some((id, description)))
 }
 
 #[tauri::command]
 pub async fn batch_import_skills(
-    app_handle: tauri::AppHandle,
     state: State<'_, DbState>,
     import_payload: String,
     model_id: Option<String>,
 ) -> Result<Vec<BatchSkillImportResult>, String> {
-    let trimmed = import_payload.trim();
-    if trimmed.is_empty() {
-        return Err("导入内容不能为空".to_string());
-    }
-
-    let mut parsed_skills: Vec<(String, Option<String>, String)> = Vec::new();
-
-    if trimmed.starts_with('[') || trimmed.starts_with('{') {
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            let list = if let Some(arr) = val.as_array() {
-                arr.clone()
-            } else if let Some(arr) = val.get("skills").and_then(|v| v.as_array()) {
-                arr.clone()
-            } else {
-                vec![val]
-            };
-
-            for item in list {
-                if let (Some(name), Some(content)) = (
-                    item.get("name").and_then(|v| v.as_str()),
-                    item.get("content").and_then(|v| v.as_str()),
-                ) {
-                    let desc = item
-                        .get("description")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    parsed_skills.push((name.trim().to_string(), desc, content.trim().to_string()));
-                }
-            }
-        }
-    }
-
-    if parsed_skills.is_empty() {
-        let mut cur_title = String::new();
-        let mut cur_lines = Vec::new();
-
-        for line in trimmed.lines() {
-            if line.starts_with("### ") || line.starts_with("## ") || line.starts_with("# ") {
-                if !cur_title.is_empty() && !cur_lines.is_empty() {
-                    parsed_skills.push((
-                        cur_title.clone(),
-                        None,
-                        cur_lines.join("\n").trim().to_string(),
-                    ));
-                    cur_lines.clear();
-                }
-                cur_title = line.trim_start_matches('#').trim().to_string();
-            } else {
-                cur_lines.push(line);
-            }
-        }
-        if !cur_title.is_empty() && !cur_lines.is_empty() {
-            parsed_skills.push((cur_title, None, cur_lines.join("\n").trim().to_string()));
-        }
-    }
-
-    if parsed_skills.is_empty() {
-        parsed_skills.push(("自定义技能".to_string(), None, trimmed.to_string()));
-    }
-
-    let model_cfg = if let Some(ref mid) = model_id.filter(|s| !s.trim().is_empty()) {
-        ModelConfig::from_db(&state, mid)?
-    } else {
-        let conn = state.0.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn
-            .prepare("SELECT m.id FROM models m JOIN platforms p ON p.id = m.platform_id WHERE m.enabled = 1 ORDER BY m.created_at DESC")
-            .map_err(|e| e.to_string())?;
-        let model_ids: Vec<String> = stmt
-            .query_map([], |row| row.get(0))
-            .ok()
-            .map(|rows| rows.flatten().collect())
-            .unwrap_or_default();
-        drop(stmt);
-        drop(conn);
-
-        let mut found = None;
-        for id in model_ids {
-            if let Ok(cfg) = ModelConfig::from_db(&state, &id) {
-                found = Some(cfg);
-                break;
-            }
-        }
-        found.ok_or_else(|| "未找到可用的大模型配置，请先在模型管理中配置 API Key".to_string())?
-    };
-
-    let mut results = Vec::new();
-    for (name, desc_opt, content) in parsed_skills {
-        let desc = match desc_opt {
-            Some(d) if !d.trim().is_empty() => d.trim().to_string(),
-            _ => {
-                if let Ok(summary) = crate::agent::skill_context::generate_llm_skill_summary(
-                    &name, &content, &model_cfg,
-                )
-                .await
-                {
-                    summary
-                } else {
-                    String::new()
-                }
-            }
+    let items = parse_skill_import(&import_payload)?;
+    let mut results = Vec::with_capacity(items.len());
+    for item in items {
+        let mut result = BatchSkillImportResult {
+            name: item.name.trim().to_string(),
+            success: false,
+            skipped: false,
+            description: String::new(),
+            error: None,
+            warning: None,
         };
-
-        match save_agent_custom_instruction(
-            app_handle.clone(),
-            state.clone(),
-            None,
-            "skill".to_string(),
-            name.clone(),
-            if desc.is_empty() {
-                None
-            } else {
-                Some(desc.clone())
-            },
-            content,
-            true,
-        ) {
-            Ok(_) => {
-                results.push(BatchSkillImportResult {
-                    name,
-                    success: true,
-                    description: desc,
-                    error: None,
-                });
+        match insert_imported_skill(state.inner(), &item) {
+            Ok(Some((id, description))) => {
+                result.success = true;
+                result.description = description;
+                if let Some(model) = model_id.as_deref().filter(|id| !id.trim().is_empty() && result.description.is_empty()) {
+                    let summary = match ModelConfig::from_db(&state, model) {
+                        Ok(config) => crate::agent::skill_context::generate_llm_skill_summary(&result.name, &item.content, &config).await,
+                        Err(error) => Err(error),
+                    };
+                    let saved = summary.and_then(|summary| {
+                        let summary: String = summary.trim().chars().take(240).collect();
+                        let conn = state.0.lock().map_err(|error| error.to_string())?;
+                        let changed = conn.execute(
+                            "UPDATE agent_custom_instructions SET description=?1 WHERE id=?2 AND description='' AND content=?3",
+                            params![summary, id, item.content.trim()],
+                        ).map_err(|error| error.to_string())?;
+                        Ok((changed == 1).then_some(summary).unwrap_or_default())
+                    });
+                    match saved {
+                        Ok(summary) => result.description = summary,
+                        Err(error) => result.warning = Some(format!("原文已导入，AI 提炼失败：{error}")),
+                    }
+                }
             }
-            Err(e) => {
-                results.push(BatchSkillImportResult {
-                    name,
-                    success: false,
-                    description: desc,
-                    error: Some(e),
-                });
+            Ok(None) => {
+                result.skipped = true;
+                result.warning = Some("已有同名自定义 Skill，已跳过并保留原有内容。".into());
             }
+            Err(error) => result.error = Some(error),
         }
+        results.push(result);
+    }
+    Ok(results)
+}
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+
+    #[test]
+    fn import_preserves_original_skill_and_skips_same_name_without_model_tables() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE agent_custom_instructions(
+                id TEXT PRIMARY KEY, kind TEXT, name TEXT, description TEXT,
+                content TEXT, enabled INTEGER, created_at TEXT, updated_at TEXT);",
+        ).unwrap();
+        let db = DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
+        let items = parse_skill_import(r#"[{"name":"审查","description":"提交前使用","content":"原文"}]"#).unwrap();
+        assert!(insert_imported_skill(&db, &items[0]).unwrap().is_some());
+        let items = parse_skill_import(r#"{"name":"审查","content":"覆盖内容"}"#).unwrap();
+        assert!(insert_imported_skill(&db, &items[0]).unwrap().is_none());
+        assert_eq!(crate::agent::skill_context::db_skill_doc(&db, "审查", 100).as_deref(), Some("原文"));
     }
 
-    Ok(results)
+    #[test]
+    fn markdown_import_keeps_document_headings_and_fenced_examples() {
+        let items = parse_skill_import("### 一\n## 步骤\n```md\n### 示例标题\n```\n### 二\n正文").unwrap();
+        assert_eq!(items.len(), 2);
+        assert!(items[0].content.contains("## 步骤"));
+        assert!(items[0].content.contains("### 示例标题"));
+        assert!(parse_skill_import("[{broken}]").is_err());
+    }
 }

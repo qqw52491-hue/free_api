@@ -65,13 +65,13 @@ pub async fn sync_mcp_plugins_for_session(
             }
         }
 
-        // DB 管理插件对账：期望集合来自当前 DB 行（含 enabled 状态）。
-        // reconcile 只作用于 ManagedDb 来源项：DB 行已删除或禁用 → 从 registry 移除；
+        // 已删除、禁用或连接配置变化的 DB 插件都要移除；
         // Yaml 来源项永不因 DB 对账被移除。
         let managed_plugins = crate::commands::load_managed_mcp_plugins(db)?;
-        let desired: std::collections::HashMap<String, bool> = managed_plugins
+        let desired: std::collections::HashMap<String, String> = managed_plugins
             .iter()
-            .map(|managed| (managed.config.name.clone(), managed.enabled))
+            .filter(|managed| managed.enabled)
+            .map(|managed| (managed.config.name.clone(), crate::agent::mcp_catalog::fingerprint(&managed.config)))
             .collect();
 
         let removed = {
@@ -83,7 +83,7 @@ pub async fn sync_mcp_plugins_for_session(
         };
         for name in &removed {
             println!(
-                "🗑️ 卸载已删除/禁用的 DB 插件: {}（配置变更在本次会话同步点生效）",
+                "🗑️ 卸载已删除、禁用或配置已变更的 DB 插件: {}",
                 name
             );
         }

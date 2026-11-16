@@ -29,12 +29,12 @@ pub struct PluginRegistry {
 }
 
 /// 纯对账函数：让运行中的 ManagedDb 注册项与 DB 期望集合一致。
-/// desired 的键为 DB 管理插件名，值为 enabled 状态。
+/// desired 只包含已启用配置，值为连接配置指纹。
 /// 返回被移除的插件名列表（供日志/事件使用）。Yaml 来源项永远保留。
 pub fn reconcile_managed_plugins(
     clients: &mut HashMap<String, Arc<McpClient>>,
     sources: &mut HashMap<String, PluginSource>,
-    desired: &HashMap<String, bool>,
+    desired: &HashMap<String, String>,
 ) -> Vec<String> {
     let managed_names: Vec<String> = sources
         .iter()
@@ -44,7 +44,9 @@ pub fn reconcile_managed_plugins(
 
     let mut removed = Vec::new();
     for name in managed_names {
-        let keep = desired.get(&name).copied().unwrap_or(false);
+        let keep = desired.get(&name).zip(clients.get(&name)).is_some_and(|(fingerprint, client)| {
+            *fingerprint == crate::agent::mcp_catalog::fingerprint(&client.config)
+        });
         if !keep {
             clients.remove(&name);
             sources.remove(&name);
@@ -422,7 +424,10 @@ mod tests {
             ("managed-a", PluginSource::ManagedDb),
             ("managed-b", PluginSource::ManagedDb),
         ]);
-        let desired = HashMap::from([("managed-a".to_string(), true)]);
+        let desired = HashMap::from([(
+            "managed-a".to_string(),
+            crate::agent::mcp_catalog::fingerprint(&clients["managed-a"].config),
+        )]);
 
         let removed = reconcile_managed_plugins(&mut clients, &mut sources, &desired);
 
@@ -435,8 +440,8 @@ mod tests {
     #[test]
     fn reconcile_removes_disabled_managed_plugin() {
         let (mut clients, mut sources) = registry_with(&[("managed-a", PluginSource::ManagedDb)]);
-        // desired 里存在但 enabled=false → 必须移除
-        let desired = HashMap::from([("managed-a".to_string(), false)]);
+        // 禁用条目不会进入期望的启用集合。
+        let desired = HashMap::new();
 
         let removed = reconcile_managed_plugins(&mut clients, &mut sources, &desired);
 
@@ -446,13 +451,36 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_replaces_changed_credentials_but_keeps_unchanged_clients() {
+        let (mut clients, mut sources) = registry_with(&[
+            ("edited", PluginSource::ManagedDb),
+            ("unchanged", PluginSource::ManagedDb),
+        ]);
+        let old = clients["edited"].clone();
+        let unchanged = clients["unchanged"].clone();
+        let mut updated = old.config.clone();
+        updated.headers.insert("Authorization".into(), "Bearer fixture".into());
+        let desired = HashMap::from([
+            ("edited".into(), crate::agent::mcp_catalog::fingerprint(&updated)),
+            ("unchanged".into(), crate::agent::mcp_catalog::fingerprint(&unchanged.config)),
+        ]);
+        assert_eq!(reconcile_managed_plugins(&mut clients, &mut sources, &desired), ["edited"]);
+        assert!(!clients.contains_key("edited"));
+        assert!(Arc::ptr_eq(&clients["unchanged"], &unchanged));
+        let mut registry = PluginRegistry { clients, sources };
+        registry.insert_with_source("edited".into(), Arc::new(McpClient::spawn(updated).unwrap()), PluginSource::ManagedDb).unwrap();
+        assert_eq!(registry.clients["edited"].config.headers["Authorization"], "Bearer fixture");
+        assert!(old.config.headers.is_empty());
+    }
+
+    #[test]
     fn reconcile_never_removes_yaml_plugin_due_to_db_diff() {
         let (mut clients, mut sources) = registry_with(&[
             ("yaml-x", PluginSource::Yaml),
             ("managed-a", PluginSource::ManagedDb),
         ]);
         // DB 期望集合为空（例如 DB 被清空）：只允许移除 managed 项
-        let desired: HashMap<String, bool> = HashMap::new();
+        let desired = HashMap::new();
 
         let removed = reconcile_managed_plugins(&mut clients, &mut sources, &desired);
 

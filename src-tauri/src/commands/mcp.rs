@@ -19,6 +19,9 @@ pub struct McpPluginRow {
     pub id: String,
     pub name: String,
     pub command: String,
+    pub url: Option<String>,
+    pub has_bearer_token: bool,
+    pub header_names: Vec<String>,
     pub args: Vec<String>,
     pub env: std::collections::HashMap<String, String>,
     pub capability_card: String,
@@ -215,6 +218,11 @@ pub async fn get_mcp_plugins(state: State<'_, DbState>) -> Result<Vec<McpPluginR
                 m.config.command.clone()
             },
             args: m.config.args.clone(),
+            url: m.config.url.clone(),
+            has_bearer_token: m.config.headers.iter().any(|(key, value)| {
+                key.eq_ignore_ascii_case("authorization") && value.starts_with("Bearer ")
+            }),
+            header_names: editable_header_names(&m.config.headers),
             env: m.config.env.clone(),
             capability_card: m
                 .config
@@ -234,6 +242,168 @@ pub async fn get_mcp_plugins(state: State<'_, DbState>) -> Result<Vec<McpPluginR
         })
         .collect();
     Ok(rows)
+}
+
+pub(crate) fn editable_header_names(headers: &std::collections::HashMap<String, String>) -> Vec<String> {
+    let mut names: Vec<_> = headers.iter()
+        .filter(|(name, value)| !name.eq_ignore_ascii_case("authorization") || !value.starts_with("Bearer "))
+        .map(|(name, _)| name.clone())
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+fn apply_mcp_header_edits(
+    headers: &mut std::collections::HashMap<String, String>,
+    updates: Vec<(String, String)>,
+    removals: Vec<String>,
+    bearer_token: Option<&str>,
+) -> Result<(), String> {
+    let token = bearer_token.map(str::trim).filter(|value| !value.is_empty());
+    let mut seen = std::collections::HashSet::new();
+    for name in removals {
+        headers.retain(|key, _| !key.eq_ignore_ascii_case(&name));
+    }
+    for (name, value) in updates {
+        let name = name.trim();
+        let parsed = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| "请求头名称无效，请使用类似 X-API-Key 的名称")?;
+        if !seen.insert(parsed.clone()) || (parsed == reqwest::header::AUTHORIZATION && token.is_some()) {
+            return Err(format!("请求头 {name} 重复填写，Authorization 只需在一处设置"));
+        }
+        reqwest::header::HeaderValue::from_str(&value)
+            .map_err(|_| format!("请求头 {name} 的值无效，请使用单行内容"))?;
+        headers.retain(|key, _| !key.eq_ignore_ascii_case(name));
+        headers.insert(name.to_owned(), value);
+    }
+    if let Some(token) = token {
+        let value = format!("Bearer {token}");
+        reqwest::header::HeaderValue::from_str(&value).map_err(|_| "访问令牌必须是单行内容")?;
+        headers.retain(|key, _| !key.eq_ignore_ascii_case("authorization"));
+        headers.insert("Authorization".into(), value);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod draft_header_tests {
+    use super::*;
+
+    #[test]
+    fn edits_headers_independently_and_preserves_unedited_values() {
+        let mut headers = std::collections::HashMap::from([
+            ("X-API-Key".into(), "original".into()),
+            ("Authorization".into(), "Bearer saved".into()),
+            ("X-Old".into(), "remove-me".into()),
+        ]);
+        apply_mcp_header_edits(
+            &mut headers,
+            vec![("x-api-key".into(), "new".into()), ("X-Workspace".into(), "team".into())],
+            vec!["x-old".into()],
+            None,
+        ).unwrap();
+        assert_eq!(headers.len(), 3);
+        assert_eq!(headers["x-api-key"], "new");
+        assert_eq!(headers["X-Workspace"], "team");
+        assert_eq!(headers["Authorization"], "Bearer saved");
+        assert_eq!(editable_header_names(&headers), ["X-Workspace", "x-api-key"]);
+    }
+
+    #[test]
+    fn rejects_case_insensitive_duplicates_and_two_authorization_values() {
+        let mut headers = std::collections::HashMap::new();
+        assert!(apply_mcp_header_edits(
+            &mut headers, vec![("X-Key".into(), "1".into()), ("x-key".into(), "2".into())],
+            vec![], None,
+        ).is_err());
+        assert!(apply_mcp_header_edits(
+            &mut headers, vec![("authorization".into(), "Basic test".into())], vec![], Some("token"),
+        ).is_err());
+    }
+}
+
+/// Test the draft configuration, or save a remote draft. A test only performs
+/// the MCP handshake and tool discovery. It does not generate a capability card.
+#[tauri::command]
+pub async fn configure_mcp_draft(
+    state: State<'_, DbState>,
+    name: String,
+    remote_url: Option<String>,
+    bearer_token: Option<String>,
+    custom_headers: Option<Vec<(String, String)>>,
+    removed_headers: Option<Vec<String>>,
+    command: Option<String>,
+    args: Option<Vec<String>>,
+    env: Option<std::collections::HashMap<String, String>>,
+    capability_card: Option<String>,
+    save: bool,
+    editing: bool,
+) -> Result<usize, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("请填写插件名称".into());
+    }
+    let url = remote_url.map(|url| {
+        let parsed = Url::parse(url.trim()).map_err(|_| "请输入有效的 HTTP 或 HTTPS 地址")?;
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.host().is_none()
+            || !parsed.username().is_empty() || parsed.password().is_some()
+        {
+            return Err("请输入有效的 HTTP 或 HTTPS 地址");
+        }
+        Ok(parsed.to_string())
+    }).transpose()?;
+    let existing = load_managed_mcp_plugins(state.inner())?.into_iter()
+        .find(|plugin| plugin.config.name == name);
+    if !editing && existing.is_some() {
+        return Err("该名称已存在，请从列表打开原配置编辑".into());
+    }
+    let mut headers = existing.as_ref().map(|plugin| plugin.config.headers.clone()).unwrap_or_default();
+    if let Some(previous_url) = existing.as_ref().and_then(|plugin| plugin.config.url.as_deref()) {
+        let previous = Url::parse(previous_url).ok().map(|url| url.origin());
+        let next = url.as_deref().and_then(|url| Url::parse(url).ok()).map(|url| url.origin());
+        if previous != next && !headers.is_empty() {
+            return Err("此配置已有认证信息。请用新的插件名称添加不同来源的服务。".into());
+        }
+    }
+    apply_mcp_header_edits(&mut headers, custom_headers.unwrap_or_default(), removed_headers.unwrap_or_default(), bearer_token.as_deref())?;
+    let config = PluginConfig {
+        name: name.clone(), command: command.unwrap_or_default(), args: args.unwrap_or_default(),
+        url, headers, env: env.unwrap_or_default(), capability_card,
+    };
+    if config.url.is_none() && config.command.trim().is_empty() {
+        return Err("请填写本地启动命令".into());
+    }
+    if save {
+        let url = config.url.as_deref().ok_or("仅远程配置使用此保存入口")?;
+        let connection_changed = existing.as_ref().is_some_and(|plugin| {
+            plugin.config.url != config.url || plugin.config.headers != config.headers
+        });
+        let headers = serde_json::to_string(&config.headers).map_err(|error| error.to_string())?;
+        let conn = state.0.lock().map_err(|error| error.to_string())?;
+        let changed = if editing {
+            conn.execute(
+                "UPDATE mcp_plugins SET
+                 last_ok_at=CASE WHEN ?5 THEN '' ELSE last_ok_at END,
+                 last_error=CASE WHEN ?5 THEN '' ELSE last_error END,
+                 tool_count=CASE WHEN ?5 THEN -1 ELSE tool_count END,
+                 url=?1, headers=?2, capability_card=?3 WHERE name=?4 AND COALESCE(url,'')<>''",
+                params![url, headers, config.capability_card.as_deref().unwrap_or_default(), name, connection_changed],
+            )
+        } else {
+            conn.execute(
+                "INSERT INTO mcp_plugins (id,name,command,args,env,capability_card,enabled,created_at,url,headers)
+                 VALUES (?1,?2,'','[]','{}',?3,1,?4,?5,?6)",
+                params![Uuid::new_v4().to_string(), name, config.capability_card.as_deref().unwrap_or_default(), Utc::now().to_rfc3339(), url, headers],
+            )
+        }.map_err(|error| error.to_string())?;
+        if changed != 1 { return Err("该远程配置已变更，请重新打开编辑".into()); }
+        invalidate_plugin(&name);
+        return Ok(0);
+    }
+    let client = McpClient::spawn(config).map_err(|error| format!("无法启动客户端：{error}"))?;
+    client.initialize().await.map_err(|error| format!("连接握手失败：{error}"))?;
+    let tools = client.list_tools().await.map_err(|error| format!("读取工具列表失败：{error}"))?;
+    Ok(tools.len())
 }
 
 #[tauri::command]
@@ -504,6 +674,9 @@ pub async fn quick_connect_and_save_mcp(
         id,
         name: plugin_name,
         command,
+        url: Some(raw_url),
+        has_bearer_token: !headers_map.is_empty(),
+        header_names: Vec::new(),
         args,
         env: env_map,
         capability_card,
@@ -783,18 +956,25 @@ pub async fn save_mcp_plugin(
     let env_json = serde_json::to_string(&actual_env).map_err(|e| e.to_string())?;
     let cap_card = capability_card.unwrap_or_default();
 
-    conn.execute(
+    let changed = conn.execute(
         "INSERT INTO mcp_plugins (id, name, command, args, env, capability_card, enabled, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(name) DO UPDATE SET
+             last_ok_at = CASE WHEN mcp_plugins.command<>excluded.command OR mcp_plugins.args<>excluded.args OR mcp_plugins.env<>excluded.env THEN '' ELSE mcp_plugins.last_ok_at END,
+             last_error = CASE WHEN mcp_plugins.command<>excluded.command OR mcp_plugins.args<>excluded.args OR mcp_plugins.env<>excluded.env THEN '' ELSE mcp_plugins.last_error END,
+             tool_count = CASE WHEN mcp_plugins.command<>excluded.command OR mcp_plugins.args<>excluded.args OR mcp_plugins.env<>excluded.env THEN -1 ELSE mcp_plugins.tool_count END,
              command = excluded.command,
              args = excluded.args,
              env = excluded.env,
              capability_card = excluded.capability_card,
-             enabled = excluded.enabled",
+             enabled = excluded.enabled
+         WHERE COALESCE(mcp_plugins.url, '') = ''",
         params![id, name, command, args_json, env_json, cap_card, if is_enabled { 1 } else { 0 }, now],
     )
     .map_err(|e| e.to_string())?;
+    if changed != 1 {
+        return Err("这是远程 MCP，请从列表打开远程配置编辑".into());
+    }
 
     invalidate_plugin(&name);
 
@@ -802,6 +982,9 @@ pub async fn save_mcp_plugin(
         id,
         name,
         command,
+        url: None,
+        has_bearer_token: false,
+        header_names: Vec::new(),
         args: actual_args,
         env: actual_env,
         capability_card: cap_card,

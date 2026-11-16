@@ -103,13 +103,13 @@
                 :class="p.last_error ? 'err' : (p.last_ok_at ? 'ok' : 'idle')"
                 :title="p.last_error
                   ? `上次连接失败：${p.last_error}`
-                  : (p.last_ok_at ? `上次握手成功：${p.last_ok_at}${p.tool_count >= 0 ? `，${p.tool_count} 个工具` : ''}` : '尚未握手验证过——点击刷新连接实拉工具目录')"
+                  : (p.last_ok_at ? `上次握手成功：${p.last_ok_at}${p.tool_count >= 0 ? `，${p.tool_count} 个工具` : ''}` : '尚未握手验证过——点击测试连接以读取工具列表')"
               ></span>
               <span v-if="p.tool_count >= 0" class="tool-count-badge" :class="{ 'warn': !!p.last_error }">{{ p.tool_count }} 工具</span>
               <span v-else-if="catalogOf(p.name)?.cached" class="tool-count-badge">{{ catalogOf(p.name).tool_count }} 工具</span>
             </h3>
             <code class="cmd-snippet">{{ p.command }} {{ p.args.join(' ') }}</code>
-            <p v-if="refreshError[p.name]" class="refresh-error">⚠️ {{ refreshError[p.name] }}</p>
+            <p v-if="refreshError[p.name] || p.last_error" class="refresh-error">{{ refreshError[p.name] || p.last_error }}</p>
           </div>
           <label class="toggle-switch">
             <input type="checkbox" :checked="p.enabled" @change="togglePlugin(p.name, !p.enabled)">
@@ -122,7 +122,7 @@
             <p class="card-desc">{{ p.capability_card }}</p>
           </div>
           <div v-else class="capability-card-badge empty">
-            <span class="card-kicker">💡 暂无能力卡 (点击编辑/提炼生成)</span>
+            <span class="card-kicker">💡 暂无能力卡 (点击编辑配置生成)</span>
           </div>
           <div class="arg-list">
             <span v-for="(arg, idx) in p.args" :key="idx" class="arg-tag">{{ arg }}</span>
@@ -134,10 +134,10 @@
         <div class="card-footer">
           <span class="created-at">{{ formatDate(p.created_at) }}</span>
           <div class="footer-actions">
-            <button class="text-btn" :disabled="refreshingName === p.name" @click="refreshConnection(p.name)">
-              {{ refreshingName === p.name ? '⏳' : '🔄' }} 连接
+            <button class="text-btn" :disabled="!p.enabled || Boolean(refreshingName)" @click="refreshConnection(p.name)">
+              {{ refreshingName === p.name ? '测试中…' : '测试连接' }}
             </button>
-            <button class="text-btn" @click="openEditPlugin(p)">编辑/提炼</button>
+            <button class="text-btn" @click="openEditPlugin(p)">编辑配置</button>
             <button class="text-btn" :disabled="!p.enabled" @click="openReviewTools(p.name)">审查工具</button>
             <button class="delete-btn" @click="confirmDelete(p.name)">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
@@ -407,12 +407,12 @@
 
         <!-- 批量导入 Skill -->
         <div v-else class="batch-panel">
-          <p class="modal-hint">支持粘贴 JSON 列表 <code>[{"name": "...", "content": "..."}]</code> 或用 <code>### 技能名</code> 分隔的多篇 Markdown 文档。</p>
+          <p class="modal-hint">粘贴 JSON 列表 <code>[{"name": "...", "content": "..."}]</code>，或用 <code>### 技能名</code> 分隔多篇 Markdown。已有同名自定义 Skill 会跳过。</p>
           <div class="form-group">
             <div class="label-with-action">
-              <label>提炼所用大模型</label>
+              <label>AI 补充缺失说明（可选）</label>
               <select v-model="batchSkillModelId" class="compact-model-select">
-                <option value="">默认模型</option>
+                <option value="">仅导入原文</option>
                 <option v-for="m in allModels" :key="m.id" :value="m.id">{{ m.display_name || m.name }}</option>
               </select>
             </div>
@@ -420,19 +420,21 @@
           </div>
           <div v-if="batchSkillResults.length" class="batch-results-list">
             <h4>导入结果 ({{ batchSkillResults.filter(r => r.success).length }}/{{ batchSkillResults.length }} 成功):</h4>
-            <div v-for="(r, idx) in batchSkillResults" :key="idx" class="batch-result-item" :class="{ success: r.success, fail: !r.success }">
+            <div v-for="(r, idx) in batchSkillResults" :key="idx" class="batch-result-item" :class="{ success: r.success, fail: !r.success && !r.skipped }">
               <div class="result-head">
                 <strong>{{ r.name }}</strong>
-                <span class="status-badge">{{ r.success ? '✅ 成功' : '❌ 失败' }}</span>
+                <span class="status-badge">{{ r.skipped ? '已跳过' : (r.success ? '已导入' : '失败') }}</span>
               </div>
               <p v-if="r.description" class="result-card">💡 {{ r.description }}</p>
+              <p v-if="r.warning" class="form-tip">{{ r.warning }}</p>
               <p v-if="r.error" class="result-err">{{ r.error }}</p>
             </div>
           </div>
+          <p v-if="batchSkillError" class="result-err" role="alert">{{ batchSkillError }}</p>
           <div class="form-actions">
             <button class="cancel-btn" type="button" @click="closeInstructionModal">关闭</button>
             <button class="save-btn" type="button" :disabled="batchSkillLoading || !batchSkillText.trim()" @click="handleBatchImportSkills">
-              {{ batchSkillLoading ? '正在提炼入库…' : '🚀 开始批量提炼入库' }}
+              {{ batchSkillLoading ? '正在导入…' : '导入 Skill' }}
             </button>
           </div>
         </div>
@@ -440,21 +442,24 @@
     </div>
 
     <!-- MCP 接入与导入弹窗 (支持极速直连、标准配置与批量导入) -->
-    <div v-if="showAddModal" class="modal-overlay" @click.self="showAddModal = false">
+    <div v-if="showAddModal" class="modal-overlay" @click.self="closeMcpModal">
       <div class="modal-content plugin-modal">
-        <div class="modal-header-tabs">
+        <h3 v-if="editingPluginName">{{ mcpTab === 'quick' ? '编辑远程 MCP' : '编辑本地 MCP' }}</h3>
+        <div v-else class="modal-header-tabs">
           <button 
             type="button" 
             class="tab-btn" 
             :class="{ active: mcpTab === 'quick' }" 
+            :disabled="Boolean(mcpDraftBusy)"
             @click="mcpTab = 'quick'"
           >
-            ⚡️ 极速直连 (URL+Token)
+            ⚡️ 远程连接
           </button>
           <button 
             type="button" 
             class="tab-btn" 
             :class="{ active: mcpTab === 'ref' }" 
+            :disabled="Boolean(mcpDraftBusy)"
             @click="mcpTab = 'ref'"
           >
             🔗 引用安装
@@ -463,57 +468,62 @@
             type="button" 
             class="tab-btn" 
             :class="{ active: mcpTab === 'custom' }" 
+            :disabled="Boolean(mcpDraftBusy)"
             @click="mcpTab = 'custom'"
           >
-            ⚙️ 命令行 stdio
+            ⚙️ 本地命令
           </button>
           <button 
             v-if="!editingPluginName" 
             type="button" 
             class="tab-btn" 
             :class="{ active: mcpTab === 'batch' }" 
+            :disabled="Boolean(mcpDraftBusy)"
             @click="mcpTab = 'batch'"
           >
-            📋 批量导入 (JSON/清单)
+            📋 批量导入
           </button>
         </div>
 
         <!-- 极速直连 Tab -->
         <div v-if="mcpTab === 'quick'">
-          <p class="modal-hint">只需填入远端 MCP 服务的 URL 与 Bearer Token，系统自动连接、调用选定大模型提纯能力卡并写入 SQLite。</p>
+          <p class="modal-hint">填写 MCP 服务的 HTTP 地址。测试连接会读取工具列表，保存后配置才会生效。</p>
           <div class="form-group">
-            <label>插件标识名称（可选，留空将自动根据 URL 命名）</label>
-            <input v-model.trim="quickForm.name" placeholder="例如: remote-http-mcp, filesystem, db-tools" />
+            <label for="mcp-remote-name">插件名称</label>
+            <input id="mcp-remote-name" v-model.trim="quickForm.name" :disabled="Boolean(editingPluginName)" placeholder="例如：remote-hub" />
           </div>
           <div class="form-group">
-            <label>远端 MCP 服务 URL（必填）</label>
-            <input v-model.trim="quickForm.remoteUrl" type="url" placeholder="https://mcp.example.com/mcp" />
+            <label for="mcp-remote-url">服务地址</label>
+            <input id="mcp-remote-url" v-model.trim="quickForm.remoteUrl" type="url" placeholder="https://mcp.example.com/mcp" />
           </div>
           <div class="form-group">
-            <label>Bearer Token（可选）</label>
-            <input v-model.trim="quickForm.bearerToken" type="password" placeholder="sk-xxx 或自定义密钥" />
+            <label for="mcp-remote-token">访问令牌（可选）</label>
+            <input id="mcp-remote-token" v-model.trim="quickForm.bearerToken" type="password"
+              :placeholder="quickForm.hasBearerToken && !removeBearerToken ? '已设置，留空保留原令牌' : '服务要求 Bearer Token 时填写'" />
+            <label v-if="quickForm.hasBearerToken && !quickForm.bearerToken" class="mcp-remove-token">
+              <input v-model="removeBearerToken" type="checkbox" /> 移除原令牌
+            </label>
           </div>
-          <div class="form-row">
-            <div class="form-group half">
-              <label>协议类型</label>
-              <select v-model="quickForm.httpTransport">
-                <option value="streamable-http">Streamable HTTP（推荐）</option>
-                <option value="sse">Legacy SSE</option>
-              </select>
+          <details class="form-group" :open="remoteHeaderRows.length > 0">
+            <summary>自定义请求头（可选）</summary>
+            <p class="modal-hint">按服务文档逐项填写名称和值，例如 X-API-Key。Authorization 只需填在一处。</p>
+            <div v-for="(row, index) in remoteHeaderRows" :key="row.id" class="mcp-header-row">
+              <input v-model.trim="row.name" :readonly="Boolean(row.savedName)" :aria-label="`请求头 ${index + 1} 名称`" placeholder="X-API-Key" />
+              <input v-model="row.value" type="password" autocomplete="off" :aria-label="`请求头 ${index + 1} 的值`"
+                :placeholder="row.savedName ? '已设置，留空保留' : '请求头的值'" />
+              <button class="text-btn" type="button" @click="removeRemoteHeader(index)">移除</button>
             </div>
-            <div class="form-group half">
-              <label>提炼能力卡所选大模型</label>
-              <select v-model="quickForm.selectedModelId">
-                <option value="">默认模型</option>
-                <option v-for="m in allModels" :key="m.id" :value="m.id">{{ m.display_name || m.name }}</option>
-              </select>
-            </div>
-          </div>
+            <button class="text-btn" type="button" @click="addRemoteHeader()">＋ 添加请求头</button>
+          </details>
+          <details v-if="editingPluginName" class="form-group">
+            <summary>能力说明</summary>
+            <textarea v-model="form.capabilityCard" rows="4" placeholder="说明这个 MCP 适合做什么"></textarea>
+          </details>
+          <p v-if="mcpDraftFeedback" role="status" :class="{ 'refresh-error': mcpDraftFeedback.error }">{{ mcpDraftFeedback.text }}</p>
           <div class="form-actions">
-            <button class="cancel-btn" @click="showAddModal = false">取消</button>
-            <button class="save-btn" :disabled="!quickForm.remoteUrl.trim() || quickConnecting" @click="handleQuickConnectMcp">
-              {{ quickConnecting ? '⏳ 正在连接并提炼能力卡…' : '⚡️ 一键连接提炼并保存' }}
-            </button>
+            <button class="cancel-btn" :disabled="mcpDraftBusy" @click="closeMcpModal">取消</button>
+            <button class="cancel-btn" :disabled="!remoteDraftReady || mcpDraftBusy" @click="testMcpDraft(true)">{{ mcpDraftBusy === 'test' ? '测试中…' : '测试连接' }}</button>
+            <button class="save-btn" :disabled="!remoteDraftReady || mcpDraftBusy" @click="saveRemoteMcp">{{ mcpDraftBusy === 'save' ? '保存中…' : '保存配置' }}</button>
           </div>
         </div>
 
@@ -550,7 +560,7 @@
 
         <!-- 本地 stdio 命令行 Tab -->
         <div v-else-if="mcpTab === 'custom'">
-          <p class="modal-hint">配置本地可执行命令与环境变量，支持手动编辑或点击 AI 提炼能力卡。</p>
+          <p class="modal-hint">填写本地启动命令和运行参数。测试连接会启动该命令并读取工具列表。</p>
           <div class="form-group">
             <label>插件名称</label>
             <input v-model.trim="form.name" :disabled="Boolean(editingPluginName)" placeholder="例如: excel, filesystem" />
@@ -567,25 +577,28 @@
             <label>环境变量（可选，每行 KEY=VALUE）</label>
             <textarea v-model="form.envText" placeholder="API_KEY=sk-xxx&#10;BASE_URL=https://..." rows="2"></textarea>
           </div>
-          <div class="form-group capability-card-field">
+          <details class="form-group capability-card-field">
+            <summary>能力说明（可选）</summary>
             <div class="label-with-action">
-              <label>💡 智能能力卡（保存至 SQLite，直接进系统提示词）</label>
+              <label>AI 提炼模型</label>
               <div class="ai-gen-toolbar">
                 <select v-model="form.selectedModelId" class="compact-model-select">
                   <option value="">默认模型</option>
                   <option v-for="m in allModels" :key="m.id" :value="m.id">{{ m.display_name || m.name }}</option>
                 </select>
-                <button type="button" class="ai-gen-btn" :disabled="generatingMcpCard || !form.name.trim() || !form.command.trim()" @click="generateMcpCard">
+                <button type="button" class="ai-gen-btn" :disabled="mcpDraftBusy || generatingMcpCard || !form.name.trim() || !form.command.trim()" @click="generateMcpCard">
                   {{ generatingMcpCard ? '正在生成…' : '🤖 AI 提炼能力卡' }}
                 </button>
               </div>
             </div>
             <textarea v-model.trim="form.capabilityCard" placeholder="点击右上角「AI 提炼能力卡」自动生成，或直接手动输入简明核心定位与适用场景..." rows="3"></textarea>
-          </div>
+          </details>
+          <p v-if="mcpDraftFeedback" role="status" :class="{ 'refresh-error': mcpDraftFeedback.error }">{{ mcpDraftFeedback.text }}</p>
           <div class="form-actions">
-            <button class="cancel-btn" @click="showAddModal = false">取消</button>
-            <button class="save-btn" @click="savePlugin" :disabled="!form.name || !form.command || generatingMcpCard">
-              💾 保存并激活
+            <button class="cancel-btn" :disabled="mcpDraftBusy" @click="closeMcpModal">取消</button>
+            <button class="cancel-btn" :disabled="!form.name || !form.command || mcpDraftBusy || generatingMcpCard" @click="testMcpDraft(false)">{{ mcpDraftBusy === 'test' ? '测试中…' : '测试连接' }}</button>
+            <button class="save-btn" @click="savePlugin" :disabled="!form.name || !form.command || generatingMcpCard || mcpDraftBusy">
+              保存配置
             </button>
           </div>
         </div>
@@ -627,7 +640,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue';
+import { computed, ref, onMounted, watch } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { invoke } from '@tauri-apps/api/core';
 
@@ -650,7 +663,9 @@ const allModels = ref([]);
 const showAddModal = ref(false);
 const mcpTab = ref('quick'); // 'quick' | 'ref' | 'custom' | 'batch'
 const editingPluginName = ref('');
-const quickConnecting = ref(false);
+const mcpDraftBusy = ref('');
+const mcpDraftFeedback = ref(null);
+const editingPluginEnabled = ref(true);
 const generatingMcpCard = ref(false);
 const refInstalling = ref(false);
 const refForm = ref({ reference: '' });
@@ -720,9 +735,25 @@ const quickForm = ref({
   name: '',
   remoteUrl: '',
   bearerToken: '',
-  httpTransport: 'streamable-http',
-  selectedModelId: '',
+  hasBearerToken: false,
 });
+const remoteHeaderRows = ref([]);
+const removedRemoteHeaders = ref([]);
+const removeBearerToken = ref(false);
+let nextHeaderRowId = 0;
+const addRemoteHeader = (savedName = '') => {
+  remoteHeaderRows.value.push({ id: nextHeaderRowId++, name: savedName, value: '', savedName });
+};
+const removeRemoteHeader = (index) => {
+  const [row] = remoteHeaderRows.value.splice(index, 1);
+  if (row.savedName) removedRemoteHeaders.value.push(row.savedName);
+};
+const resetRemoteHeaders = (savedNames = []) => {
+  remoteHeaderRows.value = [];
+  removedRemoteHeaders.value = [];
+  removeBearerToken.value = false;
+  savedNames.forEach(addRemoteHeader);
+};
 
 const form = ref({
   name: '',
@@ -757,6 +788,7 @@ const instructionForm = ref({
 // Skill Batch
 const batchSkillText = ref('');
 const batchSkillModelId = ref('');
+const batchSkillError = ref('');
 const batchSkillLoading = ref(false);
 const batchSkillResults = ref([]);
 
@@ -898,8 +930,10 @@ const refreshConnection = async (name) => {
   try {
     const updated = await invoke('refresh_mcp_plugin_connection', { name });
     catalogMap.value = { ...catalogMap.value, [name]: updated };
+    await loadPlugins();
   } catch (err) {
     refreshError.value = { ...refreshError.value, [name]: String(err) };
+    await loadPlugins();
   } finally {
     refreshingName.value = '';
   }
@@ -920,14 +954,16 @@ onMounted(() => {
 });
 
 const openAddModal = () => {
+  resetRemoteHeaders();
   editingPluginName.value = '';
+  editingPluginEnabled.value = true;
+  mcpDraftFeedback.value = null;
   mcpTab.value = 'quick';
   quickForm.value = {
     name: '',
     remoteUrl: '',
     bearerToken: '',
-    httpTransport: 'streamable-http',
-    selectedModelId: allModels.value[0]?.id || '',
+    hasBearerToken: false,
   };
   form.value = {
     name: '',
@@ -944,8 +980,12 @@ const openAddModal = () => {
 };
 
 const openEditPlugin = (p) => {
+  resetRemoteHeaders(p.header_names || []);
   editingPluginName.value = p.name;
-  mcpTab.value = 'custom';
+  editingPluginEnabled.value = p.enabled;
+  mcpDraftFeedback.value = null;
+  mcpTab.value = p.url ? 'quick' : 'custom';
+  quickForm.value = { name: p.name, remoteUrl: p.url || '', bearerToken: '', hasBearerToken: p.has_bearer_token };
   const envLines = Object.entries(p.env || {})
     .map(([k, v]) => `${k}=${v}`)
     .join('\n');
@@ -960,26 +1000,63 @@ const openEditPlugin = (p) => {
   showAddModal.value = true;
 };
 
-const handleQuickConnectMcp = async () => {
-  if (!quickForm.value.remoteUrl.trim()) {
-    alert('请填写远端 MCP URL');
-    return;
-  }
-  quickConnecting.value = true;
+const remoteDraftReady = computed(() => Boolean(quickForm.value.name && quickForm.value.remoteUrl));
+watch([mcpTab, quickForm, form, remoteHeaderRows, removedRemoteHeaders, removeBearerToken], () => {
+  mcpDraftFeedback.value = null;
+}, { deep: true });
+const closeMcpModal = () => {
+  if (!mcpDraftBusy.value) showAddModal.value = false;
+};
+
+const mcpDraft = (remote) => remote ? {
+  name: quickForm.value.name,
+  remoteUrl: quickForm.value.remoteUrl,
+  bearerToken: quickForm.value.bearerToken || null,
+  customHeaders: remoteHeaderRows.value
+    .filter(row => row.savedName ? row.value !== '' : row.name || row.value)
+    .map(row => [row.name, row.value]),
+  removedHeaders: [
+    ...removedRemoteHeaders.value,
+    ...(removeBearerToken.value && !quickForm.value.bearerToken ? ['Authorization'] : []),
+  ],
+  capabilityCard: form.value.capabilityCard,
+} : {
+  name: form.value.name,
+  command: form.value.command,
+  args: form.value.argsText.split('\n').map(line => line.trim()).filter(Boolean),
+  env: Object.fromEntries(form.value.envText.split('\n').flatMap(line => {
+    const separator = line.indexOf('=');
+    return separator > 0 ? [[line.slice(0, separator).trim(), line.slice(separator + 1).trim()]] : [];
+  })),
+};
+
+const testMcpDraft = async (remote) => {
+  const draft = mcpDraft(remote);
+  mcpDraftBusy.value = 'test';
+  mcpDraftFeedback.value = null;
   try {
-    await invoke('quick_connect_and_save_mcp', {
-      name: quickForm.value.name.trim() || null,
-      remoteUrl: quickForm.value.remoteUrl.trim(),
-      bearerToken: quickForm.value.bearerToken.trim() || null,
-      httpTransport: quickForm.value.httpTransport,
-      modelId: quickForm.value.selectedModelId || null,
-    });
+    const count = await invoke('configure_mcp_draft', { ...draft, save: false, editing: Boolean(editingPluginName.value) });
+    if (JSON.stringify(draft) === JSON.stringify(mcpDraft(remote))) {
+      mcpDraftFeedback.value = { text: `连接成功，发现 ${count} 个工具。这次测试未保存配置。` };
+    }
+  } catch (error) {
+    mcpDraftFeedback.value = { error: true, text: String(error) };
+  } finally {
+    mcpDraftBusy.value = '';
+  }
+};
+
+const saveRemoteMcp = async () => {
+  mcpDraftBusy.value = 'save';
+  mcpDraftFeedback.value = null;
+  try {
+    await invoke('configure_mcp_draft', { ...mcpDraft(true), save: true, editing: Boolean(editingPluginName.value) });
     showAddModal.value = false;
     await loadPlugins();
-  } catch (err) {
-    alert('极速连接与提炼失败: ' + err);
+  } catch (error) {
+    mcpDraftFeedback.value = { error: true, text: String(error) };
   } finally {
-    quickConnecting.value = false;
+    mcpDraftBusy.value = '';
   }
 };
 
@@ -1082,29 +1159,24 @@ const generateMcpCard = async () => {
 };
 
 const savePlugin = async () => {
+  if (!editingPluginName.value && plugins.value.some(plugin => plugin.name === form.value.name)) {
+    mcpDraftFeedback.value = { error: true, text: '该名称已存在，请从列表打开原配置编辑。' };
+    return;
+  }
+  mcpDraftBusy.value = 'save';
+  mcpDraftFeedback.value = null;
   try {
-    const args = form.value.argsText.split('\n').map(a => a.trim()).filter(a => a.length > 0);
-    const env = {};
-    form.value.envText.split('\n').forEach(line => {
-      const idx = line.indexOf('=');
-      if (idx > 0) {
-        env[line.substring(0, idx).trim()] = line.substring(idx + 1).trim();
-      }
-    });
-    
     await invoke('save_mcp_plugin', {
-      name: form.value.name,
-      command: form.value.command,
-      args,
-      env,
+      ...mcpDraft(false),
       capabilityCard: form.value.capabilityCard || null,
-      enabled: true,
+      enabled: editingPluginEnabled.value,
     });
-    
     showAddModal.value = false;
     await loadPlugins();
-  } catch (err) {
-    alert('保存失败: ' + err);
+  } catch (error) {
+    mcpDraftFeedback.value = { error: true, text: String(error) };
+  } finally {
+    mcpDraftBusy.value = '';
   }
 };
 
@@ -1113,7 +1185,8 @@ const openInstructionModal = (item = null) => {
   skillTab.value = 'single';
   batchSkillText.value = '';
   batchSkillResults.value = [];
-  batchSkillModelId.value = allModels.value[0]?.id || '';
+  batchSkillModelId.value = '';
+  batchSkillError.value = '';
   instructionForm.value = item
     ? {
         kind: item.kind,
@@ -1183,45 +1256,18 @@ const handleBatchImportSkills = async () => {
     return;
   }
   batchSkillLoading.value = true;
+  batchSkillError.value = '';
   batchSkillResults.value = [];
-
-  let items = [];
-  try {
-    if (text.startsWith('[') && text.endsWith(']')) {
-      items = JSON.parse(text);
-    } else {
-      // Markdown 解析
-      const sections = text.split(/(?:^|\n)###\s+/).filter(Boolean);
-      for (const sec of sections) {
-        const lines = sec.trim().split('\n');
-        const title = lines[0].trim();
-        const content = lines.slice(1).join('\n').trim();
-        if (title && content) {
-          items.push({ name: title, content });
-        }
-      }
-    }
-  } catch (e) {
-    alert('解析输入格式失败: ' + e);
-    batchSkillLoading.value = false;
-    return;
-  }
-
-  if (!items.length) {
-    alert('未能识别到有效的 Skill 项目，请使用 ### 标题 分隔每段内容');
-    batchSkillLoading.value = false;
-    return;
-  }
 
   try {
     const results = await invoke('batch_import_skills', {
-      skills: items,
+      importPayload: text,
       modelId: batchSkillModelId.value || null,
     });
     batchSkillResults.value = results;
     await loadCustomInstructions();
   } catch (err) {
-    alert('批量导入失败: ' + err);
+    batchSkillError.value = String(err);
   } finally {
     batchSkillLoading.value = false;
   }
@@ -1966,6 +2012,9 @@ select option { background-color: var(--theme-bg-panel, #18181b) !important; col
 .tool-count-badge.warn { color:var(--theme-status-warning, #fbbf24); background:rgba(251,191,36,.12); }
 .ref-env-box { margin-top:8px; padding:10px; border:1px solid rgba(var(--theme-foreground-rgb), 0.1); border-radius:8px; background:rgba(var(--theme-foreground-rgb), 0.03); }
 .ref-env-row { display:flex; align-items:center; gap:8px; margin:6px 0; }
+.mcp-header-row { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.4fr) auto; align-items:center; gap:8px; margin:8px 0; }
+.mcp-remove-token { display:flex; align-items:center; gap:6px; }
+.mcp-remove-token input[type="checkbox"] { width:auto; }
 .ref-env-key { font-size:11px; color:var(--theme-text-secondary, #8e8e93); min-width:120px; font-family:monospace; }
 .ref-env-row input { flex:1; }
 .ref-env-saved { font-size:11px; color:var(--theme-status-success, #4ade80); margin:6px 0 0; }

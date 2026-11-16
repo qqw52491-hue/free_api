@@ -506,7 +506,7 @@ pub async fn dispatch(
         .with_effort(model_routing.reasoning_effort_for(&routing.tier));
 
         let persona = crate::agent::tools::role_manager::persona_block(card)
-            + &crate::agent::tools::role_manager::skills_block(db, card);
+            + &crate::agent::tools::role_manager::skills_block(db, card, Some(workspace));
         if !persona.is_empty() {
             envelope = envelope.with_persona(persona);
         }

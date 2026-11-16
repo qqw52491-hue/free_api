@@ -624,6 +624,11 @@ pub async fn install_mcp_registry_entry(
             id,
             name: plugin_name,
             command: config.command.clone(),
+            url: config.url.clone(),
+            has_bearer_token: config.headers.iter().any(|(key, value)| {
+                key.eq_ignore_ascii_case("authorization") && value.starts_with("Bearer ")
+            }),
+            header_names: super::mcp::editable_header_names(&config.headers),
             args: config.args.clone(),
             env,
             capability_card: String::new(),

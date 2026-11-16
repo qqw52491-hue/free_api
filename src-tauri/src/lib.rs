@@ -180,6 +180,7 @@ pub fn run() {
             commands::get_mcp_review_tools,
             commands::set_mcp_review_tools,
             commands::refresh_mcp_plugin_connection,
+            commands::configure_mcp_draft,
             commands::generate_mcp_capability_card,
             commands::quick_connect_and_save_mcp,
             commands::batch_import_mcp_plugins,

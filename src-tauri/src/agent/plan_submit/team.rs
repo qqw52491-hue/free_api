@@ -43,7 +43,7 @@ pub(super) async fn prepare_snapshots(
             .0;
         }
         snapshot.persona = crate::agent::tools::role_manager::persona_block(card)
-            + &crate::agent::tools::role_manager::skills_block(db, card);
+            + &crate::agent::tools::role_manager::skills_block(db, card, Some(workspace));
         snapshot.params["role"] = json!(card.name);
         snapshot.params["role_label"] = json!(card.label);
         snapshot.params["model"] = json!(snapshot.model);

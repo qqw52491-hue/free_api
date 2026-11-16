@@ -31,8 +31,19 @@ pub struct McpClient {
 
 impl McpClient {
     pub fn spawn(config: PluginConfig) -> Result<Self, String> {
-        let http_client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
+        let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(60));
+        if !config.headers.is_empty() {
+            builder = builder.redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().first().is_some_and(|url| url.origin() != attempt.url().origin()) {
+                    return attempt.error("带自定义请求头的 MCP 不跟随跨站重定向，请填写最终服务地址");
+                }
+                if attempt.previous().len() >= 10 {
+                    return attempt.error("MCP 重定向次数过多");
+                }
+                attempt.follow()
+            }));
+        }
+        let http_client = builder
             .build()
             .map_err(|e| format!("[MCP:{}] 构建 HTTP 客户端失败: {}", config.name, e))?;
 
@@ -700,5 +711,43 @@ impl McpClient {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+}
+
+#[cfg(test)]
+mod redirect_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn remote_mcp_does_not_forward_custom_headers_across_origins() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let source = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let destination = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source_url = format!("http://{}/mcp", source.local_addr().unwrap());
+        let redirect_url = format!("http://{}/mcp", destination.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut connection, _) = source.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(connection.read_u8().await.unwrap());
+            }
+            assert!(String::from_utf8_lossy(&request).to_ascii_lowercase().contains("x-api-key: fixture"));
+            connection.write_all(format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: {redirect_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            ).as_bytes()).await.unwrap();
+        });
+        let client = McpClient::spawn(PluginConfig {
+            name: "redirect-fixture".into(),
+            command: String::new(),
+            args: Vec::new(),
+            env: HashMap::new(),
+            url: Some(source_url),
+            headers: HashMap::from([("X-API-Key".into(), "fixture".into())]),
+            capability_card: None,
+        }).unwrap();
+        assert!(client.initialize().await.is_err());
+        server.await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(100), destination.accept()).await.is_err());
     }
 }

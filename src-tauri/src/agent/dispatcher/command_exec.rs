@@ -273,7 +273,11 @@ fn execute_command_in_run(
     if tool.eq_ignore_ascii_case("capability_search")
         || tool.eq_ignore_ascii_case("search_capabilities")
     {
-        return crate::agent::capability_index::search(db, registry, workspace_root, params);
+        let scope = match run_id.map(|id| crate::agent::execution::runtime::config(db, id)).transpose() {
+            Ok(scope) => scope,
+            Err(error) => return crate::agent::tools::input_validation::rejection(error),
+        };
+        return crate::agent::capability_index::search_with_scope(db, registry, workspace_root, params, scope.as_ref());
     }
 
     // 3.5 核心原生工具 D: web_search / web_fetch (互联网全网检索与网页正文 Markdown 提取)

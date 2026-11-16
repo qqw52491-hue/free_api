@@ -401,6 +401,12 @@ pub fn known_app_skills_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+pub(crate) fn searchable_skill_dirs(workspace: Option<&Path>) -> Vec<PathBuf> {
+    workspace.into_iter().map(|root| root.join("skills"))
+        .chain(known_app_skills_dirs())
+        .collect()
+}
+
 /// Skill 路由索引条目：名称 + 摘要 + 作者显式声明的触发面。
 /// capability_search 与 triage Skill 路由共用此结构——判决模型按
 /// when_to_use 做匹配，执行模型按 name 加载。
@@ -509,26 +515,15 @@ pub fn db_skill_index_entries(db: &crate::db::DbState) -> Vec<SkillIndexEntry> {
 
 /// 文件 ∪ DB 的统一路由清单：同名条目 DB 优先（用户/自助沉淀覆盖内置默认）。
 /// 只列名称与触发面，正文仍按需加载。
-pub fn skill_routing_index_with_db(db: &crate::db::DbState, skills_dir: &Path) -> String {
-    let mut by_name: std::collections::BTreeMap<String, String> =
-        skill_index_entries(skills_dir)
-            .into_iter()
-            .map(|e| {
-                let trigger = if e.when_to_use.is_empty() {
-                    e.summary
-                } else {
-                    e.when_to_use
-                };
-                (e.name, trigger)
-            })
-            .collect();
-    for e in db_skill_index_entries(db) {
+pub(crate) fn skill_routing_index_for_dirs(db: &crate::db::DbState, dirs: &[PathBuf]) -> String {
+    let mut by_name = std::collections::BTreeMap::new();
+    for e in db_skill_index_entries(db).into_iter().chain(dirs.iter().flat_map(|dir| skill_index_entries(dir))) {
         let trigger = if e.when_to_use.is_empty() {
             e.summary
         } else {
             e.when_to_use
         };
-        by_name.insert(e.name, trigger);
+        by_name.entry(e.name).or_insert(trigger);
     }
     by_name
         .into_iter()
@@ -560,6 +555,7 @@ pub fn db_skill_doc(db: &crate::db::DbState, name: &str, max_chars: usize) -> Op
 
 /// 统一手册加载：DB 优先（用户/自助沉淀优先于内置同名），文件兜底。
 /// DB 查询失败/未命中不阻断，静默回落文件通道。
+#[cfg(test)]
 pub fn load_skill_doc_with_db(
     db: &crate::db::DbState,
     skills_dir: &Path,
@@ -569,10 +565,21 @@ pub fn load_skill_doc_with_db(
     db_skill_doc(db, name, max_chars).or_else(|| load_skill_doc(skills_dir, name, max_chars))
 }
 
+pub(crate) fn load_searchable_skill_doc(
+    db: &crate::db::DbState,
+    dirs: &[PathBuf],
+    name: &str,
+    max_chars: usize,
+) -> Option<String> {
+    db_skill_doc(db, name, max_chars)
+        .or_else(|| dirs.iter().find_map(|dir| load_skill_doc(dir, name, max_chars)))
+}
+
 /// 定位 skill 手册目录：优先已登记目录（register_app_skills_dir），
 /// 其次相对候选（prompts/skills / src-tauri/prompts/skills 等），
 /// 与 capability_index 的索引覆盖范围一致——搜得到 ⇒ 能加载。
 /// 主循环与子任务角色白名单注入共用此解析。
+#[cfg(test)]
 pub fn resolve_skills_dir() -> std::path::PathBuf {
     known_app_skills_dirs()
         .into_iter()
@@ -583,6 +590,9 @@ pub fn resolve_skills_dir() -> std::path::PathBuf {
 /// 按名称加载单个 skill 手册全文（角色白名单注入用），截断防爆。
 /// 返回 None 表示该 skill 不存在（白名单笔误时由调用方决定是否提示）。
 pub fn load_skill_doc(skills_dir: &Path, name: &str, max_chars: usize) -> Option<String> {
+    if name.is_empty() || name.contains(['/', '\\', ':']) || matches!(name, "." | "..") {
+        return None;
+    }
     let path = skills_dir.join(format!("{}.md", name));
     let content = std::fs::read_to_string(path).ok()?;
     if content.chars().count() > max_chars {
@@ -873,7 +883,7 @@ mod routing_tests {
         }
 
         // 索引：DB skill 入列、同名覆盖、prompt 不混进、disabled 不出现
-        let index = skill_routing_index_with_db(&db, &dir);
+        let index = skill_routing_index_for_dirs(&db, std::slice::from_ref(&dir));
         assert!(index.contains("- deploy_ops: DB版触发卡"), "同名应由 DB 触发卡覆盖: {}", index);
         assert!(index.contains("- video_making: 视频制作触发卡"), "{}", index);
         assert!(!index.contains("always_on"), "prompt 类不该混进 skill 索引: {}", index);

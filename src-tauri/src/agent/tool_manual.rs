@@ -13,6 +13,8 @@ use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex;
 
+const SKILL_DOC_MAX_CHARS: usize = 20_000;
+
 pub async fn load_tool_manual_for_next_step(
     app: &AppHandle,
     registry_state: &Arc<Mutex<PluginRegistry>>,
@@ -71,23 +73,30 @@ async fn load_single_tool_manual(
     context: &mut SandwichContext,
     db: &crate::db::DbState,
 ) {
-    // 含 "/" 的目标是 "插件/工具" 精确粒度，必须直通 registry：
+    let skill_dirs = crate::agent::skill_context::searchable_skill_dirs(Some(workspace_root));
+    if let Some(name) = target.strip_prefix("skill/") {
+        if load_skill_into_context(context, db, &skill_dirs, name, None) {
+            return;
+        }
+        let miss_key = format!("miss:{target}");
+        if is_explicit_hint && context.fetched_tools.insert(miss_key) {
+            context.turns_history.push(ChatMessage {
+                role: "user".into(),
+                content: json!(format!("【next_tool_hint 未命中: {target}】未找到可读取的 Skill。请用 capability_search 的 kind: skill 核对名称。")),
+            });
+        }
+        return;
+    }
+    // 其余含 "/" 的目标以 "插件/工具" 精确粒度到 registry。
     // 若先做本地文件手册查找，恰好同名的 <插件>.md Skill 会返回
     // 文档而不是 MCP 工具 Schema（名称碰撞）。
     let is_exact_mcp_target = target.contains('/');
     let tool_filename = format!("{}.md", tool_key);
-    // 与 capability_index 的 Skill 索引口径保持一致：
-    // 工作区 skills/ 与应用资源 skills/ 都可被搜索到，也必须可加载。
     let candidate_paths = [
-        workspace_root.join("skills").join(&tool_filename),
         std::path::PathBuf::from("src-tauri/prompts/tools").join(&tool_filename),
         std::path::PathBuf::from("prompts/tools").join(&tool_filename),
         std::path::PathBuf::from("../src-tauri/prompts/tools").join(&tool_filename),
         resource_dir.join("prompts/tools").join(&tool_filename),
-        std::path::PathBuf::from("src-tauri/prompts/skills").join(&tool_filename),
-        std::path::PathBuf::from("prompts/skills").join(&tool_filename),
-        std::path::PathBuf::from("../src-tauri/prompts/skills").join(&tool_filename),
-        resource_dir.join("prompts/skills").join(&tool_filename),
     ];
 
     let mut tool_detail = String::new();
@@ -98,15 +107,8 @@ async fn load_single_tool_manual(
                 break;
             }
         }
-        // 文件手册未命中 → 兜底查 DB 自定义 Skill（kind='skill'）：
-        // agent 经 skill_manager.add 自助沉淀的条目由此可被运行中
-        // next_tool_hint 取回，与 triage 索引/懒加载同一命名空间。
-        if tool_detail.is_empty() {
-            if let Some(doc) =
-                crate::agent::skill_context::db_skill_doc(db, tool_key, 20_000)
-            {
-                tool_detail = format!("【DB 自定义 Skill】\n{}", doc);
-            }
+        if tool_detail.is_empty() && load_skill_into_context(context, db, &skill_dirs, tool_key, None) {
+            return;
         }
     }
     let mut hint_miss_feedback: Option<String> = None;
@@ -207,38 +209,45 @@ async fn load_single_tool_manual(
 /// 走同一 Write-Once 历史事件 + fetched_tools 去重口径，区别只在来源
 /// （triage 判决 vs 模型自荐）。加载结果回填 verdict.loaded_skills /
 /// skill_load_failures，让"推荐过"与"真加载了"可审计。
+fn load_skill_into_context(
+    context: &mut SandwichContext,
+    db: &crate::db::DbState,
+    dirs: &[std::path::PathBuf],
+    name: &str,
+    reason: Option<&str>,
+) -> bool {
+    let target = format!("skill/{name}");
+    if context.has_tool_manual(&target) {
+        return true;
+    }
+    let Some(doc) = crate::agent::skill_context::load_searchable_skill_doc(db, dirs, name, SKILL_DOC_MAX_CHARS) else {
+        return false;
+    };
+    let origin = reason.map(|reason| format!("\n(分流路由预载：{reason})")).unwrap_or_default();
+    context.turns_history.push(ChatMessage {
+        role: "user".into(),
+        content: json!(format!("【工具/Skill 操作手册: {target}】\n{}{origin}", doc.trim())),
+    });
+    context.fetched_tools.insert(target);
+    true
+}
+
 pub fn apply_triage_skill_recommendations(
     context: &mut SandwichContext,
     verdict: &mut TriageVerdict,
-    skills_dir: &std::path::Path,
+    dirs: &[std::path::PathBuf],
     db: &crate::db::DbState,
 ) {
-    const SKILL_DOC_MAX_CHARS: usize = 20_000;
     for rec in &verdict.skill_recommendations {
         let name = rec.name.trim();
-        if name.is_empty() || context.has_tool_manual(name) {
+        if name.is_empty() || context.has_tool_manual(&format!("skill/{name}")) {
             continue;
         }
-        match crate::agent::skill_context::load_skill_doc_with_db(
-            db,
-            skills_dir,
-            name,
-            SKILL_DOC_MAX_CHARS,
-        ) {
-            Some(doc) => {
-                context.turns_history.push(ChatMessage {
-                    role: "user".to_string(),
-                    content: json!(format!(
-                        "【工具/Skill 操作手册: {}】\n{}\n(分流路由预载：{}；已写入历史流，后续可直接参考此规格)",
-                        name,
-                        doc.trim(),
-                        if rec.reason.trim().is_empty() { "任务匹配" } else { rec.reason.trim() }
-                    )),
-                });
-                context.fetched_tools.insert(name.to_string());
-                verdict.loaded_skills.push(name.to_string());
-            }
-            None => verdict.skill_load_failures.push(name.to_string()),
+        let reason = if rec.reason.trim().is_empty() { "任务匹配" } else { rec.reason.trim() };
+        if load_skill_into_context(context, db, dirs, name, Some(reason)) {
+            verdict.loaded_skills.push(name.to_string());
+        } else {
+            verdict.skill_load_failures.push(name.to_string());
         }
     }
 }
@@ -254,6 +263,40 @@ mod tests {
         let p = std::env::temp_dir().join(format!("tool_manual_skills_{n}"));
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    #[tokio::test]
+    async fn search_hint_loads_the_same_custom_or_workspace_skill() {
+        let root = temp_skills_dir();
+        let dir = root.join("skills");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("deploy_ops.md"), "# 工作区同名版本").unwrap();
+        std::fs::write(dir.join("workspace_only.md"), "# 工作区独有正文").unwrap();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE agent_custom_instructions (kind TEXT, name TEXT, description TEXT, content TEXT, enabled INTEGER, updated_at TEXT);
+             INSERT INTO agent_custom_instructions VALUES ('skill', 'deploy_ops', '发布流程', '自定义发布正文', 1, 'now');",
+        ).unwrap();
+        let db = crate::db::DbState(Arc::new(std::sync::Mutex::new(conn)));
+        let registry = Arc::new(Mutex::new(PluginRegistry::new()));
+        let mut context = SandwichContext::new("sys".into(), "goal".into());
+        for (name, expected) in [("deploy_ops", "自定义发布正文"), ("workspace_only", "工作区独有正文")] {
+            let result = crate::agent::capability_index::search(
+                &db, &*registry.lock().await, Some(&root), &json!({ "query": name, "kind": "skill" }),
+            );
+            let result: serde_json::Value = serde_json::from_str(&result.stdout).unwrap();
+            let hint = result["matches"][0]["load_hint"].as_str().unwrap();
+            let target = hint.strip_prefix("next_tool_hint: \"").unwrap().strip_suffix('"').unwrap();
+            load_single_tool_manual(target, "skill", true, &root, &root, &registry, &mut context, &db).await;
+            let body = context.turns_history.last().unwrap().content.as_str().unwrap();
+            assert!(body.contains(expected), "{body}");
+            assert!(!body.contains("工作区同名版本"));
+        }
+        let mut verdict = TriageVerdict::fallback("test");
+        verdict.skill_recommendations = vec![SkillRecommendation { name: "deploy_ops".into(), reason: "same".into() }];
+        apply_triage_skill_recommendations(&mut context, &mut verdict, &[dir], &db);
+        assert!(verdict.loaded_skills.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -278,20 +321,20 @@ mod tests {
         )
         .unwrap();
         let db = crate::db::DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
-        apply_triage_skill_recommendations(&mut ctx, &mut verdict, &dir, &db);
+        apply_triage_skill_recommendations(&mut ctx, &mut verdict, std::slice::from_ref(&dir), &db);
 
         assert_eq!(verdict.loaded_skills, vec!["code_diagnosis".to_string()], "存在的手册应加载且去重");
         assert_eq!(verdict.skill_load_failures, vec!["ghost_skill".to_string()], "不存在的名应记失败不静默");
-        assert!(ctx.has_tool_manual("code_diagnosis"));
+        assert!(ctx.has_tool_manual("skill/code_diagnosis"));
         let manuals = ctx.turns_history.iter().filter(|m| {
-            m.content.as_str().map_or(false, |s| s.contains("【工具/Skill 操作手册: code_diagnosis】"))
+            m.content.as_str().map_or(false, |s| s.contains("【工具/Skill 操作手册: skill/code_diagnosis】"))
         }).count();
         assert_eq!(manuals, 1, "手册事件只应注入一次");
 
         // 二次调用不重复注入（与 next_tool_hint 同一去重口径）
         let mut verdict2 = TriageVerdict::fallback("test2");
         verdict2.skill_recommendations = vec![SkillRecommendation { name: "code_diagnosis".into(), reason: "again".into() }];
-        apply_triage_skill_recommendations(&mut ctx, &mut verdict2, &dir, &db);
+        apply_triage_skill_recommendations(&mut ctx, &mut verdict2, std::slice::from_ref(&dir), &db);
         assert!(verdict2.loaded_skills.is_empty(), "已加载的 Skill 不应重复注入");
         let _ = std::fs::remove_dir_all(&dir);
     }

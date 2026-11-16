@@ -117,12 +117,7 @@ fn collect_entries(
             load_hint: format!("next_tool_hint: \"{}/{}\"", "skill", entry.name),
         });
     }
-    let mut skill_dirs: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(root) = workspace_root {
-        skill_dirs.push(root.join("skills"));
-    }
-    skill_dirs.extend(crate::agent::skill_context::known_app_skills_dirs());
-    for dir in skill_dirs {
+    for dir in crate::agent::skill_context::searchable_skill_dirs(workspace_root) {
         for entry in crate::agent::skill_context::skill_index_entries(&dir) {
             if !seen_skills.insert(entry.name.clone()) {
                 continue;
@@ -133,7 +128,7 @@ fn collect_entries(
                 id: entry.name.clone(),
                 description: entry.summary,
                 extra_text: entry.when_to_use,
-                load_hint: format!("next_tool_hint: \"{}\"", entry.name),
+                load_hint: format!("next_tool_hint: \"skill/{}\"", entry.name),
             });
         }
     }
@@ -270,11 +265,22 @@ fn score_entry(entry: &CapabilityEntry, tokens: &[String], whole_query: &str) ->
 /// capability_search 的统一入口：按关键词在全部能力源中检索。
 /// 参数：query(string) 必填；kind? = builtin|mcp|skill|instruction|role；
 /// namespace? = 插件名/目录名子串；limit? 默认 5（插件目录 40），上限 40；offset? 翻页。
+#[cfg(test)]
 pub fn search(
     db: &DbState,
     registry: &PluginRegistry,
     workspace_root: Option<&std::path::Path>,
     params: &Value,
+) -> DispatchResult {
+    search_with_scope(db, registry, workspace_root, params, None)
+}
+
+pub(crate) fn search_with_scope(
+    db: &DbState,
+    registry: &PluginRegistry,
+    workspace_root: Option<&std::path::Path>,
+    params: &Value,
+    scope: Option<&crate::agent::execution::runtime::ExecutionConfig>,
 ) -> DispatchResult {
     let query = params
         .get("query")
@@ -301,8 +307,17 @@ pub fn search(
         .or_else(|| params.get("plugin"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_lowercase());
-    let catalog = registry.list_all_tools();
-    let entries = collect_entries(db, &catalog, workspace_root);
+    let mut catalog = registry.list_all_tools();
+    let plugins_with_directory: std::collections::HashSet<_> =
+        catalog.iter().map(|(plugin, _)| plugin.clone()).collect();
+    catalog.retain(|(plugin, tool)| {
+        scope.is_none_or(|config| config.permits(&format!("{plugin}/{}", tool.name).to_ascii_lowercase()))
+    });
+    let mut entries = collect_entries(db, &catalog, workspace_root);
+    if let Some(config) = scope {
+        entries.retain(|entry| entry.kind != "builtin"
+            || crate::agent::task_context::visibility::tool(config, &entry.id));
+    }
     let total_scanned = entries.len();
     let whole_query = query.to_lowercase();
     let tokens = tokenize(&query);
@@ -324,14 +339,10 @@ pub fn search(
         && entries
             .iter()
             .any(|e| e.kind != "mcp_tool" && e.id.eq_ignore_ascii_case(&query));
-    let mut browse_namespace = entries
-        .iter()
-        .find(|e| {
-            e.kind == "mcp_tool"
-                && (e.namespace.eq_ignore_ascii_case(&query)
-                    || missing_tool_plugin.is_some_and(|p| e.namespace.eq_ignore_ascii_case(p)))
-        })
-        .map(|e| e.namespace.as_str())
+    let mut browse_namespace = registry.plugin_names().into_iter()
+        .filter(|name| name.eq_ignore_ascii_case(&query)
+            || missing_tool_plugin.is_some_and(|plugin| name.eq_ignore_ascii_case(plugin)))
+        .min()
         .filter(|_| !prefer_non_mcp && kind_filter.as_deref().is_none_or(|k| k == "mcp"));
     let offset = params
         .get("offset")
@@ -441,6 +452,27 @@ pub fn search(
         .collect();
 
     let total_matches = scored.len();
+    // An empty registry entry does not prove a connection failure: handshake,
+    // discovery, or a legitimate zero-tool response all have the same shape here.
+    let mut no_tool_directory: Vec<_> = registry.plugin_names().into_iter()
+        .filter(|name| !plugins_with_directory.contains(*name))
+        .filter(|name| {
+            let prefix = format!("{}/", name.to_ascii_lowercase());
+            scope.and_then(|config| config.allowed_tools.as_ref()).is_none_or(|allowed|
+                allowed.iter().any(|tool| tool.to_ascii_lowercase().starts_with(&prefix)))
+        })
+        .filter(|name| {
+            if !kind_filter.as_deref().is_none_or(|kind| kind == "mcp") { return false; }
+            if let Some(namespace) = namespace_filter.as_deref() {
+                return name.to_ascii_lowercase().contains(namespace);
+            }
+            query.eq_ignore_ascii_case(name)
+                || query.split_once('/').is_some_and(|(prefix, _)| prefix.eq_ignore_ascii_case(name))
+                || (kind_filter.as_deref() == Some("mcp") && total_matches == 0)
+        })
+        .collect();
+    no_tool_directory.sort_unstable();
+    no_tool_directory.truncate(8);
     // 发现结果也走通用观测入口；先按同一 token 估算收成完整页，避免随后被头尾采样
     // 切坏目录或自动附带的 schema。下一页基于实际保留条数，不跳过删减的候选。
     let stdout = loop {
@@ -455,7 +487,9 @@ pub fn search(
         } else {
             Value::Null
         };
-        let note = if total_matches == 0 {
+        let note = if total_matches == 0 && !no_tool_directory.is_empty() {
+            "列出的 MCP 插件目前没有工具目录可供搜索。可在能力管理中测试连接并查看结果。"
+        } else if total_matches == 0 {
             "无命中。可换关键词（工具名/动作/中文描述均可），或去掉 kind/namespace 过滤再试。"
         } else if matches.is_empty() {
             "offset 已超出本次结果范围，可从 offset=0 重新读取；结果未持久化，工具连接变化后目录可能改变。"
@@ -478,6 +512,7 @@ pub fn search(
             "next_offset": if has_more { Some(next_offset) } else { None },
             "next_request": next_request,
             "matches": matches,
+            "mcp_without_tool_directory": no_tool_directory,
             "note": note,
         }))
         .unwrap_or_else(|_| "{}".to_string());
@@ -868,6 +903,56 @@ mod tests {
         let res = search(db, registry, None, &params);
         assert!(res.success, "{}", res.stderr);
         serde_json::from_str(&res.stdout).unwrap()
+    }
+
+    #[test]
+    fn restricted_search_uses_registered_execution_permissions() {
+        let db = test_db();
+        db.0.lock().unwrap().execute_batch(
+            r#"CREATE TABLE agent_child_runs (id TEXT PRIMARY KEY, execution_config_json TEXT);
+               INSERT INTO agent_child_runs VALUES ('child', '{"allowed_tools":["capability_search","books/read_range"]}');"#,
+        ).unwrap();
+        let mut registry = PluginRegistry::new();
+        add_catalog(&mut registry, "books", vec![
+            tool("read_range", "读取 Excel 工作表单元格", json!({})),
+            tool("write_range", "修改 Excel 工作表单元格", json!({})),
+        ]);
+        let request = serde_json::from_value(json!({
+            "tool": "capability_search", "command": {"query":"Excel 工作表", "kind":"mcp"}
+        })).unwrap();
+        let output = crate::agent::dispatcher::run_agent_step_with_images(
+            &db, "session", &request, &registry, None, &Default::default(), Some("child"), None,
+        );
+        assert!(output.success, "{}", output.stderr);
+        let result: Value = serde_json::from_str(&output.stdout).unwrap();
+        assert_eq!(result["returned_matches"], 1);
+        assert_eq!(result["matches"][0]["id"], "books/read_range");
+        assert!(result["matches"][0]["input_schema"].is_object());
+    }
+
+    #[test]
+    fn empty_mcp_catalog_is_distinguished_from_keyword_miss() {
+        let db = test_db();
+        let mut registry = PluginRegistry::new();
+        add_catalog(&mut registry, "empty-books", vec![]);
+        add_catalog(&mut registry, "ready-books", vec![tool("read_range", "Read Excel cells", json!({}))]);
+        let empty = result(&db, &registry, json!({"query":"empty-books", "kind":"mcp"}));
+        assert_eq!(empty["matches"], json!([]));
+        assert_eq!(empty["mcp_without_tool_directory"], json!(["empty-books"]));
+        let miss = result(&db, &registry, json!({"query":"星际航行", "kind":"mcp", "namespace":"ready-books"}));
+        assert_eq!(miss["mcp_without_tool_directory"], json!([]));
+    }
+
+    #[test]
+    fn skill_query_matches_trigger_text_and_returns_the_document_hint() {
+        let db = test_db();
+        db.0.lock().unwrap().execute(
+            "INSERT INTO agent_custom_instructions VALUES ('1','skill','diagnose_again','修复无效，问题仍在时排查','先确认实际运行的是哪个版本',1,'now')",
+            [],
+        ).unwrap();
+        let output = result(&db, &PluginRegistry::new(), json!({"query":"修过一次但问题仍在", "kind":"skill"}));
+        assert_eq!(output["matches"][0]["id"], "diagnose_again");
+        assert_eq!(output["matches"][0]["load_hint"], "next_tool_hint: \"skill/diagnose_again\"");
     }
 
     #[test]
