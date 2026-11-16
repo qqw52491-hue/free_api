@@ -5,11 +5,15 @@
     <fieldset class="independent-fields" :disabled="parseError">
       <section class="settings-block" aria-label="工具权限">
         <h5>工具权限</h5>
-        <label class="tool-mode">可选工具范围
-          <select class="form-select workflow-select" :value="toolMode" @change="changeToolMode($event)">
-            <option value="inherit">由 AI 按需选择（默认）</option>
-            <option value="allowlist">仅允许指定工具</option>
-          </select>
+        <label class="tool-mode"><span @click.prevent>可选工具范围</span>
+          <WorkflowSegmented
+            :model-value="toolMode"
+            :options="[
+              { value: 'inherit', label: '由 AI 按需选择（默认）', tone: 'auto' },
+              { value: 'allowlist', label: '仅允许指定工具', tone: 'accent' },
+            ]"
+            @change="changeToolMode($event)"
+          />
         </label>
         <p v-if="toolMode === 'inherit'" class="hint">继承父任务可用工具，AI 自行决定每次用哪些。</p>
         <template v-else>
@@ -23,11 +27,42 @@
       <section class="settings-block" aria-label="工作流程">
         <h5>工作流程 <span class="section-tag">{{ flowMode === 'custom' && !specialized ? '角色自定义' : specialized ? '专用结果契约' : '继承公共默认' }}</span></h5>
         <p class="hint">只决定方案、审查和交付安排，不改变上面的工具权限。</p>
-        <label class="tool-mode">流程来源<select class="form-select workflow-select" :value="flowMode" :disabled="specialized" @change="changeFlowMode($event)"><option value="inherit">继承子任务默认流程</option><option value="custom">为这个角色自定义</option></select></label>
+        <label class="tool-mode"><span @click.prevent>流程来源</span>
+          <WorkflowSegmented
+            :model-value="flowMode"
+            :disabled="specialized"
+            :options="[
+              { value: 'inherit', label: '继承子任务默认流程', tone: 'auto' },
+              { value: 'custom', label: '为这个角色自定义', tone: 'accent' },
+            ]"
+            @change="changeFlowMode($event)"
+          />
+        </label>
         <template v-if="flowMode === 'custom' && !specialized">
           <div class="controls">
-            <label>方案安排<select class="form-select workflow-select" v-model="planMode" @change="publish()"><option value="">继承公共默认</option><option value="auto">自动 / 原有策略</option><option value="cross_review">先讨论并审查方案</option><option value="plan_approval">方案需要人工批准</option></select></label>
-            <label>结果如何结束<select class="form-select workflow-select" v-model="completion" @change="publish()"><option value="">继承公共默认</option><option value="delivery">完整交付，执行适用验证和审查</option><option value="handoff">交回结果，由父任务集成验收</option></select></label>
+            <label>方案安排
+              <WorkflowSelect
+                v-model="planMode"
+                :options="[
+                  { value: '', label: '继承公共默认' },
+                  { value: 'auto', label: '自动 / 原有策略' },
+                  { value: 'cross_review', label: '先讨论并审查方案' },
+                  { value: 'plan_approval', label: '方案需要人工批准' },
+                ]"
+                @change="publish()"
+              />
+            </label>
+            <label>结果如何结束
+              <WorkflowSelect
+                v-model="completion"
+                :options="[
+                  { value: '', label: '继承公共默认' },
+                  { value: 'delivery', label: '完整交付，执行适用验证和审查' },
+                  { value: 'handoff', label: '交回结果，由父任务集成验收' },
+                ]"
+                @change="publish()"
+              />
+            </label>
           </div>
           <StageSettingsFields v-model="stages" :approval="planMode === 'plan_approval'" @update:model-value="publish()" />
         </template>
@@ -35,7 +70,20 @@
       </section>
       <section class="settings-block" aria-label="执行方式">
         <h5>执行方式 <span class="section-tag">高级选项</span></h5>
-        <label class="tool-mode">默认执行方式<select class="form-select workflow-select" :value="profile" @change="changeProfile($event)"><option value="">沿用派发入口</option><option value="task">通用子任务</option><option value="worker">调查助手</option><option value="writer">实施助手</option><option value="reviewer">专用审查</option></select></label>
+        <label class="tool-mode"><span @click.prevent>默认执行方式</span>
+          <WorkflowSegmented
+            variant="pills"
+            :model-value="profile"
+            :options="[
+              { value: '', label: '沿用派发入口', tone: 'auto' },
+              { value: 'task', label: '通用子任务', tone: 'accent' },
+              { value: 'worker', label: '调查助手', tone: 'accent' },
+              { value: 'writer', label: '实施助手', tone: 'accent' },
+              { value: 'reviewer', label: '专用审查', tone: 'accent' },
+            ]"
+            @change="changeProfile($event)"
+          />
+        </label>
         <p v-if="workspace === 'isolated'" class="hint">此角色仍有历史隔离配置。请先改为共享工作区再派发新任务。<button type="button" class="workflow-link" @click="changeWorkspace()">改为共享工作区</button></p>
         <p class="hint">普通方式共用通用执行器；调查名称不自动保证只读。切到专用方式时会说明不兼容的流程变化。</p>
         <details class="preset-details"><summary>快捷组合（同时调整执行方式与流程）</summary><div class="presets"><button v-for="preset in presets" :key="preset.id" type="button" :aria-pressed="matches(preset)" :class="{selected:matches(preset)}" @click="applyPreset(preset)"><strong>{{ preset.label }}</strong><span>{{ preset.description }}</span></button></div></details>
@@ -48,6 +96,8 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
+import WorkflowSelect from '../common/WorkflowSelect.vue';
+import WorkflowSegmented from '../common/WorkflowSegmented.vue';
 import StageSettingsFields from './StageSettingsFields.vue';
 import type { StageSettings } from './types';
 const stages = ref<StageSettings>({});
@@ -179,29 +229,136 @@ watch(() => props.modelValue, raw => {
 </script>
 
 <style scoped>
-.independent-fields {border:0;padding:0;margin:0;min-width:0}.workflow-link {background:transparent;border:0;color:var(--theme-text-secondary);cursor:pointer;font-size:12px}.section-tag {font-size:11px;font-weight:400;color:var(--theme-text-muted);margin-left:8px}
-.execution-settings { padding: 18px; border: 1px solid var(--border-1, #3f3f46); border-radius: 12px; background: var(--bg-1, #18181b); }
+.independent-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+.execution-settings {
+  padding: 20px;
+  border: 1px solid rgba(129, 140, 248, 0.22);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(99, 102, 241, 0.08) 0%, transparent 45%), var(--bg-1, #18181b);
+  box-shadow: inset 0 1px 0 rgba(var(--theme-foreground-rgb, 255, 255, 255), 0.04), 0 4px 20px rgba(0, 0, 0, 0.22);
+}
 .heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
-h4 { margin: 0; font-size: 15px; color: var(--theme-text-primary, #f4f4f5); }
+h4 { margin: 0; font-size: 15px; font-weight: 600; color: var(--theme-text-primary, #f4f4f5); }
 p { margin: 7px 0 0; }
 .heading p, .hint { color: var(--theme-text-muted, #a1a1aa); font-size: 12px; line-height: 1.65; }
-.workflow-link { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--theme-text-primary, #e4e4e7); cursor: pointer; }
-.presets { display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); gap: 9px; margin: 16px 0; }
-.presets button { padding: 12px; border: 1px solid var(--border-1, #3f3f46); border-radius: 9px; background: transparent; color: var(--theme-text-primary, #e4e4e7); text-align: left; cursor: pointer; }
-.presets button:hover, .presets button.selected { border-color: var(--theme-status-info, #38bdf8); background: rgba(56, 189, 248, .07); }
+.workflow-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: rgba(99, 102, 241, 0.12);
+  border: 1px solid rgba(129, 140, 248, 0.28);
+  color: var(--theme-status-accent, #c7d2fe);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background .15s ease, border-color .15s ease, transform .15s ease;
+}
+.workflow-link:hover {
+  background: rgba(99, 102, 241, 0.2);
+  border-color: rgba(129, 140, 248, 0.5);
+  transform: translateY(-1px);
+}
+p .workflow-link { margin-left: 8px; padding: 3px 9px; font-size: 11.5px; }
+.section-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(99, 102, 241, 0.14);
+  border: 1px solid rgba(129, 140, 248, 0.26);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--theme-status-accent, #a5b4fc);
+  margin-left: 8px;
+}
+.presets { display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); gap: 9px; margin: 14px 0 4px; }
+.presets button {
+  padding: 12px 13px;
+  border: 1px solid rgba(var(--theme-foreground-rgb, 255, 255, 255), 0.1);
+  border-radius: 10px;
+  background: rgba(var(--theme-foreground-rgb, 255, 255, 255), 0.02);
+  color: var(--theme-text-primary, #e4e4e7);
+  text-align: left;
+  cursor: pointer;
+  transition: background .15s ease, border-color .15s ease, box-shadow .15s ease, transform .15s ease;
+}
+.presets button:hover {
+  border-color: rgba(129, 140, 248, 0.48);
+  background: rgba(99, 102, 241, 0.08);
+  transform: translateY(-1px);
+}
+.presets button.selected {
+  border-color: rgba(129, 140, 248, 0.72);
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.18) 0%, rgba(56, 189, 248, 0.08) 100%);
+  box-shadow: 0 4px 14px rgba(79, 70, 229, 0.16);
+}
 .presets strong { display: flex; align-items: center; gap: 7px; font-size: 13px; }
 .presets button > span { display: block; margin-top: 6px; font-size: 12px; color: var(--theme-text-muted, #a1a1aa); line-height: 1.5; }
 .recommended { padding: 2px 5px; border-radius: 4px; font-size: 10px; color: var(--theme-status-info, #38bdf8); background: rgba(56, 189, 248, .12); }
-.settings-block { margin-top: 16px; padding: 14px; border: 1px solid var(--border-1, #3f3f46); border-radius: 9px; }
-.settings-block h5 { margin: 0; font-size: 13px; color: var(--theme-text-primary, #e4e4e7); }
+.settings-block {
+  margin-top: 14px;
+  padding: 15px 16px;
+  background: rgba(var(--theme-foreground-rgb, 255, 255, 255), 0.022);
+  border: 1px solid rgba(var(--theme-foreground-rgb, 255, 255, 255), 0.08);
+  border-radius: 11px;
+}
+.settings-block h5 { display: flex; align-items: center; margin: 0; font-size: 13px; font-weight: 600; color: var(--theme-text-primary, #e4e4e7); }
 .settings-block .controls { margin-top: 12px; }
 .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); gap: 12px; }
-.controls label, .tool-list, .tool-mode { min-width: 0; display: flex; flex-direction: column; gap: 7px; font-size: 12px; color: var(--theme-text-primary, #e4e4e7); }
-textarea { width: 100%; box-sizing: border-box; padding: 9px; border: 1px solid var(--border-1, #3f3f46); border-radius: 7px; background: var(--theme-inset-bg, #202024); color: var(--theme-text-primary, #e4e4e7); font: inherit; }
-textarea { resize: vertical; }
-details { margin-top: 14px; border-top: 1px solid var(--border-1, #3f3f46); padding-top: 12px; }
-summary { cursor: pointer; font-size: 13px; color: var(--theme-text-primary, #e4e4e7); }
+.controls label, .tool-list, .tool-mode { min-width: 0; display: flex; flex-direction: column; gap: 7px; font-size: 12px; font-weight: 500; color: var(--theme-text-primary, #e4e4e7); }
+textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 9px 11px;
+  border: 1px solid rgba(var(--theme-foreground-rgb, 255, 255, 255), 0.12);
+  border-radius: 8px;
+  background: var(--theme-inset-bg, #202024);
+  color: var(--theme-text-primary, #e4e4e7);
+  font: inherit;
+  resize: vertical;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+textarea:focus {
+  outline: none;
+  border-color: var(--accent, #6c63ff);
+  box-shadow: 0 0 0 3px var(--accent-glow, rgba(108, 99, 255, 0.25));
+}
+details { margin-top: 14px; border-top: 1px solid rgba(var(--theme-foreground-rgb, 255, 255, 255), 0.08); padding-top: 12px; }
+summary { cursor: pointer; font-size: 13px; font-weight: 500; color: var(--theme-text-primary, #e4e4e7); }
 .tool-mode, .tool-list { margin-top: 12px; }
-.summary { margin-top: 14px; padding: 10px 12px; border-radius: 7px; background: rgba(56, 189, 248, .07); color: var(--theme-status-info, #38bdf8); font-size: 12px; line-height: 1.6; }
-.error { color: var(--theme-status-danger, #f87171); font-size: 12px; }
+.summary {
+  margin-top: 14px;
+  padding: 10px 13px;
+  border-radius: 9px;
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.1) 0%, rgba(99, 102, 241, 0.08) 100%);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  color: var(--theme-status-info, #38bdf8);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.6;
+}
+.error {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border-radius: 9px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: var(--theme-status-danger, #f87171);
+  font-size: 12px;
+}
+.error button {
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.16);
+  color: inherit;
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
 </style>
