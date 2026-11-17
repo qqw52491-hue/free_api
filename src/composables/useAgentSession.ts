@@ -794,7 +794,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         return combined;
     });
     // 流式 finish 只是候选草稿；最终正文仅来自 complete 事件中的已提交结果。
-    // 只向界面投影布尔状态，长草稿逐块增长不触发最终 Markdown 重算/渲染。
+    // 候选正文以纯文本预览，已提交的 Markdown 单独渲染。
     const completionPending = computed(() => {
         if (!isRunning.value || completionMessage.value) return false;
         const lastStep = steps.value[steps.value.length - 1];
@@ -1783,6 +1783,11 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 elapsedMs: Number(payload.elapsed_ms) || 0,
                 done: false,
             };
+            return;
+        }
+
+        if (eventType === "review_format_retry_started") {
+            streamingSummary.value = "";
             return;
         }
 

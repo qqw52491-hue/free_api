@@ -3,7 +3,7 @@ use crate::{
         context::{ChatMessage, SandwichContext},
         types::{AgentInstruction, StepExecutionError, TokenUsage},
         utils::{
-            extract_json_from_text, extract_streaming_json_field, normalize_raw_instruction_value,
+            extract_json_from_text, normalize_raw_instruction_value, streaming_finish_preview,
             repair_json,
         },
     },
@@ -460,7 +460,7 @@ pub async fn call_llm(
         let mut first_token_at: Option<std::time::Instant> = None;
         let mut total_chars: usize = 0;
         let mut last_thinking_emit_at = std::time::Instant::now();
-        let last_content_emit_at = std::time::Instant::now();
+        let mut last_content_emit_at = None;
         const EMIT_THROTTLE_MS: u128 = 50; // 20 FPS 平滑节流
 
         // 流式接收事件，实时向前端推送 Thinking/Content 以及动态速率与 TTFT
@@ -515,18 +515,9 @@ pub async fn call_llm(
                         accumulated_content,
                         ..
                     } => {
-                        if now.duration_since(last_content_emit_at).as_millis() >= EMIT_THROTTLE_MS
-                        {
-                            let is_intermediate_tool = accumulated_content.contains("\"tool\"")
-                                && !accumulated_content.contains("\"finish\"");
-                            let streaming_summary = if is_intermediate_tool {
-                                None
-                            } else {
-                                extract_streaming_json_field(
-                                    accumulated_content,
-                                    &["summary", "answer", "details"],
-                                )
-                            };
+                        if last_content_emit_at.is_none_or(|last| now.duration_since(last).as_millis() >= EMIT_THROTTLE_MS) {
+                            last_content_emit_at = Some(now);
+                            let streaming_summary = streaming_finish_preview(accumulated_content);
 
                             app_handle
                                 .emit(
@@ -691,6 +682,16 @@ pub async fn call_llm(
 
         match parse_result {
             Ok(inst) => {
+                if let (Some(app_handle), Some(content)) = (app, streaming_finish_preview(final_json_str)) {
+                    use tauri::Emitter;
+                    let _ = app_handle.emit(&format!("agent-progress-{session_id}"), json!({
+                        "type": "summary_stream",
+                        "run_id": run_id,
+                        "step_id": step_id,
+                        "content": content,
+                        "done": true,
+                    }));
+                }
                 // 📊 成功行：instruction_ready（含完整/修复两种请求形态，各自成行）
                 crate::agent::telemetry::record_llm_call(
                     state.inner(),

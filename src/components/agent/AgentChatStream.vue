@@ -1516,8 +1516,10 @@
                     </svg>
                     <span>交付验收</span>
                 </span>
-                <span class="completion-pending-text">正在准备交付物并执行自动化验收门禁，尚未正式交付…</span>
+                <span class="completion-pending-text">{{ completionPreview ? "回答预览 · 尚未正式交付" : "正在准备交付物并验收，尚未正式交付…" }}</span>
             </div>
+
+            <div v-if="completionPending && completionPreview && isRunning && !completionMessage" class="completion-preview">{{ completionPreview }}</div>
 
             <!-- 人工干预/交互选择卡片 (单选/多选/确认/传文件/补充输入) -->
             <AgentHumanInterventionCard
@@ -1895,6 +1897,7 @@ const props = withDefaults(
         isRunning: boolean;
         completionMessage: string;
         completionPending?: boolean;
+        completionPreview?: string;
         finalSummary: string;
         finalArtifacts: AgentArtifactInput[];
         hasError: boolean;
@@ -3868,7 +3871,7 @@ function getStepMetricsTooltip(step: AgentStepItem): string {
 // isStreamingSummary 已移除：解耦光标与富文本内容，避免末尾方块符号与二次全量重绘卡顿
 
 watch(
-    () => [props.steps.length, props.isRunning, props.completionPending, props.finalSummary, props.thought],
+    () => [props.steps.length, props.isRunning, props.completionPending, props.completionPreview, props.finalSummary, props.thought],
     () => {
         if (props.isRunning) {
             // 思考窗格始终自追尾——外层向上翻历史不该把它钉在第一行

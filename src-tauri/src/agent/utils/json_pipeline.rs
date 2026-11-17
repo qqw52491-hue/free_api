@@ -428,6 +428,70 @@ pub fn normalize_raw_instruction_value(val: &mut serde_json::Value) {
     }
 }
 
+/// 只预览顶层 finish 的用户正文。完整指令仍由正式解析和验收入口处理。
+pub(crate) fn streaming_finish_preview(text: &str) -> Option<String> {
+    fn fields(mut input: &str, mut visit: impl FnMut(String, &str)) {
+        let Some(object) = input.trim_start().strip_prefix('{') else { return };
+        input = object;
+        loop {
+            let mut key = serde_json::Deserializer::from_str(input).into_iter::<String>();
+            let Some(Ok(name)) = key.next() else { break };
+            let Some(value) = input[key.byte_offset()..].trim_start().strip_prefix(':') else { break };
+            let value = value.trim_start();
+            visit(name, value);
+            let mut values = serde_json::Deserializer::from_str(value).into_iter::<serde_json::Value>();
+            if !matches!(values.next(), Some(Ok(_))) { break; }
+            let Some(rest) = value[values.byte_offset()..].trim_start().strip_prefix(',') else { break };
+            input = rest;
+        }
+    }
+
+    fn draft_string(input: &str) -> Option<String> {
+        if !input.starts_with('"') { return None; }
+        let mut values = serde_json::Deserializer::from_str(input).into_iter::<String>();
+        match values.next() {
+            Some(Ok(text)) => Some(text),
+            Some(Err(error)) if error.is_eof() => {
+                extract_streaming_json_field(&format!(r#""text":{input}"#), &["text"])
+            }
+            _ => None,
+        }
+    }
+
+    fn prose(object: &str) -> Option<String> {
+        let (mut summary, mut details) = (None, None);
+        fields(object, |name, value| match name.as_str() {
+            "summary" | "answer" if summary.is_none() => summary = draft_string(value),
+            "details" => details = draft_string(value),
+            _ => {}
+        });
+        match (summary.filter(|text| !text.is_empty()), details.filter(|text| !text.is_empty())) {
+            (Some(summary), Some(details)) if summary != details => Some(format!("{summary}\n\n{details}")),
+            (Some(text), _) | (None, Some(text)) => Some(text),
+            (None, None) => None,
+        }
+    }
+
+    let text = text.trim_start();
+    let text = text.strip_prefix("```json").or_else(|| text.strip_prefix("```")).unwrap_or(text);
+    let mut tool = None;
+    let (mut params, mut command, mut args) = (None, None, None);
+    let mut batch = false;
+    fields(text, |name, value| match name.as_str() {
+        "tool" => tool = serde_json::Deserializer::from_str(value).into_iter::<String>().next().and_then(Result::ok),
+        "params" if value.starts_with('{') => params = prose(value),
+        "command" if value.starts_with('{') => command = prose(value),
+        "args" if value.starts_with('{') => args = prose(value),
+        "parallel" | "plan_tree" | "commands" => batch |= value.starts_with(['{', '[']),
+        _ => {}
+    });
+    if !batch && tool.is_some_and(|tool| tool.eq_ignore_ascii_case("finish")) {
+        params.or(command).or(args).or_else(|| prose(text))
+    } else {
+        None
+    }
+}
+
 /// 从未闭合或已闭合的流式 JSON 字符串中，实时提取指定字段的文本内容（自动解码转义字符）
 pub fn extract_streaming_json_field(json_text: &str, field_names: &[&str]) -> Option<String> {
     for field in field_names {
@@ -512,6 +576,28 @@ pub fn extract_streaming_json_field(json_text: &str, field_names: &[&str]) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streaming_finish_previews_summary_and_growing_details_before_json_closes() {
+        let first = r#"{"tool":"finish","params":{"summary":"正在"#;
+        let second = r#"{"tool":"finish","params":{"summary":"正在交付","details":"第一行\n第二"#;
+        assert_eq!(streaming_finish_preview(first).as_deref(), Some("正在"));
+        assert_eq!(streaming_finish_preview(second).as_deref(), Some("正在交付\n\n第一行\n第二"));
+        assert_eq!(streaming_finish_preview(r#"{"tool":"finish","command":{"details":"正文"#).as_deref(), Some("正文"));
+        assert_eq!(streaming_finish_preview(r#"{"tool":"finish","params":{"summary":"正文","details":"尾部"}}"#).as_deref(), Some("正文\n\n尾部"));
+    }
+
+    #[test]
+    fn streaming_finish_ignores_nested_tools_and_unrelated_text() {
+        for input in [
+            r#"{"tool":"local_shell","params":{"summary":"finish 中的私有命令"#,
+            r#"{"parallel":[{"tool":"finish","params":{"summary":"嵌套调用"#,
+            r#"{"tool":"finish","params":{"extra":{"summary":"内部值"},"other":"内容"#,
+            r#"{"thought":"示例：\"tool\": \"finish\"","params":{"summary":"内部值"#,
+        ] {
+            assert_eq!(streaming_finish_preview(input), None, "{input}");
+        }
+    }
 
     /// 回归：模型把所有字段填成 ""（含 id/applied_lessons/parallel）不再导致结构转换失败。
     #[test]
