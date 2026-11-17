@@ -722,7 +722,8 @@ pub(super) async fn turn_main<'a, 'b>(
                 }
                 // 非 git 环境：按本步骤是否为写类指令保守计 1（但排除 session_tmp 草稿写入）
                 (None, _)
-                    if crate::agent::dispatcher::is_write_or_side_effect_tool(&instruction) =>
+                    if crate::agent::dispatcher::is_write_or_side_effect_tool(&instruction)
+                        && !post_step::is_remote_shell_observation(&instruction) =>
                 {
                     let is_tmp_write = instruction.get_tool().eq_ignore_ascii_case("local_file")
                         && crate::agent::tools::local_file::is_dispatch_result_tmp(&result);

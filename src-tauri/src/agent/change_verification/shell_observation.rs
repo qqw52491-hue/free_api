@@ -7,7 +7,7 @@ pub fn is_observation_or_validation_script(command: &str) -> bool {
     let Some(sanitized) = observation_substitutions(command) else {
         return false;
     };
-    let Some(parts) = segments(&sanitized) else {
+    let Some(parts) = segments(&sanitized, false) else {
         return false;
     };
     !parts.is_empty()
@@ -19,6 +19,63 @@ pub fn is_observation_or_validation_script(command: &str) -> bool {
             AuditLedger::is_readonly_shell_command(&json!({"command":trimmed}))
                 || verification_segment(trimmed)
         })
+}
+
+/// 识别单一、字面量 SSH 查询。只用于审查计数和台账分类。
+pub(crate) fn is_readonly_ssh_probe(command: &str) -> bool {
+    let Some((invocation, quoted)) = command.trim().split_once(" '") else { return false };
+    let Some(script) = quoted.strip_suffix('\'') else { return false };
+    if script.contains(['\'', '\\', '`']) || script.contains("$(") {
+        return false;
+    }
+
+    let mut words = invocation.split_whitespace();
+    if words.next() != Some("ssh") { return false; }
+    let host = loop {
+        match words.next() {
+            Some("-o") => {
+                let Some((key, value)) = words.next().and_then(|word| word.split_once('=')) else {
+                    return false;
+                };
+                let allowed = match key {
+                    "ConnectTimeout" => !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()),
+                    "BatchMode" => matches!(value, "yes" | "no"),
+                    "StrictHostKeyChecking" => matches!(value, "yes" | "no" | "accept-new"),
+                    _ => false,
+                };
+                if !allowed { return false; }
+            }
+            Some(host) => break host,
+            None => return false,
+        }
+    };
+    if words.next().is_some() || host.starts_with('-') || !host.bytes().all(|byte|
+        byte.is_ascii_alphanumeric() || matches!(byte, b'@' | b'.' | b'-' | b'_')
+    ) {
+        return false;
+    }
+
+    let Some(parts) = segments(script, true) else { return false };
+    !parts.is_empty() && parts.iter().all(|part| {
+        let part = part.strip_suffix(" 2>/dev/null").unwrap_or(part);
+        let mut words = part.split_whitespace();
+        let head = words.next();
+        if part.contains('$') && !(head == Some("echo") && words.clone().all(|word| {
+            !word.contains('$') || word == "verify_rc=$?"
+        })) {
+            return false;
+        }
+        match head {
+            Some("systemctl") => matches!(words.next(), Some("show" | "cat" | "is-active" | "is-enabled" | "status"))
+                && AuditLedger::is_readonly_shell_command(&json!({"command":part})),
+            Some("systemd-analyze") => words.next() == Some("verify")
+                && words.next().is_some_and(|operand| !operand.starts_with('-'))
+                && words.all(|word| word == "2>&1"),
+            Some("echo" | "ls" | "cat" | "grep" | "head" | "tail" | "journalctl") =>
+                AuditLedger::is_readonly_shell_command(&json!({"command":part})),
+            _ => false,
+        }
+    })
 }
 
 /// 只有单次验证（或 cd && 单次验证）可按工具成功自动认账；管道/分号/|| 会遮盖前段退出码。
@@ -124,7 +181,7 @@ fn observation_substitutions(command: &str) -> Option<String> {
     Some(out)
 }
 
-fn segments(s: &str) -> Option<Vec<&str>> {
+fn segments(s: &str, allow_null_stderr: bool) -> Option<Vec<&str>> {
     let b = s.as_bytes();
     let mut parts = Vec::new();
     let mut quote = None;
@@ -147,7 +204,14 @@ fn segments(s: &str) -> Option<Vec<&str>> {
             i += 1;
             continue;
         }
-        // 仅 stderr 合并，不接受写文件重定向。
+        // 仅 stderr 合并或丢弃，不接受写文件重定向。
+        if allow_null_stderr && b[i..].starts_with(b"2>/dev/null")
+            && (i == 0 || b[i - 1].is_ascii_whitespace())
+            && b.get(i + 11).is_none_or(|c| c.is_ascii_whitespace() || matches!(c, b';' | b'|' | b'&'))
+        {
+            i += 11;
+            continue;
+        }
         if b[i..].starts_with(b"2>&1") {
             i += 4;
             continue;
@@ -181,6 +245,31 @@ fn segments(s: &str) -> Option<Vec<&str>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ssh_status_and_validation_are_observations_but_mixed_writes_are_not() {
+        let ssh = |body: &str| format!("ssh -o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=no admin@example.test '{body}'");
+        for body in [
+            "systemctl show example.service -p ConditionPathExists --no-pager",
+            "echo ===CHECK===; systemctl cat example.service --no-pager | tail -n 10",
+            "ls -l /run/example.pid 2>&1; systemctl is-active example.service",
+            "systemctl show example.service -p Conditions 2>/dev/null; systemctl show example.service | grep -i condition",
+            "systemd-analyze verify example.service 2>&1; echo verify_rc=$?; systemctl cat example.service",
+        ] {
+            assert!(is_readonly_ssh_probe(&ssh(body)), "{body}");
+        }
+        for body in [
+            "systemctl show example.service; systemctl stop example.service",
+            "systemctl show example.service 2>/dev/null.log",
+            "cat /etc/example > /tmp/copy",
+            "journalctl --rotate",
+            "systemd-analyze verify $(touch a)",
+        ] {
+            assert!(!is_readonly_ssh_probe(&ssh(body)), "{body}");
+        }
+        assert!(!is_readonly_ssh_probe("ssh -o ProxyCommand=anything admin@example.test 'systemctl show example.service'"));
+        assert!(!is_readonly_ssh_probe("ssh admin@example.test 'systemctl show example.service' && touch /tmp/example"));
+    }
+
     #[test]
     fn real_license_queries_and_filtered_maven_tests_do_not_create_new_write_batches() {
         assert!(is_observation_or_validation_script("cd /tmp/ws; ZIP=$(ls target/*.zip | head -1); echo '授权依赖'; unzip -l \"$ZIP\" | grep 'lic-1.0.0.jar'"));

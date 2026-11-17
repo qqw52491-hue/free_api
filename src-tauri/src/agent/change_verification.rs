@@ -719,7 +719,7 @@ pub fn decide_auto_verify(
 }
 
 mod shell_observation;
-pub(crate) use shell_observation::is_observation_or_validation_script;
+pub(crate) use shell_observation::{is_observation_or_validation_script, is_readonly_ssh_probe};
 
 /// 识别退出状态能够直接代表本次验证结果的简单命令；不按子串认账。
 pub fn is_test_or_verification_command(cmd: &str) -> bool {

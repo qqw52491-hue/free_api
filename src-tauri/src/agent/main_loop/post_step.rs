@@ -79,6 +79,14 @@ pub(crate) fn record_lesson_lineage(
     }
 }
 
+pub(crate) fn is_remote_shell_observation(instruction: &AgentInstruction) -> bool {
+    if !instruction.get_tool().eq_ignore_ascii_case("local_shell") {
+        return false;
+    }
+    crate::agent::change_verification::extract_command_from_params(&instruction.get_params())
+        .is_some_and(|command| crate::agent::change_verification::is_readonly_ssh_probe(&command))
+}
+
 /// 记录不可逆副作用安全台账 (Side-Effects Ledger)：
 /// 关键不可逆操作成功执行后记录台账；纯只读命令及临时草稿 (session_tmp) 不入台账；
 /// 否则走写入验证自愈（测试命令成功自动闭合 unverified 写入）。
@@ -100,13 +108,13 @@ pub(crate) fn record_side_effect_or_verify(
         .is_some_and(|t| t.eq_ignore_ascii_case("local_shell"))
         || (tool.eq_ignore_ascii_case("mcp")
             && instruction.get_action().eq_ignore_ascii_case("local_shell"));
-    let nonmutating_shell = local_shell
+    let nonmutating_shell = is_remote_shell_observation(instruction) || (local_shell
         && crate::agent::change_verification::extract_command_from_params(
             &instruction.get_params(),
         )
         .is_some_and(|c| {
             crate::agent::change_verification::is_observation_or_validation_script(&c)
-        });
+        }));
     // 失败的 shell 也可能已经改了文件；实测差集不因非零退出而丢弃。
     let shell_touched = std::mem::take(&mut context.shell_touched_paths);
     let should_record = should_record_effect(
