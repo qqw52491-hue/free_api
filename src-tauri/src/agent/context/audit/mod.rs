@@ -27,7 +27,7 @@ impl AuditLedger {
             // 早期记录聚合
             let omitted = total - 6;
             lines.push(format!(
-                "- [... 早期已安全执行 {} 项不可逆动作 (完整记录在 SQLite) ...]",
+                "- [... 早期 {} 条记录 (完整记录在 SQLite) ...]",
                 omitted
             ));
             for r in &records[omitted..] {
@@ -39,7 +39,7 @@ impl AuditLedger {
         }
 
         format!(
-            "【已生效的不可逆外部操作 (Side-Effects 台账)】\n(⚠️系统提示：以下动作已被物理执行，请勿重复调用！)\n{}\n\n",
+            "【工具副作用台账】\n宿主记录和模型补报均可回查。模型补报应结合原回执和核对回执判断。\n{}\n\n",
             lines.join("\n")
         )
     }

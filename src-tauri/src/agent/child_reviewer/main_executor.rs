@@ -20,12 +20,14 @@ pub(crate) fn restrict_instruction(
         || inst.scope_extension.is_some()
         || inst.request_retriage.is_some()
         || inst.submit_plan.is_some()
-        || inst.human_reply_decision.is_some();
+        || inst.human_reply_decision.is_some()
+        || inst.side_effect_report.is_some();
     inst.review_contract_update = None;
     inst.scope_extension = None;
     inst.request_retriage = None;
     inst.submit_plan = None;
     inst.human_reply_decision = None;
+    inst.side_effect_report = None;
     inst.change_verification_update = None;
     inst.target_blocks_update = None;
     inst.todo_update.clear();

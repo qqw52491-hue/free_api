@@ -58,6 +58,9 @@ pub struct AgentCheckpoint {
     /// LLM 已返回且已确认的结构化决策；工具开始前也必须可恢复。
     #[serde(default)]
     pub prepared_instruction: Option<AgentInstruction>,
+    /// 同一任务中可供模型补报影响的 Shell 回执。消费后移除，恢复时沿用原身份。
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub(crate) shell_effect_receipts: std::collections::BTreeMap<String, (usize, String)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) stage_arbitration: Option<stage_state::StageArbitration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -412,6 +415,7 @@ impl AgentCheckpoint {
             data: DurableAgentContext::capture(context),
             pending: None,
             prepared_instruction: None,
+            shell_effect_receipts: Default::default(),
             stage_arbitration: None,
             child_dispatch_batch: None,
             step_id: 0,
@@ -506,6 +510,73 @@ impl AgentCheckpoint {
 
     pub fn restore_context(&self, context: &mut SandwichContext) {
         self.data.restore_into(context);
+    }
+
+    pub(crate) fn apply_side_effect_report(
+        &mut self,
+        db: &DbState,
+        context: &mut SandwichContext,
+        report: &crate::agent::types::SideEffectReport,
+    ) -> Result<bool, String> {
+        let output = report.output_id.trim();
+        let description = report.description.trim();
+        if output.is_empty() || description.is_empty() {
+            return Err("副作用补报需要原回执编号和变更说明。".into());
+        }
+        if context.side_effects.iter().skip(context.inherited_side_effects_count).any(|effect| {
+            effect.model_report.as_ref().is_some_and(|saved| saved.output_id == output)
+        }) {
+            return Ok(false);
+        }
+        let Some((step, tool)) = self.shell_effect_receipts.get(output) else {
+            return Err("原回执不属于当前任务中可补报的 Shell 执行。".into());
+        };
+        let verification = report.verification_output_id.as_deref().map(str::trim).filter(|id| !id.is_empty());
+        {
+            let conn = db.0.lock().map_err(|error| error.to_string())?;
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM agent_step_logs WHERE session_id=?1 AND output_id=?2)",
+                rusqlite::params![self.run_id, output], |row| row.get(0),
+            ).map_err(|error| error.to_string())?;
+            if !exists {
+                return Err("原 Shell 回执已无法回查。".into());
+            }
+            if let Some(id) = verification {
+                let belongs: bool = conn.query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM agent_step_logs log WHERE log.session_id=?1 AND log.output_id=?2 AND (
+                            EXISTS(SELECT 1 FROM agent_memory_nodes node
+                                WHERE node.id='event-'||log.output_id AND node.session_id=log.session_id AND
+                                    CASE WHEN json_valid(node.metadata_json) THEN json_extract(node.metadata_json, '$.work_group.task_id') END=?3)
+                            OR EXISTS(SELECT 1 FROM agent_run_traces run JOIN agent_run_steps step ON step.run_id=run.id
+                                WHERE run.session_id=log.session_id AND run.history_task_id=?3 AND
+                                    CASE WHEN json_valid(step.step_json) THEN json_extract(step.step_json, '$.output_id') END=log.output_id)
+                        )
+                    )",
+                    rusqlite::params![self.run_id, id, context.history_task_id], |row| row.get(0),
+                ).map_err(|error| error.to_string())?;
+                if !belongs {
+                    return Err("验证回执缺少当前任务的来源记录。".into());
+                }
+            }
+        }
+        let report = crate::agent::types::SideEffectReport {
+            output_id: output.to_owned(),
+            verification_output_id: verification.map(str::to_owned),
+            description: description.chars().take(500).collect(),
+        };
+        let verification_note = report.verification_output_id.as_ref()
+            .map(|id| format!("；核对回执 {id}")).unwrap_or_default();
+        context.record_side_effect(*step, tool.clone(), format!(
+            "模型补报（原回执 {}{verification_note}）：{}", report.output_id, report.description
+        ));
+        context.side_effects.last_mut().unwrap().model_report = Some(report);
+        self.shell_effect_receipts.remove(output);
+        self.finish_reviewed = false;
+        self.finish_challenge_count = 0;
+        self.pending_finalization = None;
+        self.refresh_context(context);
+        Ok(true)
     }
 
     pub fn begin_planning(&mut self, step_id: usize, context: &SandwichContext) {

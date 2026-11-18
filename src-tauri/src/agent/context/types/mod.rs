@@ -119,6 +119,8 @@ pub struct SideEffectRecord {
     pub timestamp: String,
     #[serde(default)]
     pub affected_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_report: Option<crate::agent::types::SideEffectReport>,
 }
 
 pub(crate) fn new_history_task_id() -> String {
@@ -1182,6 +1184,7 @@ impl SandwichContext {
             description,
             timestamp: chrono::Utc::now().to_rfc3339(),
             affected_paths,
+            model_report: None,
         });
     }
 

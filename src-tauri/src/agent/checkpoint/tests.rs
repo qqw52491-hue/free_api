@@ -498,6 +498,7 @@
             description: "model_manager.rs 新增 add_platform".to_string(),
             timestamp: "2026-08-24T00:00:00Z".to_string(),
             affected_paths: Vec::new(),
+            model_report: None,
         });
         previous
             .memories
@@ -1601,3 +1602,47 @@
         assert!(save_checkpoint(&db, &mut cp).is_err());
         assert!(load_checkpoint(&db, &cp.run_id).unwrap().is_none());
     }
+
+#[test]
+fn shell_effect_report_is_optional_source_bound_and_consumed_once_after_restore() {
+    let data = crate::agent::review_team::tests::TestDb::new();
+    let mut context = SandwichContext::new("system".into(), "task".into());
+    let mut checkpoint = AgentCheckpoint::new("session".into(), &context);
+    let original = crate::agent::run_trace::save_step_output_with_meta(
+        &data.db, "session", 3, "local_shell", "change", "succeeded", "已修改配置",
+    ).unwrap();
+    let group = crate::agent::work_history::WorkGroup {
+        session_id: "session".into(), task_id: context.history_task_id.clone(),
+        plan_id: "plan".into(), title: "核对".into(), step_id: 4,
+    };
+    let checked = crate::agent::run_trace::save_step_output_in_group(
+        &data.db, "session", 4, "local_shell", "inspect", "succeeded", "配置已加载", Some(&group),
+    ).unwrap();
+    let instruction: AgentInstruction = serde_json::from_value(serde_json::json!({
+        "tool": "local_file",
+        "params": {"action": "read", "path": "config.ini"},
+        "side_effect_report": {"output_id": original, "verification_output_id": checked, "description": "远端配置已更新"}
+    })).unwrap();
+    let report = instruction.side_effect_report.unwrap();
+    assert!(checkpoint.apply_side_effect_report(&data.db, &mut context, &report).is_err());
+    checkpoint.shell_effect_receipts.insert(original.clone(), (3, "local_shell".into()));
+    let mut foreign = report.clone();
+    let other_group = crate::agent::work_history::WorkGroup { task_id: "different-task".into(), ..group.clone() };
+    let other = crate::agent::run_trace::save_step_output_in_group(
+        &data.db, "session", 4, "local_shell", "inspect", "succeeded", "另一项任务的核对", Some(&other_group),
+    ).unwrap();
+    foreign.verification_output_id = Some(other);
+    assert!(checkpoint.apply_side_effect_report(&data.db, &mut context, &foreign).is_err());
+    assert!(context.side_effects.is_empty());
+    assert_eq!(crate::agent::run_trace::get_step_output(&data.db, "session", &checked).unwrap(), "配置已加载");
+    checkpoint = serde_json::from_value(serde_json::to_value(&checkpoint).unwrap()).unwrap();
+    assert!(checkpoint.apply_side_effect_report(&data.db, &mut context, &report).unwrap());
+    assert_eq!(context.side_effects.len(), 1);
+    assert_eq!(context.side_effects[0].step_id, 3);
+    assert_eq!(context.side_effects[0].model_report.as_ref(), Some(&report));
+    assert!(context.side_effects[0].affected_paths.is_empty());
+    checkpoint = serde_json::from_value(serde_json::to_value(&checkpoint).unwrap()).unwrap();
+    checkpoint.restore_context(&mut context);
+    assert!(!checkpoint.apply_side_effect_report(&data.db, &mut context, &report).unwrap());
+    assert_eq!(context.side_effects.len(), 1);
+}

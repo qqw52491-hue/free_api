@@ -167,6 +167,7 @@ fn formal_subtask_delivery_is_separate_from_parent_and_recovers_without_reexecut
             description: "write".into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
             affected_paths: vec!["src/a.rs".into()],
+            model_report: None,
         });
     crate::agent::checkpoint::save_checkpoint(&f.db, &mut child_cp).unwrap();
     let mut parent_context = SandwichContext::new("sys".into(), "parent goal".into());

@@ -296,6 +296,7 @@ const BUILTIN_TOOL_SPECS: &[BuiltinToolSpec] = &[
         actions: &[
             "调用格式优先 {\"tool\":\"local_shell\",\"params\":{\"command\":\"cargo check\",\"cwd\":\".\"}}。兼容旧 command 参数对象及非空命令字符串简写；简写只整理参数形状，仍走同一权限/目录/审查检查，不自动添加 cwd；附加选项放 params，两个来源冲突时不执行并报具体字段",
             "exec(command: string, args?: string[], cwd?: string, timeout_secs?: number [默认 60s，同步等待窗口上限 300s——到点不杀，自动转后台 job 交你裁决], env?: object, background?: boolean) — 在项目工作区执行 shell 命令行（支持参数数组与自定义环境变量；已注入 $SESSION_TMP_DIR/$TMPDIR=会话产物物理根）。预估超过 5 分钟的任务（视频渲染/大构建/批处理）传 background:true 或 timeout_secs>300 直接后台执行——立即返回 job_id，输出实时写日志文件，wait_jobs 挂起回收 / job_cancel 中止；同步命令跑满 300s 未结束也会自动转为后台任务（不杀进程），由你决定续等还是中止",
+            "副作用补报：命令执行后可用 get_step_output 回查原回执，也可自行执行只读核对。随后随下一步在 JSON 顶层附 side_effect_report:{output_id, description, verification_output_id?}。output_id 指原 Shell 回执；verification_output_id 指可选的核对回执。宿主已观察到的写入自动记录，只读或证据不足可省略补报。",
             "退出码仅代表外层进程。包装脚本需保留关键检查退出码，例如 sh check.sh >check.log 2>&1; rc=$?; tail -n 40 check.log; exit \"$rc\"。管道、分号、|| true、后台启动或最后的 echo/tail 可能掩盖内部失败；构建与重启建议拆成独立调用，先确认构建结果再重启。set -e 对 &&/|| 条件列表并非全覆盖。success 仅指进程退出，verification_status=not_assessed 不表示编译或业务通过；远端脚本也应传回退出码",
             "⚠️【产物落点】shell 内写交付产物一律用 \"$SESSION_TMP_DIR/文件名\" 落点——裸相对路径 tmp/x 会落在当前执行目录下的 tmp/，既不是会话产物区也不随会话清理（系统会检测并提醒）；tmp/ 前缀路由只在 local_file/register_file 等工具参数中有效",
             "⚠️【基线提示】读取文件建议用 local_file(action: \"read\")——shell 读文件不建立乐观并发哈希基线，后续 write/edit 该既有文件会因缺基线被硬拦截",

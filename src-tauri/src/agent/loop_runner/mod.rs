@@ -186,6 +186,14 @@ pub async fn run_tool_phase(
         return Ok(result);
     }
 
+    if let Some(report) = &inst.side_effect_report {
+        match checkpoint.apply_side_effect_report(state.inner(), context, report) {
+            Ok(true) => save_checkpoint(state.inner(), checkpoint)?,
+            Ok(false) => {}
+            Err(message) => context.add_host_feedback(&format!("副作用补报未登记：{message}")),
+        }
+    }
+
     if let Some(decision) = &inst.human_reply_decision {
         if let Err(error) = checkpoint.apply_human_reply_decision(state.inner(), context, decision) {
             return Ok(DispatchResult { view: None, success: false, stdout: String::new(), stderr: error, route: "human_reply:invalid_source".into() });

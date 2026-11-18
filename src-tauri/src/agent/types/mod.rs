@@ -506,6 +506,14 @@ pub struct FailTaskRequest {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SideEffectReport {
+    pub output_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_output_id: Option<String>,
+    pub description: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentInstruction {
     /// 失败停止是独立终态，不走成功 finish 的验收门禁，不核销未完成义务。
@@ -558,6 +566,9 @@ pub struct AgentInstruction {
     /// 主模型对已登记人类回复的语义判断；宿主只校验来源和范围。
     #[serde(default)]
     pub human_reply_decision: Option<crate::agent::human_reply::HumanReplyDecision>,
+    /// 执行模型根据已有工具回执补报的副作用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side_effect_report: Option<SideEffectReport>,
     /// 目标块显式规划或批量更新（粗粒度任务单元）
     #[serde(default)]
     pub target_blocks_update: Option<Vec<crate::agent::target_block::TargetBlock>>,

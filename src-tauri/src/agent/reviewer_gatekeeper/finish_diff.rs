@@ -137,6 +137,7 @@ fn collect_write_origin_evidence(context: &SandwichContext) -> String {
             "step_id": effect.step_id,
             "tool": effect.tool,
             "affected_paths": effect.affected_paths,
+            "model_report": effect.model_report,
         }))
         .collect();
     format!(

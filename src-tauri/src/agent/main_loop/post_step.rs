@@ -79,6 +79,19 @@ pub(crate) fn record_lesson_lineage(
     }
 }
 
+pub(crate) fn is_shell_instruction(instruction: &AgentInstruction) -> bool {
+    instruction.get_tool().eq_ignore_ascii_case("local_shell")
+}
+
+pub(crate) fn can_report_shell_effect(instruction: &AgentInstruction, result: &DispatchResult) -> bool {
+    is_shell_instruction(instruction)
+        && result.view.as_ref().is_some_and(|view| {
+            view.get("kind").and_then(serde_json::Value::as_str) == Some("terminal")
+                && view.get("spawn_error").is_none()
+                && view.get("exit_code").and_then(serde_json::Value::as_i64).is_some()
+        })
+}
+
 pub(crate) fn is_remote_shell_observation(instruction: &AgentInstruction) -> bool {
     if !instruction.get_tool().eq_ignore_ascii_case("local_shell") {
         return false;
@@ -102,25 +115,17 @@ pub(crate) fn record_side_effect_or_verify(
     let is_tmp_write = instruction.get_tool().eq_ignore_ascii_case("local_file")
         && crate::agent::tools::local_file::is_dispatch_result_tmp(result);
     let tool = instruction.get_tool();
-    let local_shell = tool
-        .rsplit('/')
-        .next()
-        .is_some_and(|t| t.eq_ignore_ascii_case("local_shell"))
-        || (tool.eq_ignore_ascii_case("mcp")
-            && instruction.get_action().eq_ignore_ascii_case("local_shell"));
-    let nonmutating_shell = is_remote_shell_observation(instruction) || (local_shell
-        && crate::agent::change_verification::extract_command_from_params(
-            &instruction.get_params(),
-        )
-        .is_some_and(|c| {
-            crate::agent::change_verification::is_observation_or_validation_script(&c)
-        }));
+    let native_shell = is_shell_instruction(instruction);
+    let shell_observation = (tool.rsplit('/').next().is_some_and(|name| name.eq_ignore_ascii_case("local_shell"))
+        || (tool.eq_ignore_ascii_case("mcp") && instruction.get_action().eq_ignore_ascii_case("local_shell")))
+        && crate::agent::change_verification::extract_command_from_params(&instruction.get_params())
+            .is_some_and(|command| crate::agent::change_verification::is_observation_or_validation_script(&command));
     // 失败的 shell 也可能已经改了文件；实测差集不因非零退出而丢弃。
     let shell_touched = std::mem::take(&mut context.shell_touched_paths);
     let should_record = should_record_effect(
         result.success,
         is_tmp_write,
-        nonmutating_shell,
+        native_shell || shell_observation,
         !shell_touched.is_empty(),
         crate::agent::context::AuditLedger::is_mutating_side_effect_with_action(
             &tool,
@@ -192,16 +197,35 @@ pub(crate) fn record_side_effect_or_verify(
 fn should_record_effect(
     succeeded: bool,
     temporary: bool,
-    nonmutating: bool,
+    requires_observed_change: bool,
     observed_changes: bool,
     mutating_tool: bool,
 ) -> bool {
-    !temporary && (observed_changes || (succeeded && mutating_tool && !nonmutating))
+    !temporary && (observed_changes || (succeeded && mutating_tool && !requires_observed_change))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_executed_native_shell_receipts_are_eligible_for_a_report() {
+        let instruction: AgentInstruction = serde_json::from_value(serde_json::json!({
+            "tool": "local_shell", "params": {"command": "ssh host 'inspect state'"}
+        })).unwrap();
+        let mut result = DispatchResult {
+            success: false,
+            view: None,
+            stdout: String::new(),
+            stderr: "blocked".into(),
+            route: "gate".into(),
+        };
+        assert!(!can_report_shell_effect(&instruction, &result));
+        result.view = Some(serde_json::json!({"kind": "terminal", "exit_code": -1, "spawn_error": "unavailable"}));
+        assert!(!can_report_shell_effect(&instruction, &result));
+        result.view = Some(serde_json::json!({"kind": "terminal", "exit_code": 1}));
+        assert!(can_report_shell_effect(&instruction, &result));
+    }
+
     #[test]
     fn failed_shell_writes_are_not_lost_and_queries_do_not_reset_verification() {
         assert!(should_record_effect(false, false, false, true, true));

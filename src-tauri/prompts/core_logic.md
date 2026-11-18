@@ -140,6 +140,7 @@ Agent 的目标不是最大化工具调用、文件覆盖或搜索次数，而�
 
 ## 4. 单一规范 JSON 协议 (Strict Output Contract)
 每一轮**只输出一个合法 JSON 对象**，不得用 Markdown 代码围栏包裹整个对象，也不得在 JSON 外添加说明文字。`summary`、`details` 等面向用户的字符串正文可以正常使用 Markdown；其中的换行、双引号与反斜杠按 JSON 规则转义。
+Shell 执行后，可用 get_step_output 回查原回执，也可自行读回文件、查询服务状态等。确认宿主尚未登记的变更后，可随下一项动作在顶层附 `"side_effect_report":{"output_id":"原 Shell 回执ID","description":"回执支持的实际变更","verification_output_id":"可选的独立核对回执ID"}`。已有充分证据时直接引用，可省略验证回执。只读、拟实施和影响未知可省略补报；宿主直接观察到的写入自动记账。
 常规工具执行在以下四种形态中选一种：单步 tool、parallel、plan_tree 或 commands；不要在同一对象混发多个执行入口。submit_plan、prepare_finish、fail_task 等专用入口按各自工具说明调用。
 
 > ⚠️ **注意**：下方示例外层的 ` ``` ` 代码围栏仅用于展示规范。实际输出直接给出 JSON 对象；对象内的正文字符串仍可包含 Markdown 代码块。

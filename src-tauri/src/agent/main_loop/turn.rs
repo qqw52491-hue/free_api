@@ -631,7 +631,7 @@ pub(super) async fn turn_main<'a, 'b>(
         if checkpoint.stage_review_baseline_side_effects == 0
             && checkpoint.stage_review_budget_used == 0
         {
-            checkpoint.stage_review_baseline_side_effects = context.side_effects.len() as u32;
+            checkpoint.stage_review_baseline_side_effects = context.inherited_side_effects_count as u32;
         }
         // 【shell 批改探针·后】步骤结束时取差值入账（覆盖单发/批量/重试所有执行路径）
         // 路径级差值 = 本步 shell 真实触碰的新增脏文件，入账 side_effect.affected_paths，
@@ -723,7 +723,7 @@ pub(super) async fn turn_main<'a, 'b>(
                 // 非 git 环境：按本步骤是否为写类指令保守计 1（但排除 session_tmp 草稿写入）
                 (None, _)
                     if crate::agent::dispatcher::is_write_or_side_effect_tool(&instruction)
-                        && !post_step::is_remote_shell_observation(&instruction) =>
+                        && !post_step::is_shell_instruction(&instruction) =>
                 {
                     let is_tmp_write = instruction.get_tool().eq_ignore_ascii_case("local_file")
                         && crate::agent::tools::local_file::is_dispatch_result_tmp(&result);
@@ -1224,6 +1224,17 @@ pub(super) async fn turn_main<'a, 'b>(
         );
         // ──────────────────────────────────────────────────────────────────
 
+        if output_id != "unknown_output_id"
+            && post_step::can_report_shell_effect(&instruction, &result)
+            && context.side_effects.len() == side_effects_before
+        {
+            checkpoint.shell_effect_receipts.insert(output_id.clone(), (step_id, instruction.get_tool()));
+            if !post_step::is_remote_shell_observation(&instruction) {
+                output_text.push_str(&format!(
+                    "\n\n已保存 Shell 回执 {output_id}。若回执支持发生了实际变更，可在下一步顶层附加 side_effect_report（output_id、description）补报；只读或证据不足时可省略。"
+                ));
+            }
+        }
         context.current_observation = output_text.clone();
         // 复盘轨迹使用与 step_new 相同的语义字段，但与 Agent prompt/checkpoint 隔离。
         // 这使历史会话既能恢复思考、计划和工具调用，又不会放大运行时上下文。

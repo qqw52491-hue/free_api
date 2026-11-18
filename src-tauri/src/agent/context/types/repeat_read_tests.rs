@@ -232,6 +232,7 @@
             description: "edit".into(),
             timestamp: "t".into(),
             affected_paths: vec!["src/a.rs".into()],
+            model_report: None,
         });
         assert!(context.read_overlap_hint(&overlap).is_none(), "写后重读不应提示");
         // 非读指令忽略

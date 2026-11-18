@@ -596,7 +596,21 @@ fn build_stage_evidence(
     let todos = context.todo_list.iter().map(|t|format!("- [{}] {} ({})",t.status,t.description,t.id)).collect::<Vec<_>>().join("\n");
     let diff = crate::agent::reviewer_gatekeeper::GitBaseline::capture(workspace)
         .collect_git_diff(workspace).map(|(diff,_)|diff).unwrap_or_else(||"（无法获取 git diff）".into());
-    crate::agent::task_context::stage(context.effective_goal(), &todos, extra_sections, focus_context, &diff)
+    let reports: Vec<_> = context.side_effects.iter().skip(context.inherited_side_effects_count)
+        .rev().filter_map(|effect| effect.model_report.as_ref()).take(4).collect();
+    if reports.is_empty() {
+        return crate::agent::task_context::stage(context.effective_goal(), &todos, extra_sections, focus_context, &diff);
+    }
+    let mut lines = vec!["执行模型补报的 Shell 变更，请核对引用回执。".to_owned()];
+    lines.extend(reports.into_iter().map(|report| format!(
+        "- 原回执 {}{} · {}",
+        report.output_id,
+        report.verification_output_id.as_ref().map(|id| format!("，核对回执 {id}")).unwrap_or_default(),
+        report.description.chars().take(80).collect::<String>(),
+    )));
+    let mut extras = vec![lines.join("\n")];
+    extras.extend_from_slice(extra_sections);
+    crate::agent::task_context::stage(context.effective_goal(), &todos, &extras, focus_context, &diff)
 }
 
 /// 阶段审查回执处理结果：模型可见摘要 + 待结算退款标记。
