@@ -9,13 +9,14 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let path =
-            std::env::temp_dir().join(format!("inbox-coordination-{}", uuid::Uuid::new_v4()));
+        let fixture_id = uuid::Uuid::new_v4();
+        let path = std::env::temp_dir().join(format!("inbox-coordination-{fixture_id}"));
         std::fs::create_dir_all(&path).unwrap();
         let db = DbState(Arc::new(Mutex::new(
             crate::db::init_db(&path.join("test.db")).unwrap(),
         )));
-        let root = Actor::new("root", "session");
+        // Runtime ownership is process-wide, even though each test has its own database.
+        let root = Actor::new(&format!("root-{fixture_id}"), &format!("session-{fixture_id}"));
         crate::agent::run_trace::upsert_snapshot(
             &db,
             &root.run,
@@ -49,6 +50,18 @@ impl Fixture {
             a,
             b,
         }
+    }
+    fn resumed_root(&self) -> Actor {
+        let resumed = Actor::new(&format!("resumed-{}", self.root.run), &self.root.session);
+        crate::agent::run_trace::upsert_snapshot(
+            &self.db, &resumed.run, &resumed.session, "goal", "running", &[], None,
+        )
+        .unwrap();
+        self.db.0.lock().unwrap().execute(
+            "UPDATE agent_run_traces SET history_task_id='task' WHERE id IN (?1, ?2)",
+            [&self.root.run, &resumed.run],
+        ).unwrap();
+        resumed
     }
     fn end(&self, actor: &Actor) {
         self.db.0.lock().unwrap().execute("UPDATE agent_child_runs SET status='succeeded',result_json='{\"findings\":[\"original\"]}' WHERE id=?1",[&actor.run]).unwrap();
@@ -113,15 +126,14 @@ fn resumed_root_claims_old_undelivered_mail_without_changing_its_owner() {
     let f = Fixture::new();
     f.end(&f.b);
     let message = f.send(&f.a, &f.b, "resume-mail");
-    crate::agent::run_trace::upsert_snapshot(&f.db, "new-root", "session", "goal", "running", &[], None).unwrap();
+    let resumed = f.resumed_root();
     {
         let conn = f.db.0.lock().unwrap();
-        conn.execute("UPDATE agent_run_traces SET history_task_id='task' WHERE id IN ('root','new-root')", []).unwrap();
-        conn.execute("UPDATE agent_run_traces SET status='interrupted' WHERE id='root'", []).unwrap();
-        assert!(pending_on(&conn, "new-root").unwrap());
+        conn.execute("UPDATE agent_run_traces SET status='interrupted' WHERE id=?1", [&f.root.run]).unwrap();
+        assert!(pending_on(&conn, &resumed.run).unwrap());
     }
     let ticket = claim(&f.db).unwrap().pop().unwrap();
-    assert_eq!(ticket.root.run, "new-root");
+    assert_eq!(ticket.root.run, resumed.run);
     let mut history = vec![];
     assert_eq!(deliver_specialist(&f.db, &ticket.run, &mut history).unwrap(), 1);
     assert!(serde_json::to_string(&history).unwrap().contains("resume-mail"));
@@ -129,14 +141,14 @@ fn resumed_root_claims_old_undelivered_mail_without_changing_its_owner() {
     let continuation = Actor::new(&ticket.run, &format!("child:{}", ticket.run));
     send(&f.db, &continuation, &json!({"target":f.a.run,"message":"recovered reply"}), Some("recovered-reply"), false).unwrap();
     let reply = claim(&f.db).unwrap().pop().unwrap();
-    assert_eq!(reply.root.run, "new-root");
+    assert_eq!(reply.root.run, resumed.run);
     let mut reply_history = vec![];
     assert_eq!(deliver_specialist(&f.db, &reply.run, &mut reply_history).unwrap(), 1);
     assert!(serde_json::to_string(&reply_history).unwrap().contains("recovered reply"));
     let conn = f.db.0.lock().unwrap();
     let owner: String = conn.query_row("SELECT root_run_id FROM agent_messages WHERE id=?1", [message["message_id"].as_str().unwrap()], |r| r.get(0)).unwrap();
-    assert_eq!(owner, "root");
-    assert!(!pending_on(&conn, "new-root").unwrap());
+    assert_eq!(owner, f.root.run);
+    assert!(!pending_on(&conn, &resumed.run).unwrap());
 }
 
 #[test]
@@ -144,10 +156,9 @@ fn ambiguous_active_roots_do_not_claim_old_mail() {
     let f = Fixture::new();
     f.end(&f.b);
     f.send(&f.a, &f.b, "ambiguous");
-    crate::agent::run_trace::upsert_snapshot(&f.db, "new-root", "session", "goal", "running", &[], None).unwrap();
-    f.db.0.lock().unwrap().execute("UPDATE agent_run_traces SET history_task_id='task' WHERE id IN ('root','new-root')", []).unwrap();
+    let resumed = f.resumed_root();
     assert!(claim(&f.db).unwrap().is_empty());
-    assert!(pending_on(&f.db.0.lock().unwrap(), "new-root").unwrap());
+    assert!(pending_on(&f.db.0.lock().unwrap(), &resumed.run).unwrap());
 }
 
 #[test]
@@ -167,13 +178,12 @@ fn inbox_waits_until_root_recovery_finishes() {
 fn resumed_root_receives_direct_message_once() {
     let f = Fixture::new();
     f.send(&f.a, &f.root, "old-root-message");
-    crate::agent::run_trace::upsert_snapshot(&f.db, "new-root", "session", "goal", "running", &[], None).unwrap();
-    f.db.0.lock().unwrap().execute("UPDATE agent_run_traces SET history_task_id='task' WHERE id IN ('root','new-root')", []).unwrap();
+    let resumed = f.resumed_root();
     let mut context = crate::agent::context::SandwichContext::new("system".into(), "goal".into());
-    let mut checkpoint = crate::agent::checkpoint::AgentCheckpoint::new("session".into(), &context);
-    assert_eq!(super::super::deliver_main(&f.db, &Actor::new("new-root", "session"), &mut context, &mut checkpoint).unwrap(), 1);
+    let mut checkpoint = crate::agent::checkpoint::AgentCheckpoint::new(resumed.session.clone(), &context);
+    assert_eq!(super::super::deliver_main(&f.db, &resumed, &mut context, &mut checkpoint).unwrap(), 1);
     assert!(serde_json::to_string(&context).unwrap().contains("old-root-message"));
-    assert_eq!(super::super::deliver_main(&f.db, &Actor::new("new-root", "session"), &mut context, &mut checkpoint).unwrap(), 0);
+    assert_eq!(super::super::deliver_main(&f.db, &resumed, &mut context, &mut checkpoint).unwrap(), 0);
 }
 
 #[test]

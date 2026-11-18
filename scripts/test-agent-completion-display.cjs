@@ -23,7 +23,8 @@ const pendingTemplate = pendingNode?.loc.source;
 assert(pendingTemplate, 'pending status must be mounted in the real template');
 const pendingRender = new Function('Vue', compiler.compile(pendingTemplate, {mode:'function'}).code)(vue);
 const pendingView = (s, overrides={}) => pendingRender({completionPending:s.completionPending.value,
-    isRunning:s.isRunning.value,completionMessage:s.completionMessage.value,...overrides}, []);
+    isRunning:s.isRunning.value,completionMessage:s.completionMessage.value,
+    completionPreview:s.streamingSummary.value,...overrides}, []);
 function viewText(node) {
     if (typeof node === 'string') return node;
     if (Array.isArray(node)) return node.map(viewText).join('');
@@ -31,17 +32,20 @@ function viewText(node) {
 }
 const ast = ts.createSourceFile('component.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 const projection = ast.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === 'currentTimeline');
+const liveVisibility = ast.statements.find(n => ts.isVariableStatement(n)
+    && n.declarationList.declarations.some(d => d.name.getText(ast) === 'showLiveTimeline'));
 assert(projection, 'test must execute the real currentTimeline');
-const code = ts.transpileModule(projection.getText(ast) + '\ncurrentTimeline;', {
+assert(liveVisibility, 'test must execute the real live timeline visibility rule');
+const code = ts.transpileModule(liveVisibility.getText(ast) + '\n' + projection.getText(ast) + '\ncurrentTimeline;', {
     compilerOptions: {module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022},
 }).outputText;
-function timeline(s) {
-    const props = {historyTurns: [], humanInterventions: []};
+function timeline(s, {historyTurns = [], liveRunId} = {}) {
+    const props = {historyTurns, liveRunId, humanInterventions: []};
     for (const key of ['steps','currentGoal','isRunning','completionMessage','finalSummary','finalArtifacts','hasError','runState','isThinking','thought']) {
         Object.defineProperty(props, key, {get: () => s[key].value});
     }
     const current = vm.runInNewContext(code, {
-        props, activeThoughtStartedAt: {value: 0},
+        props, computed: vue.computed, activeThoughtStartedAt: {value: 0},
         planEntries: () => [], assignInterventionAnchors: () => {},
     });
     return () => current().filter(entry => entry.type === 'completion');
@@ -185,9 +189,9 @@ async function main() {
     // Existing persisted completion suppresses the live duplicate.
     s = await start();
     progress({type:'complete',success:true,finish:{summary:'已提交'}});
-    const p = {historyTurns:[{goal:s.currentGoal.value,status:'succeeded'}],humanInterventions:[]};
-    for (const k of ['currentGoal','isRunning']) Object.defineProperty(p,k,{get:()=>s[k].value});
-    assert.equal(vm.runInNewContext(code,{props:p})().length,0);
+    const historyTurns = [{id:'saved-run',goal:s.currentGoal.value,status:'succeeded'}];
+    assert.equal(timeline(s, {historyTurns, liveRunId:'saved-run'})().length,0);
+    assert.equal(timeline(s, {historyTurns, liveRunId:'different-run'})().length,1);
     console.log('PASS: streamed draft isolation, stable pending status, rejection, confirmed success, failure/cancel, legacy completion, artifact-only guard, persisted dedup; real event/computed/timeline paths');
 }
 main().then(()=>process.exit(0), e=>{console.error(e);process.exit(1);});
