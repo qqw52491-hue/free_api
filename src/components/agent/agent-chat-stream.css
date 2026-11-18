@@ -4228,7 +4228,5 @@ article:hover .msg-header-actions .msg-fork-btn:disabled {
 
 .completion-preview {
     margin: 0 0 14px;
-    white-space: pre-wrap;
     overflow-wrap: anywhere;
-    color: var(--theme-text-primary, #cbd5e1);
 }

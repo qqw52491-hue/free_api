@@ -1519,7 +1519,14 @@
                 <span class="completion-pending-text">{{ completionPreview ? "回答预览 · 尚未正式交付" : "正在准备交付物并验收，尚未正式交付…" }}</span>
             </div>
 
-            <div v-if="completionPending && completionPreview && isRunning && !completionMessage" class="completion-preview">{{ completionPreview }}</div>
+            <div
+                v-if="completionPending && completionPreview && isRunning && !completionMessage"
+                class="completion-preview summary-rich"
+                :class="{ 'is-streaming-text': isPreviewStreaming }"
+                @click="isPreviewStreaming && finishTypewriterInstantly(PREVIEW_STREAM_ID, completionPreview)"
+            >
+                <RichContentRenderer :content="completionPreviewDisplay" :compact-html="true" :streaming="isPreviewStreaming" markdown-preview />
+            </div>
 
             <!-- 人工干预/交互选择卡片 (单选/多选/确认/传文件/补充输入) -->
             <AgentHumanInterventionCard
@@ -2236,20 +2243,28 @@ function handleActionCardClick(step: AgentStepItem) {
 }
 
 // 🌟 终态交付 Markdown 丝滑流式打字渐显 (Typewriter Stream Reveal)
+const PREVIEW_STREAM_ID = '__completion-preview__';
 const typewriterTexts = reactive<Record<string, string>>({});
 const typewriterDoneIds = new Set<string>();
+const typewriterSkippedIds = new Set<string>();
 const typewriterAnimFrames = new Map<string, number>();
 const typewriterTargets = new Map<string, string>();
+let lastPreviewShown = '';
 
 function updateSmoothStream(id: string, targetText: string) {
     typewriterTargets.set(id, targetText);
-    if (!props.viewActive) {
+    if (!props.viewActive || typewriterSkippedIds.has(id)) {
         finishTypewriterInstantly(id, targetText);
         return;
     }
+    const existing = typewriterTexts[id];
     if (typewriterDoneIds.has(id)) {
-        typewriterTexts[id] = targetText;
-        return;
+        if (existing !== undefined && targetText.length > existing.length && targetText.startsWith(existing)) {
+            typewriterDoneIds.delete(id);
+        } else {
+            typewriterTexts[id] = targetText;
+            return;
+        }
     }
     if (typewriterAnimFrames.has(id)) {
         // 已经在运行 tick，目标文本已在 typewriterTargets 更新，tick 每帧会读取最新 target
@@ -2273,6 +2288,7 @@ function updateSmoothStream(id: string, targetText: string) {
             typewriterTexts[id] = target;
             typewriterAnimFrames.delete(id);
             typewriterDoneIds.add(id);
+            if (id === PREVIEW_STREAM_ID) lastPreviewShown = target;
             return;
         }
 
@@ -2292,6 +2308,10 @@ function updateSmoothStream(id: string, targetText: string) {
 
         const nextLen = Math.min(target.length, current.length + step);
         typewriterTexts[id] = target.slice(0, nextLen);
+        if (id === PREVIEW_STREAM_ID) {
+            lastPreviewShown = typewriterTexts[id];
+            if (followLiveTail.value && props.isRunning) followLatest();
+        }
 
         if (nextLen < target.length) {
             const handle = requestAnimationFrame(tick);
@@ -2306,6 +2326,55 @@ function updateSmoothStream(id: string, targetText: string) {
     typewriterAnimFrames.set(id, handle);
 }
 
+const completionPreviewDisplay = computed(() => {
+    const preview = props.completionPreview || '';
+    if (!preview) return '';
+    if (!props.viewActive || typewriterSkippedIds.has(PREVIEW_STREAM_ID)) return preview;
+    return typewriterTexts[PREVIEW_STREAM_ID] || preview.slice(0, Math.min(2, preview.length));
+});
+
+const isPreviewStreaming = computed(() => {
+    if (!props.completionPending || !props.completionPreview || !props.isRunning || props.completionMessage) return false;
+    if (!props.viewActive || typewriterSkippedIds.has(PREVIEW_STREAM_ID) || typewriterDoneIds.has(PREVIEW_STREAM_ID)) return false;
+    const target = typewriterTargets.get(PREVIEW_STREAM_ID) || props.completionPreview;
+    const current = typewriterTexts[PREVIEW_STREAM_ID] || '';
+    return current.length < target.length || typewriterAnimFrames.has(PREVIEW_STREAM_ID);
+});
+
+watch(() => props.completionPreview, (next) => {
+    if (!next) {
+        const frame = typewriterAnimFrames.get(PREVIEW_STREAM_ID);
+        if (frame !== undefined) {
+            cancelAnimationFrame(frame);
+            typewriterAnimFrames.delete(PREVIEW_STREAM_ID);
+        }
+        if (props.completionMessage) {
+            lastPreviewShown = typewriterTexts[PREVIEW_STREAM_ID] || lastPreviewShown;
+        } else {
+            lastPreviewShown = '';
+        }
+        typewriterDoneIds.delete(PREVIEW_STREAM_ID);
+        typewriterSkippedIds.delete(PREVIEW_STREAM_ID);
+        typewriterTargets.delete(PREVIEW_STREAM_ID);
+        delete typewriterTexts[PREVIEW_STREAM_ID];
+        return;
+    }
+    const current = typewriterTexts[PREVIEW_STREAM_ID] || '';
+    if (current && !next.startsWith(current)) {
+        if (next.includes(current)) {
+            typewriterTexts[PREVIEW_STREAM_ID] = next;
+            typewriterTargets.set(PREVIEW_STREAM_ID, next);
+            typewriterDoneIds.add(PREVIEW_STREAM_ID);
+            lastPreviewShown = next;
+            return;
+        }
+        delete typewriterTexts[PREVIEW_STREAM_ID];
+        typewriterDoneIds.delete(PREVIEW_STREAM_ID);
+        typewriterSkippedIds.delete(PREVIEW_STREAM_ID);
+    }
+    updateSmoothStream(PREVIEW_STREAM_ID, next);
+}, { immediate: true });
+
 function getCompletionDisplayText(entry: { id: string; summary?: string; title?: string; timestamp?: number }): string {
     const fullText = entry.summary || entry.title || '';
     if (!fullText) return '';
@@ -2314,19 +2383,35 @@ function getCompletionDisplayText(entry: { id: string; summary?: string; title?:
     const isFreshCompletion = entry.id.startsWith("history-completion-")
         && !!entry.timestamp && Date.now() - entry.timestamp < 15_000;
     const isHistoric = entry.id.startsWith('history-') && !isFreshCompletion;
-    if (isHistoric || typewriterDoneIds.has(entry.id)) {
+    if (isHistoric || typewriterDoneIds.has(entry.id) || typewriterSkippedIds.has(entry.id)) {
         typewriterDoneIds.add(entry.id);
+        typewriterSkippedIds.add(entry.id);
         return fullText;
     }
 
-    // 已提交的新回答保留渐显效果；不是尚在生成/验收的草稿流。
+    if (entry.id === 'live-completion' && !typewriterTargets.has(entry.id)) {
+        const shown = lastPreviewShown || typewriterTexts[PREVIEW_STREAM_ID] || '';
+        lastPreviewShown = '';
+        if (shown && fullText === shown) {
+            typewriterTexts[entry.id] = fullText;
+            typewriterTargets.set(entry.id, fullText);
+            typewriterDoneIds.add(entry.id);
+            typewriterSkippedIds.add(entry.id);
+            return fullText;
+        }
+        if (shown && fullText.startsWith(shown)) {
+            typewriterTexts[entry.id] = shown;
+        }
+    }
+
+    // 已提交的新回答保留渐显效果；若预览已显示前缀，从断点平滑续写。
     updateSmoothStream(entry.id, fullText);
     return typewriterTexts[entry.id] || fullText.slice(0, 1);
 }
 
 function isStreamingCompletion(entry: { id: string; summary?: string; title?: string; failed?: boolean }): boolean {
     if (entry.failed) return false;
-    if (typewriterDoneIds.has(entry.id)) return false;
+    if (typewriterDoneIds.has(entry.id) || typewriterSkippedIds.has(entry.id)) return false;
     const target = typewriterTargets.get(entry.id) || entry.summary || entry.title || '';
     const current = typewriterTexts[entry.id] || '';
     // 这里的文本已经提交；仅渐显尚未追上正文时使用光标，不依赖运行/验收状态。
@@ -2339,6 +2424,7 @@ function finishTypewriterInstantly(id: string, fullText?: string) {
         typewriterAnimFrames.delete(id);
     }
     typewriterDoneIds.add(id);
+    typewriterSkippedIds.add(id);
     if (fullText) {
         typewriterTexts[id] = fullText;
         typewriterTargets.set(id, fullText);
@@ -3720,6 +3806,7 @@ onBeforeUnmount(() => {
     typewriterAnimFrames.clear();
     typewriterTargets.clear();
     typewriterDoneIds.clear();
+    typewriterSkippedIds.clear();
 });
 function followThoughtTail() {
     // 已有一个滚动动画在跑就不用再起——tick 每帧会重新读 scrollHeight，
@@ -3821,6 +3908,7 @@ watch(() => props.viewActive, async (active) => {
         for (const id of [...typewriterAnimFrames.keys()]) finishTypewriterInstantly(id, typewriterTargets.get(id));
         return;
     }
+    typewriterSkippedIds.delete(PREVIEW_STREAM_ID);
     await nextTick();
     if (!props.viewActive) return;
     scheduleQuestionPosition();
@@ -4314,9 +4402,18 @@ watch(() => [timelineEntries.value.length, props.completionMessage, props.histor
 watch(reviewLocationKey, () => { if (props.isRunning && followLiveTail.value) followLatest(); }, { flush: "post" });
 watch(() => props.isRunning, (running, wasRunning) => {
     if (running && !wasRunning) {
-        typewriterDoneIds.delete('live-completion');
-        delete typewriterTexts['live-completion'];
-        typewriterTargets.delete('live-completion');
+        lastPreviewShown = '';
+        for (const id of ['live-completion', PREVIEW_STREAM_ID]) {
+            const frame = typewriterAnimFrames.get(id);
+            if (frame !== undefined) {
+                cancelAnimationFrame(frame);
+                typewriterAnimFrames.delete(id);
+            }
+            typewriterDoneIds.delete(id);
+            typewriterSkippedIds.delete(id);
+            delete typewriterTexts[id];
+            typewriterTargets.delete(id);
+        }
         navigationLeavingBottom = false;
         followLiveTail.value = true;
         followLatest();

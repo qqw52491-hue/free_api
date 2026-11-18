@@ -50,6 +50,14 @@ function renderSegmentMarkdown(segment: string): string {
   }
   return sanitized;
 }
+
+function renderMarkdownPreview(segment: string): string {
+  return DOMPurify.sanitize(renderMarkdown(segment), {
+    USE_PROFILES: { html: true },
+    FORBID_TAGS: ["form", "iframe", "object", "embed", "script", "style", "img", "video", "audio", "source"],
+    FORBID_ATTR: ["style", "href", "src", "srcset"],
+  });
+}
 </script>
 
 <script setup lang="ts">
@@ -73,10 +81,12 @@ const props = withDefaults(
     content: string;
     compactHtml?: boolean;
     streaming?: boolean;
+    markdownPreview?: boolean;
   }>(),
   {
     compactHtml: false,
     streaming: false,
+    markdownPreview: false,
   }
 );
 
@@ -136,6 +146,13 @@ const MERMAID_KEYWORDS = /^(?:flowchart|graph|sequenceDiagram|classDiagram|state
 const parsedBlocks = computed<ContentBlock[]>(() => {
   const text = props.content || "";
   if (!text) return [];
+  if (props.markdownPreview) {
+    return [{
+      type: "markdown",
+      content: text,
+      html: renderMarkdownPreview(text),
+    }];
+  }
 
   // 使用 marked.lexer 解析顶级 AST Token，完全遵循 Markdown 规范，杜绝代码块穿透
   let tokens: any[] = [];
@@ -280,7 +297,7 @@ function decorateStreamingTail(html: string): string {
 }
 
 function getBlockHtml(block: ContentBlock, idx: number): string {
-  const baseHtml = block.html || renderSegmentMarkdown(block.content);
+  const baseHtml = block.html ?? renderSegmentMarkdown(block.content);
   if (!props.streaming || idx !== parsedBlocks.value.length - 1) {
     return baseHtml;
   }

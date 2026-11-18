@@ -61,17 +61,26 @@ fn compact_history_value(v: &serde_json::Value, depth: usize) -> serde_json::Val
     }
 }
 
+fn serialize_ordered_json(fields: &[(&str, serde_json::Value)]) -> String {
+    let mut out = String::from("{");
+    for (idx, (key, value)) in fields.iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        out.push_str(&serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string()));
+        out.push(':');
+        out.push_str(&serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()));
+    }
+    out.push('}');
+    out
+}
+
 /// 把已执行的指令压成一条紧凑 JSON 写进 assistant 历史。
-/// 模型即使模仿这种历史形态，输出也是合法的指令 JSON，不再触发解析失败。
+/// 模型即使模仿这种历史形态，输出也是合法的指令 JSON，不再触发解析失败；
+/// 把 `tool` / `action` 放在最前面，与流式预览识别顺序保持一致。
 pub(crate) fn history_action_json(instruction: &AgentInstruction, plan_title: Option<&str>) -> String {
-    use serde_json::{Map, Value};
-    let mut obj = Map::new();
-    if let Some(t) = plan_title.filter(|t| !t.is_empty()) {
-        obj.insert("plan_title".to_string(), json!(t));
-    }
-    if !instruction.description.is_empty() {
-        obj.insert("description".to_string(), json!(instruction.description));
-    }
+    use serde_json::Value;
+    let mut fields: Vec<(&str, Value)> = Vec::new();
     let mut params_key: Option<(&str, Value)> = None;
     if let Some(par) = &instruction.parallel {
         params_key = Some(("parallel", serde_json::to_value(par).unwrap_or(Value::Null)));
@@ -82,26 +91,32 @@ pub(crate) fn history_action_json(instruction: &AgentInstruction, plan_title: Op
     } else {
         let tool = instruction.get_tool();
         let action = instruction.get_action();
+        fields.push(("tool", json!(tool)));
         if !action.is_empty() && action != tool {
-            obj.insert("action".to_string(), json!(action));
+            fields.push(("action", json!(action)));
         }
-        obj.insert("tool".to_string(), json!(tool));
         let params = instruction.get_params();
         let empty = params.is_null() || params.as_object().is_some_and(|m| m.is_empty());
         if !empty {
             params_key = Some(("params", params));
         }
     }
-    let mut with_params = obj.clone();
+    if !instruction.description.is_empty() {
+        fields.push(("description", json!(instruction.description)));
+    }
+    if let Some(t) = plan_title.filter(|t| !t.is_empty()) {
+        fields.push(("plan_title", json!(t)));
+    }
     if let Some((k, v)) = params_key {
-        with_params.insert(k.to_string(), compact_history_value(&v, 0));
-        let full = Value::Object(with_params).to_string();
+        let mut with_params = fields.clone();
+        with_params.push((k, compact_history_value(&v, 0)));
+        let full = serialize_ordered_json(&with_params);
         if full.chars().count() <= HISTORY_ACTION_MAX_CHARS {
             return full;
         }
-        obj.insert(k.to_string(), json!("(参数过长已省略)"));
+        fields.push((k, json!("(参数过长已省略)")));
     }
-    Value::Object(obj).to_string()
+    serialize_ordered_json(&fields)
 }
 
 impl SandwichContext {
@@ -218,12 +233,17 @@ mod tests {
             "action": "read",
             "params": {"path": "src/a.rs"}
         }));
-        let s = history_action_json(&i, None);
+        let s = history_action_json(&i, Some("分析代码"));
+        assert!(s.starts_with(r#"{"tool":"local_file","action":"read""#), "{s}");
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["tool"], "local_file");
         assert_eq!(v["action"], "read");
         assert_eq!(v["params"]["path"], "src/a.rs");
-        assert!(v.get("plan_title").is_none());
+        assert_eq!(v["plan_title"], "分析代码");
+
+        let s_no_title = history_action_json(&i, None);
+        let v2: serde_json::Value = serde_json::from_str(&s_no_title).unwrap();
+        assert!(v2.get("plan_title").is_none());
     }
 
     #[test]

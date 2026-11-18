@@ -794,7 +794,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         return combined;
     });
     // 流式 finish 只是候选草稿；最终正文仅来自 complete 事件中的已提交结果。
-    // 候选正文以纯文本预览，已提交的 Markdown 单独渲染。
+    // 候选正文单独预览，正式交付仍依赖宿主验收。
     const completionPending = computed(() => {
         if (!isRunning.value || completionMessage.value) return false;
         const lastStep = steps.value[steps.value.length - 1];

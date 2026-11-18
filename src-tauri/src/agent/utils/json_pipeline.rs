@@ -360,6 +360,7 @@ pub fn normalize_raw_instruction_value(val: &mut serde_json::Value) {
             "review_contract_update",
             "change_verification_update",
             "human_reply_decision",
+            "side_effect_report",
             "self_report",
             "scope_extension",
             "request_retriage",
@@ -473,19 +474,29 @@ pub(crate) fn streaming_finish_preview(text: &str) -> Option<String> {
     }
 
     let text = text.trim_start();
-    let text = text.strip_prefix("```json").or_else(|| text.strip_prefix("```")).unwrap_or(text);
+    let text = if let Some(rest) = text.strip_prefix("```") {
+        rest.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    } else {
+        text
+    };
     let mut tool = None;
+    let mut action = None;
     let (mut params, mut command, mut args) = (None, None, None);
     let mut batch = false;
     fields(text, |name, value| match name.as_str() {
         "tool" => tool = serde_json::Deserializer::from_str(value).into_iter::<String>().next().and_then(Result::ok),
+        "action" => action = serde_json::Deserializer::from_str(value).into_iter::<String>().next().and_then(Result::ok),
         "params" if value.starts_with('{') => params = prose(value),
         "command" if value.starts_with('{') => command = prose(value),
         "args" if value.starts_with('{') => args = prose(value),
         "parallel" | "plan_tree" | "commands" => batch |= value.starts_with(['{', '[']),
         _ => {}
     });
-    if !batch && tool.is_some_and(|tool| tool.eq_ignore_ascii_case("finish")) {
+    let is_finish = match tool.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        Some(tool_name) => tool_name.eq_ignore_ascii_case("finish"),
+        None => action.as_deref().map(str::trim).is_some_and(|a| a.eq_ignore_ascii_case("finish")),
+    };
+    if !batch && is_finish {
         params.or(command).or(args).or_else(|| prose(text))
     } else {
         None
@@ -585,12 +596,16 @@ mod tests {
         assert_eq!(streaming_finish_preview(second).as_deref(), Some("正在交付\n\n第一行\n第二"));
         assert_eq!(streaming_finish_preview(r#"{"tool":"finish","command":{"details":"正文"#).as_deref(), Some("正文"));
         assert_eq!(streaming_finish_preview(r#"{"tool":"finish","params":{"summary":"正文","details":"尾部"}}"#).as_deref(), Some("正文\n\n尾部"));
+        assert_eq!(streaming_finish_preview(r#"{"action":"finish","command":{"summary":"兼容动作"#).as_deref(), Some("兼容动作"));
+        assert_eq!(streaming_finish_preview(r#"{"tool":"","action":"finish","params":{"summary":"空工具走动作"#).as_deref(), Some("空工具走动作"));
+        assert_eq!(streaming_finish_preview("```JSON\n{\"tool\":\"finish\",\"params\":{\"artifacts\":[],\"details\":\"流式").as_deref(), Some("流式"));
     }
 
     #[test]
     fn streaming_finish_ignores_nested_tools_and_unrelated_text() {
         for input in [
             r#"{"tool":"local_shell","params":{"summary":"finish 中的私有命令"#,
+            r#"{"tool":"local_shell","action":"finish","params":{"summary":"非 finish 工具"#,
             r#"{"parallel":[{"tool":"finish","params":{"summary":"嵌套调用"#,
             r#"{"tool":"finish","params":{"extra":{"summary":"内部值"},"other":"内容"#,
             r#"{"thought":"示例：\"tool\": \"finish\"","params":{"summary":"内部值"#,
