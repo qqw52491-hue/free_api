@@ -434,17 +434,13 @@ pub(crate) async fn finish_interrupted_run<R: tauri::Runtime>(
 ) -> Result<(), String> {
     let message = format!("{} 已在安全边界停止旧任务。", reason);
     checkpoint.mark_failed(message.clone(), context);
-    crate::agent::checkpoint::save_checkpoint_with_chat_claims(db, checkpoint, run_id, context)?;
-    crate::agent::advance_run_state(
-        app,
-        session_id,
-        run_id,
-        machine,
-        crate::agent::run_state::AgentRunEvent::Cancel {
-            reason: message.clone(),
-        },
-    )?;
-    let failure_completion = serde_json::json!({ "summary": message });
+    let saved = crate::agent::checkpoint::save_checkpoint_with_chat_claims(db, checkpoint, run_id, context);
+    // 子任务可以在安全边界收尾。等它们退出后再发布父任务终态，即使检查点写入失败也要收停。
+    for warning in crate::agent::failure::stop_run_runtime(db, session_id, run_id).await {
+        eprintln!("[control] {warning}");
+    }
+    saved?;
+    let failure_completion = serde_json::json!({ "summary": &message });
     if let Err(error) = crate::agent::run_trace::upsert_snapshot(
         db,
         run_id,
@@ -456,14 +452,18 @@ pub(crate) async fn finish_interrupted_run<R: tauri::Runtime>(
     ) {
         eprintln!("[run-trace] 无法保存取消轨迹: {error}");
     }
+    crate::agent::advance_run_state(
+        app,
+        session_id,
+        run_id,
+        machine,
+        crate::agent::run_state::AgentRunEvent::Cancel { reason: message.clone() },
+    )?;
     app.emit(
         &format!("agent-log-{}", session_id),
         format!("⏹️ {} 不再派发旧计划。", message),
     )
     .ok();
-    for warning in crate::agent::failure::stop_run_runtime(db, session_id, run_id).await {
-        eprintln!("[control] {warning}");
-    }
     Ok(())
 }
 

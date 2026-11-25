@@ -173,3 +173,57 @@ async fn nested_cancellation_waits_for_descendants() {
     assert!(!attached(&child));
     assert!(!attached(&grandchild));
 }
+
+#[tokio::test]
+async fn parent_cancellation_waits_for_child_before_publishing_even_if_checkpoint_save_fails() {
+    use crate::agent::{checkpoint::AgentCheckpoint, context::SandwichContext, run_state::AgentRunMachine};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    for fail_save in [false, true] {
+        let token = uuid::Uuid::new_v4();
+        let parent_session = format!("parent-session-{token}");
+        let parent_run = format!("parent-run-{token}");
+        let child_run = format!("child-run-{token}");
+        let binding = TaskBinding {
+            parent_session: parent_session.clone(),
+            parent_run: parent_run.clone(),
+            child_session: format!("task-{child_run}"),
+            child_run: child_run.clone(),
+        };
+        let app = tauri::test::mock_app();
+        let conn = crate::db::init_db(&std::path::PathBuf::from(":memory:")).unwrap();
+        if fail_save {
+            conn.execute("DROP TABLE agent_checkpoints", []).unwrap();
+        }
+        let db = DbState(Arc::new(Mutex::new(conn)));
+        let context = SandwichContext::new("system".into(), "goal".into());
+        let mut checkpoint = AgentCheckpoint::new(parent_session.clone(), &context);
+        let mut machine = AgentRunMachine::new();
+        let published = Arc::new(AtomicBool::new(false));
+        let published_event = published.clone();
+        app.listen(format!("agent-run-state-{parent_session}"), move |_| {
+            published_event.store(true, Ordering::SeqCst);
+        });
+        let (done_tx, done) = watch::channel(false);
+        let (cancel, mut cancel_rx) = watch::channel(false);
+        RUNS.lock().unwrap().insert(child_run.clone(), Running {
+            binding, done, cancel, paused: Arc::new(Mutex::new(None)),
+        });
+        let finish = crate::agent::control::finish_interrupted_run(
+            app.handle(), &db, &parent_session, &parent_run, "goal", &[], &mut checkpoint,
+            &context, &mut machine, "用户请求停止当前任务。".into(),
+        );
+        let settle_child = async {
+            cancel_rx.wait_for(|cancelled| *cancelled).await.unwrap();
+            assert!(!published.load(Ordering::SeqCst), "子任务仍在退出，父任务还不能报告已停止");
+            RUNS.lock().unwrap().remove(&child_run);
+            done_tx.send_replace(true);
+        };
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(finish, settle_child)
+        }).await.unwrap();
+        assert!(!attached(&child_run));
+        assert_eq!(result.is_err(), fail_save, "{result:?}");
+        assert_eq!(published.load(Ordering::SeqCst), !fail_save);
+    }
+}
