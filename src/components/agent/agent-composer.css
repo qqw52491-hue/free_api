@@ -1559,9 +1559,13 @@ textarea::placeholder {
     color: var(--theme-status-danger, #fca5a5);
     transition: all 0.15s ease;
 }
-.mode-switch-pill:hover {
+.mode-switch-pill:hover:not(:disabled) {
     background: rgba(239, 68, 68, 0.22);
     border-color: rgba(239, 68, 68, 0.55);
+}
+.mode-switch-pill:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
 }
 .mode-switch-pill.is-queue {
     background: rgba(245, 158, 11, 0.12);

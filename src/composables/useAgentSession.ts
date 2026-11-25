@@ -451,7 +451,11 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     const pausedStepId = ref<string | undefined>(undefined);
     const humanForm = ref<AgentHumanForm | null>(null);
     const humanInput = ref("");
-    const pendingReplacementGoal = ref<{ text: string; attachments?: ParsedAttachment[] } | null>(null);
+    const pendingReplacementGoal = ref<{
+        text: string;
+        attachments?: ParsedAttachment[];
+        afterStop?: boolean;
+    } | null>(null);
     const queuedGoals = ref<QueuedAgentGoal[]>([]);
     interface CancelAgentRunResult {
         delivered: boolean;
@@ -2357,6 +2361,11 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                             if (finalDecision.releaseStop) {
                                 stoppingRunId = null;
                                 stopRequested.value = false;
+                                if (isDeletedSession) {
+                                    pendingReplacementGoal.value = null;
+                                } else if (pendingReplacementGoal.value?.afterStop) {
+                                    startPendingReplacement();
+                                }
                             }
                         }
                     }
@@ -2455,9 +2464,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 isThinking.value = false;
                 activeRunId.value = null;
                 stoppingRunId = null;
-                stopRequested.value = false;
+                if (!pendingReplacementGoal.value?.afterStop) stopRequested.value = false;
                 stopElapsedTimer();
-                const queuedGoal = pendingReplacementGoal.value;
                 try {
                     await loadConversation();
                     await loadRunTraces();
@@ -2478,11 +2486,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 if (currentGeneration !== runGeneration) {
                     return;
                 }
-                if (queuedGoal) {
-                    pendingReplacementGoal.value = null;
-                    await nextTick();
-                    void runAgent(queuedGoal.text, queuedGoal.attachments, "new");
-                } else if (queuedGoals.value.length > 0) {
+                stopRequested.value = false;
+                if (!startPendingReplacement() && queuedGoals.value.length > 0) {
                     const next = queuedGoals.value.shift();
                     if (next) {
                         await nextTick();
@@ -2495,6 +2500,30 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             }
         }
     }
+
+    function startPendingReplacement() {
+        const next = pendingReplacementGoal.value;
+        if (!next || isRunning.value || stopRequested.value || activeLocalRunCount > 0) return false;
+        pendingReplacementGoal.value = null;
+        void runAgent(next.text, next.attachments, "new");
+        return true;
+    }
+
+    async function endTaskAndStartNew(text: string, attachments?: ParsedAttachment[]) {
+        if (!text.trim() || stopRequested.value || isSendingHuman.value || pendingReplacementGoal.value) return false;
+        if (!isRunning.value && activeLocalRunCount === 0) {
+            void runAgent(text, attachments, "new");
+            return true;
+        }
+        pendingReplacementGoal.value = { text, attachments, afterStop: true };
+        // A terminal state event can precede the return of the desktop command.
+        // Its finally block starts the replacement after the old run releases ownership.
+        if (!isRunning.value) return true;
+        if (!await requestStop()) return false;
+        if (pendingReplacementGoal.value?.afterStop) startPendingReplacement();
+        return true;
+    }
+
     async function runReadOnlyRegression() {
         if (isRunning.value) return;
         try {
@@ -2520,7 +2549,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     }
 
     async function requestStop() {
-        if (!isRunning.value || stopRequested.value) return;
+        if (!isRunning.value || stopRequested.value) return false;
         flushStreamDisplay();
         stopRequested.value = true;
         stoppingRunId = null;
@@ -2536,9 +2565,10 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         if (pendingStopCommand === command) pendingStopCommand = null;
 
         if (!outcome) {
+            if (pendingReplacementGoal.value?.afterStop) pendingReplacementGoal.value = null;
             stoppingRunId = null;
             stopRequested.value = false;
-            return;
+            return false;
         }
 
         if (outcome.has_active_run) {
@@ -2546,13 +2576,16 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 activeRunId.value = outcome.active_run_id;
                 stoppingRunId = outcome.active_run_id;
                 if (activeLocalRunCount === 0 && completedRunIds.has(outcome.active_run_id)) {
+                    isRunning.value = false;
+                    isThinking.value = false;
                     activeRunId.value = null;
                     stoppingRunId = null;
                     stopRequested.value = false;
-                    return;
+                    return true;
                 }
             }
             if (!outcome.delivered) {
+                if (pendingReplacementGoal.value?.afterStop) pendingReplacementGoal.value = null;
                 // 后台存在活动运行但停止信号未能投递：解除“停止中”按钮锁定以便重试停止，
                 // 同时保留 isRunning 阻止误启动新一轮。
                 stoppingRunId = null;
@@ -2560,7 +2593,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 statusDescription.value = "停止信号未送达当前任务，请重试停止。";
                 appendLog("[停止未送达] 后台仍有活动任务，但停止指令未送达，请再次点击停止重试。");
             }
-            return;
+            return outcome.delivered;
         }
 
         // 后端明确确认不存在活动运行（如重启遗留的人工挂起检查点），安全解除锁定。
@@ -2576,6 +2609,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 setRunState("cancelled", "任务已停止。");
             }
         }
+        return true;
     }
     async function checkAndRestoreCheckpointState() {
         try {
@@ -2874,6 +2908,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         runReadOnlyRegression,
         requestStop,
         answerHuman,
+        endTaskAndStartNew,
         sendHumanInput,
         submitHumanForm,
         clearSession,

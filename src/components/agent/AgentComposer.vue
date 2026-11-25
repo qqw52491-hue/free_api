@@ -1131,6 +1131,17 @@
                     </button>
 
                     <button
+                        v-if="isRunning && isWaitingForHuman"
+                        type="button"
+                        class="mode-switch-pill"
+                        :disabled="!canSubmit || isSending || Boolean(modelSetupHint)"
+                        title="结束当前任务，把输入作为新任务发送并重新评估流程"
+                        @click.stop="submit('new')"
+                    >
+                        停止后另起任务
+                    </button>
+
+                    <button
                         class="submit-control"
                         :class="{
                             'is-queue-submit': isRunning && !isWaitingForHuman && submitMode === 'queue',
@@ -1220,7 +1231,7 @@ const emit = defineEmits<{
     "update:budget-mode": [mode: ContextBudgetMode];
     "update:autoPilot": [value: boolean];
     "update:planMode": [mode: PlanExecutionMode];
-    submit: [payload?: { text: string; attachments: ParsedAttachment[]; mode?: "interrupt" | "queue"; taskStartMode?: "resume" | "new" }];
+    submit: [payload?: { text: string; attachments: ParsedAttachment[]; mode?: "interrupt" | "queue" | "new"; taskStartMode?: "resume" | "new"; onRejected?: () => void }];
     "cancel-queue": [index: number];
     stop: [];
     "open-settings": [];
@@ -2363,12 +2374,14 @@ const canSubmit = computed(() => {
         && (Boolean(props.draft.trim()) || attachments.value.length > 0);
 });
 
-async function submit(explicitMode?: "interrupt" | "queue" | Event) {
+async function submit(explicitMode?: "interrupt" | "queue" | "new" | Event) {
     if (!canSubmit.value || props.isSending) return;
 
-    let userText = props.draft.trim();
-    const mode = (typeof explicitMode === "string" ? explicitMode : undefined)
-        || (props.isRunning && !props.isWaitingForHuman ? submitMode.value : undefined);
+    const userText = props.draft.trim();
+    const replacing = explicitMode === "new";
+    const mode = typeof explicitMode === "string"
+        ? explicitMode
+        : props.isRunning && !props.isWaitingForHuman ? submitMode.value : undefined;
 
     // 先清输入框：等待落盘期间用户的新输入属于下一条消息，不能被本次提交吞掉
     emit("update:draft", "");
@@ -2383,6 +2396,11 @@ async function submit(explicitMode?: "interrupt" | "queue" | Event) {
     }
 
     const currentAtts = [...attachments.value];
+    const onRejected = replacing ? () => {
+        if (!props.draft.trim()) emit("update:draft", userText);
+        attachments.value = [...currentAtts, ...attachments.value];
+    } : undefined;
+    const startMode = replacing ? "new" : taskStartMode.value;
 
     if (currentAtts.length > 0) {
         // 🌟 分流：粘贴的纯文本片段 (is_pasted_snippet) vs 物理附件 (拖拽或上传的文件/图片)
@@ -2420,9 +2438,9 @@ async function submit(explicitMode?: "interrupt" | "queue" | Event) {
 
         const visiblePrompt = promptParts.join("\n\n");
         attachments.value = [];
-        emit("submit", { text: visiblePrompt, attachments: realAttachments, mode, taskStartMode: taskStartMode.value });
+        emit("submit", { text: visiblePrompt, attachments: realAttachments, mode, taskStartMode: startMode, onRejected });
     } else {
-        emit("submit", { text: userText, attachments: [], mode, taskStartMode: taskStartMode.value });
+        emit("submit", { text: userText, attachments: [], mode, taskStartMode: startMode, onRejected });
     }
 }
 

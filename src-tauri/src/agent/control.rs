@@ -348,7 +348,12 @@ pub async fn cancel_agent_run(session_id: String) -> Result<CancelAgentRunResult
                 if let Some(interrupt_sender) = interrupts.get(&session_id) {
                     interrupt_sender.send_modify(|generation| *generation = generation.wrapping_add(1));
                 }
-                (Some(sender), false, None)
+                // Capture the target before sending. A waiting run may publish its
+                // terminal state immediately after receiving the cancellation.
+                let run_id = channel_owners().lock().ok()
+                    .and_then(|owners| owners.get(&session_id).cloned())
+                    .or_else(|| crate::agent::channel::active_run_id_for_session(&session_id));
+                (Some(sender), false, run_id)
             } else {
                 // 与 register_run_channels 共享 intervention_channels -> stream_interrupt_channels 锁序：
                 // 要么主循环尚未注册（写入 pending_cancels 后必被注册期消费并触发流中断），
@@ -366,7 +371,6 @@ pub async fn cancel_agent_run(session_id: String) -> Result<CancelAgentRunResult
 
         if let Some(sender) = existing_sender {
             let delivered = sender.send(HumanControl::Cancel).await.is_ok();
-            let active_run_id = crate::agent::channel::active_run_id_for_session(&session_id);
             let has_active_run = active_run_id.is_some() || is_session_starting(&session_id);
             return Ok(CancelAgentRunResult {
                 delivered,

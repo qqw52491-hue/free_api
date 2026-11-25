@@ -151,7 +151,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
     // 极早期启动占位：覆盖附件搬迁等前置 I/O，保证刚启动即点停止也不会漏掉取消信号。
     let _starting_guard = crate::agent::control::StartingSessionGuard::enter(&final_session_id);
     let run_id = run_id_override.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let _owner = match admitted {
+    let owner = match admitted {
         Some(owner) => owner,
         None => crate::agent::control::SessionExecutionOwner::acquire(&final_session_id, &run_id)?,
     };
@@ -200,7 +200,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace(
             eprintln!("[failure-cleanup] {warning}");
         }
     }
-    run_guard.finish(&result);
+    run_guard.finish(&result, Some(owner));
     result
 }
 

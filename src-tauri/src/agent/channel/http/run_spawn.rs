@@ -194,7 +194,11 @@ impl<R: tauri::Runtime> SessionRunGuard<R> {
         }
     }
 
-    pub(crate) fn finish(self, outcome: &Result<(), String>) {
+    pub(crate) fn finish(
+        self,
+        outcome: &Result<(), String>,
+        owner: Option<crate::agent::control::SessionExecutionOwner>,
+    ) {
         let _ = self.app.unlisten(self.event_id);
         let _ = self.app.unlisten(self.state_event_id);
         let existing = runs_store().lock().expect("runs store poisoned").get(&self.run_id).cloned();
@@ -242,6 +246,8 @@ impl<R: tauri::Runtime> SessionRunGuard<R> {
         if missing_terminal || outcome.is_err() {
             eprintln!("[run-finish] run={} status={} host_result={:?}", self.run_id, status, outcome);
         }
+        // Receivers may start a replacement as soon as they see the terminal event.
+        drop(owner);
         notify_session_event(&self.session_id, &status);
         let _ = self.app.emit("channel-run-done", json!({
             "run_id":self.run_id, "session_id":self.session_id, "status":status, "at":now_ts()
@@ -406,7 +412,7 @@ mod state_regressions {
             "cannot finish", &[], &mut cp, &context, &mut machine, "API 401: task incomplete".into()).await;
         assert!(outcome.is_ok(), "a handled business failure returns host Ok: {outcome:?}");
         assert_eq!(cp.phase, AgentPhase::Failed);
-        guard.finish(&outcome);
+        guard.finish(&outcome, None);
         let status = runs_store().lock().unwrap().remove(&run).unwrap().status;
         let stored: String = db.0.lock().unwrap().query_row("SELECT status FROM agent_run_traces WHERE id=?1", [&run], |r| r.get(0)).unwrap();
         eprintln!("AUDIT handled-failure host_result=Ok checkpoint=failed trace={} channel={}", stored, status);
@@ -429,7 +435,7 @@ mod state_regressions {
         let outcome = crate::agent::control::finish_interrupted_run(app.handle(), &db, &session, &run,
             "cancel", &[], &mut cp, &context, &mut machine, "用户请求停止当前任务。".into()).await;
         assert!(outcome.is_ok(), "{outcome:?}");
-        guard.finish(&outcome);
+        guard.finish(&outcome, None);
         let status = runs_store().lock().unwrap().remove(&run).unwrap().status;
         let stored: String = db.0.lock().unwrap().query_row("SELECT status FROM agent_run_traces WHERE id=?1", [&run], |r| r.get(0)).unwrap();
         eprintln!("AUDIT handled-cancel machine={:?} trace={} channel={}", machine.state(), stored, status);
@@ -445,7 +451,7 @@ mod state_regressions {
         let session = format!("unknown-terminal-{}", uuid::Uuid::new_v4());
         let run = format!("unknown-run-{}", uuid::Uuid::new_v4());
         let guard = SessionRunGuard::new(app.handle(), &session, &run, "unknown", 1);
-        guard.finish(&Ok(()));
+        guard.finish(&Ok(()), None);
         let record = runs_store().lock().unwrap().remove(&run).unwrap();
         assert_eq!(record.status, "failed");
         assert!(record.error.unwrap().contains("未取得本次任务的终态"));
@@ -461,13 +467,20 @@ mod state_regressions {
         let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
         let out = events.clone();
         let filter = run.clone();
+        let successor_session = session.clone();
         app.listen("channel-run-done", move |event| {
             let value: Value = serde_json::from_str(event.payload()).unwrap();
-            if value["run_id"] == filter { out.lock().unwrap().push(value); }
+            if value["run_id"] == filter {
+                let _successor = crate::agent::control::SessionExecutionOwner::acquire(
+                    &successor_session, "successor",
+                ).unwrap();
+                out.lock().unwrap().push(value);
+            }
         });
+        let owner = crate::agent::control::SessionExecutionOwner::acquire(&session, &run).unwrap();
         let guard = SessionRunGuard::new(app.handle(), &session, &run, "success", 1);
         crate::agent::run_trace::upsert_snapshot(&db, &run, &session, "success", "succeeded", &[], Some(&json!({"summary":"committed"}))).unwrap();
-        guard.finish(&Err("late emit failure".into()));
+        guard.finish(&Err("late emit failure".into()), Some(owner));
         assert_eq!(runs_store().lock().unwrap().remove(&run).unwrap().status, "done");
         assert_eq!(events.lock().unwrap().last().unwrap()["status"], "done");
         let status: String = db.0.lock().unwrap().query_row("SELECT status FROM agent_run_traces WHERE id=?1", [&run], |row| row.get(0)).unwrap();
@@ -490,7 +503,7 @@ mod state_regressions {
         });
         let guard = SessionRunGuard::new(app.handle(), &session, &run, "cancel", 1);
         patch_run(&run, |record| record.status = "cancelled".into());
-        guard.finish(&Err("storage unavailable".into()));
+        guard.finish(&Err("storage unavailable".into()), None);
         assert_eq!(runs_store().lock().unwrap().remove(&run).unwrap().status, "cancelled");
         assert_eq!(events.lock().unwrap().last().unwrap()["status"], "cancelled");
     }
@@ -506,7 +519,7 @@ mod state_regressions {
         app.emit(&format!("agent-run-state-{session}"), json!({"state":"failed","message":"real failure"})).unwrap();
         app.emit(&format!("agent-progress-{session}"), json!({"type":"agent_paused","message":"late question"})).unwrap();
         assert_ne!(runs_store().lock().unwrap().get(&run).unwrap().status, "waiting_human");
-        guard.finish(&Ok(()));
+        guard.finish(&Ok(()), None);
         assert_eq!(runs_store().lock().unwrap().remove(&run).unwrap().status, "failed");
     }
 
@@ -519,7 +532,7 @@ mod state_regressions {
         let run = format!("audit-run-{}", uuid::Uuid::new_v4());
         let guard = SessionRunGuard::new(app.handle(), &session, &run, "done", 1);
         app.emit(&format!("agent-run-state-{session}"), json!({"state":"succeeded","message":"done"})).unwrap();
-        guard.finish(&Ok(()));
+        guard.finish(&Ok(()), None);
         assert_eq!(runs_store().lock().unwrap().remove(&run).unwrap().status, "done");
     }
 }

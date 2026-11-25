@@ -9,6 +9,7 @@ const root = path.resolve(__dirname, '..');
 const cache = new Map();
 let mounted = [], requests = [], traceStatus = 'cancelled', creations = [], failCreation = false;
 let traceFixtures, messageFixtures = [];
+let invokeFixtures = {};
 const storage = new Map();
 const handlers = new Map();
 global.localStorage = { getItem: k => storage.get(k) ?? null, setItem: (k,v) => storage.set(k,v) };
@@ -30,7 +31,9 @@ async function invoke(name, args) {
         id: 'previous-run', goal: 'original complex task', status: traceStatus,
         started_at: '2026-10-13T08:00:00Z', updated_at: '2026-10-13T08:01:00Z', steps: [],
     }];
-    if (name === 'run_agent_main_loop') { requests.push(args); return; }
+    if (name === 'run_agent_main_loop') requests.push(args);
+    if (invokeFixtures[name]) return invokeFixtures[name](args);
+    if (name === 'run_agent_main_loop') return;
     if (name === 'get_agent_checkpoint') return null;
     return [];
 }
@@ -69,10 +72,66 @@ async function session(status, fixtures = {}) {
     traceStatus = status; mounted = []; requests = []; storage.clear();
     traceFixtures = fixtures.traces;
     messageFixtures = fixtures.messages ?? [];
+    invokeFixtures = fixtures.invoke ?? {};
     const s = useAgentSession('existing-session');
     s.modelRouting.value.pro = 'pro-model';
     for (const fn of mounted) await fn();
     return s;
+}
+
+async function replaceWaitingTask() {
+    const event = (channel, payload) => handlers.get(channel)({payload});
+    const pausedRun = async () => {
+        await event('channel-run-started', {session_id:'existing-session',run_id:'old-run',goal:'改造 License'});
+        await event('agent-progress-existing-session', {type:'agent_paused',run_id:'old-run',message:'是否继续改造？'});
+    };
+    const ask = '停止改造，解释为什么反复读取';
+    const activeStop = {delivered:true,has_active_run:true,active_run_id:'old-run'};
+
+    let releaseOld;
+    let s = await session('cancelled', {invoke:{
+        run_agent_main_loop: () => requests.length === 1 ? new Promise(resolve => {releaseOld = resolve;}) : undefined,
+        cancel_agent_run: () => activeStop,
+        send_human_intervention: () => assert.fail('新任务不能写进人工回答'),
+    }});
+    const old = s.runAgent('改造 License', undefined, 'new');
+    await new Promise(resolve => setImmediate(resolve));
+    await pausedRun();
+    assert.equal(s.isWaitingForHuman.value, true);
+    assert.equal(await s.endTaskAndStartNew(ask), true);
+    await event('channel-run-done', {session_id:'existing-session',run_id:'old-run',status:'cancelled'});
+    assert.equal(requests.length, 1, '本地旧任务还未完成收尾');
+    releaseOld();
+    await old;
+    assert.equal(requests.length, 2);
+    assert.equal(requests[1].goal, ask);
+    assert.equal(requests[1].taskStartMode, 'new');
+
+    s = await session('running', {invoke:{cancel_agent_run: () => activeStop}});
+    await pausedRun();
+    assert.equal(await s.endTaskAndStartNew(ask), true);
+    await event('channel-run-done', {session_id:'existing-session',run_id:'unrelated-run',status:'cancelled'});
+    assert.equal(requests.length, 0, '其他运行的完成事件不能启动新问题');
+    await event('channel-run-done', {session_id:'existing-session',run_id:'old-run',status:'cancelled'});
+    await event('channel-run-done', {session_id:'existing-session',run_id:'old-run',status:'cancelled'});
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].taskStartMode, 'new');
+
+    s = await session('waiting_human', {invoke:{
+        get_agent_checkpoint: () => ({run_id:'old-run',is_waiting_human:true,user_goal:'改造 License',step_id:1}),
+        cancel_agent_run: () => ({delivered:false,has_active_run:false,active_run_id:null}),
+    }});
+    assert.equal(s.isWaitingForHuman.value, true);
+    assert.equal(await s.endTaskAndStartNew(ask), true);
+    assert.equal(requests[0].taskStartMode, 'new');
+
+    s = await session('running', {invoke:{cancel_agent_run: () => ({...activeStop,delivered:false})}});
+    await pausedRun();
+    assert.equal(await s.endTaskAndStartNew(ask), false);
+    assert.equal(s.isWaitingForHuman.value, true);
+    assert.equal(await s.endTaskAndStartNew(ask), false, '停止失败后可重试且不会残留上一份新任务');
+    await event('channel-run-done', {session_id:'existing-session',run_id:'old-run',status:'cancelled'});
+    assert.equal(requests.length, 0, '失败的切换不能留待未来误启动');
 }
 async function main() {
     for (const status of ['failed', 'cancelled', 'running', 'waiting_human']) {
@@ -106,6 +165,8 @@ async function main() {
     await new Promise(resolve => setTimeout(resolve, 25));
     assert.equal(requests[0].taskStartMode, 'resume');
     assert.equal(requests[1].taskStartMode, 'new', 'queued task must not inherit failed predecessor');
+    await replaceWaitingTask();
+    invokeFixtures = {};
     requests = []; creations = []; failCreation = false;
     let promoted = [];
     s = useAgentSession('draft-directory', { onPromote: (...args) => promoted.push(args) });
@@ -132,7 +193,7 @@ async function main() {
     s = useAgentSession('draft-project', { projectId: 'p1' });
     await s.ensureSession(); assert.equal(creations[0].name, 'create_agent_project_session');
     assert.equal(creations[0].args.projectId, 'p1');
-    console.log('PASS: task intent (8 scenarios) + settings session creation (6 scenarios); real composable, mocked I/O');
+    console.log('PASS: task intent, replacement during human wait, and settings session creation; real composable, mocked I/O');
 }
 module.exports = { load, session, emit: (channel, payload) => { assert(handlers.has(channel), channel); return handlers.get(channel)({ payload }); } };
 if (require.main === module) main().then(() => process.exit(0), e => { console.error(e); process.exit(1); });

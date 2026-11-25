@@ -643,7 +643,13 @@ function handleOpenDiff(payload: FileDiffPayload) {
     inspectorCollapsed.value = false;
     inspectorRef.value?.openDiff(payload);
 }
-function submitComposer(payload?: { text: string; attachments?: any[]; mode?: "interrupt" | "queue"; taskStartMode?: "resume" | "new" }) {
+function submitComposer(payload?: { text: string; attachments?: any[]; mode?: "interrupt" | "queue" | "new"; taskStartMode?: "resume" | "new"; onRejected?: () => void }) {
+    if (payload?.mode === "new") {
+        void session.endTaskAndStartNew(payload.text, payload.attachments).then((accepted) => {
+            if (!accepted) payload.onRejected?.();
+        });
+        return;
+    }
     if (session.stopRequested.value) return;
     const text = (payload?.text ?? composerDraft.value).trim();
     if (!text && (!payload?.attachments || payload.attachments.length === 0)) return;
