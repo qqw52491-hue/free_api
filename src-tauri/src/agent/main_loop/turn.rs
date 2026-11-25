@@ -1148,7 +1148,14 @@ pub(super) async fn turn_main<'a, 'b>(
             eprintln!("⚠️ 无法保存 step_output: {}", e);
             "unknown_output_id".to_string()
         });
-        context.add_step(&instruction, &model_output_text, &output_id);
+        let observation = if instruction.parallel.is_some()
+            && matches!(result.route.as_str(), "plan_tree_success" | "plan_tree_failed" | "review:parallel")
+        {
+            &final_stdout
+        } else {
+            &model_output_text
+        };
+        context.add_step(&instruction, observation, &output_id, step_id);
         let dedup = deduplicate_mcp_output(
             state.inner(),
             &final_session_id,

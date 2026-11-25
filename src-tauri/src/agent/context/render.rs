@@ -311,12 +311,17 @@ impl ContextRenderer {
                 let last_step = windows.iter().map(|(_, e)| e.last_step).max().unwrap_or(0);
                 let first_step = windows.iter().map(|(_, e)| e.first_step).min().unwrap_or(0);
                 let total_count: u32 = windows.iter().map(|(_, e)| e.count).sum();
-                let latest_oid = windows
+                let latest = windows
                     .iter()
                     .max_by_key(|(_, e)| e.last_step)
-                    .and_then(|(_, e)| e.output_id.as_deref());
+                    .map(|(_, entry)| *entry);
                 let coverage = Self::merge_window_labels(&windows);
-                let oid = latest_oid.map(|id| format!(" → {}", id)).unwrap_or_default();
+                let oid = latest.and_then(|entry| entry.output_id.as_deref().map(|id| {
+                    match entry.branch_id.as_deref() {
+                        Some(branch) => format!(" → output_id={id} branch_id={branch:?}"),
+                        None => format!(" → {id}"),
+                    }
+                })).unwrap_or_default();
                 let line = format!(
                     "- read {} 已读 {} · ×{} (step {}~{}){}",
                     path, coverage, total_count, first_step, last_step, oid

@@ -186,11 +186,11 @@ async fn parallel_full_output_survives_persistence_pagination_and_search() {
         restored.push_str(f.read(&id, offset)["raw_output"].as_str().unwrap());
     }
     assert_eq!(restored, original);
-    // The existing ingress budget still bounds model context after full persistence.
+    // The model gets readable prefixes from each branch; the saved report is unchanged.
     let mut context = crate::agent::context::SandwichContext::new("sys".into(), "测试".into());
     let instruction =
         serde_json::from_value(json!({"parallel":[read_leaf(),read_leaf()]})).unwrap();
-    context.add_step(&instruction, &original, &id);
+    context.add_step(&instruction, &original, &id, 0);
     let model_view = context
         .turns_history
         .last()
@@ -199,11 +199,67 @@ async fn parallel_full_output_survives_persistence_pagination_and_search() {
         .as_str()
         .unwrap();
     assert!(model_view.contains(&id));
-    assert!(model_view.contains("truncated: true"));
+    assert_eq!(model_view.matches("[分支正文已节选，可回查原文]").count(), 2);
+    assert!(model_view.matches("天气正文").count() > 2);
+    assert!(model_view.contains("[分支 1]"));
+    assert!(model_view.contains("[分支 2]"));
     assert!(
         crate::agent::context::budget::conservative_token_estimate(model_view)
-            <= crate::agent::context::budget::ContextBudget::SINGLE_OBSERVATION_INGRESS_CAP
+            <= context.current_budget().max_allowed_history_tokens / 2
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parallel_recall_uses_visible_cursors_and_repeated_reads_point_to_saved_branches() {
+    use crate::agent::context::SandwichContext;
+    let f = Fixture::new();
+    let files = json!({"parallel":[
+        {"id":"whole","tool":"local_file","params":{"action":"read","path":"weather.txt"}},
+        {"id":"window","tool":"local_file","params":{"action":"read","path":"weather.txt","start_line":2,"end_line":8}}
+    ]});
+    let mut first = f.execute(files.clone());
+    let original = f.archive(&mut first);
+    let mut ctx = SandwichContext::new("sys".into(), "goal".into());
+    ctx.context_window_tokens = 16_000;
+    let instruction = serde_json::from_value(files.clone()).unwrap();
+    ctx.add_step(&instruction, &first.stdout, &original, 1);
+    let mut second = f.execute(files);
+    let second_id = f.archive(&mut second);
+    ctx.add_step(&instruction, &second.stdout, &second_id, 2);
+    let observed = ctx.turns_history.last().unwrap().content.as_str().unwrap();
+    assert!(observed.contains(&format!("output_id={original:?}, branch_id=\"whole\"")));
+    assert!(observed.contains(&format!("output_id={original:?}, branch_id=\"window\"")));
+
+    let read = |offset| json!({"tool":"get_step_output","params":{
+        "output_id":original,"branch_id":"whole","offset":offset,"limit":6000
+    }});
+    let lookup = json!({"parallel":[read(0),read(6000),read(12000)]});
+    let result = f.execute(lookup.clone());
+    assert!(result.success, "{}", result.stderr);
+    let lookup_instruction = serde_json::from_value(lookup).unwrap();
+    let mut ctx = SandwichContext::new("sys".into(), "goal".into());
+    ctx.context_window_tokens = 16_000;
+    ctx.add_step(&lookup_instruction, &result.stdout, "lookup-receipt", 3);
+    let observed = ctx.turns_history.last().unwrap().content.as_str().unwrap();
+    let mut pages = 0;
+    for section in observed.split("[分支 ").skip(1) {
+        let (_, rest) = section.split_once('\n').unwrap();
+        let (locator, text) = rest.split_once('\n').unwrap();
+        let locator: Value = serde_json::from_str(locator).unwrap();
+        let offset = locator["offset"].as_u64().unwrap();
+        let next = locator["next_offset"].as_u64().unwrap();
+        assert!(next > offset && next < offset + 6000);
+        assert_eq!(locator["selection"]["branch_id"], "whole");
+        assert_eq!(locator["output_id"], original);
+        assert_eq!(locator["has_more"], true);
+        let stored_page = f.execute(read(offset));
+        let stored_page: Value = serde_json::from_str(&stored_page.stdout).unwrap();
+        let expected: String = stored_page["raw_output"].as_str().unwrap()
+            .chars().take((next - offset) as usize).collect();
+        assert_eq!(text, format!("{expected}\n\n"));
+        pages += 1;
+    }
+    assert_eq!(pages, 3);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

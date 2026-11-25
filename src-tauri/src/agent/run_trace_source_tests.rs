@@ -218,11 +218,11 @@ fn recalled_result_is_appended_once_and_later_steps_keep_its_prefix_unchanged() 
         command: Some(json!({"output_id":"proof"})),
         ..Default::default()
     };
-    ctx.add_step(&instruction, &result.stdout, "recall-call-output");
+    ctx.add_step(&instruction, &result.stdout, "recall-call-output", 0);
     let history = ctx.turns_history.clone();
     let request = ctx.assemble_messages();
     let stable_prefix = &request[..2 + history.len()];
-    ctx.add_step(&instruction, "下一个操作的结果", "next-call-output");
+    ctx.add_step(&instruction, "下一个操作的结果", "next-call-output", 0);
     assert_eq!(&ctx.turns_history[..history.len()], &history);
     assert_eq!(
         &ctx.assemble_messages()[..stable_prefix.len()],

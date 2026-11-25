@@ -279,7 +279,7 @@ impl SandwichContext {
 
     /// 低水位批量脱水：大窗口模型下 85% 高水位（deep_coding ≈255k）日常任务
     /// 不可达，旧输出会被逐步全量携带。历史估算超过脱水水位时仅执行一次性
-    /// 批量脱水：固定尾窗保护区、不清读取台账（output_id 句柄仍可回查）、
+    /// 批量脱水：保护近期输出、不清读取台账（output_id 句柄仍可回查）、
     /// 不动手册/纪元标记——前缀缓存只在事件点断裂一次，摊薄到后续全部步数。
     /// 扫无可脱对象时滞后重扫（dehydration_rearm_tokens），避免每步空转。
     fn maybe_dehydrate_low_watermark(&mut self, budget: &ContextBudget, current_tokens: usize) {
@@ -305,7 +305,17 @@ impl SandwichContext {
         let mut back_tokens = 0usize;
         let projected_history =
             crate::agent::attachment_vision::project_messages(self, &self.turns_history);
+        let mut recent_observations = 0;
+        let mut recent_parallel = false;
         for msg in projected_history.iter().rev() {
+            if msg.role == "user" && msg.content.as_str().is_some_and(|s| s.starts_with("【执行输出")) {
+                recent_observations += 1;
+                if recent_observations == 1 {
+                    recent_parallel = msg.content.as_str().is_some_and(|s| {
+                        s.starts_with(super::sampling::PARALLEL_LABEL)
+                    });
+                }
+            }
             back_tokens += match &msg.content {
                 serde_json::Value::String(s) => conservative_token_estimate(s),
                 other => conservative_token_estimate(&other.to_string()),
@@ -313,6 +323,8 @@ impl SandwichContext {
             protected_from_back += 1;
             if back_tokens >= ContextBudget::DEHYDRATION_PROTECTED_TOKENS
                 && protected_from_back >= 2
+                && (!recent_parallel || recent_observations >= 2
+                    || back_tokens >= budget.max_allowed_history_tokens / 2)
             {
                 break;
             }

@@ -4,6 +4,15 @@ use std::borrow::Cow;
 
 pub(crate) const RESULTS_MARKER: &str = "详细返回数据 (JSON):\n```json\n";
 
+pub(crate) fn report_results(report: &str) -> Option<Value> {
+    if !report.trim_start().starts_with("【计划执行结果报告】") {
+        return None;
+    }
+    let (_, rest) = report.split_once(RESULTS_MARKER)?;
+    let (body, _) = rest.split_once("\n```")?;
+    serde_json::from_str(body).ok()
+}
+
 #[derive(Debug)]
 pub(crate) struct SelectedBranch {
     pub text: String,
@@ -21,7 +30,7 @@ fn leaves<'a>(value: &'a Value, found: &mut Vec<&'a Value>) {
     }
 }
 
-fn branch_text(node: &Value) -> (Cow<'_, str>, &'static str) {
+pub(crate) fn branch_text(node: &Value) -> (Cow<'_, str>, &'static str) {
     if let Some(output) = node.get("data").and_then(|v| v.get("output")).and_then(Value::as_str) {
         return (Cow::Borrowed(output), "data.output");
     }
@@ -57,13 +66,13 @@ pub(crate) fn select_branch(persisted: &str, request: &Value) -> Result<Option<S
     let Some(value) = request.get("branch_id") else { return Ok(None); };
     let id = value.as_str().filter(|s| !s.trim().is_empty())
         .ok_or("branch_id 必须为非空字符串，填写回执目录中的原始分支 ID。")?;
+    let projected = crate::agent::dispatcher::project_mcp_durable_output(persisted);
+    let persisted = projected.as_deref().unwrap_or(persisted);
     if !persisted.trim_start().starts_with("【计划执行结果报告】") {
         return Err("该回执不是可定位分支的批量结果；省略 branch_id 可按原方式读取完整回执。".into());
     }
-    let payload = persisted.split_once(RESULTS_MARKER).and_then(|(_, rest)| rest.split_once("\n```"))
-        .map(|(body, _)| body).ok_or("批量回执缺少完整结果 JSON；省略 branch_id 可读取已保存原文。")?;
-    let results: Value = serde_json::from_str(payload)
-        .map_err(|_| "批量结果 JSON 无法解析；省略 branch_id 可读取已保存原文。")?;
+    let results = report_results(persisted)
+        .ok_or("批量结果缺少有效 JSON；省略 branch_id 可读取已保存原文。")?;
     let mut nodes = Vec::new();
     leaves(&results, &mut nodes);
     let mut matches = nodes.into_iter().filter(|node| node["id"].as_str() == Some(id));

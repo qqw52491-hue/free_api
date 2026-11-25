@@ -302,6 +302,8 @@ pub(crate) fn dehydrate_historical_turn(msg: &ChatMessage) -> ChatMessage {
     {
         let mut output_id = "";
         let mut receipt_lines = Vec::new();
+        let parallel = text.starts_with(super::sampling::PARALLEL_LABEL);
+        let receipt_line_cap = if parallel { 5 } else { 4 };
         for line in text.lines() {
             let trimmed = line.trim();
             if trimmed.starts_with("output_id: ") {
@@ -310,6 +312,7 @@ pub(crate) fn dehydrate_historical_turn(msg: &ChatMessage) -> ChatMessage {
                     output_id = trimmed[11..].trim();
                 }
             } else if (trimmed.starts_with("【计划执行结果报告】")
+                || (parallel && trimmed.starts_with("[分支 "))
                 || trimmed.starts_with("状态:")
                 || trimmed.starts_with("Finished")
                 || trimmed.starts_with("总耗时:")
@@ -317,7 +320,7 @@ pub(crate) fn dehydrate_historical_turn(msg: &ChatMessage) -> ChatMessage {
                 || trimmed.starts_with("退出码:")
                 || trimmed.starts_with("命令退出码:")
                 || trimmed.starts_with("$ "))
-                && receipt_lines.len() < 4
+                && receipt_lines.len() < receipt_line_cap
             {
                 receipt_lines.push(trimmed.chars().take(240).collect::<String>());
             }

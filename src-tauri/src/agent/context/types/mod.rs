@@ -41,6 +41,10 @@ pub struct EvidenceReceiptEntry {
     /// 最近一次结果的持久化句柄（get_step_output 可按此取回完整原文）
     #[serde(default)]
     pub output_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_fingerprint: Option<String>,
 }
 
 /// 方案门禁状态投影：由 checkpoint 每轮规划前生成，注入底部状态卡，
@@ -874,6 +878,8 @@ impl SandwichContext {
                 first_step: step_id,
                 last_step: step_id,
                 output_id: None,
+                branch_id: None,
+                read_fingerprint: None,
             });
         entry.count = entry.count.saturating_add(1);
         entry.last_step = step_id;
@@ -882,6 +888,8 @@ impl SandwichContext {
         }
         if !output_id.is_empty() {
             entry.output_id = Some(output_id.to_string());
+            entry.branch_id = None;
+            entry.read_fingerprint = None;
         }
     }
 

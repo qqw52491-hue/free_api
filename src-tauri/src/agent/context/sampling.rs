@@ -3,6 +3,9 @@ use crate::agent::context::types::{ChatMessage, SandwichContext};
 use crate::agent::types::AgentInstruction;
 use serde_json::json;
 
+mod receipts;
+pub(super) use receipts::PARALLEL_LABEL;
+
 pub const SAMPLER_VERSION: u32 = 4;
 
 fn targeted_verification_guidance(
@@ -131,6 +134,7 @@ impl SandwichContext {
         instruction: &AgentInstruction,
         output_summary: &str,
         output_id: &str,
+        step_id: usize,
     ) {
         // 历史里的动作摘要用模型自己的输出形态（JSON），而不是「计划: X | 工具: Y」纯文本：
         // 实测 976ca63b：deepseek 见到满屏纯文本的历史后会模仿它，22% 的调用解析失败。
@@ -149,7 +153,34 @@ impl SandwichContext {
             1.0
         };
 
-        let feedback_str = if ingress_tokens > ingress_cap {
+        let projected = if instruction.parallel.is_some() {
+            crate::agent::plan_tree::output::report_results(output_summary)
+                .and_then(|results| {
+                    let nodes = results.as_array()?;
+                    if nodes.iter().any(serde_json::Value::is_array) {
+                        return None;
+                    }
+                    let budget = self.current_budget();
+                    // Budget a new batch against the active history work set.
+                    // Above the high watermark, the normal compaction path can recover room.
+                    let room = budget.max_allowed_history_tokens.saturating_sub(
+                        self.history_estimated_tokens().min(budget.high_watermark_tokens)
+                    );
+                    let cap = room.min(budget.max_allowed_history_tokens / 3);
+                    let notices = receipts::record_file_reads(self, nodes, step_id, output_id);
+                    let lookup_scope = output_summary.rsplit_once("\n```\n")
+                        .map(|(_, suffix)| suffix)
+                        .filter(|suffix| suffix.starts_with("回查本批审查回执时，请同时传入 run_id="))
+                        .unwrap_or_default();
+                    receipts::parallel(nodes, cap, output_id, &notices, lookup_scope)
+                })
+        } else {
+            receipts::single_page(&instruction.get_tool(), output_summary, ingress_cap, output_id)
+        };
+
+        let feedback_str = if let Some(projected) = projected {
+            projected
+        } else if ingress_tokens > ingress_cap {
             let safe_cap_tokens = ingress_cap.saturating_sub(600) as f64;
             let safe_cap_chars = (safe_cap_tokens / token_char_ratio).max(100.0) as usize;
             let mut head_chars = (safe_cap_chars as f64 * 0.4) as usize;

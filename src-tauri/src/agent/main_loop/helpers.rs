@@ -696,7 +696,7 @@ mod tests {
         current_output_id: &str,
     ) -> context::SandwichContext {
         let mut ctx = ctx_with_messages(prior_msgs);
-        ctx.add_step(instruction, current_body, current_output_id);
+        ctx.add_step(instruction, current_body, current_output_id, 0);
         ctx
     }
 

@@ -439,10 +439,10 @@ fn test_prompt_prefix_byte_stability_across_steps() {
         ..Default::default()
     };
 
-    ctx.add_step(&instruction, "Output step 1", "out_1");
+    ctx.add_step(&instruction, "Output step 1", "out_1", 0);
     let step1_snapshot = ctx.turns_history[1].content.as_str().unwrap().to_string();
 
-    ctx.add_step(&instruction, "Output step 2", "out_2");
+    ctx.add_step(&instruction, "Output step 2", "out_2", 0);
     let step1_after_step2 = ctx.turns_history[1].content.as_str().unwrap().to_string();
 
     // 严格字节级前缀一致性断言：历史追加绝不改变旧历史的任何字节（KV Cache 100% 命中）
@@ -474,7 +474,7 @@ fn test_sample_output_token_cap_strict_invariant() {
         ));
     }
 
-    ctx.add_step(&instruction, &giant_output, "giant_out");
+    ctx.add_step(&instruction, &giant_output, "giant_out", 0);
 
     let last_user_msg = ctx.turns_history.last().unwrap();
     let content_str = match &last_user_msg.content {
@@ -510,7 +510,7 @@ fn test_long_running_fuzz_never_overflows_and_watermark_gap() {
     for step in 1..=40 {
         let payload_size = (step * 7919) % 20000 + 500;
         let payload = format!("Step {} payload: {}\n", step, "X".repeat(payload_size));
-        ctx.add_step(&instruction, &payload, &format!("fuzz_{}", step));
+        ctx.add_step(&instruction, &payload, &format!("fuzz_{}", step), 0);
 
         let current_tokens = ctx.history_estimated_tokens();
         let budget = ctx.current_budget();
