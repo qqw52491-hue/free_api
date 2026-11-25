@@ -493,7 +493,7 @@
                                                 <line x1="4" y1="17" x2="18" y2="17" />
                                                 <polyline points="14 14 18 17 14 20" />
                                             </svg>
-                                            <span>并行执行</span>
+                                            <span>并行执行{{ item.action.branchCount ? ` · ${item.action.branchCount} 项` : '' }}</span>
                                         </span>
                                         <span v-else-if="item.action.actionKind === 'pipeline'" class="action-tag action-tag-pipeline" title="按顺序流水线执行多项操作">
                                             <svg class="batch-operation-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -628,197 +628,34 @@
                                 <time class="ambient-text-time mini">{{ formatClock(item.timestamp) }}</time>
                             </button>
 
-                            <!-- 2. 连续检索智能微折叠卡片 (大量 ripgrep 静默汇聚) -->
-                            <div
-                                v-else-if="item.type === 'search-group'"
-                                class="ambient-search-group"
-                                :class="{ 'is-expanded': isSearchGroupExpanded(item.id) }"
-                            >
-                                <div class="ambient-search-group-header" @click="toggleSearchGroup(item.id)">
-                                    <div class="search-group-left">
-                                        <span class="action-tag action-tag-search" title="检索代码或内容">
-                                            <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                                <circle cx="11" cy="11" r="8" />
-                                                <line x1="21" y1="21" x2="16.65" y2="16.65" />
-                                            </svg>
-                                            <span>检索</span>
-                                        </span>
-                                        <span class="search-group-summary">{{ item.summary }}</span>
-                                        <span v-if="item.targetFiles.length > 0" class="search-group-files">
-                                            · {{ item.targetFiles.slice(0, 3).join(', ') }}{{ item.targetFiles.length > 3 ? ' 等' : '' }}
-                                        </span>
-                                        <span v-if="item.durationBadge" class="chip-duration">{{ item.durationBadge }}</span>
-                                    </div>
-                                    <div class="search-group-right">
-                                        <button type="button" class="search-group-toggle-btn" @click.stop="toggleSearchGroup(item.id)">
-                                            <span>{{ isSearchGroupExpanded(item.id) ? '收起明细' : `展开 ${item.count} 项检索` }}</span>
-                                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" :class="{ 'rotate-180': isSearchGroupExpanded(item.id) }">
-                                                <polyline points="6 9 12 15 18 9" />
-                                            </svg>
-                                        </button>
-                                        <time class="ambient-text-time">{{ formatClock(item.timestamp) }}</time>
-                                    </div>
-                                </div>
-
-                                <!-- 展开后的检索明细列表 -->
-                                <div v-if="isSearchGroupExpanded(item.id)" class="ambient-search-group-list">
-                                    <article
-                                        v-for="subStep in item.steps"
-                                        :key="subStep.id"
-                                        class="ambient-search-sub-row"
-                                        @click="$emit('select-step', subStep.id)"
-                                    >
-                                        <span class="search-sub-bullet">·</span>
-                                        <span class="search-sub-lead">
-                                            <FileIcon
-                                                v-if="getAmbientAction(subStep).fileName"
-                                                :name="getAmbientAction(subStep).fileName || ''"
-                                                :size="12"
-                                                class="chip-file-icon"
-                                            />
-                                            <span class="search-sub-title">{{ getAmbientAction(subStep).capsuleTitle }}</span>
-                                        </span>
-                                        <span class="search-sub-body">{{ getAmbientAction(subStep).explanation }}</span>
-                                        <span v-if="getAmbientAction(subStep).durationBadge" class="chip-duration">{{ getAmbientAction(subStep).durationBadge }}</span>
-                                        <time class="ambient-text-time mini">{{ formatClock(subStep.timestamp) }}</time>
-                                    </article>
-                                </div>
-                            </div>
-
-                            <!-- 2.5 连续操作的折叠集合（支持并行、串行、MCP与通用集合） -->
-                            <div
-                                v-else-if="item.type === 'mcp-group'"
-                                class="ambient-action-group ambient-mcp-group"
-                                :class="[
-                                    `ambient-${item.groupKind || 'batch'}-group`,
-                                    { 'is-expanded': isMcpGroupExpanded(item.id) }
-                                ]"
-                            >
-                                <div class="ambient-action-group-header" @click="toggleMcpGroup(item.id)">
+                            <div v-else-if="item.type === 'repeat-group'" class="ambient-action-group">
+                                <div class="ambient-action-group-header" @click="toggleRepeatGroup(item.id)">
                                     <div class="action-group-left">
-                                        <span v-if="item.groupKind === 'parallel'" class="action-tag action-tag-parallel" title="多项操作并行并发执行">
-                                            <svg class="batch-operation-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                                <line x1="4" y1="7" x2="18" y2="7" />
-                                                <polyline points="14 4 18 7 14 10" />
-                                                <line x1="4" y1="17" x2="18" y2="17" />
-                                                <polyline points="14 14 18 17 14 20" />
-                                            </svg>
-                                            <span>并行</span>
-                                        </span>
-                                        <span v-else-if="item.groupKind === 'pipeline'" class="action-tag action-tag-pipeline" title="按顺序流水线执行多项操作">
-                                            <svg class="batch-operation-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                                <rect x="3" y="4" width="6" height="6" rx="1.5" />
-                                                <rect x="15" y="14" width="6" height="6" rx="1.5" />
-                                                <path d="M9 7h4a2 2 0 0 1 2 2v5" />
-                                                <polyline points="12 11 15 14 18 11" />
-                                            </svg>
-                                            <span>串行</span>
-                                        </span>
-                                        <span v-else-if="item.groupKind === 'mcp'" class="action-tag action-tag-mcp">🧩 MCP</span>
-                                        <span v-else class="action-tag action-tag-batch" title="多项操作组成的执行集合">
-                                            <svg class="batch-operation-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                                <rect x="3" y="3" width="7" height="7" rx="1.5" />
-                                                <rect x="14" y="3" width="7" height="7" rx="1.5" />
-                                                <rect x="3" y="14" width="7" height="7" rx="1.5" />
-                                                <path d="M14 17.5h7m-3.5-3.5v7" />
-                                            </svg>
-                                            <span>操作集合</span>
+                                        <span class="action-tag" :class="item.kind === 'wait' ? 'action-tag-human' : item.kind === 'search' ? 'action-tag-search' : 'action-tag-read'">
+                                            {{ item.kind === 'wait' ? '后台等待' : item.kind === 'search' ? '检索' : '读取' }} · {{ item.steps.length }} 次
                                         </span>
                                         <span class="action-group-summary">{{ item.summary }}</span>
                                         <span v-if="item.durationBadge" class="chip-duration">{{ item.durationBadge }}</span>
                                     </div>
                                     <div class="action-group-right">
-                                        <button type="button" class="action-group-toggle-btn" @click.stop="toggleMcpGroup(item.id)">
-                                            <span>{{ isMcpGroupExpanded(item.id) ? '收起明细' : `展开 ${item.count} 项${item.groupKind === 'parallel' ? '并行操作' : (item.groupKind === 'pipeline' ? '串行操作' : (item.groupKind === 'mcp' ? 'MCP 操作' : '操作'))}` }}</span>
-                                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" :class="{ 'rotate-180': isMcpGroupExpanded(item.id) }">
-                                                <polyline points="6 9 12 15 18 9" />
-                                            </svg>
+                                        <button type="button" class="action-group-toggle-btn" :aria-expanded="expandedRepeatGroupIds.has(item.id)" @click.stop="toggleRepeatGroup(item.id)">
+                                            {{ expandedRepeatGroupIds.has(item.id) ? '收起明细' : '展开明细' }}
                                         </button>
                                         <time class="ambient-text-time">{{ formatClock(item.timestamp) }}</time>
                                     </div>
                                 </div>
-
-                                <!-- 展开后的操作明细列表 -->
-                                <div v-if="isMcpGroupExpanded(item.id)" class="ambient-action-group-list">
-                                    <article
+                                <div v-if="expandedRepeatGroupIds.has(item.id)" class="ambient-action-group-list">
+                                    <button
                                         v-for="subStep in item.steps"
                                         :key="subStep.id"
+                                        type="button"
                                         class="ambient-action-sub-row"
                                         @click="$emit('select-step', subStep.id)"
                                     >
-                                        <span class="action-sub-lead" :class="`sub-action-${getAmbientAction(subStep).actionKind}`">
-                                            <svg v-if="getAmbientAction(subStep).actionKind === 'parallel'" class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                                <line x1="4" y1="7" x2="18" y2="7" />
-                                                <polyline points="14 4 18 7 14 10" />
-                                                <line x1="4" y1="17" x2="18" y2="17" />
-                                                <polyline points="14 14 18 17 14 20" />
-                                            </svg>
-                                            <svg v-else-if="getAmbientAction(subStep).actionKind === 'pipeline'" class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                                <rect x="3" y="4" width="6" height="6" rx="1.5" />
-                                                <rect x="15" y="14" width="6" height="6" rx="1.5" />
-                                                <path d="M9 7h4a2 2 0 0 1 2 2v5" />
-                                                <polyline points="12 11 15 14 18 11" />
-                                            </svg>
-                                            <svg v-else-if="getAmbientAction(subStep).actionKind === 'batch'" class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                                <rect x="3" y="3" width="7" height="7" rx="1.5" />
-                                                <rect x="14" y="3" width="7" height="7" rx="1.5" />
-                                                <rect x="3" y="14" width="7" height="7" rx="1.5" />
-                                                <path d="M14 17.5h7m-3.5-3.5v7" />
-                                            </svg>
-                                            <svg v-else-if="getAmbientAction(subStep).actionKind === 'search'" class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                                <circle cx="11" cy="11" r="8" />
-                                                <line x1="21" y1="21" x2="16.65" y2="16.65" />
-                                            </svg>
-                                            <svg v-else-if="getAmbientAction(subStep).actionKind === 'web'" class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                                <circle cx="12" cy="12" r="10" />
-                                                <line x1="2" y1="12" x2="22" y2="12" />
-                                            </svg>
-                                            <svg v-else-if="getAmbientAction(subStep).actionKind === 'read'" class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                                <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
-                                                <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
-                                            </svg>
-                                            <svg v-else-if="getAmbientAction(subStep).actionKind === 'edit'" class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-                                                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-                                            </svg>
-                                            <svg v-else-if="getAmbientAction(subStep).actionKind === 'write'" class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                                                <polyline points="14 2 14 8 20 8" />
-                                            </svg>
-                                            <svg v-else-if="getAmbientAction(subStep).actionKind === 'shell'" class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                                <polyline points="4 17 10 11 4 5" />
-                                                <line x1="12" y1="19" x2="20" y2="19" />
-                                            </svg>
-                                            <svg v-else-if="getAmbientAction(subStep).actionKind === 'recall'" class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                                <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
-                                                <path d="M9 14l2 2 4-4" />
-                                            </svg>
-                                            <svg v-else-if="getAmbientAction(subStep).actionKind === 'artifact'" class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
-                                            </svg>
-                                            <svg v-else-if="getAmbientAction(subStep).actionKind === 'deliver'" class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
-                                                <polyline points="22 4 12 14.01 9 11.01" />
-                                            </svg>
-                                            <svg v-else-if="getAmbientAction(subStep).actionKind === 'mcp'" class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                                <path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83M2 12h4m12 0h4" />
-                                            </svg>
-                                            <svg v-else class="sub-action-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                                <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
-                                            </svg>
-                                        </span>
-                                        <FileIcon
-                                            v-if="getAmbientAction(subStep).fileName"
-                                            :name="getAmbientAction(subStep).fileName || ''"
-                                            :size="12"
-                                            class="chip-file-icon"
-                                        />
-                                        <span v-if="shouldShowCapsuleTitle(getAmbientAction(subStep))" class="action-sub-title">{{ getAmbientAction(subStep).capsuleTitle }}</span>
-                                        <span v-if="getAmbientAction(subStep).capsuleBadge && !getAmbientAction(subStep).capsuleBadge?.endsWith('s')" class="chip-line-range mini">{{ getAmbientAction(subStep).capsuleBadge }}</span>
-                                        <span class="action-sub-body">{{ getAmbientAction(subStep).explanation }}</span>
+                                        <span class="action-sub-body">{{ subStep.description || item.summary }}</span>
                                         <span v-if="getAmbientAction(subStep).durationBadge" class="chip-duration">{{ getAmbientAction(subStep).durationBadge }}</span>
                                         <time class="ambient-text-time mini">{{ formatClock(subStep.timestamp) }}</time>
-                                    </article>
+                                    </button>
                                 </div>
                             </div>
                         </template>
@@ -1580,6 +1417,7 @@ import { placeHistoricalStepReviewers } from "./reviewWorkerSteps";
 import { extractSubagentsFromStep } from "./workerUtils";
 import { historicalWorkerSnapshot, type ChildTaskSnapshot } from "./delegatedTaskState";
 import { getWorkerLiveLine } from "./liveThoughtPreview";
+import { timelineRepeat } from "./timelineRepeats";
 
 const attachmentParseCache = new Map<string, { cleanText: string; attachments: ParsedAttachment[] }>();
 let attachmentCacheChars = 0;
@@ -2479,6 +2317,7 @@ export interface AmbientActionDisplay {
     iconKind?: string;
     iconEmoji?: string;
     capsuleBadge?: string;
+    branchCount?: number;
     durationBadge?: string;
     additions?: number;
     deletions?: number;
@@ -2498,24 +2337,11 @@ export interface AmbientStepItemDisplay {
     action: AmbientActionDisplay;
 }
 
-export interface AmbientSearchGroupDisplay {
-    type: 'search-group';
+interface AmbientRepeatGroupDisplay {
+    type: 'repeat-group';
     id: string;
+    kind: NonNullable<ReturnType<typeof timelineRepeat>>['kind'];
     steps: AgentStepItem[];
-    count: number;
-    summary: string;
-    targetFiles: string[];
-    querySample: string;
-    durationBadge?: string;
-    timestamp: number;
-}
-
-export interface AmbientMcpGroupDisplay {
-    type: 'mcp-group';
-    id: string;
-    groupKind?: 'parallel' | 'pipeline' | 'mcp' | 'batch';
-    steps: AgentStepItem[];
-    count: number;
     summary: string;
     durationBadge?: string;
     timestamp: number;
@@ -2536,21 +2362,7 @@ export interface AmbientInterventionDisplay {
     timestamp: number;
 }
 
-export type AmbientDisplayItem = AmbientStepItemDisplay | AmbientSearchGroupDisplay | AmbientMcpGroupDisplay | AmbientNarrativeDisplay | AmbientInterventionDisplay;
-
-const expandedSearchGroupIds = reactive(new Set<string>());
-
-function toggleSearchGroup(groupId: string) {
-    if (expandedSearchGroupIds.has(groupId)) {
-        expandedSearchGroupIds.delete(groupId);
-    } else {
-        expandedSearchGroupIds.add(groupId);
-    }
-}
-
-function isSearchGroupExpanded(groupId: string): boolean {
-    return expandedSearchGroupIds.has(groupId);
-}
+export type AmbientDisplayItem = AmbientStepItemDisplay | AmbientRepeatGroupDisplay | AmbientNarrativeDisplay | AmbientInterventionDisplay;
 
 // 简报流终端步骤：命令行右侧箭头展开输出；执行中自动展开、结束后自动收起，手动切换优先
 const ambientTermOverride = reactive<Record<string, boolean>>({});
@@ -2576,18 +2388,10 @@ function ambientTermText(step: AgentStepItem): string {
     return "(无输出)";
 }
 
-const expandedMcpGroupIds = reactive(new Set<string>());
+const expandedRepeatGroupIds = reactive(new Set<string>());
 
-function toggleMcpGroup(groupId: string) {
-    if (expandedMcpGroupIds.has(groupId)) {
-        expandedMcpGroupIds.delete(groupId);
-    } else {
-        expandedMcpGroupIds.add(groupId);
-    }
-}
-
-function isMcpGroupExpanded(groupId: string): boolean {
-    return expandedMcpGroupIds.has(groupId);
+function toggleRepeatGroup(groupId: string) {
+    if (!expandedRepeatGroupIds.delete(groupId)) expandedRepeatGroupIds.add(groupId);
 }
 
 // -----------------------------------------------------------------------------
@@ -2638,77 +2442,6 @@ function getDirName(filePath?: string): string {
         return parts.slice(-2).join('/') + '/';
     }
     return parts[parts.length - 1] + '/';
-}
-
-function buildSearchGroupSummary(steps: AgentStepItem[]): { summary: string; targetFiles: string[]; querySample: string } {
-    const files = new Set<string>();
-    const queryTerms: string[] = [];
-    const explanations: string[] = [];
-
-    for (const s of steps) {
-        const op = formatStepOperation(s);
-        if (op.fileName) files.add(op.fileName);
-        let p: any = s.params || s.rawParams;
-        if (typeof p === 'string') {
-            try { p = JSON.parse(p); } catch {}
-        }
-        if (p && typeof p === 'object') {
-            const q = String(p.query || p.pattern || p.Query || p.regex || '').trim();
-            if (q && !queryTerms.includes(q)) queryTerms.push(q);
-        }
-        let desc = (s.description || '').replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
-        desc = desc.replace(/^(检索|搜索|查找|检查)\s*(代码|相关代码|历史日志)?\s*(以|为了|来|用于|：|:)?\s*/i, '').trim();
-        if (desc && desc !== '执行操作' && !explanations.includes(desc)) {
-            explanations.push(desc);
-        }
-    }
-
-    const targetFiles = Array.from(files);
-    let summary = '';
-    if (explanations.length > 0) {
-        summary = explanations[0];
-        if (explanations.length > 1) {
-            summary += ` 等 ${explanations.length} 处检索`;
-        }
-    } else if (queryTerms.length > 0) {
-        summary = `检索 "${queryTerms.slice(0, 2).map(q => q.length > 16 ? q.slice(0, 14) + '…' : q).join('", "')}"${queryTerms.length > 2 ? ` 等 ${queryTerms.length} 处` : ''}`;
-    } else {
-        summary = '检索相关关联代码与门禁规则';
-    }
-
-    const querySample = queryTerms.slice(0, 3).join(', ');
-    return { summary, targetFiles, querySample };
-}
-
-function buildMcpGroupSummary(steps: AgentStepItem[], groupKind?: 'parallel' | 'pipeline' | 'mcp' | 'batch'): { summary: string } {
-    const titles: string[] = [];
-    const explanations: string[] = [];
-
-    for (const s of steps) {
-        const action = getAmbientAction(s);
-        if (action.capsuleTitle && action.capsuleTitle !== 'MCP 工具' && action.capsuleTitle !== '操作' && !titles.includes(action.capsuleTitle)) {
-            titles.push(action.capsuleTitle);
-        }
-        let desc = (s.description || '').replace(/^[💡🎯📌🚀⚠️⚡✏️💭❌]\s*/, '').trim();
-        if (desc && desc !== '执行操作' && !explanations.includes(desc)) {
-            explanations.push(desc);
-        }
-    }
-
-    const typeSuffix = groupKind === 'parallel' ? '并行操作' : (groupKind === 'pipeline' ? '串行操作' : (groupKind === 'mcp' ? 'MCP 操作' : '操作'));
-
-    let summary = '';
-    if (explanations.length > 0) {
-        summary = explanations[0];
-        if (steps.length > 1) {
-            summary += ` 等 ${steps.length} 项${typeSuffix}`;
-        }
-    } else if (titles.length > 0) {
-        summary = `${titles.slice(0, 2).join('、')} 等 ${steps.length} 项${typeSuffix}`;
-    } else {
-        summary = `执行 ${steps.length} 项${typeSuffix}`;
-    }
-    return { summary };
 }
 
 function isMcpStep(step: AgentStepItem, op?: StepOperationDisplay): boolean {
@@ -2765,6 +2498,15 @@ function stepNarrative(step: AgentStepItem): string {
     return narr;
 }
 
+function getTimelineRepeat(step: AgentStepItem) {
+    const repeat = timelineRepeat(step);
+    if (!repeat || stepNarrative(step) || stepInterventions.value.has(step)) return;
+    if (repeat.kind === 'wait' && (
+        getAmbientWorkerRows(step).length || getStepReviewRows(step).length || getStepHistoricalReviews(step).length
+    )) return;
+    return repeat;
+}
+
 function buildAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
     const rawSteps = entry.steps || [];
     const items: AmbientDisplayItem[] = [];
@@ -2804,101 +2546,27 @@ function buildAmbientDisplayItems(entry: PlanEntry): AmbientDisplayItem[] {
         }
         const action = getAmbientAction(step);
 
-        // 检索微折叠：只合并"无叙述"的连续检索——带解说的检索步自成一节，不进折叠组
-        if (action.actionKind === 'search') {
-            const searchSteps: AgentStepItem[] = [step];
-            let j = i + 1;
-            while (j < rawSteps.length) {
-                const nextStep = rawSteps[j];
-                if (!isAmbientKeyStep(nextStep)) {
-                    if (stepNarrative(nextStep)) break;
-                    j++;
-                    continue;
-                }
-                if (getAmbientAction(nextStep).actionKind === 'search' && !stepNarrative(nextStep)) {
-                    searchSteps.push(nextStep);
-                    j++;
-                } else {
-                    break;
-                }
-            }
-
-            // 连续检索 >= 2 条，聚合成微折叠组
-            if (searchSteps.length >= 2) {
-                const groupId = `search-group-${entry.id}-${step.id}-${searchSteps.length}`;
-                const { summary, targetFiles, querySample } = buildSearchGroupSummary(searchSteps);
-
-                let totalDurationMs = 0;
-                for (const s of searchSteps) {
-                    if (s.metrics?.toolDurationMs) totalDurationMs += s.metrics.toolDurationMs;
-                }
-
+        const repeat = getTimelineRepeat(step);
+        if (repeat) {
+            let end = i + 1;
+            while (end < rawSteps.length && getTimelineRepeat(rawSteps[end])?.key === repeat.key) end++;
+            if (end - i >= 2) {
+                const steps = rawSteps.slice(i, end);
+                const duration = steps.reduce((ms, row) => ms + (row.metrics?.toolDurationMs ?? 0), 0);
+                const summary = repeat.kind === 'wait'
+                    ? '同一批后台任务，这几次等待均未收到新结果'
+                    : [action.fileName, action.capsuleBadge, action.explanation].filter(Boolean).join(' · ')
+                        || action.capsuleTitle || step.description;
                 items.push({
-                    type: 'search-group',
-                    id: groupId,
-                    steps: searchSteps,
-                    count: searchSteps.length,
+                    type: 'repeat-group',
+                    id: `repeat-${entry.id}-${step.id}`,
+                    kind: repeat.kind,
+                    steps,
                     summary,
-                    targetFiles,
-                    querySample,
-                    durationBadge: totalDurationMs > 0 ? formatDurationSeconds(totalDurationMs) : undefined,
-                    timestamp: searchSteps[searchSteps.length - 1].timestamp || step.timestamp,
+                    durationBadge: duration > 0 ? formatDurationSeconds(duration) : undefined,
+                    timestamp: steps[steps.length - 1].timestamp,
                 });
-                for (const s of searchSteps) pushAmbientInterventions(s, items);
-                i = j;
-                continue;
-            }
-        }
-
-        // 连续批次、并行、串行或外部工具折叠收拢
-        const groupableKinds = ['mcp', 'batch', 'parallel', 'pipeline'];
-        if (groupableKinds.includes(action.actionKind)) {
-            const groupSteps: AgentStepItem[] = [step];
-            let j = i + 1;
-            while (j < rawSteps.length) {
-                const nextStep = rawSteps[j];
-                if (!isAmbientKeyStep(nextStep)) {
-                    if (stepNarrative(nextStep)) break;
-                    j++;
-                    continue;
-                }
-                const nextKind = getAmbientAction(nextStep).actionKind;
-                if (groupableKinds.includes(nextKind) && !stepNarrative(nextStep)) {
-                    groupSteps.push(nextStep);
-                    j++;
-                } else {
-                    break;
-                }
-            }
-
-            if (groupSteps.length >= 2) {
-                const groupId = `action-group-${entry.id}-${step.id}-${groupSteps.length}`;
-                const firstKind = getAmbientAction(groupSteps[0]).actionKind;
-                const allSame = groupSteps.every(s => getAmbientAction(s).actionKind === firstKind);
-                const groupKind: 'parallel' | 'pipeline' | 'mcp' | 'batch' =
-                    allSame && (firstKind === 'parallel' || firstKind === 'pipeline' || firstKind === 'mcp')
-                        ? firstKind
-                        : 'batch';
-
-                const { summary } = buildMcpGroupSummary(groupSteps, groupKind);
-
-                let totalDurationMs = 0;
-                for (const s of groupSteps) {
-                    if (s.metrics?.toolDurationMs) totalDurationMs += s.metrics.toolDurationMs;
-                }
-
-                items.push({
-                    type: 'mcp-group',
-                    id: groupId,
-                    groupKind,
-                    steps: groupSteps,
-                    count: groupSteps.length,
-                    summary,
-                    durationBadge: totalDurationMs > 0 ? formatDurationSeconds(totalDurationMs) : undefined,
-                    timestamp: groupSteps[groupSteps.length - 1].timestamp || step.timestamp,
-                });
-                for (const s of groupSteps) pushAmbientInterventions(s, items);
-                i = j;
+                i = end;
                 continue;
             }
         }
@@ -3179,9 +2847,10 @@ function computeAmbientAction(step: AgentStepItem): AmbientActionDisplay {
         return {
             actionKind: 'parallel',
             capsuleTitle: '',
+            branchCount: op.branchCount,
             durationBadge: step.metrics?.toolDurationMs != null
                 ? formatDurationSeconds(step.metrics.toolDurationMs) : undefined,
-            explanation: desc && desc !== '执行操作' ? desc : op.actionText,
+            explanation: op.actionText,
             isWarning: false,
             isMilestone: false,
             tooltip: op.actionText || '并行执行多项操作',

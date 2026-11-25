@@ -9,11 +9,36 @@ export interface StepOperationDisplay {
     filePath?: string;
     fileName?: string;
     lineRange?: string;
+    branchCount?: number;
     hasDiff: boolean;
     diffStat?: { additions: number; deletions: number };
 }
 
 const formatOpMemo = new WeakMap<object, { fp: string; val: StepOperationDisplay }>();
+
+const genericParallelDescriptions = new Set([
+    "", "执行操作", "执行下一步操作", "已执行步骤", "并行执行", "并行执行多项操作",
+]);
+
+function parallelBranchTitle(value: unknown): string {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+    const branch = value as Record<string, unknown>;
+    const input = branch.args ?? (typeof branch.command === "object" ? branch.command : undefined)
+        ?? branch.params ?? branch;
+    const params = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    const description = typeof branch.description === "string" ? branch.description.trim() : "";
+    if (!genericParallelDescriptions.has(description)) return description;
+    const file = params.path ?? params.filePath ?? params.file_path;
+    if (typeof file === "string" && file.trim()) {
+        const path = cleanFilePath(file);
+        return path.split("/").pop() || path;
+    }
+    const query = params.query ?? params.pattern;
+    if (typeof query === "string" && query.trim()) return `查找 ${query.trim()}`;
+    if (typeof params.branch_id === "string") return `回查分支 ${params.branch_id}`;
+    const tool = branch.tool ?? branch.action;
+    return typeof tool === "string" ? tool : "";
+}
 
 /**
  * 将步骤调用的原始参数提取为结构化、极具可读性的操作意图描述 (例如 "AgentProgressDeck.vue :1-100")
@@ -118,10 +143,18 @@ export function computeFormatStepOperation(step: AgentStepItem): StepOperationDi
 
     // 内部调度容器（并行、串行、操作集合），不代表外部 MCP 插件
     if (t === "parallel" || act === "parallel") {
+        const branches: unknown[] = Array.isArray(p.parallel) ? p.parallel
+            : Array.isArray(p.commands) ? p.commands : [];
+        const summary = [step.description, step.explanation]
+            .map(text => text?.trim() ?? "")
+            .find(text => !genericParallelDescriptions.has(text));
+        const titles = summary ? [] : branches.map(parallelBranchTitle).filter(Boolean);
+        const preview = titles.slice(0, 3).map(title => title.length > 56 ? `${title.slice(0, 55)}…` : title);
         return {
             badgeIcon: "⇶",
             badgeLabel: "并行",
-            actionText: step.description || "并行执行多项操作",
+            actionText: summary || (preview.length ? `${preview.join("、")}${titles.length > preview.length ? "…" : ""}` : ""),
+            branchCount: branches.length || undefined,
             hasDiff: false,
         };
     }

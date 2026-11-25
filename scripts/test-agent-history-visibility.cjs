@@ -11,6 +11,85 @@ assert(partial);
 const code = ts.transpileModule(partial.getText(ast) + '\n' + node.getText(ast) + '\n({isHistoryTurnCoveredByLive, historyStepsNotCoveredByLive});', {compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText;
 const props = {isRunning:true,activeRunId:'new',steps:[]};
 const {isHistoryTurnCoveredByLive: f, historyStepsNotCoveredByLive: remaining} = vm.runInNewContext(code,{props});
+
+// The same projection renders live and saved batches, using each step's original ID.
+const {load} = require('./test-agent-task-resume.cjs');
+const {formatStepOperation} = load(require('node:path').resolve('src/components/agent/diff/toolOperation.ts'));
+const {timelineRepeat} = load(require('node:path').resolve('src/components/agent/timelineRepeats.ts'));
+const groupingCode = ts.transpileModule(
+    ['getTimelineRepeat', 'buildAmbientDisplayItems'].map(name =>
+        ast.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === name).getText(ast)
+    ).join('\n') + '\nbuildAmbientDisplayItems;',
+    {compilerOptions:{module:ts.ModuleKind.CommonJS}},
+).outputText;
+const projectSteps = vm.runInNewContext(groupingCode, {
+    isAmbientKeyStep: () => true,
+    stepNarrative: step => step.thought || '',
+    pushAmbientInterventions: () => {},
+    timelineRepeat,
+    stepInterventions: {value:new Map()},
+    getAmbientWorkerRows: step => step.review ? [{}] : [],
+    getStepReviewRows: () => [],
+    getStepHistoricalReviews: () => [],
+    formatDurationSeconds: ms => String(ms),
+    getAmbientAction: step => ({actionKind:step.tool, explanation:formatStepOperation(step).actionText}),
+});
+const batch = (id, description, params) => ({id,tool:'parallel',description,params,timestamp:1});
+const first = batch('read-files', '执行下一步操作', {parallel:[
+    {tool:'local_file',params:{path:'src/LicenseUtils.java'}},
+    {tool:'search',args:{query:'LicenseInterceptor'}},
+]});
+const second = batch('review-evidence', '回查上一批的证据', JSON.stringify({parallel:[
+    {tool:'get_step_output',params:{branch_id:'$2'}},
+]}));
+const mcp = id => ({id,tool:'mcp',description:id,timestamp:1});
+for (const prefix of ['live-', 'history-']) {
+    const steps = [mcp('before'), first, second, mcp('after-1'), mcp('after-2')]
+        .map(step => ({...step,id:prefix+step.id}));
+    const items = projectSteps({id:prefix+'plan',steps});
+    assert.deepEqual(Array.from(items, item => item.type), ['step','step','step','step','step']);
+    assert.deepEqual(Array.from(items.slice(1,3), item => item.id), [prefix+'read-files',prefix+'review-evidence']);
+    assert.equal(items[1].action.explanation, 'LicenseUtils.java、查找 LicenseInterceptor');
+    assert.equal(items[2].action.explanation, '回查上一批的证据');
+}
+assert.equal(formatStepOperation(first).branchCount, 2);
+assert.equal(formatStepOperation(second).branchCount, 1);
+
+const saved = (id, tool, params, result, other = {}) => ({
+    id, tool, action:tool, rawParams:params, rawResult:result,
+    source:'内部', status:'succeeded', description:tool, timestamp:1, ...other,
+});
+const searchA = saved('a1','search',{query:'License',path:'src'},{matches:['a.java']});
+const searchB = saved('a2','search',{path:'src',query:'License'},{matches:['a.java']});
+const searchChanged = saved('a3','search',{query:'License',path:'src'},{matches:['b.java']});
+const searchDifferent = saved('a4','search',{query:'Interceptor',path:'src'},{matches:['b.java']});
+const readA = saved('r1','local_file',{path:'src/a.java',start_line:20,end_line:30},'file range bytes',
+    {action:'read',view:{kind:'read',resolved_path:'/work/src/a.java',start_line:20,end_line:30}});
+const readB = {...readA,id:'r2'};
+const readNextRange = {...readA,id:'r3',rawParams:{path:'src/a.java',start_line:31,end_line:40}};
+const readElsewhere = {...readA,id:'r4',view:{...readA.view,resolved_path:'/other-work/src/a.java'}};
+const waitBody = seconds => `等待结束：仍有 2 个目标后台任务在运行；本次等待窗口为 ${seconds}s，未收到新结果。`;
+const waitA = saved('w1','wait_jobs',{job_ids:['job-a','job-b'],timeout_secs:180},waitBody(180));
+const waitB = saved('w2','wait_jobs',{job_ids:['job-b','job-a'],timeout_secs:300},waitBody(300));
+const waitOther = saved('w3','wait_jobs',{job_ids:['job-c','job-b']},waitBody(180));
+const waitResult = {...waitB,id:'w4',rawResult:'后台任务返回 1 条结果'};
+const waitReview = {...waitB,id:'w5',review:true};
+const waitPending = {...waitB,id:'w6',rawResult:waitBody(180)+'\n有 1 个目标任务已到终态、结果尚未回收'};
+const items = projectSteps({id:'repeats',steps:[
+    searchA,searchB,searchChanged,searchDifferent,
+    readA,readB,readNextRange,readElsewhere,
+    waitA,waitB,waitOther,waitResult,waitReview,waitPending,
+    {...searchA,id:'failed',status:'failed'}, {...searchB,id:'retry'},
+]});
+assert.deepEqual(Array.from(items, item => item.type === 'repeat-group'
+    ? [item.kind,...Array.from(item.steps, step=>step.id)]
+    : item.id), [
+    ['search','a1','a2'],'a3','a4',['read','r1','r2'],'r3','r4',
+    ['wait','w1','w2'],'w3','w4','w5','w6','failed','retry',
+]);
+assert.equal(projectSteps({id:'repeats',steps:[searchA,searchB,{...searchB,id:'a5'}]})[0].id, items[0].id);
+assert.equal(projectSteps({id:'note',steps:[searchA,{...searchB,thought:'开始核对原因'}]}).filter(item=>item.type==='step').length, 2);
+
 const old = {id:'old',messages:[],artifacts:[],steps:[{id:'history-new-step-1-0',outputId:'receipt-1'}]};
 const current = {id:'new',messages:[],artifacts:[],steps:[{id:'history-new-step-1-0',outputId:'receipt-1'}]};
 assert.equal(f(old),false); assert.equal(f(current),false);

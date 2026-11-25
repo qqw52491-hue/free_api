@@ -102,23 +102,24 @@ async function main() {
  for (const name of functions) assert(ast.statements.some(n=>ts.isFunctionDeclaration(n)&&n.name?.text===name));
  assert(!source.match(/return workers;\s*}\s*\n\nasync function handlePreviewArtifact/));
  assert(!source.includes('startedAt >= step.timestamp - 5000'), 'no role/time identity heuristic');
- assert(source.includes('const ambientDisplayItems = computed'), 'grouping is computed, not per-render');
  // Evaluate the actual component's caches/grouping functions, not a copy of their logic.
- const names = ['stepWorkersByStep','ambientWorkerRows','ambientDisplayItems'];
- const fnNames = ['buildAmbientDisplayItems','getAmbientDisplayItems','getStepActiveWorkers','getAmbientWorkerRows'];
+ const names = ['historicalStepWorkers','liveStepWorkers','historicalWorkerRows','liveWorkerRows','ambientDisplayItems'];
+ const fnNames = ['getTimelineRepeat','buildAmbientDisplayItems','getAmbientDisplayItems','getStepActiveWorkers','getAmbientWorkerRows'];
  const selected = ast.statements.filter(n => ts.isFunctionDeclaration(n) && fnNames.includes(n.name?.text)
    || ts.isVariableStatement(n) && n.declarationList.declarations.some(d => names.includes(d.name.getText(ast))));
  assert.equal(selected.length,names.length+fnNames.length);
  const ordinary = Array.from({length:35},(_,i)=>step(`step-${i+20}`,'local_shell',{},'ok'));
  const props = vue.reactive({steps:[dispatch,wait,...ordinary],historyTurns:[], get teamState(){return s.teamState.value;}});
  const timeline = vue.computed(()=>[{id:'plan',type:'plan',steps:props.steps}]);
- const ctx = {props,computed:vue.computed,timelineEntries:timeline,extractSubagentsFromStep,workerRowOwners,
+ const ctx = {props,computed:vue.computed,extractSubagentsFromStep,workerRowOwners,
+   isHistoryTurnCoveredByLive:()=>false,historicalWorkerSnapshot:worker=>worker,
+   timelineRepeat:load(path.join(base,'timelineRepeats.ts')).timelineRepeat,
+   stepInterventions:{value:new Map()},getStepReviewRows:()=>[],getStepHistoricalReviews:()=>[],
    stepNarrative:st=>st.thought||'',isAmbientKeyStep:()=>true,getAmbientAction:()=>({actionKind:'general'}),pushAmbientInterventions:()=>{}};
- const componentCode = ts.transpileModule(selected.map(n=>n.getText(ast)).join('\n') + '\n({getAmbientDisplayItems,getAmbientWorkerRows,getStepActiveWorkers,ambientWorkerRows});',
+ const componentCode = ts.transpileModule(selected.map(n=>n.getText(ast)).join('\n') + '\n({getAmbientDisplayItems,getAmbientWorkerRows,getStepActiveWorkers,liveWorkerRows});',
    {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
  const component = vm.runInNewContext(componentCode,ctx);
  const initialItems = component.getAmbientDisplayItems(timeline.value[0]);
- const initialWorkerRows = component.ambientWorkerRows.value;
  assert.equal(initialItems.length,37);
  assert.equal(component.getAmbientWorkerRows(props.steps[0]).length,2);
  assert.equal(component.getAmbientWorkerRows(props.steps[1]).length,0,'wait summary must not duplicate dispatched member cards');
@@ -138,11 +139,11 @@ async function main() {
  props.historyTurns.splice(0);
  assert.equal(ordinary.reduce((sum,st)=>sum+component.getAmbientWorkerRows(st).length,0),0);
  const stableItems = component.getAmbientDisplayItems(timeline.value[0]);
- const stableRows = component.ambientWorkerRows.value;
+ const stableRows = component.liveWorkerRows.value;
  for(let i=0;i<100;i++) {
   progress({type:'child_reviewer_stream',child_run_id:c,stream_type:'thinking',chunk:'live'});
   assert.equal(component.getAmbientDisplayItems(timeline.value[0]),stableItems,'token stream must not regroup full timeline');
-  assert.equal(component.ambientWorkerRows.value,stableRows,'token stream must not reproject brief rows');
+  assert.equal(component.liveWorkerRows.value,stableRows,'token stream must not reproject brief rows');
  }
  // Main-agent narrative and new steps are still allowed to invalidate the cached grouping.
  props.steps[0].thought='new main narrative';

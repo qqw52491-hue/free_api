@@ -1729,8 +1729,7 @@
     margin-left: 2px;
 }
 
-/* 🌟 连续动作智能微折叠卡片 (高信噪比收拢连续搜索与连续 MCP 工具调用) */
-.ambient-search-group,
+/* 连续重复操作的摘要和明细。 */
 .ambient-action-group {
     display: flex;
     flex-direction: column;
@@ -1739,7 +1738,6 @@
     transition: background 0.15s ease;
 }
 
-.ambient-search-group-header,
 .ambient-action-group-header {
     display: flex;
     align-items: center;
@@ -1753,12 +1751,10 @@
     user-select: none;
 }
 
-.ambient-search-group-header:hover,
 .ambient-action-group-header:hover {
     background: rgba(var(--theme-foreground-rgb), 0.035);
 }
 
-.search-group-left,
 .action-group-left {
     display: flex;
     align-items: center;
@@ -1768,7 +1764,6 @@
     overflow: hidden;
 }
 
-.search-group-summary,
 .action-group-summary {
     font-size: 11.5px;
     color: var(--theme-status-info, #94a3b8);
@@ -1777,17 +1772,6 @@
     white-space: nowrap;
 }
 
-.search-group-files {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 11px;
-    color: var(--theme-status-info, #64748b);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    flex-shrink: 0;
-}
-
-.search-group-right,
 .action-group-right {
     display: flex;
     align-items: center;
@@ -1795,7 +1779,6 @@
     flex-shrink: 0;
 }
 
-.search-group-toggle-btn,
 .action-group-toggle-btn {
     display: inline-flex;
     align-items: center;
@@ -1810,24 +1793,12 @@
     transition: all 0.15s ease;
 }
 
-.search-group-toggle-btn:hover,
 .action-group-toggle-btn:hover {
     color: var(--theme-status-info, #94a3b8);
     background: rgba(var(--theme-foreground-rgb), 0.07);
     border-color: rgba(var(--theme-foreground-rgb), 0.12);
 }
 
-.search-group-toggle-btn svg,
-.action-group-toggle-btn svg {
-    transition: transform 0.2s ease;
-}
-
-.search-group-toggle-btn svg.rotate-180,
-.action-group-toggle-btn svg.rotate-180 {
-    transform: rotate(180deg);
-}
-
-.ambient-search-group-list,
 .ambient-action-group-list {
     display: flex;
     flex-direction: column;
@@ -1837,9 +1808,11 @@
     border-left: 1px solid rgba(var(--theme-foreground-rgb), 0.08);
 }
 
-.ambient-search-sub-row,
 .ambient-action-sub-row {
     display: flex;
+    border: 0;
+    background: transparent;
+    text-align: start;
     align-items: center;
     gap: 6px;
     padding: 2px 4px;
@@ -1850,129 +1823,11 @@
     transition: background 0.1s ease;
 }
 
-.ambient-search-sub-row:hover,
 .ambient-action-sub-row:hover {
     background: rgba(var(--theme-foreground-rgb), 0.04);
     color: var(--theme-text-primary, #cbd5e1);
 }
 
-.search-sub-bullet,
-.action-sub-bullet {
-    color: var(--theme-status-info, #475569);
-    font-size: 12px;
-    line-height: 1;
-}
-
-.search-sub-lead {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    flex-shrink: 0;
-}
-
-/* 子步骤动作微图标：替代生硬圆点，准确反映子项工具 */
-.action-sub-lead {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 14px;
-    height: 14px;
-    flex-shrink: 0;
-    line-height: 1;
-}
-
-.action-sub-lead.sub-action-parallel {
-    color: var(--theme-status-info, #38bdf8);
-}
-
-.action-sub-lead.sub-action-pipeline {
-    color: var(--theme-status-warning, #fbbf24);
-}
-
-.action-sub-lead.sub-action-batch {
-    color: var(--theme-status-accent, #a5b4fc);
-}
-
-.action-sub-lead.sub-action-search {
-    color: var(--theme-status-accent, #c084fc);
-}
-
-.action-sub-lead.sub-action-web {
-    color: var(--theme-status-info, #38bdf8);
-}
-
-.action-sub-lead.sub-action-shell {
-    color: var(--theme-text-primary, #e2e8f0);
-}
-
-.action-sub-lead.sub-action-read {
-    color: var(--theme-status-info, #94a3b8);
-}
-
-.action-sub-lead.sub-action-edit {
-    color: var(--theme-status-info, #7dd3fc);
-}
-
-.action-sub-lead.sub-action-write {
-    color: var(--theme-status-success, #86efac);
-}
-
-.action-sub-lead.sub-action-recall {
-    color: var(--theme-status-accent, #c084fc);
-}
-
-.action-sub-lead.sub-action-artifact {
-    color: var(--theme-status-warning, #fb923c);
-}
-
-.action-sub-lead.sub-action-human {
-    color: var(--theme-status-pink, #f472b6);
-}
-
-.action-sub-lead.sub-action-model {
-    color: var(--theme-status-accent, #a78bfa);
-}
-
-.action-sub-lead.sub-action-mcp {
-    color: var(--theme-status-accent, #c4b5fd);
-}
-
-.action-sub-lead.sub-action-subagent {
-    color: var(--theme-status-accent, #a5b4fc);
-}
-
-.action-sub-lead.sub-action-deliver {
-    color: var(--theme-status-success, #34d399);
-}
-
-.action-sub-lead.sub-action-general {
-    color: var(--theme-status-info, #94a3b8);
-}
-
-.sub-action-icon {
-    display: block;
-    width: 12px;
-    height: 12px;
-    flex: none;
-}
-
-.sub-action-glyph {
-    font-size: 11px;
-    line-height: 1;
-}
-
-.search-sub-title,
-.action-sub-title {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 11px;
-    color: var(--theme-status-accent, #c084fc);
-}
-
-.search-sub-title {
-    color: var(--theme-status-info, #94a3b8);
-}
-
-.search-sub-body,
 .action-sub-body {
     flex: 1;
     overflow: hidden;
@@ -2003,9 +1858,7 @@
    仅作用于动作行/分组标题/明细行，不改展开正文、思考和终端输出的排版。 */
 .ambient-text-row,
 .ambient-text-row.is-milestone .ambient-text-body,
-.ambient-search-group-header,
 .ambient-action-group-header,
-.ambient-search-sub-row,
 .ambient-action-sub-row {
     line-height: 18px;
 }
@@ -2013,21 +1866,14 @@
 .ambient-text-row .ambient-action-lead,
 .ambient-text-row .ambient-text-body,
 .ambient-text-row .ambient-text-time,
-.ambient-search-group-header .search-group-left,
-.ambient-search-group-header .search-group-right,
-.ambient-search-group-header .ambient-text-time,
 .ambient-action-group-header .action-group-left,
 .ambient-action-group-header .action-group-right,
 .ambient-action-group-header .ambient-text-time,
-.ambient-search-sub-row .search-sub-lead,
-.ambient-search-sub-row .ambient-text-time,
-.ambient-action-sub-row .action-sub-lead,
 .ambient-action-sub-row .ambient-text-time {
     line-height: 18px;
 }
 
 .ambient-text-row .action-tag,
-.ambient-search-group-header .action-tag,
 .ambient-action-group-header .action-tag {
     min-height: 16px;
     line-height: 16px;
