@@ -1288,6 +1288,12 @@
                         <time class="msg-clock">{{ formatClock(entry.timestamp) }}</time>
                         <div class="msg-header-actions">
                             <button
+                                v-if="isStreamingCompletion(entry)"
+                                type="button"
+                                class="skip-text-reveal"
+                                @click="finishTypewriterInstantly(entry.id, entry.summary || entry.title)"
+                            >显示全文</button>
+                            <button
                                 type="button"
                                 class="msg-fork-btn"
                                 :disabled="isRunning"
@@ -1329,8 +1335,6 @@
                         class="summary-rich"
                         v-deferred-history="historyEntryIds.has(entry.id) && !isStreamingCompletion(entry)"
                         :class="{ 'is-streaming-text': isStreamingCompletion(entry) }"
-                        :title="isStreamingCompletion(entry) ? '点击可直接瞬间完成渐显' : undefined"
-                        @click="isStreamingCompletion(entry) && finishTypewriterInstantly(entry.id, entry.summary || entry.title)"
                     >
                         <RichContentRenderer :content="getCompletionDisplayText(entry)" :compact-html="true" :streaming="isStreamingCompletion(entry)" @open-preview="$emit('open-preview', $event)" />
                     </div>
@@ -1354,13 +1358,13 @@
                     <span>交付验收</span>
                 </span>
                 <span class="completion-pending-text">{{ completionPreview ? "回答预览 · 尚未正式交付" : "正在准备交付物并验收，尚未正式交付…" }}</span>
+                <button v-if="isPreviewStreaming" type="button" class="skip-text-reveal" @click="finishTypewriterInstantly(PREVIEW_STREAM_ID, completionPreview)">跳过渐显</button>
             </div>
 
             <div
                 v-if="completionPending && completionPreview && isRunning && !completionMessage"
                 class="completion-preview summary-rich"
                 :class="{ 'is-streaming-text': isPreviewStreaming }"
-                @click="isPreviewStreaming && finishTypewriterInstantly(PREVIEW_STREAM_ID, completionPreview)"
             >
                 <RichContentRenderer :content="completionPreviewDisplay" :compact-html="true" :streaming="isPreviewStreaming" markdown-preview />
             </div>

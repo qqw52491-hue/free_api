@@ -2620,6 +2620,20 @@ button.root-row {
     position: relative;
 }
 
+.skip-text-reveal {
+    padding: 2px 5px;
+    border: 0;
+    background: transparent;
+    color: var(--theme-text-secondary, #a1a1aa);
+    font-size: 11px;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.skip-text-reveal:hover {
+    color: var(--theme-text-primary, #e4e4e7);
+}
+
 /* 最终回复的文本整体渐进浮现动效 */
 .final-response .summary-rich {
     animation: textProgressiveFadeIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;

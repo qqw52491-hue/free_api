@@ -1,5 +1,5 @@
 <template>
-  <div class="rich-content-stream" :class="{ 'is-live-streaming': streaming }" @click="handleCopyClick">
+  <div ref="root" class="rich-content-stream" :class="{ 'is-live-streaming': renderState.streaming }" @pointerdown="trackSelectionGesture" @click="handleCopyClick">
     <template v-for="(block, idx) in parsedBlocks" :key="idx">
       <div
         v-if="block.type === 'markdown'"
@@ -61,8 +61,9 @@ function renderMarkdownPreview(segment: string): string {
 </script>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent } from "vue";
+import { computed, defineAsyncComponent, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import { marked } from "marked";
+import { copyPlainText } from "../../utils/clipboard";
 import MarkdownImageGallery from './MarkdownImageGallery.vue';
 import { standaloneImages, type MarkdownImage } from './markdownImages';
 
@@ -90,50 +91,83 @@ const props = withDefaults(
   }
 );
 
+const root = ref<HTMLElement | null>(null);
+const renderInput = computed(() => ({
+  content: props.content,
+  streaming: props.streaming,
+  markdownPreview: props.markdownPreview,
+}));
+const renderState = shallowRef(renderInput.value);
+let selectionPointerId: number | null = null;
+
+function hasContentSelection(): boolean {
+  const selection = document.getSelection();
+  if (!root.value || !selection || selection.isCollapsed) return false;
+  for (let i = 0; i < selection.rangeCount; i++) {
+    if (selection.getRangeAt(i).intersectsNode(root.value)) return true;
+  }
+  return false;
+}
+
+function updateRenderedContent() {
+  if (selectionPointerId !== null || renderState.value === renderInput.value) return;
+  // Replacing v-html detaches the text nodes that anchor the browser's selection.
+  if (hasContentSelection()) {
+    document.addEventListener("selectionchange", updateRenderedContent);
+    return;
+  }
+  document.removeEventListener("selectionchange", updateRenderedContent);
+  renderState.value = renderInput.value;
+}
+
+function trackSelectionGesture(event: PointerEvent) {
+  if (!event.isPrimary || event.button !== 0 || selectionPointerId !== null) return;
+  if (event.target instanceof Element && event.target.closest("button, a, input, textarea, select")) return;
+  selectionPointerId = event.pointerId;
+  window.addEventListener("pointerup", finishSelectionGesture, true);
+  window.addEventListener("pointercancel", finishSelectionGesture, true);
+  window.addEventListener("blur", finishSelectionGesture);
+}
+
+function clearSelectionGesture() {
+  selectionPointerId = null;
+  window.removeEventListener("pointerup", finishSelectionGesture, true);
+  window.removeEventListener("pointercancel", finishSelectionGesture, true);
+  window.removeEventListener("blur", finishSelectionGesture);
+}
+
+function finishSelectionGesture(event: Event) {
+  if (event instanceof PointerEvent && event.pointerId !== selectionPointerId) return;
+  clearSelectionGesture();
+  updateRenderedContent();
+}
+
+watch(renderInput, updateRenderedContent);
+onBeforeUnmount(() => {
+  clearSelectionGesture();
+  document.removeEventListener("selectionchange", updateRenderedContent);
+});
+
 async function handleCopyClick(event: MouseEvent) {
-  const target = event.target as HTMLElement | null;
-  if (!target) return;
-  const btn = target.closest(".code-copy-btn") as HTMLElement | null;
-  if (!btn) return;
+  if (!(event.target instanceof Element)) return;
+  const btn = event.target.closest<HTMLButtonElement>(".code-block-header > button.code-copy-btn[data-code]");
+  if (!btn?.closest(".code-block-wrapper") || (event.detail > 0 && hasContentSelection())) return;
 
   const rawCode = btn.getAttribute("data-code");
-  let codeText = "";
-  if (rawCode) {
-    try {
-      codeText = decodeURIComponent(rawCode);
-    } catch {
-      codeText = rawCode;
-    }
-  } else {
-    const wrapper = btn.closest(".code-block-wrapper");
-    const codeEl = wrapper?.querySelector("code");
-    codeText = codeEl?.textContent || "";
-  }
-
-  if (!codeText) return;
-
+  if (!rawCode) return;
+  let codeText = rawCode;
   try {
-    if (navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(codeText);
-    } else {
-      const textArea = document.createElement("textarea");
-      textArea.value = codeText;
-      textArea.style.position = "fixed";
-      textArea.style.opacity = "0";
-      document.body.appendChild(textArea);
-      textArea.focus();
-      textArea.select();
-      document.execCommand("copy");
-      document.body.removeChild(textArea);
-    }
-    const oldText = btn.innerText;
-    btn.innerText = "已复制";
-    setTimeout(() => {
-      btn.innerText = oldText || "复制";
-    }, 1800);
-  } catch (err) {
-    console.warn("复制代码失败:", err);
-  }
+    codeText = decodeURIComponent(rawCode);
+  } catch { /* Preserve unencoded content. */ }
+
+  const label = btn.dataset.copyLabel ?? btn.textContent ?? "复制";
+  btn.dataset.copyLabel = label;
+  const copied = await copyPlainText(codeText);
+  const feedback = copied ? "已复制" : "复制失败";
+  btn.textContent = feedback;
+  setTimeout(() => {
+    if (btn.textContent === feedback) btn.textContent = label;
+  }, 1800);
 }
 
 defineEmits<{
@@ -144,9 +178,9 @@ defineEmits<{
 const MERMAID_KEYWORDS = /^(?:flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|mindmap|pie|gitGraph|journey|quadrantChart|xychart-beta|packet-beta|architecture-beta|kanban)/i;
 
 const parsedBlocks = computed<ContentBlock[]>(() => {
-  const text = props.content || "";
+  const { content: text, markdownPreview } = renderState.value;
   if (!text) return [];
-  if (props.markdownPreview) {
+  if (markdownPreview) {
     return [{
       type: "markdown",
       content: text,
@@ -298,7 +332,7 @@ function decorateStreamingTail(html: string): string {
 
 function getBlockHtml(block: ContentBlock, idx: number): string {
   const baseHtml = block.html ?? renderSegmentMarkdown(block.content);
-  if (!props.streaming || idx !== parsedBlocks.value.length - 1) {
+  if (!renderState.value.streaming || idx !== parsedBlocks.value.length - 1) {
     return baseHtml;
   }
   return decorateStreamingTail(baseHtml);

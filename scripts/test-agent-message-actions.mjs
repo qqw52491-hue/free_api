@@ -89,7 +89,51 @@ try {
  assert.equal(await evaluate('window.copied'),'当前任务正文');
  await click('.user-message .msg-fork-btn');
  assert.equal(await evaluate('window.forks.length'),3);
- console.log('PASS real AgentChatStream: collapsed/expanded/short/narrow bubbles, physical copy/fork clicks, header copy fidelity, keyboard focus, running fork disabled, denied clipboard fallback and failure label, escaped separator display');
+
+ const preview = '.completion-preview .markdown-segment p';
+ await call('Emulation.setDeviceMetricsOverride',{width:1000,height:1000,deviceScaleFactor:1,mobile:false});
+ await evaluate('window.fixtureProps.isRunning=true;window.copied=null');
+ await waitFor('!!document.querySelector(".process-tree.is-running")');
+ await evaluate(`Object.assign(window.fixtureProps, {completionPending:true,completionPreview:'alpha bravo charlie delta echo'})`);
+ await waitFor(`document.querySelector(${JSON.stringify(preview)})?.textContent==='alpha bravo charlie delta echo'`);
+ const rangePoint = async offset => evaluate(`(()=>{
+  const p=document.querySelector(${JSON.stringify(preview)});
+  const range=document.createRange();range.setStart(p.firstChild,${offset});range.setEnd(p.firstChild,${offset}+1);
+  const {left,right,top,bottom}=range.getBoundingClientRect();return {x:(left+right)/2,y:(top+bottom)/2};
+ })()`);
+ await evaluate(`document.querySelector(${JSON.stringify(preview)}).scrollIntoView({block:'nearest',behavior:'instant'})`);
+ const start = await rangePoint(0);
+ assert(await evaluate(`document.elementFromPoint(${start.x},${start.y})?.matches(${JSON.stringify(preview)})`),'drag starts over the preview text');
+ await mouse('mouseMoved',start.x,start.y);
+ await mouse('mousePressed',start.x,start.y);
+ await evaluate(`(()=>{const t=document.querySelector(${JSON.stringify(preview)}).firstChild;getSelection().setBaseAndExtent(t,0,t,11)})()`);
+ const selected = await evaluate('getSelection().toString()');
+ await evaluate(`window.fixtureProps.completionPreview+=' foxtrot golf hotel'`);
+ await new Promise(r=>setTimeout(r,750));
+ assert.equal(await evaluate(`document.querySelector(${JSON.stringify(preview)}).textContent`),'alpha bravo charlie delta echo','stream update keeps the selected DOM during drag');
+ await mouse('mouseReleased',start.x,start.y);
+ assert.equal(await evaluate('getSelection().toString()'),selected,'releasing the pointer leaves the selected text intact');
+ assert.equal(await evaluate('window.copied'),null,'drag selection does not write to the clipboard');
+ await mouse('mousePressed',start.x,start.y);await mouse('mouseReleased',start.x,start.y);
+ await waitFor(`getSelection().isCollapsed && document.querySelector(${JSON.stringify(preview)})?.textContent.endsWith('foxtrot golf hotel')`);
+ const word = await rangePoint(2);
+ for (const count of [1,2]) {
+  for (const type of ['mousePressed','mouseReleased']) await call('Input.dispatchMouseEvent',{type,x:word.x,y:word.y,button:'left',clickCount:count});
+ }
+ assert.equal(await evaluate('getSelection().toString()'),'alpha','double-click keeps native word selection');
+ assert.equal(await evaluate('window.copied'),null);
+
+ await evaluate(`Object.assign(window.fixtureProps, {isRunning:false,completionPending:false,completionPreview:''});
+ window.fixtureProps.legacyMessages[1].content='Selectable <span class="code-copy-btn" data-code="unwanted">text</span>\\n\\n\x60\x60\x60text\\nactual code\\n\x60\x60\x60';`);
+ await waitFor('!!document.querySelector(".code-block-header > button.code-copy-btn")');
+ await evaluate('document.querySelector("span.code-copy-btn").click()');
+ assert.equal(await evaluate('window.copied'),null,'a CSS class on ordinary text cannot initiate copy');
+ await click('button.code-copy-btn');
+ await waitFor('window.copied==="actual code"');
+ await evaluate('window.denyClipboard=true;document.execCommand=()=>false');
+ await click('button.code-copy-btn');
+ await waitFor('document.querySelector("button.code-copy-btn").textContent==="复制失败"');
+ console.log('PASS real AgentChatStream: copy/fork, keyboard and fallback, streaming selection preservation, single-click deselection, native double-click, explicit code copy');
  console.log('Screenshot: '+join(profile,'screenshot.png'));
 
 }finally{ws?.close();chrome.kill();await server.close();}
