@@ -436,11 +436,14 @@ pub async fn call_llm(
     let original_context_len = api_values.len();
     append_final_json_output_anchor(&mut api_values);
 
-    // 4. 初试加一次纠偏。仅当纠偏只返回思考时，给原协议错误一次干净的重生成机会。
-    let mut current_try = 0;
+    // 4. 指令纠偏有独立次数。完全空回包沿用原请求，每步最多发起五次生成。
     const STANDARD_ATTEMPTS: usize = 2;
+    const MAX_GENERATION_ATTEMPTS: usize = 5;
+    const EMPTY_RESPONSE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+    let mut current_try = 0;
+    let mut instruction_attempts = 0;
     let mut first_attempt_failed_protocol = false;
-    let mut failures = Vec::with_capacity(3);
+    let mut failures = Vec::with_capacity(MAX_GENERATION_ATTEMPTS);
     // 隔离 JSON 修复的短 prompt 不能覆盖完整 Agent 上下文的校准基线。
     let mut uses_primary_prompt = true;
 
@@ -810,12 +813,32 @@ pub async fn call_llm(
                     );
                 }
 
-                if current_try == 1 {
+                failures.push(e.clone());
+                if current_try >= MAX_GENERATION_ATTEMPTS {
+                    return Err(exhausted_instruction_recovery(&failures));
+                }
+
+                let empty_response = final_json_str.trim().is_empty()
+                    && result.thinking_text.trim().is_empty()
+                    && matches!(result.finish_reason.as_deref(), None | Some("stop"));
+                if empty_response {
+                    // 空回包没有内容可纠偏，重复发送同一份请求，等待期间仍可主动中断。
+                    tokio::select! {
+                        biased;
+                        _ = interrupt_rx.changed() => {
+                            return Err(StepExecutionError::RequestFailure(llm::STREAM_INTERRUPTED_ERROR.to_string()));
+                        }
+                        _ = tokio::time::sleep(EMPTY_RESPONSE_RETRY_DELAY) => {}
+                    }
+                    continue;
+                }
+
+                instruction_attempts += 1;
+                if instruction_attempts == 1 {
                     first_attempt_failed_protocol = outcome == "parse_error";
                 }
-                failures.push(e.clone());
 
-                if current_try == STANDARD_ATTEMPTS
+                if instruction_attempts == STANDARD_ATTEMPTS
                     && first_attempt_failed_protocol
                     && final_json_str.trim().is_empty()
                     && !result.thinking_text.trim().is_empty()
@@ -830,12 +853,12 @@ pub async fn call_llm(
                     continue;
                 }
 
-                if current_try >= STANDARD_ATTEMPTS {
+                if instruction_attempts >= STANDARD_ATTEMPTS {
                     return Err(exhausted_instruction_recovery(&failures));
                 }
                 println!(
                     "⚠️ 未获得有效工具指令，按既有额度重试 (第 {} 次 / 共 {} 次): {}",
-                    current_try, STANDARD_ATTEMPTS, e
+                    instruction_attempts, STANDARD_ATTEMPTS, e
                 );
 
                 // 将模型上一轮的原始回复作为 assistant turn 追加，保持对话轮次完整性

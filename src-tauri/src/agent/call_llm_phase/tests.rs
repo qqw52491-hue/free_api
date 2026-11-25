@@ -162,7 +162,8 @@ async fn generation_exhaustion_does_not_restart_the_inner_budget() {
         vec![response(&read("evidence.txt"), Some("length")), reasoning_only()],
         vec![reasoning_only()],
         vec![response("{", Some("stop"))],
-        vec![response("{", Some("stop")), response("", Some("stop"))],
+        vec![response("{", Some("stop")), response("", Some("content_filter"))],
+        vec![response("", Some("length"))],
         vec![response("{", Some("stop")), json!({
             "choices":[{"delta":{"reasoning_content":"truncated reasoning"},"finish_reason":"length"}]
         })],
@@ -192,6 +193,62 @@ async fn generation_exhaustion_does_not_restart_the_inner_budget() {
         assert!(error.message().contains("第 1 次："));
         assert!(error.message().contains("第 2 次："));
     }
+}
+
+#[tokio::test]
+async fn empty_responses_retry_the_same_request_and_dispatch_on_the_fifth_attempt() {
+    let mut responses = vec![response("", Some("stop")); 4];
+    responses.push(response(&read("evidence.txt"), Some("stop")));
+    let f = Fixture::new(responses).await;
+    let (instruction, _, _, _) = f.run().await.unwrap();
+    let result = run_agent_step(
+        &f.data.db, "fixture", &instruction, &PluginRegistry::new(), Some(&f.data.root),
+    );
+    assert!(result.success && result.stdout.contains("existing evidence"));
+
+    let requests = f.requests.lock().unwrap();
+    assert_eq!(requests.len(), 5);
+    assert!(requests.iter().all(|request| request == &requests[0]));
+}
+
+#[tokio::test]
+async fn five_empty_responses_exhaust_the_budget_without_executing() {
+    let f = Fixture::new(vec![response("", None)]).await;
+    let error = f.run().await.unwrap_err();
+    assert!(error.instruction_recovery_exhausted());
+    assert!(error.to_string().contains("5 次尝试"));
+    assert_eq!(f.requests.lock().unwrap().len(), 5);
+    assert_eq!(error.message().lines().count(), 5);
+    for (index, line) in error.message().lines().enumerate() {
+        assert!(line.starts_with(&format!("第 {} 次：", index + 1)));
+        assert!(line.contains("收到 0 字符思考文本"));
+    }
+}
+
+#[tokio::test]
+async fn interrupt_during_empty_response_backoff_prevents_the_next_request() {
+    let f = Fixture::new(vec![response("", Some("stop"))]).await;
+    let (sender, mut interrupt) = watch::channel(0);
+    let stop = async {
+        loop {
+            let recorded = f.data.db.0.lock().unwrap().query_row(
+                "SELECT EXISTS (SELECT 1 FROM agent_llm_calls WHERE outcome = 'output_incomplete')",
+                [], |row| row.get::<_, bool>(0),
+            ).unwrap();
+            if recorded {
+                sender.send_modify(|generation| *generation += 1);
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    };
+    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        tokio::join!(f.run_with_interrupt(&mut interrupt), stop)
+    }).await.unwrap();
+    let error = result.unwrap_err();
+    assert_eq!(error.message(), crate::llm::STREAM_INTERRUPTED_ERROR);
+    assert!(!error.instruction_recovery_exhausted());
+    assert_eq!(f.requests.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -250,6 +307,7 @@ async fn failed_clean_regeneration_stops_and_reports_all_three_attempts() {
 #[tokio::test]
 async fn generation_correction_preserves_history_and_dispatches_the_complete_instruction() {
     let f = Fixture::new(vec![
+        response("", Some("stop")),
         response("{", Some("stop")),
         response(&read("evidence.txt"), Some("stop")),
     ])
@@ -265,12 +323,13 @@ async fn generation_correction_preserves_history_and_dispatches_the_complete_ins
     assert!(result.success, "{}", result.stderr);
     assert!(result.stdout.contains("existing evidence"));
     let requests = f.requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0], requests[1], "空回包沿用同一请求");
     for request in requests.iter() {
         assert_eq!(request["max_tokens"], 8192);
         assert!(request["messages"].to_string().contains("已完成的观察"));
     }
-    assert!(requests[1]["messages"]
+    assert!(requests[2]["messages"]
         .to_string()
         .contains("未通过协议校验"));
 }
