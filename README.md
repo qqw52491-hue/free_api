@@ -187,14 +187,16 @@ src/                      Vue 桌面界面与交互
 src-tauri/src/agent/       任务运行、上下文、工具、协作与审查
 src-tauri/src/llm/         模型请求、流式响应与重试
 src-tauri/src/db/          数据存储与迁移
+src-tauri/src/acp/         ACP 入站桥接
 src-tauri/prompts/         Agent 规则、工具说明和内置技能
+wechat-bridge/            可选微信桥接服务
 plugins/                  MCP 插件配置
 scripts/                  评测、回归及维护脚本
 test/                    测试用例与夹具
 docs/                    设计说明与实测记录
 ```
 
-- [架构与源码导读](docs/architecture.md)：上下文、检索、协作、审查与执行边界。
+- [架构与源码导读](docs/architecture.md) 按项目、任务控制、外部接入和协作图定位代码，附各条路径的验证范围。
 - [系统设计准则](AGENTS.md)：事实边界与认知判断如何分工。
 - [多 Agent 审查与生命周期审计](docs/agent-multi-agent-opinion-audit-2026-10-22.md)。
 - [附件观察与视觉路由修复](docs/agent-attachment-vision-lifecycle-2026-10-23.md)。

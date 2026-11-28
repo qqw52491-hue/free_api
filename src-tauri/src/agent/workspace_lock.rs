@@ -1,44 +1,121 @@
-//! 工作区软锁：跨父任务协调同一项目目录；同一父任务的子任务可共享持锁。
-//! 具备同会话自动协同打断、僵尸锁自动自愈、基于 run_id 的防踩踏释放机制。
+//! 工作区软锁：跨任务协调重叠的可写目录，同一父任务的子任务可共享持锁。
 
+use super::workspace_access::{self, DirectoryAccess};
 use crate::db::DbState;
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
-pub(crate) struct WorkspaceLockEntry {
-    pub session_id: String,
-    pub run_id: String,
-    pub goal: String,
-    pub acquired_at: Instant,
+struct WorkspaceLockEntry {
+    session_id: String,
+    run_id: String,
+    goal: String,
+    acquired_at: Instant,
+    writable_roots: HashSet<PathBuf>,
     generation: u64,
     holders: usize,
     delegation_holders: usize,
 }
 
-fn workspace_locks() -> &'static Mutex<HashMap<String, WorkspaceLockEntry>> {
-    static WORKSPACE_LOCKS: OnceLock<Mutex<HashMap<String, WorkspaceLockEntry>>> = OnceLock::new();
+fn workspace_locks() -> &'static Mutex<HashMap<PathBuf, WorkspaceLockEntry>> {
+    static WORKSPACE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, WorkspaceLockEntry>>> = OnceLock::new();
     WORKSPACE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 pub(crate) struct WorkspaceRunGuard {
-    key: String,
+    key: PathBuf,
     run_id: String,
     generation: u64,
     delegated: bool,
 }
 
-fn insert_lock(locks: &mut HashMap<String, WorkspaceLockEntry>, key: String, session_id: &str, run_id: &str, goal: &str, delegated: bool) -> WorkspaceRunGuard {
+fn insert_lock(
+    locks: &mut HashMap<PathBuf, WorkspaceLockEntry>,
+    key: PathBuf,
+    writable_roots: HashSet<PathBuf>,
+    session_id: &str,
+    run_id: &str,
+    goal: &str,
+    delegated: bool,
+) -> WorkspaceRunGuard {
     static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
-    locks.insert(key.clone(), WorkspaceLockEntry {
-        session_id: session_id.to_string(), run_id: run_id.to_string(),
-        goal: goal.chars().take(60).collect(), acquired_at: Instant::now(),
-        generation, holders: 1, delegation_holders: usize::from(delegated),
-    });
-    WorkspaceRunGuard { key, run_id: run_id.to_string(), generation, delegated }
+    locks.insert(
+        key.clone(),
+        WorkspaceLockEntry {
+            session_id: session_id.to_string(),
+            run_id: run_id.to_string(),
+            goal: goal.chars().take(60).collect(),
+            acquired_at: Instant::now(),
+            writable_roots,
+            generation,
+            holders: 1,
+            delegation_holders: usize::from(delegated),
+        },
+    );
+    WorkspaceRunGuard {
+        key,
+        run_id: run_id.to_string(),
+        generation,
+        delegated,
+    }
+}
+
+fn overlaps(first: &Path, second: &Path) -> bool {
+    first.starts_with(second) || second.starts_with(first)
+}
+
+fn writable_roots(primary: &Path, session_id: &str) -> HashSet<PathBuf> {
+    let mut roots = HashSet::from([primary.to_path_buf()]);
+    for dir in workspace_access::directories_for_canonical_primary(session_id, primary) {
+        if dir.access == DirectoryAccess::ReadWrite {
+            // 权限表保存物理路径；目录离线再回来也仍属于该运行的保留范围。
+            roots.insert(PathBuf::from(dir.path));
+        }
+    }
+    roots
+}
+
+/// 将新授权与正在执行的任务锁同步发布。撤销权限立即生效，已持有的目录锁留到任务退出，
+/// 保护已经开始的工具操作。待发布的配置只在所有运行中的归属通过检查后提交。
+pub(crate) fn publish_writable_directory<'a, T>(
+    sessions: impl IntoIterator<Item = &'a str>,
+    directory: &Path,
+    publish: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let sessions: HashSet<_> = sessions.into_iter().collect();
+    let mut locks = workspace_locks().lock().map_err(|e| e.to_string())?;
+    for recipient in locks
+        .values()
+        .filter(|entry| sessions.contains(entry.session_id.as_str()))
+    {
+        if let Some(conflict) = locks.values().find(|entry| {
+            (entry.session_id != recipient.session_id || entry.run_id != recipient.run_id)
+                && (sessions.contains(entry.session_id.as_str())
+                    || entry
+                        .writable_roots
+                        .iter()
+                        .any(|root| overlaps(root, directory)))
+        }) {
+            return Err(format!(
+                "附加目录 {} 与运行中任务「{}」的可写范围重叠。请等待任务退出后再授权。",
+                directory.display(),
+                conflict.goal,
+            ));
+        }
+    }
+    // 运行开始时也在同一互斥区读取目录投影，避免在授权写入和锁更新之间漏锁。
+    let result = publish()?;
+    for entry in locks
+        .values_mut()
+        .filter(|entry| sessions.contains(entry.session_id.as_str()))
+    {
+        entry.writable_roots.insert(directory.to_path_buf());
+    }
+    Ok(result)
 }
 
 impl Drop for WorkspaceRunGuard {
@@ -48,104 +125,115 @@ impl Drop for WorkspaceRunGuard {
             if let Some(entry) = locks.get_mut(&self.key) {
                 if entry.run_id == self.run_id && entry.generation == self.generation {
                     entry.holders -= 1;
-                    if self.delegated { entry.delegation_holders -= 1; }
-                    if entry.holders == 0 { locks.remove(&self.key); }
+                    if self.delegated {
+                        entry.delegation_holders -= 1;
+                    }
+                    if entry.holders == 0 {
+                        locks.remove(&self.key);
+                    }
                 }
             }
         }
     }
 }
 
-/// 尝试获取工作区锁。
-/// 1. 若当前被同会话的前序任务占用（如前序任务因网络硬失败处于端点韧性重试等待中，用户再次发起新任务）：
-///    - 第 0 轮自旋立即向旧任务发送取消打断信号，让其从 sleep/重试中唤醒退出并触发 Drop 释放锁；
-///    - 若自旋 1.5 秒后旧任务仍被外部重试阻塞未退出，安全抢占接管锁，防止无限死锁；
-/// 2. 若当前被跨会话占用：
-///    - 检查持锁者是否为僵尸锁（超过 10 秒且对应 session 的控制通道已不复存在）；若已成僵尸则安全回收；
-/// 3. 自旋等待最多 3 秒（60 次 * 50ms）；若旧任务正常退出释放，新任务即可无缝接力。
+/// 尝试获取工作区锁，最多等待 60 次 * 50ms。同会话锁冲突可中断旧运行；
+/// 仍有执行者或在途委派的锁继续保留。
 pub(crate) async fn acquire_workspace_lock(
-    workspace_dir: &std::path::Path,
+    workspace_dir: &Path,
     session_id: &str,
     run_id: &str,
     goal: &str,
 ) -> Result<WorkspaceRunGuard, String> {
-    acquire_workspace_lock_inner(workspace_dir, session_id, run_id, goal, false).await
+    let key = workspace_dir
+        .canonicalize()
+        .map_err(|e| format!("工作区不可用：{} ({e})", workspace_dir.display()))?;
+    acquire_workspace_lock_inner(key, session_id, run_id, goal, false).await
 }
 
 async fn acquire_workspace_lock_inner(
-    workspace_dir: &std::path::Path, session_id: &str, run_id: &str, goal: &str, delegated: bool,
+    key: PathBuf,
+    session_id: &str,
+    run_id: &str,
+    goal: &str,
+    delegated: bool,
 ) -> Result<WorkspaceRunGuard, String> {
-    let key = workspace_dir
-        .canonicalize()
-        .unwrap_or_else(|_| workspace_dir.to_path_buf())
-        .to_string_lossy()
-        .to_string();
-
     let mut sent_cancel = false;
 
     for attempt in 0..60 {
-        let (should_cancel_same_session, check_zombie_session, conflict_info) = {
+        let (conflicting_root, conflict) = {
             let mut locks = workspace_locks().lock().map_err(|e| e.to_string())?;
-            if let Some(entry) = locks.get_mut(&key) {
-                // 委派等待竞争锁期间，同一父任务可能已经取得锁。复用而非取消父任务。
-                if delegated && entry.session_id == session_id && entry.run_id == run_id {
-                    entry.holders += 1;
-                    entry.delegation_holders += 1;
-                    return Ok(WorkspaceRunGuard { key, run_id: run_id.to_string(), generation: entry.generation, delegated: true });
-                }
-                if entry.session_id == session_id {
-                    let should_cancel = !sent_cancel;
-                    if should_cancel {
-                        sent_cancel = true;
-                    }
-                    if attempt >= 30 && entry.delegation_holders == 0 && crate::agent::child_task::runtime::active(&entry.run_id).is_empty() {
-                        return Ok(insert_lock(&mut locks, key, session_id, run_id, goal, delegated));
-                    }
-                    (should_cancel, None, Some((entry.goal.clone(), true)))
-                } else {
-                    let zombie_candidate = if entry.acquired_at.elapsed() > Duration::from_secs(10) {
-                        Some(entry.session_id.clone())
-                    } else {
-                        None
-                    };
-                    (false, zombie_candidate, Some((entry.goal.clone(), false)))
-                }
+            let roots = writable_roots(&key, session_id);
+            let conflict = locks.iter().find(|(_, entry)| {
+                (entry.session_id != session_id || entry.run_id != run_id)
+                    && roots
+                        .iter()
+                        .any(|root| entry.writable_roots.iter().any(|held| overlaps(root, held)))
+            });
+            if let Some((root, entry)) = conflict {
+                (root.clone(), entry.clone())
             } else {
-                return Ok(insert_lock(&mut locks, key, session_id, run_id, goal, delegated));
+                // 同一父任务的委派复用同一目录锁；独立持有者分别释放。
+                if let Some(entry) = locks.get_mut(&key) {
+                    entry.holders += 1;
+                    entry.delegation_holders += usize::from(delegated);
+                    entry.writable_roots.extend(roots);
+                    return Ok(WorkspaceRunGuard {
+                        key,
+                        run_id: run_id.to_string(),
+                        generation: entry.generation,
+                        delegated,
+                    });
+                }
+                return Ok(insert_lock(
+                    &mut locks, key, roots, session_id, run_id, goal, delegated,
+                ));
             }
         };
 
-        // 异步操作移至 MutexGuard 外部，确保整个 Future 满足 Send 特征
-        if should_cancel_same_session {
-            let _ = crate::agent::control::cancel_agent_run(session_id.to_string()).await;
+        let same_session = conflict.session_id == session_id;
+        if same_session && !sent_cancel {
+            sent_cancel = true;
+            let _ = crate::agent::control::cancel_run(session_id, Some(&conflict.run_id)).await;
         }
 
-        if let Some(target_session) = check_zombie_session {
+        if conflict.delegation_holders == 0
+            && ((same_session && attempt >= 30)
+                || conflict.acquired_at.elapsed() > Duration::from_secs(10))
+        {
             let has_channel = crate::agent::control::intervention_channels()
                 .lock()
                 .await
-                .contains_key(&target_session);
+                .contains_key(&conflict.session_id);
             if !has_channel {
                 let mut locks = workspace_locks().lock().map_err(|e| e.to_string())?;
-                if let Some(entry) = locks.get(&key) {
-                    if entry.session_id == target_session && entry.delegation_holders == 0 && crate::agent::child_task::runtime::active(&entry.run_id).is_empty() {
-                        return Ok(insert_lock(&mut locks, key, session_id, run_id, goal, delegated));
+                if let Some(entry) = locks.get(&conflicting_root) {
+                    if entry.generation == conflict.generation
+                        && entry.delegation_holders == 0
+                        && crate::agent::control::active_execution_run_id(&entry.session_id)?
+                            .as_ref()
+                            != Some(&entry.run_id)
+                        && crate::agent::child_task::runtime::active(&entry.run_id).is_empty()
+                    {
+                        // 重新检查其它重叠锁后才登记新范围。
+                        locks.remove(&conflicting_root);
+                        continue;
                     }
                 }
             }
         }
 
         if attempt == 59 {
-            if let Some((occupied_by, is_same_session)) = conflict_info {
-                let hint = if is_same_session {
-                    "前序任务仍在处理中断或重试中，请等待其退出后再试。"
-                } else {
-                    "同一项目目录同时只允许一个任务，请等待其完成或先停止该任务。"
-                };
-                return Err(format!(
-                    "工作区已被占用：{key}（正在执行「{occupied_by}」）。{hint}"
-                ));
-            }
+            let hint = if same_session {
+                "前序任务仍在处理中断或重试中，请等待其退出后再试。"
+            } else {
+                "可写目录有重叠，请等待对方完成或先停止该任务。"
+            };
+            return Err(format!(
+                "工作区已被占用：{}（与「{}」的可写范围重叠）。{hint}",
+                key.display(),
+                conflict.goal,
+            ));
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -160,12 +248,11 @@ pub async fn force_release_workspace_lock(
 ) -> Result<bool, String> {
     let mut locks = workspace_locks().lock().map_err(|e| e.to_string())?;
     if let Some(path) = workspace_path {
-        let canonical = std::path::Path::new(&path)
+        let canonical = Path::new(&path)
             .canonicalize()
-            .unwrap_or_else(|_| std::path::PathBuf::from(&path))
-            .to_string_lossy()
-            .to_string();
-        let removed = locks.remove(&canonical).is_some() || locks.remove(&path).is_some();
+            .unwrap_or_else(|_| PathBuf::from(&path));
+        let removed =
+            locks.remove(&canonical).is_some() || locks.remove(Path::new(&path)).is_some();
         return Ok(removed);
     }
     if let Some(sid) = session_id {
@@ -192,19 +279,62 @@ impl<'a> Drop for ChildWorkspaceGuard<'a> {
 
 /// 同一父 run 的并发子任务各持有一个引用，最后一个持有者退出才释放项目锁。
 /// 不同父 run 的项目锁仍沿用原有跨任务协调规则。
-pub(crate) async fn acquire_delegation_lock(workspace: &std::path::Path, parent_session: &str, parent_run: &str) -> Result<Option<WorkspaceRunGuard>, String> {
-    let key = workspace.canonicalize().map_err(|e| e.to_string())?.to_string_lossy().into_owned();
-    {
-        let mut locks = workspace_locks().lock().map_err(|e| e.to_string())?;
-        match locks.get_mut(&key) {
-            Some(entry) if entry.run_id == parent_run && entry.session_id == parent_session => {
-                entry.holders += 1;
-                entry.delegation_holders += 1;
-                return Ok(Some(WorkspaceRunGuard { key, run_id: parent_run.to_string(), generation: entry.generation, delegated: true }));
-            }
-            None => return Ok(Some(insert_lock(&mut locks, key, parent_session, parent_run, "通用子任务委派", true))),
-            Some(_) => {}
-        }
+pub(crate) async fn acquire_delegation_lock(
+    workspace: &Path,
+    parent_session: &str,
+    parent_run: &str,
+) -> Result<Option<WorkspaceRunGuard>, String> {
+    let key = workspace.canonicalize().map_err(|e| e.to_string())?;
+    acquire_workspace_lock_inner(key, parent_session, parent_run, "通用子任务委派", true)
+        .await
+        .map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn workspace_lock_compares_real_parent_child_roots_and_preserves_delegate_ownership() {
+        let base =
+            std::env::temp_dir().join(format!("free-api-workspace-lock-{}", uuid::Uuid::new_v4()));
+        let primary = base.join("project");
+        let nested = primary.join("nested");
+        let separate = base.join("project-other");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&separate).unwrap();
+
+        let parent = acquire_workspace_lock(&primary, "tree-owner", "root-run", "parent")
+            .await
+            .unwrap();
+        let unrelated =
+            acquire_workspace_lock(&separate, "separate-owner", "separate-run", "unrelated")
+                .await
+                .unwrap();
+        assert!(
+            acquire_workspace_lock(&nested, "nested-owner", "nested-run", "independent child")
+                .await
+                .is_err()
+        );
+
+        let delegate = acquire_delegation_lock(&nested, "tree-owner", "root-run")
+            .await
+            .unwrap()
+            .unwrap();
+        drop(parent);
+        assert!(acquire_workspace_lock(
+            &primary,
+            "nested-owner",
+            "nested-run",
+            "ancestor challenger"
+        )
+        .await
+        .is_err());
+        drop(delegate);
+        let successor = acquire_workspace_lock(&primary, "nested-owner", "nested-run", "successor")
+            .await
+            .unwrap();
+        drop((unrelated, successor));
+        std::fs::remove_dir_all(base).unwrap();
     }
-    acquire_workspace_lock_inner(workspace, parent_session, parent_run, "通用子任务委派", true).await.map(Some)
 }

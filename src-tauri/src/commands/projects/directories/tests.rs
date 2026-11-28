@@ -142,3 +142,53 @@ fn unknown_access_value_is_rejected_instead_of_granting_write() {
     assert!(serde_json::from_str::<DirectoryAccess>("\"write\"").is_err());
     assert!(serde_json::from_str::<DirectoryAccess>("\"read_write\"").is_ok());
 }
+
+#[tokio::test(start_paused = true)]
+async fn project_additional_write_lock_is_atomic_at_start_and_on_live_permission_changes() {
+    let base = std::env::temp_dir().join(format!("project-directory-lock-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&base).unwrap();
+    let base = base.canonicalize().unwrap();
+    let first = base.join("first");
+    let second = base.join("second");
+    let third = base.join("third");
+    for dir in [&first, &second, &third] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let conn = crate::db::init_db(&base.join("test.db")).unwrap();
+    let p1 = create_project_row(&conn, "first", first.to_str().unwrap()).unwrap();
+    let p2 = create_project_row(&conn, "second", second.to_str().unwrap()).unwrap();
+    let a = create_project_session_row(&conn, &p1.id, "first", "model").unwrap();
+    let b = create_project_session_row(&conn, &p2.id, "second", "model").unwrap();
+    bind_session_directories(&conn, &a.id, &first, true).unwrap();
+    bind_session_directories(&conn, &b.id, &second, true).unwrap();
+    let lock = crate::agent::workspace_lock::acquire_workspace_lock;
+
+    // Both configurations may be saved while idle. Both runs cannot write the same root.
+    for project in [&p1, &p2] {
+        set_project_directory_row(&conn, &project.id, third.to_str().unwrap(), DirectoryAccess::ReadWrite).unwrap();
+    }
+    let a_guard = lock(&first, &a.id, "project-a", "first").await.unwrap();
+    assert!(lock(&second, &b.id, "project-b", "second").await.is_err());
+
+    // A live conflicting grant is rejected without persisting or publishing new authority.
+    remove_project_directory_row(&conn, &p2.id, third.to_str().unwrap()).unwrap();
+    let b_guard = lock(&second, &b.id, "project-b", "second").await.unwrap();
+    let denied = set_project_directory_row(&conn, &p2.id, third.to_str().unwrap(), DirectoryAccess::ReadWrite).unwrap_err();
+    assert!(denied.contains("可写范围重叠"));
+    assert!(list_project_directories_row(&conn, &p2.id).unwrap().is_empty());
+    assert!(workspace_access::directories(Some(&b.id), &second).is_empty());
+
+    // Revocation takes effect for permissions now; in-flight work keeps the lease until exit.
+    remove_project_directory_row(&conn, &p1.id, third.to_str().unwrap()).unwrap();
+    assert!(workspace_access::directories(Some(&a.id), &first).is_empty());
+    assert!(set_project_directory_row(&conn, &p2.id, third.to_str().unwrap(), DirectoryAccess::ReadWrite).is_err());
+    drop(a_guard);
+    set_project_directory_row(&conn, &p2.id, third.to_str().unwrap(), DirectoryAccess::ReadWrite).unwrap();
+    assert!(lock(&third, &a.id, "project-c", "third").await.is_err());
+
+    drop(b_guard);
+    workspace_access::revoke_session(&a.id);
+    workspace_access::revoke_session(&b.id);
+    drop(conn);
+    std::fs::remove_dir_all(base).unwrap();
+}

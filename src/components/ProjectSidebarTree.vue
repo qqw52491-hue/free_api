@@ -112,11 +112,25 @@
               </svg>
             </button>
             <button
+              v-if="session.isDraft || activeSessionId === session.id"
               type="button"
               class="leaf-close-btn"
-              title="关闭/删除对话"
-              @click.stop="closeSession(project.id, session)"
+              title="关闭对话面板"
+              aria-label="关闭对话面板"
+              @click.stop="emit('close-session', session.id)"
             >×</button>
+            <button
+              v-if="!session.isDraft"
+              type="button"
+              class="leaf-action-btn session-delete-btn"
+              title="删除会话"
+              aria-label="删除会话"
+              @click.stop="emit('delete-session', session.id, session.title, project.id)"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                <path d="M3 6h18M9 6V3h6v3m4 0-1 15H6L5 6m5 4v7m4-7v7"/>
+              </svg>
+            </button>
           </div>
 
           <!-- 2. 项目内数据与文件列表 (Excel, Word, Code, MD...) -->
@@ -332,7 +346,8 @@ const emit = defineEmits<{
   (event: "open-session", session: TreeSessionItem): void;
   (event: "select-project", project: AgentProject): void;
   (event: "new-project-session", project: AgentProject): void;
-  (event: "session-deleted", sessionId: string): void;
+  (event: "close-session", sessionId: string): void;
+  (event: "delete-session", sessionId: string, title: string, projectId: string): void;
   (event: "fork-session", session: TreeSessionItem): void;
 }>();
 
@@ -459,6 +474,12 @@ async function refreshProjectSessions(projectIds: Iterable<string>) {
   await Promise.all([...projectIds].filter(isExpanded).map(loadProjectSessions));
 }
 
+function findCachedSessionProject(sessionId: string) {
+  return Object.entries(projectSessionsMap).find(([, sessions]) =>
+    sessions.some(session => session.id === sessionId),
+  )?.[0];
+}
+
 // 新建项目
 async function promptCreateProject() {
   try {
@@ -571,18 +592,6 @@ async function removeResource(projectId: string, resourceId: string) {
   }
 }
 
-async function closeSession(projectId: string, session: TreeSessionItem) {
-  try {
-    if (!session.isDraft) {
-      await invoke("delete_session", { id: session.id });
-      await loadProjectData(projectId);
-    }
-    emit("session-deleted", session.id);
-  } catch (e) {
-    console.error("删除会话失败:", e);
-  }
-}
-
 function startRename(session: TreeSessionItem) {
   if (session.isDraft) return;
   renamingId.value = session.id;
@@ -629,6 +638,7 @@ async function copyResourcePreview() {
 defineExpose({
   refreshProjects,
   refreshProjectSessions,
+  findCachedSessionProject,
   loadProjectData,
   projects,
   projectSessionsMap,
@@ -927,17 +937,23 @@ onMounted(() => {
   transition: all 0.15s;
 }
 
-.child-leaf-row:hover .leaf-close-btn {
+.child-leaf-row:hover .leaf-close-btn,
+.child-leaf-row:focus-within .leaf-close-btn {
   display: block;
 }
 
-.child-leaf-row:hover .leaf-action-btn {
+.child-leaf-row:hover .leaf-action-btn,
+.child-leaf-row:focus-within .leaf-action-btn {
   display: inline-flex;
 }
 
 .leaf-close-btn:hover {
   color: var(--theme-text-primary, #fff);
   background: rgba(var(--theme-foreground-rgb), 0.15);
+}
+
+.leaf-action-btn.session-delete-btn:hover {
+  color: var(--theme-status-danger, #ed9caa);
 }
 
 .leaf-action-btn:hover {

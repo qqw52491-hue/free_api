@@ -71,6 +71,21 @@ pub(crate) async fn stop_run_runtime(db: &DbState, session_id: &str, run_id: &st
     if let Err(e) = crate::agent::job_engine::cancel_all_running_jobs(db, run_id) {
         warnings.push(format!("后台任务收停失败：{e}"));
     }
+    match crate::agent::job_engine::task_runs(db, run_id) {
+        Ok(runs) => {
+            for previous_run in runs.iter().filter(|previous| previous.as_str() != run_id) {
+                crate::agent::child_task::stop_children(previous_run).await;
+                if let Err(error) = crate::agent::child_reviewer::cancel_running_child_runs(db, previous_run) {
+                    warnings.push(format!("历史运行 {previous_run} 的子任务收停失败：{error}"));
+                }
+                match crate::agent::job_engine::cancel_recovered_running_jobs(db, previous_run) {
+                    Ok(recovered_warnings) => warnings.extend(recovered_warnings),
+                    Err(error) => warnings.push(format!("历史运行 {previous_run} 的后台任务收停失败：{error}")),
+                }
+            }
+        }
+        Err(error) => warnings.push(format!("读取任务的历史运行失败：{error}")),
+    }
     if released {
         crate::agent::control::clear_stage(session_id);
     }
@@ -366,6 +381,65 @@ mod tests {
             .unwrap();
         assert_eq!(status, "cancelled");
         drop(conn);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resumed_runtime_stop_reaches_only_verified_jobs_in_the_same_task() {
+        use std::os::unix::process::CommandExt;
+        struct TestProcess(std::process::Child);
+        impl Drop for TestProcess {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let spawn = || TestProcess(std::process::Command::new("sleep")
+            .arg("60").process_group(0).spawn().unwrap());
+        let (dir, db, _, _) = fixture();
+        for (run, task) in [("old-run", "the-task"), ("resumed-run", "the-task"), ("other-run", "other-task")] {
+            crate::agent::run_trace::upsert_snapshot(&db, run, "s1", "goal", "running", &[], None).unwrap();
+            db.0.lock().unwrap().execute(
+                "UPDATE agent_run_traces SET history_task_id=?1 WHERE id=?2", [task, run],
+            ).unwrap();
+        }
+
+        let database = crate::shell_receipt::database_path(&db).unwrap();
+        let (token, receipt_path) = crate::shell_receipt::prepare(&database).unwrap();
+        let active_receipt = std::fs::OpenOptions::new().read(true).write(true).open(receipt_path).unwrap();
+        active_receipt.lock().unwrap();
+        let mut proven = spawn();
+        let mut unknown = spawn();
+        let old = crate::agent::job_engine::begin_job(
+            &db, "old-run", "s1", "shell", "proven old process",
+            &json!({"pid": proven.0.id(), "exit_receipt_id": token}).to_string(),
+        ).unwrap();
+        let stale = crate::agent::job_engine::begin_job(
+            &db, "old-run", "s1", "shell", "unverified process ID",
+            &json!({"pid": unknown.0.id()}).to_string(),
+        ).unwrap();
+        let other = crate::agent::job_engine::begin_job(
+            &db, "other-run", "s1", "watch", "unrelated task", "{}",
+        ).unwrap();
+
+        let warnings = stop_run_runtime(&db, "s1", "resumed-run").await;
+        assert!(warnings.iter().any(|warning| warning.contains(&stale)));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while proven.0.try_wait().unwrap().is_none() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        assert!(unknown.0.try_wait().unwrap().is_none(), "a historical PID alone cannot authorize a signal");
+        let conn = db.0.lock().unwrap();
+        for (id, expected) in [(old, "cancelled"), (stale, "interrupted"), (other, "running")] {
+            let status: String = conn.query_row(
+                "SELECT status FROM agent_background_jobs WHERE id=?1", [id], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(status, expected);
+        }
+        drop(conn);
+        drop(active_receipt);
         let _ = std::fs::remove_dir_all(dir);
     }
 

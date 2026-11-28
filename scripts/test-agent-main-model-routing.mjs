@@ -138,6 +138,18 @@ try {
 
     await openApp();
     await waitFor(`${element(chipName)}?.textContent.trim() === '已有模型'`, 'initial model defaults');
+    await evaluate(`(() => {
+        localStorage.setItem(${JSON.stringify(storageKey)}, JSON.stringify({
+            pro_reasoning_effort: 'max', flash_reasoning_effort: 'none', state_card_level: 'minimal',
+        }));
+        fixture.beforeMigration = true;
+    })()`);
+    await call('Page.reload');
+    await waitFor(`window.fixture && !fixture.beforeMigration && ${element(chipName)}?.textContent.trim() === '已有模型'`, 'legacy preferences loaded');
+    const migrated = await stored();
+    assert.equal(migrated.pro_reasoning_effort, 'high');
+    assert.equal(migrated.flash_reasoning_effort, 'off');
+    assert.equal(migrated.state_card_level, 'minimal');
     await enterGoal();
     await evaluate('fixture.addModels()');
     await click(chip);
@@ -181,6 +193,8 @@ try {
     await waitFor('fixture.launches.length > 0', 'desktop task launch');
     const launched = await evaluate('fixture.launches[0]');
     assert.deepEqual([launched.pro, launched.flash, launched.vision], ['new-pro', 'new-pro', '']);
+    assert.equal(launched.state_card_level, 'minimal', 'valid preference survives reload and reaches launch');
+    await evaluate(`${element('.agent-panel-frame')}.dataset.sameSession = 'mounted'`);
 
     await click('.project-row');
     await waitFor(`!!${element('.project-workspace-view .model-chip')}`, 'project workspace');
@@ -194,8 +208,27 @@ try {
     await click('.model-routing-popover .pro-tier .btn-trigger-clear');
     assert.equal(await text('.project-workspace-view .model-badge-chip'), '未配置规划模型');
     assert.equal((await stored()).pro, '');
+    await choose('pro', '项目规划');
+    await choose('flash', '新执行');
 
-    console.log('PASS: desktop Agent and project model choices, shared catalog, save and reload, clear, and launch payload');
+    await click('.nav-row[title="Agent 对话"]');
+    await waitFor(`${element(chipName)}?.textContent.trim() === '项目规划'`, 'model change in the already open conversation');
+    assert.equal(await evaluate(`${element('.agent-panel-frame')}.dataset.sameSession`), 'mounted');
+    assert.equal(await text('.agent-panel-frame .flash-tag'), '快速 · 新执行');
+    await enterGoal();
+    await click(submit);
+    await waitFor('fixture.launches.length === 2', 'second launch from the same conversation');
+    const next = await evaluate('fixture.launches[1]');
+    assert.deepEqual([next.pro, next.flash, next.vision], ['project-pro', 'new-flash', '']);
+    assert.deepEqual([launched.pro, launched.flash], ['new-pro', 'new-pro'], 'first launch kept the old choice');
+
+    await click(chip);
+    await choose('pro', '新规划');
+    await click('.model-routing-popover .close-popover-btn');
+    await click('.project-row');
+    await waitFor(`${element('.project-workspace-view .model-badge-chip')}?.textContent.trim() === '新规划'`, 'session changes visible on the project page');
+
+    console.log('PASS: project and mounted conversation share model changes, exact launch payloads, legacy effort migration, reload and clear');
 } finally {
     socket?.close();
     if (chrome?.pid && chrome.exitCode === null && chrome.signalCode === null) {

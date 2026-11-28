@@ -56,7 +56,7 @@ async function main() {
  const mixedWait = step('step-mixed','wait_jobs',{job_ids:[a,shellId]},result(a)+result(shellId,'succeeded','shell'));
  assert.deepEqual(extractSubagentsFromStep(mixedWait,[dispatch,mixedWait]).map(w=>w.id),[a], 'mixed wait retains real children only');
  const s = await session('failed');
- await emit('channel-run-started',{session_id:'existing-session',goal:'worker regression'});
+ await emit('channel-run-started',{session_id:'existing-session',run_id: 'fixture-run-59', goal:'worker regression'});
  const progress = p => emit('agent-progress-existing-session',p);
  const tool = p => emit('agent-tool-event-existing-session',p);
  // Both channels are used in production: planned/progress + actual tool receipts.
@@ -166,6 +166,40 @@ async function main() {
  assert.equal(s.teamWorkers.value.find(w=>w.id===c).extra.stoppedByParent,true);
  progress({type:'worker_stream',child_run_id:c,delta:'late stream'});
  assert.equal(s.teamWorkers.value.find(w=>w.id===c).status,'failed');
+
+ let syncTeam;
+ window.addEventListener = (event, handler) => {
+  if (event === 'agent:child-tasks-synced') syncTeam = handler;
+ };
+ const reopened = await session('failed');
+ await emit('channel-run-started', {session_id:'existing-session', run_id:'resumed-run', goal:'继续原任务'});
+ const saved = {child_run_id:a, parent_run_id:'original-run', result_available:true, collected_at:null, execution_status:'succeeded'};
+ const graph = {
+  sessionId:'existing-session', focus_run_id:'resumed-run', focus_run_ids:['original-run','resumed-run'],
+  tasks:[
+   {child_run_id:a, root_run_id:'original-run', task:'原派发子任务', depth:1, execution_status:'succeeded', handoff_accepted:true, summary:'保存的结果'},
+   {child_run_id:b, root_run_id:'other-run', task:'同会话其他任务', depth:1, execution_status:'succeeded'},
+  ],
+  receipts:[saved], waiting_on:[{waiter_run_id:'resumed-run',target_ids:[a],kind:'jobs'}],
+ };
+ syncTeam({detail:graph});
+ assert.equal(reopened.teamState.value.masterRunId, 'resumed-run');
+ assert.deepEqual(reopened.teamState.value.workers.map(w=>[w.id,w.name]), [[a,'原派发子任务']], 'resume restores the original member only within the same logical task');
+ assert.equal(reopened.teamState.value.receipts.get(a).collected_at, null);
+ assert.equal(reopened.teamState.value.receipts.get(a).summary, '保存的结果');
+ assert.deepEqual(reopened.teamState.value.waitingOn, graph.waiting_on);
+ const displayedTeam = reopened.teamState.value;
+ for (let i = 0; i < 10; i++) {
+  syncTeam({detail:structuredClone(graph)});
+  assert.equal(reopened.teamState.value, displayedTeam, 'identical polls keep the team projection stable');
+ }
+ syncTeam({detail:{...graph, receipts:[{...saved, collected_at:'2026-11-28T03:17:00Z'}], waiting_on:[]}});
+ syncTeam({detail:{...graph, waiting_on:[]}});
+ assert.equal(reopened.teamState.value.receipts.get(a).collected_at, '2026-11-28T03:17:00Z', 'an older snapshot cannot undo committed collection');
+ assert.deepEqual(reopened.teamState.value.waitingOn, [], 'finished waits disappear');
+ await emit('channel-run-started', {session_id:'existing-session', run_id:'unrelated-next-run', goal:'新任务'});
+ syncTeam({detail:graph});
+ assert.deepEqual(reopened.teamState.value.workers.map(w=>w.id), [], 'an old focus snapshot cannot repopulate a new run');
  console.log('PASS: exact dispatch/wait/history association, batch partial failure, failover, resume, both real event channels, 100-chunk reactivity regression');
 }
 main().then(()=>process.exit(0),e=>{console.error(e);process.exit(1)});

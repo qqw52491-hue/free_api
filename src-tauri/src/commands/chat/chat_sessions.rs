@@ -143,11 +143,40 @@ pub async fn delete_session(
     id: String,
 ) -> Result<(), String> {
     let app_dir = app.path().app_data_dir().ok();
-    {
-        let conn = state.0.lock().map_err(|e| e.to_string())?;
-        crate::db::delete_session_completely(&conn, &id, app_dir.as_deref())?;
+    delete_idle_session(state.inner(), &id, app_dir.as_deref()).map_err(|error| match error {
+        DeleteSessionError::InUse => SESSION_DELETE_IN_USE.to_owned(),
+        DeleteSessionError::Storage(error) => error,
+    })
+}
+
+pub(crate) const SESSION_DELETE_IN_USE: &str = "这个会话还有任务在启动、运行或收尾，请先停止或等它结束。";
+
+#[derive(Debug)]
+pub(crate) enum DeleteSessionError {
+    InUse,
+    Storage(String),
+}
+
+pub(crate) fn delete_idle_session(
+    db: &DbState,
+    session_id: &str,
+    app_dir: Option<&std::path::Path>,
+) -> Result<(), DeleteSessionError> {
+    let id = session_id.trim();
+    if id.is_empty() {
+        return Err(DeleteSessionError::Storage("缺少会话 ID".into()));
     }
-    crate::agent::retrieval::clear_session_search_index(&id);
+    // Reserve the same session slot as the executor before touching persisted history.
+    let operation_id = format!("delete-{}", Uuid::new_v4());
+    let _owner = crate::agent::control::SessionExecutionOwner::acquire(id, &operation_id)
+        .map_err(|_| DeleteSessionError::InUse)?;
+    if crate::agent::control::is_session_starting(id) {
+        return Err(DeleteSessionError::InUse);
+    }
+    let conn = db.0.lock().map_err(|error| DeleteSessionError::Storage(error.to_string()))?;
+    crate::db::delete_session_completely(&conn, id, app_dir).map_err(DeleteSessionError::Storage)?;
+    drop(conn);
+    crate::agent::retrieval::clear_session_search_index(id);
     Ok(())
 }
 
@@ -176,6 +205,34 @@ pub async fn rename_session(
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn explicit_session_deletion_waits_for_the_execution_owner() {
+        let base = std::env::temp_dir().join(format!("delete-idle-session-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let conn = crate::db::init_db(&base.join("test.db")).unwrap();
+        let id = format!("session-{}", Uuid::new_v4());
+        conn.execute(
+            "INSERT INTO chat_sessions (id,title,model_id,created_at,updated_at)
+             VALUES (?1,'test','','2026-01-01','2026-01-01')", [&id],
+        ).unwrap();
+        let db = DbState(Arc::new(Mutex::new(conn)));
+        let owner = crate::agent::control::SessionExecutionOwner::acquire(&id, "active-run").unwrap();
+        assert!(matches!(delete_idle_session(&db, &id, Some(&base)), Err(DeleteSessionError::InUse)));
+        let exists = || db.0.lock().unwrap().query_row(
+            "SELECT EXISTS(SELECT 1 FROM chat_sessions WHERE id=?1)", [&id], |row| row.get::<_, bool>(0),
+        ).unwrap();
+        assert!(exists());
+        drop(owner);
+        let starting = crate::agent::control::StartingSessionGuard::enter(&id);
+        assert!(matches!(delete_idle_session(&db, &id, Some(&base)), Err(DeleteSessionError::InUse)));
+        assert!(exists());
+        drop(starting);
+        delete_idle_session(&db, &id, Some(&base)).unwrap();
+        assert!(!exists());
+        drop(db);
+        let _ = std::fs::remove_dir_all(base);
+    }
 
     #[tokio::test]
     async fn session_list_hides_internal_review_and_task_sessions_by_registration() {

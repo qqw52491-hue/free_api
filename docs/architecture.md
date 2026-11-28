@@ -4,6 +4,17 @@
 
 本文说明现有实现中的职责边界。具体参数以源码为准；历史设计和评测记录保留在 `docs/` 与 `OVERNIGHT_LOOP.md` 中，不将一次运行结果视为所有模型的保证。
 
+## 按问题找入口
+
+| 想排查什么 | 从哪里开始 | 下一站 |
+| --- | --- | --- |
+| 项目、会话页签和工作目录 | [`AgentView.vue`](../src/views/AgentView.vue)、[`ProjectWorkspace.vue`](../src/components/ProjectWorkspace.vue) | [`commands/projects/`](../src-tauri/src/commands/projects/) 保存项目与目录配置，[`workspace_access.rs`](../src-tauri/src/agent/workspace_access.rs) 和 [`workspace_lock.rs`](../src-tauri/src/agent/workspace_lock.rs) 处理执行期目录和占用 |
+| 提交、回答、停止或恢复了哪次运行 | [`AgentPanel.vue`](../src/components/AgentPanel.vue)、[`useAgentSession.ts`](../src/composables/useAgentSession.ts) | [`main_loop/entry.rs`](../src-tauri/src/agent/main_loop/entry.rs)、[`control.rs`](../src-tauri/src/agent/control.rs)、[`checkpoint/`](../src-tauri/src/agent/checkpoint/) |
+| Zed 或手机接进来后任务去了哪里 | [`main.rs`](../src-tauri/src/main.rs)、[`acp/`](../src-tauri/src/acp/)、[`channel/http/`](../src-tauri/src/agent/channel/http/) | [`run_spawn.rs`](../src-tauri/src/agent/channel/http/run_spawn.rs) 受理后连接同一工作区执行入口。微信桥独立在 [`wechat-bridge/`](../wechat-bridge/) |
+| 子任务为什么没有出现在图里、现在等谁、结果收到了吗 | [`child_task/team_view.rs`](../src-tauri/src/agent/child_task/team_view.rs)、[`AgentTeamTopology.vue`](../src/components/agent/AgentTeamTopology.vue) | [`agent_mailbox.rs`](../src-tauri/src/agent/agent_mailbox.rs)、[`job_engine.rs`](../src-tauri/src/agent/job_engine.rs)、[`child_receipt.rs`](../src-tauri/src/agent/child_receipt.rs) |
+| 模型选了谁、文件工具能做什么、为什么交付被打回 | [`router.rs`](../src-tauri/src/agent/router.rs)、[`child_task/models.rs`](../src-tauri/src/agent/child_task/models.rs)、[`dispatcher/`](../src-tauri/src/agent/dispatcher/)、[`main_loop/finalize.rs`](../src-tauri/src/agent/main_loop/finalize.rs) | 先定位发生在哪一层，再核对模型实际收到的材料、工具返回原文和审查记录 |
+| 要验证发布、恢复或模型表现 | [开发与验证](../README.md#开发与验证)、[`test/e2e/`](../test/e2e/)、[`test/eval_cases/`](../test/eval_cases/) | [ACP 本机验证](ACP_INTEGRATION_PLAN.md#本机验证)、[实测记录](agent-reliability-records.md)、[发布指南](releasing.md) |
+
 ## 一次任务如何推进
 
 ```text
@@ -63,13 +74,12 @@
 
 | 角色 | 执行方式 | 回收与核对 |
 | --- | --- | --- |
-| Worker | 独立上下文中的只读任务 | 返回结论和证据供主 Agent 判断 |
-| Writer | 普通写入角色走通用子任务执行器。旧隔离 Writer 记录可续接 | 使用当前角色和工作区约束核对回执。外部进程的隔离与权限需要独立实现 |
-| Reviewer | 基于材料与取证工具独立审查 | 保留具体发现、修订要求与当前有效意见 |
+| 普通任务、Worker、Writer | 通用子任务可以复用主循环和工作区，拥有各自的上下文、运行身份与检查点。工具权限取父任务和子任务的实际授权，调查角色可显式设为只读 | 按派发配置交接给父任务或正式交付。旧专用 Worker、隔离 Writer 路径按各自的配置和历史记录处理 |
+| Reviewer | 审查组合按实际阶段配置派发。正式审查使用审查材料和相应的取证权限 | 保留成员意见、修订要求与裁决，按当前批次收取 |
 
-`job_engine` 与 `wait_jobs` 管理在途任务和结果，角色卡提供模型、职责、范围及可选结构化契约。多人审查的历史回执与当前有效发现分开处理，单个成员的晚到意见不能简单覆盖其他成员的有效阻塞。
+角色卡提供模型、职责、范围及可选结构化契约。`job_engine`、信箱和等待工具处理后台回执，常用收取路径共享 `child_receipt.rs` 的交付处理。父任务通过检查点事务保存收取结果。子任务的执行状态、结果是否落盘、父任务是否已收取是三个独立事实。协作图以宿主记录的等待对象和回执为准。续跑时按同会话的逻辑任务关联旧尝试，保留原子任务和实际派发者的身份。
 
-相关入口：[`child_worker.rs`](../src-tauri/src/agent/child_worker.rs)、[`child_writer/`](../src-tauri/src/agent/child_writer/)、[`child_reviewer/`](../src-tauri/src/agent/child_reviewer/)、[`job_engine.rs`](../src-tauri/src/agent/job_engine.rs)、[`tools/role_manager/`](../src-tauri/src/agent/tools/role_manager/)。
+普通派发见 [`loop_runner/dispatch_child_task.rs`](../src-tauri/src/agent/loop_runner/dispatch_child_task.rs) 和 [`child_task/runtime.rs`](../src-tauri/src/agent/child_task/runtime.rs)。专用实现见 [`child_worker.rs`](../src-tauri/src/agent/child_worker.rs)、[`child_writer/`](../src-tauri/src/agent/child_writer/)、[`child_reviewer/`](../src-tauri/src/agent/child_reviewer/) 和 [`tools/role_manager/`](../src-tauri/src/agent/tools/role_manager/)。
 
 ## 验证、审查与交付
 
@@ -86,6 +96,26 @@
 指令生成补正、网络传输重试和工具失败恢复分别处理。指令生成补正耗尽会把耗尽事实传给外层，避免多层重试重新开启同一生成预算；用户中断保持独立处理。详见 [调查与恢复审计](agent-investigation-rule-and-recovery-audit-2026-10-23.md)。
 
 相关入口：[`main_loop/`](../src-tauri/src/agent/main_loop/)、[`call_llm_phase.rs`](../src-tauri/src/agent/call_llm_phase.rs)、[`run_state.rs`](../src-tauri/src/agent/run_state.rs)、[`control.rs`](../src-tauri/src/agent/control.rs)。
+
+[`run_trace.rs`](../src-tauri/src/agent/run_trace.rs) 提供续跑使用的运行归属查询。旧运行须属于同一会话且具有相同的非空任务标识，才能参与后台任务回收、信箱接续和协作图聚合。任务标识缺失或为空的历史只按原运行号处理。
+
+项目页和会话面板通过 [`useModelRoutingPreferences.ts`](../src/composables/useModelRoutingPreferences.ts) 共用桌面模型偏好。打开的面板随设置更新，提交时读取最新值。单个会话休眠的角色卡保存在该会话面板的状态中，任务续跑仍由宿主读取检查点中的流程配置。
+
+## 验证过的范围
+
+| 使用场景 | 当前证据 |
+| --- | --- |
+| 本机单仓任务、按需派发、人工审批和停止 | README 有实际配置和操作入口，生产执行器有单元与集成回归。交付质量随任务、所选模型和审查配置变化 |
+| 模型设置同步 | 本机浏览器用模拟接口打开真实项目与会话页面。项目页换模型后，同一个已打开的会话下次提交带上新模型；还验证了旧推理设置、重新加载、显式清空和会话到项目页的更新 |
+| 跨入口续跑 | 2026-11-28 在临时数据库中用本机模拟模型联调。经 ACP 派发，子任务落盘后中断桌面进程，经手机入口恢复。核对同一个子任务只执行一次、父任务只收取一次，其他任务的结果保留原归属。空任务标识的历史通过真实 `wait_jobs` 验证按原运行隔离 |
+| 外部客户端 | [ACP 接入说明](ACP_INTEGRATION_PLAN.md) 记录可用流程和限制。Zed 已验证派发、进度、审批和正文，Quick 与 JetBrains 的界面交互待实测。当前实现是入站桥接，依赖桌面引擎；出站调用其他 Agent 尚无生产入口 |
+| 使用同一模型时，多 Agent 是否更快或更准 | [`scripts/eval_runner.mjs`](../scripts/eval_runner.mjs) 和 [`test/eval_cases/`](../test/eval_cases/) 已有生产执行器评测入口和夹具。当前证据适合逐案例判断。跨模型、跨工作负载的稳定收益仍需配对比较，记录验收结果、耗时、用量和父任务等待时间 |
+
+## 继续维护时优先看这三处
+
+1. **运行状态。** [`useAgentSession.ts`](../src/composables/useAgentSession.ts) 汇总实时事件、历史读取、人工交互和停止回执。可以先抽出明确的状态更新规则，让聊天、协作图和其他入口共享。
+2. **长会话。** 先测首屏、切换和内存，再决定历史分页、增量事件和空闲面板回收的顺序。
+3. **角色默认与评测。** 单文件修复、跨模块调查、独立复核适合分成三类实测。已有评测配置和验收用于比较同模型的单 Agent 与按需协作。用真实结果决定哪些角色出现在默认界面、哪些适合留在高级设置。
 
 ## 源码导航
 

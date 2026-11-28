@@ -29,9 +29,17 @@ struct Slot {
     /// 上一轮以普通提问结束，桌面端任务仍在等回答。
     awaiting_answer: Option<(String, String)>,
     tracked_run: Option<String>,
+    pending_admission: Option<PendingAdmission>,
     busy: bool,
     cancel: Option<watch::Sender<bool>>,
     ignored_mcp: usize,
+}
+
+#[derive(Clone)]
+struct PendingAdmission {
+    run_id: String,
+    goal: String,
+    cancel_requested: bool,
 }
 
 pub(crate) struct Bridge {
@@ -172,11 +180,12 @@ impl Bridge {
         mut cancel_rx: watch::Receiver<bool>,
     ) -> Result<StopReason, String> {
         let desktop = Desktop::from_env()?;
-        let (awaiting, tracked_run, ignored) = self
+        let (awaiting, tracked_run, pending_admission, ignored) = self
             .slot(sid, |s| {
                 (
                     s.awaiting_answer.clone(),
                     s.tracked_run.clone(),
+                    s.pending_admission.clone(),
                     std::mem::take(&mut s.ignored_mcp),
                 )
             })
@@ -223,10 +232,10 @@ impl Bridge {
             );
             run
         } else {
-            desktop
-                .start_task(sid, goal, self.plan_mode.as_deref())
-                .await
-                .map_err(|e| e.to_string())?
+            match self.admit_turn(&desktop, cx, sid, goal, pending_admission, &cancel_rx).await? {
+                Some(run_id) => run_id,
+                None => return Ok(StopReason::Cancelled),
+            }
         };
 
         self.slot(sid, |slot| slot.tracked_run = Some(run_id.clone()));
@@ -387,6 +396,77 @@ impl Bridge {
                 }
             }
         }
+    }
+
+    async fn admit_turn(
+        &self,
+        desktop: &Desktop,
+        cx: &ConnectionTo<Client>,
+        sid: &str,
+        goal: &str,
+        pending: Option<PendingAdmission>,
+        cancel_rx: &watch::Receiver<bool>,
+    ) -> Result<Option<String>, String> {
+        let is_recovery = pending.is_some();
+        let mut admission = pending.unwrap_or_else(|| PendingAdmission {
+            run_id: uuid::Uuid::new_v4().to_string(),
+            goal: goal.to_string(),
+            cancel_requested: false,
+        });
+        let run_id = admission.run_id.clone();
+        if is_recovery {
+            send(cx, sid, message("正在核对上一次提交。本条消息未另行派发。\n"));
+            match desktop.run_record(&run_id).await {
+                Ok(record) if record.get("session_id").and_then(Value::as_str) == Some(sid) => {
+                    if admission.cancel_requested && !*cancel_rx.borrow() {
+                        request_cancel(desktop, cx, sid, &run_id).await;
+                    }
+                    self.slot(sid, |slot| slot.pending_admission = None);
+                    return Ok(Some(run_id));
+                }
+                Err(DesktopError::Rejected { status: 404, .. }) if admission.cancel_requested => {
+                    self.slot(sid, |slot| slot.pending_admission = None);
+                    return Err("桌面未查到上一次请求停止的运行，本条消息未派发。".into());
+                }
+                _ if admission.cancel_requested => {
+                    return Err("仍无法确认上一次提交的停止结果，本条消息未派发。".into());
+                }
+                _ => {}
+            }
+        }
+        if *cancel_rx.borrow() {
+            if is_recovery {
+                admission.cancel_requested = true;
+                self.slot(sid, |slot| slot.pending_admission = Some(admission));
+                request_cancel(desktop, cx, sid, &run_id).await;
+            }
+            return Ok(None);
+        }
+        // Leave the dispatch identity in the session before sending. Losing the
+        // HTTP response cannot turn a retry into a new executable request.
+        self.slot(sid, |slot| slot.pending_admission = Some(admission.clone()));
+        match desktop.start_task(&run_id, sid, &admission.goal, self.plan_mode.as_deref()).await {
+            Ok(()) => {}
+            Err(error @ DesktopError::Rejected { status: 400 | 404 | 409, .. }) => {
+                self.slot(sid, |slot| slot.pending_admission = None);
+                return Err(error.to_string());
+            }
+            Err(error) => {
+                if !matches!(desktop.run_record(&run_id).await,
+                    Ok(record) if record.get("session_id").and_then(Value::as_str) == Some(sid))
+                {
+                    if *cancel_rx.borrow() {
+                        admission.cancel_requested = true;
+                        self.slot(sid, |slot| slot.pending_admission = Some(admission));
+                        request_cancel(desktop, cx, sid, &run_id).await;
+                        return Ok(None);
+                    }
+                    return Err(format!("提交结果尚未确认：{error}。下一条提示将核对这次提交。"));
+                }
+            }
+        }
+        self.slot(sid, |slot| slot.pending_admission = None);
+        Ok(Some(run_id))
     }
 
     #[allow(clippy::too_many_arguments)]

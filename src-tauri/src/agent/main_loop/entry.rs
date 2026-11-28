@@ -94,6 +94,8 @@ pub async fn run_agent_main_loop(
     attachments: Option<Vec<crate::commands::chat::ParsedAttachmentResult>>,
     plan_mode: Option<String>,
     task_start_mode: Option<crate::agent::conversation::TaskStartMode>,
+    waiting_checkpoint_version: Option<i64>,
+    desktop_run_id: Option<String>,
 ) -> Result<(), String> {
     // 尽量早于模型校验（涉及 SQLite 全局锁）建立启动占位，避免锁竞争超过停止轮询窗口。
     let _entry_starting_guard = session_id
@@ -103,6 +105,30 @@ pub async fn run_agent_main_loop(
         let conn = state.0.lock().map_err(|e| e.to_string())?;
         model_routing.validate_desktop_start(&conn)?;
     }
+    let (run_id, admitted) = if desktop_run_id.is_some() || waiting_checkpoint_version.is_some() {
+        let session = session_id.as_deref().ok_or("需要会话标识以登记本次运行")?;
+        let run_id = desktop_run_id.map(|id| {
+            uuid::Uuid::parse_str(&id).map(|uuid| uuid.to_string()).map_err(|error| error.to_string())
+        }).transpose()?.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let admitted = crate::agent::control::SessionExecutionOwner::acquire(session, &run_id)?;
+        if let Some(version) = waiting_checkpoint_version {
+            if task_start_mode != Some(crate::agent::conversation::TaskStartMode::Resume) {
+                return Err("已保存的人工确认只能用于续跑原任务".into());
+            }
+            crate::agent::checkpoint::load_waiting_checkpoint(state.inner(), session, version)?;
+        }
+        {
+            let conn = state.0.lock().map_err(|error| error.to_string())?;
+            let used: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM agent_run_traces WHERE id=?1)",
+                [&run_id], |row| row.get(0),
+            ).map_err(|error| error.to_string())?;
+            if used { return Err("该运行标识已使用。".into()); }
+        }
+        (Some(run_id), Some(admitted))
+    } else {
+        (None, None)
+    };
     Box::pin(run_agent_main_loop_in_workspace(
         app,
         state,
@@ -115,11 +141,11 @@ pub async fn run_agent_main_loop(
         transient_llm_request_retries,
         attachments,
         None,
-        None,
+        run_id,
         plan_mode,
         None,
         task_start_mode,
-        None,
+        admitted,
     ))
     .await
 }

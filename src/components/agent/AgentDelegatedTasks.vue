@@ -153,7 +153,7 @@ import AgentHumanInterventionCard from './AgentHumanInterventionCard.vue';
 import { normalizeHumanForm } from '../../composables/useAgentSession';
 import {
   createSerialRefresher, detectAutoOpen, fullCacheIsFresh, isSettled, mergeSnapshot,
-  type FullDetailCache,
+  type ChildTaskListSnapshot, type FullDetailCache,
 } from './delegatedTaskState';
 type StepTrace = { seq: number; tool: string; target?: string | null; description?: string | null; status?: string };
 type Task = {
@@ -375,7 +375,7 @@ async function doRefresh() {
   const session = props.sessionId;
   if (!session) return;
   try {
-    const result = await call<{ tasks: Task[] }>('list');
+    const result = await call<ChildTaskListSnapshot<Task>>('list');
     if (session !== props.sessionId) return;
     const previous = new Map(tasks.value.map((t) => [t.child_run_id, t]));
     const merged = result.tasks.map((t) => mergeSnapshot(previous.get(t.child_run_id), t));
@@ -388,7 +388,7 @@ async function doRefresh() {
     loadError.value = '';
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('agent:child-tasks-synced', {
-        detail: { sessionId: session, tasks: merged },
+        detail: { ...result, sessionId: session, tasks: merged },
       }));
     }
     for (const task of merged) {
@@ -452,6 +452,9 @@ watch(() => props.sessionId, () => {
   userDockOpen.value = null;
   void refresh();
 });
+
+// The parent can apply its final receipts immediately before becoming idle.
+watch(() => props.active, () => { void refresh(); });
 
 onMounted(() => {
   void refresh();

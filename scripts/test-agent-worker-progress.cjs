@@ -295,7 +295,7 @@ async function main() {
     const timelines = vm.runInNewContext(ts.transpileModule(timelineStatement.getText(ast) + '\n timelineEntries.value;', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, { computed: vue.computed, baseTimelineEntries: vue.ref([{ id: 'finish-plan', type: 'plan' }, { id: 'live-completion', type: 'completion' }]), reviewPlacement: vue.ref({ unplaced: ['unanchored'] }), unplacedLiveReviewers: vue.ref([]), unplacedReviewEntry: { id: 'unplaced-final-review', type: 'review', timestamp: 0 }, props: { isRunning: false } });
     assert.equal(timelines[1].type, 'review'); assert.equal(timelines[2].type, 'completion', 'unanchored fallback is before final response, not after');
     assert(text(reviews()[2]).includes('通过'), 'completed conclusion retained');
-    await emit('channel-run-started', { session_id: 'existing-session', goal: 'next run' });
+    await emit('channel-run-started', { session_id: 'existing-session', run_id: 'fixture-run-298', goal: 'next run' });
     await vue.nextTick();
     assert.equal(reviews().length, 0);
     progress({ type:'child_reviewer_stream', child_run_id:'stop-one', role_label:'慢审查员', stream_type:'thinking', chunk:'先前片段' });

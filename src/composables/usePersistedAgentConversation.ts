@@ -19,23 +19,32 @@ export function usePersistedAgentConversation(
     const getSessionId = typeof sessionId === "function" ? sessionId : () => sessionId;
     const conversationMessages = ref<PersistedConversationMessage[]>([]);
     const isConversationLoading = ref(false);
+    let latestRequest = 0;
+
+    function invalidateConversationLoad() {
+        latestRequest++;
+        isConversationLoading.value = false;
+    }
 
     async function loadConversation() {
         const sid = getSessionId();
+        const request = ++latestRequest;
         if (!sid || sid.startsWith("draft-")) {
             conversationMessages.value = [];
+            isConversationLoading.value = false;
             return;
         }
+        const isCurrent = () => request === latestRequest && sid === getSessionId();
         isConversationLoading.value = true;
         try {
             const messages = await invoke<PersistedConversationMessage[]>("get_messages", { sessionId: sid });
-            conversationMessages.value = Array.isArray(messages) ? messages : [];
+            if (isCurrent()) conversationMessages.value = Array.isArray(messages) ? messages : [];
         } catch (error) {
-            onError?.(error instanceof Error ? error.message : String(error));
+            if (isCurrent()) onError?.(error instanceof Error ? error.message : String(error));
         } finally {
-            isConversationLoading.value = false;
+            if (isCurrent()) isConversationLoading.value = false;
         }
     }
 
-    return { conversationMessages, isConversationLoading, loadConversation };
+    return { conversationMessages, isConversationLoading, loadConversation, invalidateConversationLoad };
 }

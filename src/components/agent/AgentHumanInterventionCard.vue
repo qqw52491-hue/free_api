@@ -108,7 +108,7 @@
       <button type="button" class="choice-btn approve-btn" :disabled="isSending || !humanForm?.requestId" @click="approveStageRepair">
         允许继续修复
       </button>
-      <button type="button" class="choice-btn revise-btn" :disabled="isSending" @click="emit('submit', '【阶段仲裁】不批准继续修复。')">
+      <button type="button" class="choice-btn revise-btn" :disabled="isSending" @click="submitAnswer('【阶段仲裁】不批准继续修复。')">
         不批准
       </button>
     </div>
@@ -265,14 +265,19 @@ import HtmlPreviewBlock from "../charts/HtmlPreviewBlock.vue";
 
 const props = defineProps<{
   humanForm: AgentHumanForm | null;
+  waitKey?: string | null;
   pauseReason?: string;
   isSending?: boolean;
 }>();
 
 const emit = defineEmits<{
-  submit: [answer: string];
+  submit: [answer: string, waitKey?: string | null];
   cancel: [];
 }>();
+
+function submitAnswer(answer: string) {
+  emit("submit", answer, props.waitKey);
+}
 
 const formKind = computed<AgentHumanFormKind>(() => {
   if (props.humanForm?.kind) return props.humanForm.kind;
@@ -382,7 +387,7 @@ function toggleRevisionInput() {
 function approveStageRepair() {
   const id = props.humanForm?.requestId;
   if (!id || props.isSending) return;
-  emit("submit", `【阶段仲裁】允许继续修复，问题移交终审。\n<!--stage-review-approval:${id}-->`);
+  submitAnswer(`【阶段仲裁】允许继续修复，问题移交终审。\n<!--stage-review-approval:${id}-->`);
 }
 
 function handlePlanApprove() {
@@ -395,14 +400,14 @@ function handlePlanApprove() {
   if (customWriteInText.value.trim()) {
     parts.push(`【补充执行要求】: ${customWriteInText.value.trim()}`);
   }
-  emit("submit", withPlanDecision(parts.join("\n"), true));
+  submitAnswer(withPlanDecision(parts.join("\n"), true));
 }
 
 function handlePlanRejectAndRevise() {
   if (!customWriteInText.value.trim() || props.isSending) return;
   const note = customWriteInText.value.trim();
   const feedback = `【方案打回修改】请重新审视并按以下意见修改方案后再提交审查：\n${note}`;
-  emit("submit", withPlanDecision(feedback, false));
+  submitAnswer(withPlanDecision(feedback, false));
 }
 
 const confirmValue = ref<boolean | null>(
@@ -489,7 +494,7 @@ function handleFormSubmit() {
   if (!canSubmit.value || props.isSending) return;
 
   if (formKind.value === "text") {
-    emit("submit", customWriteInText.value.trim());
+    submitAnswer(customWriteInText.value.trim());
     return;
   }
 
@@ -514,7 +519,7 @@ function handleFormSubmit() {
     parts.push(`【补充说明】: ${customWriteInText.value.trim()}`);
   }
 
-  emit("submit", parts.join("\n"));
+  submitAnswer(parts.join("\n"));
 }
 
 function handleCustomHtmlSubmit(data: any) {
@@ -528,11 +533,11 @@ function handleCustomHtmlSubmit(data: any) {
       text = String(data);
     }
   }
-  emit("submit", text);
+  submitAnswer(text);
 }
 
 function handleCustomHtmlCancel(reason: string) {
-  emit("submit", `【用户取消了操作】: ${reason}`);
+  submitAnswer(`【用户取消了操作】: ${reason}`);
 }
 </script>
 

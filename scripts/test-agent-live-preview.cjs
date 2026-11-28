@@ -61,7 +61,7 @@ async function main() {
     assert.deepEqual(single.append('\n结束'),full('长'.repeat(60000)+'\n结束',120));
 
     const s = await session('failed');
-    await emit('channel-run-started',{session_id:'existing-session',goal:'incremental preview regression'});
+    await emit('channel-run-started',{session_id:'existing-session',run_id: 'fixture-run-64', goal:'incremental preview regression'});
     const progress = p => emit('agent-progress-existing-session',p);
     const a='preview-reviewer-a', b='preview-reviewer-b';
     const stream = (id,kind,chunk) => progress({type:'child_reviewer_stream',child_run_id:id,role_label:'技术主管',stream_type:kind,chunk});
@@ -118,7 +118,7 @@ async function main() {
 
     // Reusing a child id in a new run must not reuse the previous run's accumulator.
     s.clearSession();
-    await emit('channel-run-started',{session_id:'existing-session',goal:'new run'});
+    await emit('channel-run-started',{session_id:'existing-session',run_id: 'fixture-run-121', goal:'new run'});
     stream(a,'thinking','全新任务');
     w=s.teamWorkers.value.find(w=>w.id===a);
     assert.equal(w.thought,'全新任务');assert.equal(w.livePreview.text,'全新任务');

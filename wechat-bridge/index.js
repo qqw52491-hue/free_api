@@ -457,13 +457,14 @@ function watchRun(conversationId, runId, num, restored = {}) {
         return;
       }
       if (run.status === "waiting_human") {
-        if (entry.status !== "waiting_human") {
+        if (entry.status !== "waiting_human" || entry.waitId !== run.wait_id) {
           entry.status = "waiting_human";
           entry.paused_reason = run.paused_reason;
+          entry.waitId = run.wait_id;
           entry.waitingSince = Date.now();
           entry.lastNudge = Date.now();
           lastSelections.delete(conversationId);
-          pendingQuestions.set(conversationId, { runId, num });
+          pendingQuestions.set(conversationId, { runId, num, waitId: run.wait_id });
           saveState();
           await botSend(
             `❓ 任务 #${num} 需要你的决定：\n${run.paused_reason || "Agent 请求协助。"}\n\n直接回复即算回答，发送「停止」可中断。`
@@ -483,6 +484,7 @@ function watchRun(conversationId, runId, num, restored = {}) {
         const notifications = [];
         entry.status = "running";
         entry.paused_reason = null;
+        delete entry.waitId;
         pendingQuestions.delete(conversationId);
         // 阶段里程碑：环境就绪/失败恢复/外部救援/开始交付时即时汇报（可按会话/任务关闭）
         const phasePush = entry.phasePush ?? run.phase_push ?? true;
@@ -857,7 +859,7 @@ const agent = {
     const pending = pendingQuestions.get(conversationId);
     if (pending || explicitAnswer || text === "回答") {
       const entry = activeRuns.get(conversationId);
-      const target = pending || (entry && { runId: entry.runId, num: entry.num });
+      const target = pending || (entry && { runId: entry.runId, num: entry.num, waitId: entry.waitId });
       if (!target) return { text: "当前没有等待回答的任务。" };
       const content = explicitAnswer ? explicitAnswer[1].trim() : text === "回答" ? "" : text;
       if (!content && !request.media) return { text: "回答不能为空，请发送「回答：具体内容」。" };
@@ -865,10 +867,11 @@ const agent = {
       answering.add(conversationId);
       try {
         const body = await buildGoalWithMedia(entry?.sessionId || sender.session_id, content, request.media);
-        await api("POST", `/channel/run/${target.runId}/answer`, { text: body });
+        await api("POST", `/channel/run/${target.runId}/answer`, { text: body, wait_id: target.waitId });
         if (pendingQuestions.get(conversationId) === pending) pendingQuestions.delete(conversationId);
-        if (entry?.runId === target.runId) {
+        if (entry?.runId === target.runId && entry.waitId === target.waitId) {
           entry.status = "running";
+          delete entry.waitId;
           entry.controlRevision = (entry.controlRevision || 0) + 1;
         }
         saveState();

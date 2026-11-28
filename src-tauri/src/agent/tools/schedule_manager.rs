@@ -321,6 +321,7 @@ fn run_now(db: &DbState, params: &serde_json::Value) -> DispatchResult {
         config.phase_pushes,
         None,
         false, // run_now 不启动独立 watcher，由应用守卫通知
+        None,
     )
     {
         Ok(run_id) => DispatchResult { view: None,
@@ -336,6 +337,7 @@ fn run_now(db: &DbState, params: &serde_json::Value) -> DispatchResult {
             fail("run_now", "该计划绑定的会话已有在途任务，请等待完成或先停止")
         }
         Err(crate::agent::channel::SubmitError::Other(message)) => fail("run_now", &message),
+        Err(crate::agent::channel::SubmitError::AdmissionConflict) => fail("run_now", "任务提交标识冲突。"),
     }
 }
 

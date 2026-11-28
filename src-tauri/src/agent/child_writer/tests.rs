@@ -198,9 +198,10 @@
     #[test]
     fn test_cleanup_child_workspaces_removes_matching_dirs_only() {
         let (base, root) = workspace();
-        let copy1 = base.join(".writer-test-cleanup-1");
-        let copy2 = base.join(".writer-test-cleanup-2");
-        let safe_keep = base.join("safe_keep_dir");
+        let root = root.canonicalize().unwrap();
+        let copy1 = root.join(".writer-test-cleanup-1");
+        let copy2 = root.join(".writer-test-cleanup-2");
+        let safe_keep = root.join(".writer-user-notes");
         std::fs::create_dir_all(&copy1).unwrap();
         std::fs::create_dir_all(&copy2).unwrap();
         std::fs::create_dir_all(&safe_keep).unwrap();
@@ -242,7 +243,7 @@
 
         assert!(!copy1.exists(), "已登记的 copy1 副本必须被回收");
         assert!(!copy2.exists(), "已登记的 copy2 副本必须被回收");
-        assert!(safe_keep.exists(), "非 writer 目录绝不能被误删");
+        assert!(safe_keep.exists(), "未登记的同前缀目录须保留");
 
         let _ = std::fs::remove_dir_all(base);
     }
@@ -250,11 +251,15 @@
     #[test]
     fn test_cleanup_orphaned_writer_workspaces_on_startup() {
         let (base, root) = workspace();
-        let copy_db = base.join(".writer-test-orphan-db");
-        let copy_disk_only = root.join(".writer-test-orphan-disk");
+        let root = root.canonicalize().unwrap();
+        let copy_db = root.join(".writer-test-orphan-db");
+        let copy_disk_only = root.join(".writer-user-notes");
+        let copy_outside = base.join(".writer-outside-project");
         let safe_keep = root.join("src");
         std::fs::create_dir_all(&copy_db).unwrap();
-        std::fs::create_dir_all(&copy_disk_only).unwrap();
+        std::fs::create_dir_all(copy_disk_only.join("notes")).unwrap();
+        std::fs::write(copy_disk_only.join("notes").join("keep.txt"), "user data").unwrap();
+        std::fs::create_dir_all(&copy_outside).unwrap();
         std::fs::create_dir_all(&safe_keep).unwrap();
 
         let conn = crate::db::init_db(&base.join("test.db")).unwrap();
@@ -278,6 +283,15 @@
                 copy_db.to_string_lossy(),
             ],
         ).unwrap();
+        conn.execute(
+            "INSERT INTO agent_child_runs (id, parent_run_id, parent_session_id, workspace_root, model_id, status, started_at, kind, workspace_copy)
+             VALUES ('outside-copy', 'parent-orphan', 'session-orphan', ?1, 'test-model', 'succeeded', ?2, 'writer', ?3)",
+            rusqlite::params![
+                root.to_string_lossy(),
+                chrono::Utc::now().to_rfc3339(),
+                copy_outside.to_string_lossy(),
+            ],
+        ).unwrap();
         drop(conn);
 
         assert!(copy_db.exists());
@@ -285,9 +299,13 @@
         assert!(safe_keep.exists());
 
         let cleaned = cleanup_orphaned_writer_workspaces(&state);
-        assert!(cleaned >= 2, "至少清理 2 处孤儿子目录，实际清理: {}", cleaned);
-        assert!(!copy_db.exists(), "DB 中的僵尸目录必须被清理");
-        assert!(!copy_disk_only.exists(), "磁盘扫描发现的孤儿目录必须被清理");
+        assert_eq!(cleaned, 1, "仅回收登记在对应工作区内的副本");
+        assert!(!copy_db.exists(), "已登记的旧 Writer 副本被清理");
+        assert_eq!(
+            std::fs::read_to_string(copy_disk_only.join("notes").join("keep.txt")).unwrap(),
+            "user data",
+        );
+        assert!(copy_outside.exists(), "落在登记工作区之外的目录须保留");
         assert!(safe_keep.exists(), "安全业务目录绝不可被误删");
 
         // 验证 status 被置为 interrupted

@@ -235,10 +235,12 @@ pub fn run() {
             agent::evaluation_runner::start_background_agent_evaluation,
             agent::dispatch_agent_step,
             agent::get_agent_checkpoint,
+            agent::get_agent_execution_snapshot,
             agent::send_human_intervention,
             agent::child_task::control_child_task,
             agent::replace_agent_goal,
-            agent::cancel_agent_run,
+            agent::cancel_agent_execution,
+            agent::cancel_agent_waiting_checkpoint,
             agent::review_control::stop_review_member,
             // 微信通道（页面 ↔ Node 桥代理）
             agent::channel::bridge::wechat_bridge_start,

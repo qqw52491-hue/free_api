@@ -19,6 +19,10 @@ fn execution_owners() -> &'static std::sync::Mutex<HashMap<String, String>> {
     OWNERS.get_or_init(Default::default)
 }
 
+pub(crate) fn active_execution_run_id(session_id: &str) -> Result<Option<String>, String> {
+    Ok(execution_owners().lock().map_err(|error| error.to_string())?.get(session_id).cloned())
+}
+
 fn recovering_runs() -> &'static std::sync::Mutex<HashSet<String>> {
     static RUNS: OnceLock<std::sync::Mutex<HashSet<String>>> = OnceLock::new();
     RUNS.get_or_init(Default::default)
@@ -44,6 +48,9 @@ impl SessionExecutionOwner {
         let mut owners = execution_owners().lock().map_err(|e| e.to_string())?;
         if owners.contains_key(session) {
             return Err("该会话已有运行正在执行或收尾，请等待结束后重试。".into());
+        }
+        if owners.values().any(|current| current == run) {
+            return Err("该运行标识正在使用。".into());
         }
         let mut recovering = recovering_runs().lock().map_err(|e| e.to_string())?;
         owners.insert(session.to_owned(), run.to_owned());
@@ -173,9 +180,11 @@ pub async fn notify_stream_interrupt(session_id: &str) {
 pub async fn send_human_intervention(
     state: State<'_, DbState>,
     session_id: String,
+    run_id: String,
+    wait_id: String,
     message: String,
 ) -> Result<Option<crate::agent::conversation::ConversationCursor>, String> {
-    send_human_reply(state.inner(), &session_id, message, None).await
+    send_human_reply(state.inner(), &session_id, message, Some((&run_id, &wait_id))).await
 }
 
 fn human_waits() -> &'static std::sync::Mutex<HashMap<String, (String, String)>> {
@@ -285,7 +294,15 @@ mod human_wait_tests {
 }
 
 #[tauri::command]
-pub async fn replace_agent_goal(session_id: String, goal: String) -> Result<(), String> {
+pub async fn replace_agent_goal(session_id: String, run_id: String, goal: String) -> Result<(), String> {
+    replace_goal_for_run(&session_id, goal, Some(&run_id)).await
+}
+
+pub(crate) async fn replace_goal_for_run(
+    session_id: &str,
+    goal: String,
+    expected_run: Option<&str>,
+) -> Result<(), String> {
     let goal = goal.trim().to_string();
     if goal.is_empty() {
         return Err("新目标不能为空".to_string());
@@ -293,9 +310,15 @@ pub async fn replace_agent_goal(session_id: String, goal: String) -> Result<(), 
     let (sender, interrupt) = {
         let channels = intervention_channels().lock().await;
         let interrupts = stream_interrupt_channels().lock().await;
-        let sender = channels.get(&session_id).cloned()
+        if let Some(expected) = expected_run {
+            let owners = channel_owners().lock().map_err(|error| error.to_string())?;
+            if owners.get(session_id).map(String::as_str) != Some(expected) {
+                return Err("此运行已结束或已更换，目标变更未提交".into());
+            }
+        }
+        let sender = channels.get(session_id).cloned()
             .ok_or_else(|| "任务已结束或通道不存在".to_string())?;
-        (sender, interrupts.get(&session_id).cloned())
+        (sender, interrupts.get(session_id).cloned())
     };
     sender
         .send(HumanControl::ReplaceGoal(goal))
@@ -311,7 +334,8 @@ pub async fn replace_agent_goal(session_id: String, goal: String) -> Result<(), 
 struct StartingRunTracker {
     in_flight_counts: HashMap<String, usize>,
     pending_cancels: HashSet<String>,
-    registered_sessions: HashSet<String>,
+    scoped_cancels: HashMap<String, String>,
+    registered_runs: HashMap<String, String>,
 }
 
 fn starting_tracker() -> &'static std::sync::Mutex<StartingRunTracker> {
@@ -350,7 +374,8 @@ impl Drop for StartingSessionGuard {
             if remove_entry {
                 tracker.in_flight_counts.remove(&self.session_id);
                 tracker.pending_cancels.remove(&self.session_id);
-                tracker.registered_sessions.remove(&self.session_id);
+                tracker.scoped_cancels.remove(&self.session_id);
+                tracker.registered_runs.remove(&self.session_id);
             }
         }
     }
@@ -363,13 +388,19 @@ pub(crate) fn is_session_starting(session_id: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) fn mark_pending_cancel(session_id: &str) -> bool {
+fn mark_pending_cancel(session_id: &str, expected_run: Option<&str>) -> bool {
     starting_tracker()
         .lock()
         .map(|mut tracker| {
+            let registered = tracker.registered_runs.get(session_id).map(String::as_str);
             if tracker.in_flight_counts.get(session_id).copied().unwrap_or(0) > 0
-                && !tracker.registered_sessions.contains(session_id) {
-                tracker.pending_cancels.insert(session_id.to_string());
+                && !registered.is_some_and(|run| expected_run.is_none_or(|expected| expected == run))
+            {
+                if let Some(run_id) = expected_run {
+                    tracker.scoped_cancels.insert(session_id.to_string(), run_id.to_string());
+                } else {
+                    tracker.pending_cancels.insert(session_id.to_string());
+                }
                 true
             } else {
                 false
@@ -378,10 +409,15 @@ pub(crate) fn mark_pending_cancel(session_id: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) fn take_pending_cancel(session_id: &str) -> bool {
+fn take_pending_cancel(session_id: &str, registering_run: Option<&str>) -> bool {
     starting_tracker()
         .lock()
-        .map(|mut tracker| tracker.pending_cancels.remove(session_id))
+        .map(|mut tracker| {
+            let scoped = registering_run.is_some_and(|run| {
+                tracker.scoped_cancels.remove(session_id).as_deref() == Some(run)
+            });
+            tracker.pending_cancels.remove(session_id) || scoped
+        })
         .unwrap_or(false)
 }
 
@@ -396,7 +432,7 @@ pub(crate) async fn register_run_channels(
 ) -> bool {
     let mut channels = intervention_channels().lock().await;
     let mut interrupts = stream_interrupt_channels().lock().await;
-    let pending_cancel = take_pending_cancel(session_id);
+    let pending_cancel = take_pending_cancel(session_id, Some(run_id));
     if pending_cancel {
         let _ = tx.try_send(HumanControl::Cancel);
         interrupt_tx.send_modify(|generation| *generation = generation.wrapping_add(1));
@@ -408,7 +444,7 @@ pub(crate) async fn register_run_channels(
     }
     if let Ok(mut tracker) = starting_tracker().lock() {
         if tracker.in_flight_counts.contains_key(session_id) {
-            tracker.registered_sessions.insert(session_id.to_string());
+            tracker.registered_runs.insert(session_id.to_string(), run_id.to_string());
         }
     }
     pending_cancel
@@ -422,9 +458,78 @@ pub struct CancelAgentRunResult {
     pub active_run_id: Option<String>,
 }
 
-#[tauri::command]
 pub async fn cancel_agent_run(session_id: String) -> Result<CancelAgentRunResult, String> {
     cancel_run(&session_id, None).await
+}
+
+#[tauri::command]
+pub async fn cancel_agent_execution(session_id: String, run_id: String) -> Result<CancelAgentRunResult, String> {
+    cancel_run(&session_id, Some(&run_id)).await
+}
+
+#[derive(serde::Serialize)]
+pub struct AgentLiveExecution {
+    run_id: String,
+    goal: Option<String>,
+    started_at: Option<String>,
+    wait_id: Option<String>,
+    question: Option<String>,
+    form: Option<serde_json::Value>,
+}
+
+#[derive(serde::Serialize)]
+pub struct AgentExecutionSnapshot {
+    active: Option<AgentLiveExecution>,
+    waiting_checkpoint: Option<crate::agent::checkpoint::AgentCheckpointSummary>,
+}
+
+/// Use admission ownership for liveness. A saved running trace can survive a process crash.
+fn live_execution(session_id: &str) -> Result<Option<AgentLiveExecution>, String> {
+    let run_id = active_execution_run_id(session_id)?;
+    let Some(run_id) = run_id else { return Ok(None) };
+    let record = crate::agent::channel::runs_store().lock().map_err(|error| error.to_string())?
+        .get(&run_id).cloned();
+    if record.is_none() && !is_session_starting(session_id) {
+        return Ok(None);
+    }
+    let wait_id = current_human_wait(session_id, &run_id);
+    let wait_record = record.as_ref().filter(|r| wait_id.is_some() && r.paused_wait_id == wait_id);
+    Ok(Some(AgentLiveExecution {
+        run_id,
+        goal: record.as_ref().map(|r| r.goal_preview.clone()),
+        started_at: record.as_ref().map(|r| r.started_at.clone()),
+        question: wait_record.and_then(|r| r.paused_reason.clone()),
+        form: wait_record.and_then(|r| r.paused_form.clone()),
+        wait_id: wait_record.and(wait_id),
+    }))
+}
+
+#[tauri::command]
+pub async fn get_agent_execution_snapshot(
+    state: State<'_, DbState>,
+    session_id: String,
+) -> Result<AgentExecutionSnapshot, String> {
+    if let Some(active) = live_execution(&session_id)? {
+        return Ok(AgentExecutionSnapshot { active: Some(active), waiting_checkpoint: None });
+    }
+    let waiting_checkpoint = crate::agent::checkpoint::load_checkpoint(state.inner(), &session_id)?
+        .filter(|cp| cp.phase == crate::agent::checkpoint::AgentPhase::WaitUser)
+        .map(crate::agent::checkpoint::AgentCheckpointSummary::from_checkpoint);
+    // Admission may have changed while the checkpoint was being read.
+    let active = live_execution(&session_id)?;
+    let waiting_checkpoint = if active.is_none() { waiting_checkpoint } else { None };
+    Ok(AgentExecutionSnapshot { active, waiting_checkpoint })
+}
+
+#[tauri::command]
+pub async fn cancel_agent_waiting_checkpoint(
+    state: State<'_, DbState>,
+    session_id: String,
+    checkpoint_version: i64,
+) -> Result<(), String> {
+    // Share admission with start and resume so an offline action cannot race a live executor.
+    let _owner = SessionExecutionOwner::acquire(&session_id, &uuid::Uuid::new_v4().to_string())?;
+    crate::agent::checkpoint::cancel_waiting_checkpoint(state.inner(), &session_id, checkpoint_version)
 }
 
 pub(crate) async fn cancel_run(
@@ -457,13 +562,14 @@ pub(crate) async fn cancel_run(
                 // 与 register_run_channels 共享 intervention_channels -> stream_interrupt_channels 锁序：
                 // 要么主循环尚未注册（写入 pending_cancels 后必被注册期消费并触发流中断），
                 // 要么主循环已同时插入两个通道（上面分支必已同时命中控制通道与流中断通道）。
-                let marked = mark_pending_cancel(session_id);
+                let marked = mark_pending_cancel(session_id, expected_run);
                 if marked {
                     if let Some(interrupt_sender) = interrupts.get(session_id) {
                         interrupt_sender.send_modify(|generation| *generation = generation.wrapping_add(1));
                     }
                 }
-                let run_id = crate::agent::channel::active_run_id_for_session(session_id);
+                let run_id = expected_run.map(str::to_owned)
+                    .or_else(|| crate::agent::channel::active_run_id_for_session(session_id));
                 (None, marked, run_id)
             }
         };
@@ -535,14 +641,20 @@ pub(crate) async fn finish_interrupted_run<R: tauri::Runtime>(
     machine: &mut AgentRunMachine,
     reason: String,
 ) -> Result<(), String> {
-    let message = format!("{} 已在安全边界停止旧任务。", reason);
+    let message = format!("{reason} 已在安全边界停止旧任务。");
     checkpoint.mark_failed(message.clone(), context);
     let saved = crate::agent::checkpoint::save_checkpoint_with_chat_claims(db, checkpoint, run_id, context);
     // 子任务可以在安全边界收尾。等它们退出后再发布父任务终态，即使检查点写入失败也要收停。
-    for warning in crate::agent::failure::stop_run_runtime(db, session_id, run_id).await {
+    let warnings = crate::agent::failure::stop_run_runtime(db, session_id, run_id).await;
+    for warning in &warnings {
         eprintln!("[control] {warning}");
     }
     saved?;
+    let message = if warnings.is_empty() {
+        message
+    } else {
+        format!("{reason} 已到达当前任务的停止边界。\n后台收停尚未全部确认：\n{}", warnings.join("\n"))
+    };
     let failure_completion = serde_json::json!({ "summary": &message });
     if let Err(error) = crate::agent::run_trace::upsert_snapshot(
         db,
@@ -580,7 +692,8 @@ mod tests {
         let session = format!("owner-test-{}", uuid::Uuid::new_v4());
         let first = SessionExecutionOwner::acquire(&session, "a").unwrap();
         assert!(SessionExecutionOwner::acquire(&session, "b").is_err());
-        let other = SessionExecutionOwner::acquire(&format!("{session}-other"), "b").unwrap();
+        let other = SessionExecutionOwner::acquire(&format!("{session}-other"), "other").unwrap();
+        assert!(SessionExecutionOwner::acquire(&format!("{session}-third"), "other").is_err());
         drop(first);
         let successor = SessionExecutionOwner::acquire(&session, "b").unwrap();
         drop((other, successor));
@@ -669,14 +782,14 @@ mod tests {
                     active_run_id: None,
                 }
             );
-            assert!(take_pending_cancel(session_id));
-            assert!(!take_pending_cancel(session_id));
+            assert!(take_pending_cancel(session_id, None));
+            assert!(!take_pending_cancel(session_id, None));
 
             // 再次标记但未消费，退出 StartingSessionGuard 时须自动清除，避免串染下一轮运行。
-            assert!(mark_pending_cancel(session_id));
+            assert!(mark_pending_cancel(session_id, None));
         }
         assert!(!is_session_starting(session_id));
-        assert!(!take_pending_cancel(session_id));
+        assert!(!take_pending_cancel(session_id, None));
     }
 
     #[tokio::test]
@@ -721,11 +834,11 @@ mod tests {
             has_active_run: true,
             active_run_id: Some(run_id.to_string()),
         });
-        assert!(!take_pending_cancel(session_id));
+        assert!(!take_pending_cancel(session_id, None));
         drop(guard);
         runs_store().lock().unwrap().remove(run_id);
         let next = StartingSessionGuard::enter(session_id);
-        assert!(mark_pending_cancel(session_id));
+        assert!(mark_pending_cancel(session_id, None));
         drop(next);
     }
 
@@ -744,10 +857,42 @@ mod tests {
         assert!(consumed);
         assert!(matches!(rx.try_recv(), Ok(HumanControl::Cancel)));
         assert_eq!(*interrupt_rx.borrow(), 1);
-        assert!(!take_pending_cancel(session_id));
+        assert!(!take_pending_cancel(session_id, None));
 
         intervention_channels().lock().await.remove(session_id);
         stream_interrupt_channels().lock().await.remove(session_id);
+    }
+
+    #[tokio::test]
+    async fn scoped_startup_cancel_cannot_be_consumed_by_the_successor() {
+        for admission_abandoned in [false, true] {
+            let session = uuid::Uuid::new_v4().to_string();
+            let target = uuid::Uuid::new_v4().to_string();
+            let _starting = StartingSessionGuard::enter(&session);
+            let mut owner = SessionExecutionOwner::acquire(&session, &target).unwrap();
+            let ack = cancel_run(&session, Some(&target)).await.unwrap();
+            assert!(ack.delivered);
+            assert_eq!(ack.active_run_id.as_deref(), Some(target.as_str()));
+
+            let registered = if admission_abandoned {
+                let successor = uuid::Uuid::new_v4().to_string();
+                drop(owner);
+                // The target's entry guard has not dropped yet. A successor can still
+                // acquire admission before that bookkeeping is cleaned up.
+                owner = SessionExecutionOwner::acquire(&session, &successor).unwrap();
+                successor
+            } else {
+                target
+            };
+            let (tx, mut rx) = mpsc::channel(4);
+            let (interrupt, interrupt_rx) = watch::channel(0);
+            let consumed = register_run_channels(&session, &registered, tx, interrupt).await;
+            assert_eq!(consumed, !admission_abandoned);
+            assert_eq!(matches!(rx.try_recv(), Ok(HumanControl::Cancel)), !admission_abandoned);
+            assert_eq!(*interrupt_rx.borrow(), u64::from(!admission_abandoned));
+            release_run_channels(&session, &registered, false).await;
+            drop(owner);
+        }
     }
 
     #[tokio::test]
@@ -797,7 +942,7 @@ mod tests {
                 "round {round}: stream interrupt generation must advance"
             );
             assert!(
-                !take_pending_cancel(&session_id),
+                !take_pending_cancel(&session_id, None),
                 "round {round}: unconsumed stale pending_cancel remained"
             );
 

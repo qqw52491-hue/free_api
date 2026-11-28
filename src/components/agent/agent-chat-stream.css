@@ -2174,6 +2174,18 @@ button.root-row {
     color: var(--theme-text-primary, #ffffff) !important;
 }
 
+.ambient-text-row[data-preview="true"],
+.ambient-action-sub-row[data-preview="true"],
+.goal-row[data-preview="true"] {
+    background: color-mix(in srgb, var(--theme-status-info, #8ab9e8) 9%, var(--theme-bg-panel, #171a20)) !important;
+    box-shadow: inset 0 1px 4px #080d1745, inset 2px 0 var(--theme-status-info, #8ab9e8);
+}
+
+.ambient-text-row[data-preview-id]:focus-visible {
+    outline: 1px solid var(--theme-status-info, #8ab9e8);
+    outline-offset: -1px;
+}
+
 .tree-mark {
     width: 7px;
     height: 7px;

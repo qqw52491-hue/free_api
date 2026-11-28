@@ -5,6 +5,7 @@ pub(crate) mod presets;
 pub(crate) mod dispatch;
 pub(crate) mod models;
 pub(crate) mod defaults;
+pub(crate) mod team_view;
 use crate::db::DbState;
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
@@ -477,10 +478,12 @@ pub(crate) fn status(db: &DbState, parent: &str, id: &str) -> Result<Value, Stri
         body["updated_at"] = json!(updated);
         body["finished_at"] = json!(end);
     }
-    if let Ok(Some((purpose, model_id, run_start, run_end, duration_ms, cp_json))) = conn
+    if let Some((purpose, model_id, run_start, run_end, duration_ms, cp_json, parent_run, has_result, applied)) = conn
         .query_row(
-            "SELECT purpose, model_id, started_at, finished_at, duration_ms, execution_checkpoint_json FROM agent_child_runs WHERE id=?1 AND kind='task'",
-            [id],
+            "SELECT purpose, model_id, started_at, finished_at, duration_ms, execution_checkpoint_json,
+                    parent_run_id, result_json IS NOT NULL, NULLIF(applied_at, '')
+               FROM agent_child_runs WHERE id=?1 AND parent_session_id=?2 AND kind='task'",
+            params![id, parent],
             |r| {
                 Ok((
                     r.get::<_, Option<String>>(0)?,
@@ -489,11 +492,18 @@ pub(crate) fn status(db: &DbState, parent: &str, id: &str) -> Result<Value, Stri
                     r.get::<_, Option<String>>(3)?,
                     r.get::<_, Option<i64>>(4)?,
                     r.get::<_, Option<String>>(5)?,
+                    r.get::<_, String>(6)?,
+                    r.get::<_, bool>(7)?,
+                    r.get::<_, Option<String>>(8)?,
                 ))
             },
         )
         .optional()
+        .map_err(|e| e.to_string())?
     {
+        body["parent_run_id"] = json!(parent_run);
+        body["result_available"] = json!(has_result);
+        body["collected_at"] = json!(applied);
         if let Some(p) = purpose.filter(|s| !s.is_empty()) {
             body["purpose"] = json!(p);
         }
@@ -720,7 +730,9 @@ pub(crate) async fn control_child_task(
             body["parent_session_id"] = json!(owner);
             tasks.push(body);
         }
-        return Ok(json!({"tasks":tasks}));
+        let mut view = team_view::observe(state.inner(), &session_id)?;
+        view.tasks = tasks;
+        return serde_json::to_value(view).map_err(|e| e.to_string());
     }
     let id = params["child_run_id"].as_str().ok_or("缺少 child_run_id。")?;
     let (_, owner, parent_run, _) = visible_tasks(state.inner(), &session_id, Some(id))?
@@ -744,10 +756,8 @@ pub(crate) async fn control_child_task(
                 return Err("该子任务当前没有待回答的人工请求；回答未发送。".into());
             }
             let message = params["message"].as_str().ok_or("缺少回答内容。")?;
-            crate::agent::control::send_human_intervention(
-                state,
-                format!("task-{id}"),
-                message.into(),
+            crate::agent::control::send_human_reply(
+                state.inner(), &format!("task-{id}"), message.into(), None,
             )
             .await?;
             Ok(json!({"answer_sent":true}))

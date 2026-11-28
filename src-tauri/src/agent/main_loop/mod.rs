@@ -243,8 +243,8 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
     // 自由会话（未选项目）的 workspace_dir 是会话产物目录而非真实工程——
     // 证据域缺失 → 降级为非 git 基线，审查改靠副作用台账/产物链。
     // 续跑时优先恢复原任务基线，稍后在 checkpoint 选择后登记。
-    // 项目会话进入前先拿工作区软锁（独占该目录直到本次 run 结束）
-    let _workspace_run_lock = if is_project_session {
+    // 主运行持有工作区及当前附加可写目录的租约；委派沿用父任务身份。
+    let _workspace_run_lock = if delegation.is_none() {
         Some(acquire_workspace_lock(&workspace_dir, &final_session_id, &run_id, &goal).await?)
     } else {
         None

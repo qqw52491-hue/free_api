@@ -2,7 +2,7 @@
 
 use super::*;
 
-fn terminal_status(state: &str) -> Option<&'static str> {
+pub(super) fn terminal_status(state: &str) -> Option<&'static str> {
     match state {
         "succeeded" | "done" => Some("done"),
         "failed" => Some("failed"),
@@ -12,8 +12,10 @@ fn terminal_status(state: &str) -> Option<&'static str> {
 }
 
 /// 提交失败的类型：会话在途（调用方映射 409）或其他原因
+#[derive(Debug)]
 pub enum SubmitError {
     InFlight,
+    AdmissionConflict,
     Other(String),
 }
 
@@ -103,6 +105,9 @@ impl<R: tauri::Runtime> SessionRunGuard<R> {
                     .or_else(|| payload.get("message").and_then(Value::as_str))
                     .map(|s| truncate_chars(s, 400));
                 let paused = payload.get("type").and_then(Value::as_str) == Some("agent_paused");
+                if paused && payload.get("run_id").and_then(Value::as_str) != Some(listen_run.as_str()) {
+                    return;
+                }
                 let is_real_step = matches!(
                     payload.get("type").and_then(Value::as_str),
                     Some("step_done") | Some("step_error") | Some("complete")
@@ -124,6 +129,11 @@ impl<R: tauri::Runtime> SessionRunGuard<R> {
                     None
                 };
                 let paused_wait_id = payload.get("wait_id").and_then(Value::as_str).map(str::to_owned);
+                if paused && (paused_wait_id.is_none() ||
+                    paused_wait_id != crate::agent::control::current_human_wait(&listen_session, &listen_run))
+                {
+                    return;
+                }
                 patch_run(&listen_run, |record| {
                     if is_real_step {
                         record.event_count += 1;
@@ -136,7 +146,9 @@ impl<R: tauri::Runtime> SessionRunGuard<R> {
                         record.paused_reason = Some(reason);
                         record.paused_form = paused_form;
                         record.paused_wait_id = paused_wait_id;
-                    } else if record.status == "waiting_human" {
+                    } else if record.status == "waiting_human"
+                        && record.paused_wait_id != crate::agent::control::current_human_wait(&listen_session, &listen_run)
+                    {
                         record.status = "running".to_string();
                         record.paused_reason = None;
                         record.paused_form = None;
@@ -156,6 +168,9 @@ impl<R: tauri::Runtime> SessionRunGuard<R> {
                 let Ok(payload) = serde_json::from_str::<Value>(event.payload()) else {
                     return;
                 };
+                if payload.get("run_id").and_then(Value::as_str).is_some_and(|id| id != state_run) {
+                    return;
+                }
                 let message = payload
                     .get("message")
                     .and_then(Value::as_str)
@@ -230,7 +245,7 @@ impl<R: tauri::Runtime> SessionRunGuard<R> {
         let error = if status == "failed" {
             outcome.as_ref().err().cloned().or(message).map(|text| truncate_chars(&text, 2_000))
         } else { None };
-        let result = last_assistant_message(&self.app, &self.session_id);
+        let result = assistant_message_for_run(&self.app, &self.session_id, &self.run_id);
         patch_run(&self.run_id, |record| {
             record.status = status.clone();
             record.error = error.clone();
@@ -274,6 +289,40 @@ impl<R: tauri::Runtime> SessionRunGuard<R> {
 /// 统一的任务提交入口（HTTP 处理器与定时调度器共用）：
 /// 登记 RunRecord → 订阅进度事件 → 后台 spawn 主循环。
 /// 同一会话同时只允许一个在途任务（含 waiting_human）。
+/// Returns the execution owner only on first admission. An existing trace is a
+/// receipt even after its in-memory record has been evicted or the app restarted.
+fn reserve_acp_run(
+    db: &DbState,
+    run_id: &str,
+    session_id: &str,
+    goal: &str,
+) -> Result<Option<crate::agent::control::SessionExecutionOwner>, SubmitError> {
+    let conn = db.0.lock().map_err(|error| SubmitError::Other(error.to_string()))?;
+    let existing = conn.query_row(
+        "SELECT session_id, goal FROM agent_run_traces WHERE id=?1",
+        [run_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    ).optional().map_err(|error| SubmitError::Other(error.to_string()))?;
+    if let Some((bound_session, bound_goal)) = existing {
+        return if bound_session == session_id && bound_goal == goal {
+            Ok(None)
+        } else {
+            Err(SubmitError::AdmissionConflict)
+        };
+    }
+    let owner = crate::agent::control::SessionExecutionOwner::acquire(session_id, run_id)
+        .map_err(|_| SubmitError::InFlight)?;
+    let inserted = conn.execute(
+        "INSERT INTO agent_run_traces (id, session_id, goal, status, steps_json, started_at, updated_at)
+         SELECT ?1, ?2, ?3, 'running', '[]', ?4, ?4 WHERE EXISTS (SELECT 1 FROM chat_sessions WHERE id=?2)",
+        rusqlite::params![run_id, session_id, goal, now_ts()],
+    ).map_err(|error| SubmitError::Other(error.to_string()))?;
+    if inserted != 1 {
+        return Err(SubmitError::Other("会话已移除，任务未受理。".into()));
+    }
+    Ok(Some(owner))
+}
+
 pub(crate) fn register_and_spawn_run(
     app: AppHandle,
     session_id: String,
@@ -285,10 +334,29 @@ pub(crate) fn register_and_spawn_run(
     _phase_push: bool,
     plan_mode: Option<String>,
     caller_notifies: bool,
+    requested_run_id: Option<String>,
 ) -> Result<String, SubmitError> {
-    let run_id = uuid::Uuid::new_v4().to_string();
-    let admitted = crate::agent::control::SessionExecutionOwner::acquire(&session_id, &run_id)
-        .map_err(|_| SubmitError::InFlight)?;
+    let persisted_admission = requested_run_id.is_some();
+    let run_id = requested_run_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let db_state = app.state::<DbState>();
+    let admitted = if persisted_admission {
+        let Some(owner) = reserve_acp_run(db_state.inner(), &run_id, &session_id, &goal)? else {
+            return Ok(run_id);
+        };
+        owner
+    } else {
+        let owner = crate::agent::control::SessionExecutionOwner::acquire(&session_id, &run_id)
+            .map_err(|_| SubmitError::InFlight)?;
+        let conn = db_state.0.lock().map_err(|error| SubmitError::Other(error.to_string()))?;
+        let exists = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM chat_sessions WHERE id=?1)",
+            [&session_id], |row| row.get::<_, bool>(0),
+        ).map_err(|error| SubmitError::Other(error.to_string()))?;
+        if !exists {
+            return Err(SubmitError::Other("会话已移除，任务未受理。".into()));
+        }
+        owner
+    };
     let started_at = now_ts();
     println!(
         "[channel] run {run_id} 启动 session={session_id} 重试上限={}",
@@ -324,16 +392,11 @@ pub(crate) fn register_and_spawn_run(
     });
 
     // 立即持久化该轮任务初始状态（用户消息气泡由 SessionRunGuard::new 在 channel-run-started 前写入）
-    let db_state = app.state::<DbState>();
-    let _ = crate::agent::run_trace::upsert_snapshot(
-        db_state.inner(),
-        &run_id,
-        &session_id,
-        &goal,
-        "running",
-        &[],
-        None,
-    );
+    if !persisted_admission {
+        let _ = crate::agent::run_trace::upsert_snapshot(
+            db_state.inner(), &run_id, &session_id, &goal, "running", &[], None,
+        );
+    }
 
     let spawn_app = app.clone();
     let spawn_run = run_id.clone();
@@ -368,6 +431,17 @@ pub(crate) fn register_and_spawn_run(
         if let Err(error) = outcome {
             // The main loop normally records its own terminal status. Setup
             // can fail before its guard has been created.
+            if persisted_admission {
+                let db = spawn_app.state::<DbState>();
+                if let Ok(conn) = db.0.lock() {
+                    let _ = conn.execute(
+                        "UPDATE agent_run_traces SET status='failed', updated_at=?3, completed_at=?3,
+                         completion_json=json_object('reason', ?4)
+                         WHERE id=?1 AND session_id=?2 AND status='running'",
+                        rusqlite::params![spawn_run, spawn_session, now_ts(), error],
+                    );
+                };
+            }
             patch_run(&spawn_run, |record| {
                 if terminal_status(&record.status).is_none() {
                     record.status = "failed".into();
@@ -413,6 +487,60 @@ mod completion_notification_tests {
 mod state_regressions {
     use super::*;
     use crate::agent::{checkpoint::{AgentCheckpoint, AgentPhase}, context::SandwichContext, run_state::AgentRunMachine};
+
+    #[test]
+    fn same_acp_admission_is_reused_after_the_owner_exits() {
+        let conn = crate::db::init_db(&std::path::PathBuf::from(":memory:")).unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO chat_sessions(id,title,model_id,created_at,updated_at)
+             VALUES (?1,'audit','','now','now')",
+            [&session],
+        ).unwrap();
+        let db = DbState(std::sync::Arc::new(std::sync::Mutex::new(conn)));
+        let run = uuid::Uuid::new_v4().to_string();
+        let owner = reserve_acp_run(&db, &run, &session, "original").unwrap().unwrap();
+        assert!(reserve_acp_run(&db, &run, &session, "original").unwrap().is_none());
+        assert!(matches!(reserve_acp_run(&db, "another-run", &session, "other"), Err(SubmitError::InFlight)));
+        db.0.lock().unwrap().execute("UPDATE agent_run_traces SET status='succeeded' WHERE id=?1", [&run]).unwrap();
+        drop(owner);
+        crate::agent::run_trace::upsert_snapshot(&db, &run, &session, "changed in desktop", "succeeded", &[], None).unwrap();
+        assert!(reserve_acp_run(&db, &run, &session, "original").unwrap().is_none());
+        assert!(matches!(reserve_acp_run(&db, &run, &session, "other"), Err(SubmitError::AdmissionConflict)));
+        assert!(matches!(reserve_acp_run(&db, &run, "other-session", "original"), Err(SubmitError::AdmissionConflict)));
+        let count: i64 = db.0.lock().unwrap().query_row(
+            "SELECT count(*) FROM agent_run_traces WHERE session_id=?1 AND status='succeeded'",
+            [&session], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 1);
+
+        let interrupted = uuid::Uuid::new_v4().to_string();
+        let owner = reserve_acp_run(&db, &interrupted, &session, "interrupted").unwrap().unwrap();
+        drop(owner);
+        let conn = db.0.lock().unwrap();
+        assert_eq!(crate::db::mark_orphan_running_traces_interrupted(&conn).unwrap(), 1);
+        drop(conn);
+        assert!(reserve_acp_run(&db, &interrupted, &session, "interrupted").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn current_wait_ignores_unrelated_progress_and_stale_questions() {
+        let app = tauri::test::mock_app();
+        let session = uuid::Uuid::new_v4().to_string();
+        let run = uuid::Uuid::new_v4().to_string();
+        let progress = format!("agent-progress-{session}");
+        let guard = SessionRunGuard::new(app.handle(), &session, &run, "wait", 1);
+        let wait = crate::agent::control::HumanWait::open(&session, &run);
+        app.emit(&progress, json!({"run_id":run,"type":"agent_paused","wait_id":wait.id,"message":"current"})).unwrap();
+        app.emit(&progress, json!({"run_id":"earlier-run","type":"agent_paused","wait_id":"old","message":"stale"})).unwrap();
+        app.emit(&progress, json!({"run_id":run,"type":"child_job_progress","message":"working"})).unwrap();
+        let record = runs_store().lock().unwrap().remove(&run).unwrap();
+        assert_eq!(record.status, "waiting_human");
+        assert_eq!(record.paused_reason.as_deref(), Some("current"));
+        assert_eq!(record.paused_wait_id.as_deref(), Some(wait.id.as_str()));
+        app.unlisten(guard.event_id);
+        app.unlisten(guard.state_event_id);
+    }
 
     #[tokio::test]
     async fn state_regression_handled_business_failure_must_not_be_reported_as_done() {

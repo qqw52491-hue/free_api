@@ -24,7 +24,7 @@ assert(pendingTemplate, 'pending status must be mounted in the real template');
 const pendingRender = new Function('Vue', compiler.compile(pendingTemplate, {mode:'function'}).code)(vue);
 const pendingView = (s, overrides={}) => pendingRender({completionPending:s.completionPending.value,
     isRunning:s.isRunning.value,completionMessage:s.completionMessage.value,
-    completionPreview:s.streamingSummary.value,...overrides}, []);
+    completionPreview:s.streamingSummary.value,isPreviewStreaming:false,...overrides}, []);
 function viewText(node) {
     if (typeof node === 'string') return node;
     if (Array.isArray(node)) return node.map(viewText).join('');
@@ -52,10 +52,12 @@ function timeline(s, {historyTurns = [], liveRunId} = {}) {
 }
 const progress = p => emit('agent-progress-existing-session', p);
 const tool = p => emit('agent-tool-event-existing-session', p);
-const state = (state, message) => emit('agent-run-state-existing-session', {state, message});
+const state = (state, message) => emit('agent-run-state-existing-session', {state, message, run_id:'fixture-run-58'});
 async function start() {
-    const s = await session('failed');
-    await emit('channel-run-started', {session_id:'existing-session', goal:'final answer regression'});
+    const s = await session('failed', {invoke: {
+        cancel_agent_execution: ({runId}) => ({delivered:true,has_active_run:true,active_run_id:runId}),
+    }});
+    await emit('channel-run-started', {session_id:'existing-session', run_id: 'fixture-run-58', goal:'final answer regression'});
     return s;
 }
 function draft(text, done = false) { progress({type:'summary_stream', content:text, done}); }
@@ -137,7 +139,9 @@ async function main() {
     assert.equal(entries()[0].outcome,'failed');
 
     s = await start(); entries = timeline(s); draft(long);
-    await s.requestStop();
+    assert.equal(await s.requestStop(), true);
+    assert.equal(entries().length, 0, 'stop request acknowledgment cannot publish a terminal result');
+    await state('cancelled','任务已停止');
     assert.equal(s.streamingSummary.value,'');
     assert.equal(s.finalSummary.value,'');
     assert.equal(s.completionPending.value,false);
@@ -182,7 +186,7 @@ async function main() {
     s = await start(); entries = timeline(s);
     progress({type:'complete',success:true,finish:{summary:'上轮已交付'}});
     assert.equal(entries().length,1);
-    await emit('channel-run-started',{session_id:'existing-session',goal:'new background task'});
+    await emit('channel-run-started',{session_id:'existing-session',run_id: 'fixture-run-185', goal:'new background task'});
     assert.equal(s.completionMessage.value,'');
     assert.equal(s.finalSummary.value,'');
     assert.equal(entries().length,0);

@@ -265,11 +265,9 @@ pub(super) async fn dispatch_job_cancel(
         };
         let row: Option<(String, String, String)> = conn
             .query_row(
-                "SELECT status, job_type, params_json FROM agent_background_jobs
-                 WHERE id=?1 AND parent_session_id=?2 AND (parent_run_id=?3 OR parent_run_id IN (
-                    SELECT old.id FROM agent_run_traces current JOIN agent_run_traces old
-                    ON old.session_id=current.session_id AND old.history_task_id=current.history_task_id
-                    WHERE current.id=?3 AND current.history_task_id IS NOT NULL))",
+                concat!("SELECT status, job_type, params_json FROM agent_background_jobs
+                         WHERE id=?1 AND parent_session_id=?2 AND parent_run_id IN (",
+                         crate::agent::run_trace::task_run_ids!("?3", "?2"), ")"),
                 rusqlite::params![job_id, ctx.final_session_id, ctx.parent_run_id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )

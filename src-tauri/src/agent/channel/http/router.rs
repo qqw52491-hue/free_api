@@ -69,6 +69,7 @@ pub(crate) fn acp_router(state: Arc<ChannelState>) -> Router {
         .route("/channel/session", post(handler_session))
         .route("/channel/session/{session_id}/stream", get(handler_session_stream))
         .route("/channel/task", post(handler_task))
+        .route("/channel/acp/task/{run_id}", post(handler_acp_task))
         .route("/channel/run/{run_id}", get(handler_run_status))
         .route("/channel/run/{run_id}/answer", post(handler_run_answer))
         .route("/channel/run/{run_id}/cancel", post(handler_run_cancel))

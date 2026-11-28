@@ -142,11 +142,15 @@ pub(crate) async fn handler_delete_session(
     }
     let db = state.app.state::<DbState>();
     let id = session_id.trim();
-    if let Ok(conn) = db.0.lock() {
-        let app_dir = state.app.path().app_data_dir().ok();
-        let _ = crate::db::delete_session_completely(&conn, id, app_dir.as_deref());
-    }
-    crate::agent::retrieval::clear_session_search_index(id);
+    let app_dir = state.app.path().app_data_dir().ok();
+    crate::commands::chat::delete_idle_session(db.inner(), id, app_dir.as_deref())
+        .map_err(|error| match error {
+            crate::commands::chat::DeleteSessionError::InUse => (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": crate::commands::chat::SESSION_DELETE_IN_USE })),
+            ),
+            crate::commands::chat::DeleteSessionError::Storage(error) => internal_error(error),
+        })?;
     notify_session_event(id, "deleted");
     let _ = state.app.emit("channel-run-done", json!({ "session_id": id, "status": "deleted", "at": now_ts() }));
     Ok(Json(json!({ "ok": true, "session_id": id })))
@@ -220,10 +224,31 @@ pub(crate) async fn handler_task(
     headers: HeaderMap,
     Json(req): Json<TaskReq>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    submit_task(&state, &headers, req, None)
+}
+
+pub(crate) async fn handler_acp_task(
+    AxumState(state): AxumState<Arc<ChannelState>>,
+    headers: HeaderMap,
+    AxumPath(run_id): AxumPath<String>,
+    Json(req): Json<TaskReq>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    submit_task(&state, &headers, req, Some(run_id))
+}
+
+fn submit_task(
+    state: &ChannelState,
+    headers: &HeaderMap,
+    req: TaskReq,
+    requested_run_id: Option<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let config = state.request_config();
-    if !authorized(&headers, &config) {
+    if !authorized(headers, &config) {
         return Err(unauthorized());
     }
+    let requested_run_id = requested_run_id.map(|id| {
+        uuid::Uuid::parse_str(&id).map(|id| id.to_string()).map_err(|_| bad_request("运行标识无效"))
+    }).transpose()?;
     let goal = req.goal.trim().to_string();
     if goal.is_empty() {
         return Err(bad_request("任务内容不能为空"));
@@ -334,13 +359,18 @@ pub(crate) async fn handler_task(
         config.phase_pushes,
         req.plan_mode,
         req.caller_notifies,
+        requested_run_id,
     )
     .map_err(|error| match error {
         SubmitError::InFlight => (
             StatusCode::CONFLICT,
             Json(json!({"error": "该会话已有在途任务", "session_id": session_id})),
         ),
-        SubmitError::Other(message) => bad_request(&message),
+        SubmitError::AdmissionConflict => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "提交标识已绑定其他会话或任务。"})),
+        ),
+        SubmitError::Other(message) => internal_error(message),
     })?;
 
     Ok(Json(json!({

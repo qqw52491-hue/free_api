@@ -99,7 +99,7 @@ async function main() {
     global.document.execCommand = () => false; assert.equal(await copyReviewDiagnostics(summary), false);
     delete global.document; delete global.HTMLElement;
     const s = await session('failed');
-    await emit('channel-run-started', { session_id: 'existing-session', goal: 'diagnostic event regression' });
+    await emit('channel-run-started', { session_id: 'existing-session', run_id: 'fixture-run-102', goal: 'diagnostic event regression' });
     const send = p => emit('agent-progress-existing-session', { ...base, phase: 'waiting', failure_kind: '', ...p });
     send({}); assert.equal(s.reviewProgress.value.length, 1);
     s.clearSession(true); s.isRunning.value = false;
@@ -110,7 +110,7 @@ async function main() {
     assert.equal(s.reviewProgress.value[0].id, base.review_id, 'ended run does not introduce unknown attempts');
     send({ phase: 'responding', elapsed_ms: 67000 });
     assert.equal(s.reviewProgress.value[0].phase, 'cancelled');
-    await emit('channel-run-started', { session_id: 'existing-session', goal: 'next task' });
+    await emit('channel-run-started', { session_id: 'existing-session', run_id: 'fixture-run-113', goal: 'next task' });
     assert.equal(s.reviewProgress.value.length, 0);
     s.clearSession(); assert.equal(s.reviewProgress.value.length, 0);
     console.log('PASS review diagnostics: 9 outcomes, unknown legacy fields, whitelist privacy, real SFC copy/failure/reset, clipboard fallback, completion retention, late terminal events and new-run isolation');

@@ -1206,6 +1206,7 @@ const props = defineProps<{
     sessionId: string;
     isRunning: boolean;
     isWaitingForHuman: boolean;
+    humanWaitKey?: string | null;
     isSending: boolean;
     stopRequested: boolean;
     canStart: boolean;
@@ -1231,7 +1232,7 @@ const emit = defineEmits<{
     "update:budget-mode": [mode: ContextBudgetMode];
     "update:autoPilot": [value: boolean];
     "update:planMode": [mode: PlanExecutionMode];
-    submit: [payload?: { text: string; attachments: ParsedAttachment[]; mode?: "interrupt" | "queue" | "new"; taskStartMode?: "resume" | "new"; onRejected?: () => void }];
+    submit: [payload?: { text: string; attachments: ParsedAttachment[]; mode?: "interrupt" | "queue" | "new"; taskStartMode?: "resume" | "new"; humanWaitKey?: string | null; onRejected?: () => void }];
     "cancel-queue": [index: number];
     stop: [];
     "open-settings": [];
@@ -2371,6 +2372,7 @@ const placeholderText = computed(() => props.isRunning
 );
 const canSubmit = computed(() => {
     return !props.stopRequested && (props.isRunning || Boolean(selectedProModel.value && selectedFlashModel.value))
+        && (!props.isWaitingForHuman || Boolean(props.humanWaitKey))
         && (Boolean(props.draft.trim()) || attachments.value.length > 0);
 });
 
@@ -2379,6 +2381,7 @@ async function submit(explicitMode?: "interrupt" | "queue" | "new" | Event) {
 
     const userText = props.draft.trim();
     const replacing = explicitMode === "new";
+    const humanWaitKey = !replacing && props.isWaitingForHuman ? props.humanWaitKey ?? null : undefined;
     const mode = typeof explicitMode === "string"
         ? explicitMode
         : props.isRunning && !props.isWaitingForHuman ? submitMode.value : undefined;
@@ -2396,10 +2399,10 @@ async function submit(explicitMode?: "interrupt" | "queue" | "new" | Event) {
     }
 
     const currentAtts = [...attachments.value];
-    const onRejected = replacing ? () => {
+    const onRejected = () => {
         if (!props.draft.trim()) emit("update:draft", userText);
         attachments.value = [...currentAtts, ...attachments.value];
-    } : undefined;
+    };
     const startMode = replacing ? "new" : taskStartMode.value;
 
     if (currentAtts.length > 0) {
@@ -2438,9 +2441,9 @@ async function submit(explicitMode?: "interrupt" | "queue" | "new" | Event) {
 
         const visiblePrompt = promptParts.join("\n\n");
         attachments.value = [];
-        emit("submit", { text: visiblePrompt, attachments: realAttachments, mode, taskStartMode: startMode, onRejected });
+        emit("submit", { text: visiblePrompt, attachments: realAttachments, mode, taskStartMode: startMode, humanWaitKey, onRejected });
     } else {
-        emit("submit", { text: userText, attachments: [], mode, taskStartMode: startMode, onRejected });
+        emit("submit", { text: userText, attachments: [], mode, taskStartMode: startMode, humanWaitKey, onRejected });
     }
 }
 

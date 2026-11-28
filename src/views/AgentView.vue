@@ -141,7 +141,8 @@
                         @select-project="handleSelectProject"
                         @open-session="openTreeSession"
                         @new-project-session="handleNewProjectSession"
-                        @session-deleted="handleSessionDeleted"
+                        @close-session="closeTab"
+                        @delete-session="requestDeleteSession"
                         @fork-session="(s) => forkSessionDirectly(s.id)"
                     />
                 </div>
@@ -163,7 +164,9 @@
                             :key="tab.id"
                             class="task-row"
                             :class="{ active: currentNavView === 'agent' && activeTabId === tab.id, 'is-draft': tab.isDraft }"
+                            tabindex="0"
                             @click="selectTask(tab.id)"
+                            @keydown.enter.self.prevent="selectTask(tab.id)"
                             @dblclick="startRename(tab)"
                         >
                             <span class="task-state" :class="{ running: tab.running }"></span>
@@ -188,7 +191,12 @@
                                     <path d="M6 8.5v7" /><path d="M18 8.5c0 4-4 4-8.5 5.5" />
                                 </svg>
                             </button>
-                            <button type="button" class="task-close" title="关闭任务" @click.stop="closeTab(tab.id)">×</button>
+                            <button v-if="activeTabId === tab.id || tab.isDraft" type="button" class="task-close" title="关闭对话面板" aria-label="关闭对话面板" @click.stop="closeTab(tab.id)">×</button>
+                            <button v-if="!tab.isDraft" type="button" class="task-action-btn task-delete" title="删除会话" aria-label="删除会话" @click.stop="requestDeleteSession(tab.id, tab.label)">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                                    <path d="M3 6h18M9 6V3h6v3m4 0-1 15H6L5 6m5 4v7m4-7v7"/>
+                                </svg>
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -257,7 +265,7 @@
                     @open-session="openTreeSession"
                     @start-task="handleStartProjectTask"
                     @project-deleted="handleProjectDeleted"
-                    @session-deleted="handleSessionDeleted"
+                    @delete-session="requestDeleteSession"
                     @refresh-projects="projectTreeRef?.refreshProjects()"
                     @refresh-models="loadAllModels"
                 />
@@ -334,12 +342,14 @@
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { ask } from "@tauri-apps/plugin-dialog";
 import AgentPanel from "../components/AgentPanel.vue";
 import AppUpdateControl from "../components/AppUpdateControl.vue";
 import ThemeToggle from "../components/common/ThemeToggle.vue";
 import ProjectSidebarTree, { type AgentProject, type TreeSessionItem } from "../components/ProjectSidebarTree.vue";
 import ProjectWorkspace from "../components/ProjectWorkspace.vue";
 import { useGlobalFileDrop, type DraggedPathItem } from "../composables/useGlobalFileDrop";
+import { fillDefaultModelRoutes } from "../composables/useModelRoutingPreferences";
 import { createSerialRefresher } from "../components/agent/delegatedTaskState";
 
 const ApiManager = defineAsyncComponent(() => import("./ApiManager.vue"));
@@ -646,12 +656,16 @@ function handleSessionPromoted(oldId: string, newId: string, title: string, proj
     projectTreeRef.value?.refreshProjects();
 }
 
+let sessionListRequest = 0;
 function handleSessionDeleted(sessionId: string) {
+    // A listing read before deletion cannot put the removed row back.
+    sessionListRequest++;
     const index = tabs.value.findIndex((t) => t.id === sessionId);
     if (index >= 0) {
         tabs.value.splice(index, 1);
         activatedPanelIds.delete(sessionId);
         delete panelRefs[sessionId];
+        delete forkDrafts.value[sessionId];
         if (activeTabId.value === sessionId) {
             activeTabId.value = tabs.value[0]?.id || "";
         }
@@ -668,7 +682,10 @@ async function loadAllModels() {
     const sequence = ++modelLoadSequence;
     try {
         const models = await invoke<ModelOption[]>("get_all_models_with_platform");
-        if (sequence === modelLoadSequence) allModels.value = models;
+        if (sequence === modelLoadSequence) {
+            fillDefaultModelRoutes(models);
+            allModels.value = models;
+        }
     } catch {
         // Keep the last successful catalog if a refresh fails.
     }
@@ -726,8 +743,10 @@ async function backfillSessionTitles(sessions: ChatSessionRow[]) {
 }
 
 async function loadSessions() {
+    const request = ++sessionListRequest;
     try {
         const sessions = await invoke<ChatSessionRow[]>("get_sessions");
+        if (request !== sessionListRequest) return;
         
         // 增量合并现有 tabs：草稿与已激活(用户打开过)的 tab 永久保留——项目会话掉出
         // get_sessions 的 LIMIT 窗口也绝不被轮询踢掉并重置 activeTabId；
@@ -763,18 +782,41 @@ async function loadSessions() {
     } catch {}
 }
 
-async function closeTab(id: string) {
-    const index = tabs.value.findIndex((tab) => tab.id === id);
-    if (index < 0) return;
-    if (!id.startsWith("draft-")) {
-        await invoke("delete_session", { id });
+function closeTab(id: string) {
+    const tab = tabs.value.find(item => item.id === id);
+    if (!tab) return;
+    const wasActive = activeTabId.value === id;
+    if (tab.isDraft) {
+        if (tab.running) return;
+        handleSessionDeleted(id);
     }
-    tabs.value.splice(index, 1);
-    activatedPanelIds.delete(id);
-    delete panelRefs[id];
-    if (!tabs.value.length) { createNewTask(); return; }
-    if (activeTabId.value === id) activeTabId.value = tabs.value[Math.max(0, index - 1)].id;
-    projectTreeRef.value?.refreshProjects();
+    if (wasActive || !tabs.value.length) createNewTask();
+}
+
+const pendingSessionDeletes = new Set<string>();
+async function requestDeleteSession(id: string, title: string, projectId?: string) {
+    if (pendingSessionDeletes.has(id)) return;
+    if (tabs.value.find(tab => tab.id === id)?.running) {
+        showToast("这个会话还有任务在运行，请先停止或等它结束。", "warning");
+        return;
+    }
+    pendingSessionDeletes.add(id);
+    try {
+        if (!await ask(`永久删除「${title}」及其历史记录和附件？`, {
+            title: "删除会话", kind: "warning", okLabel: "永久删除", cancelLabel: "取消",
+        })) return;
+        await invoke("delete_session", { id });
+        handleSessionDeleted(id);
+        if (!tabs.value.length) createNewTask();
+        if (projectId) {
+            void projectTreeRef.value?.refreshProjectSessions([projectId]);
+            if (selectedProjectId.value === projectId) void projectWorkspaceRef.value?.loadProject();
+        }
+    } catch (error) {
+        showToast(`删除会话失败：${String(error)}`, "warning");
+    } finally {
+        pendingSessionDeletes.delete(id);
+    }
 }
 
 function startRename(tab: TabInfo) {
@@ -870,7 +912,8 @@ onMounted(async () => {
             if (payload.kind === "created" || payload.kind === "deleted") {
                 scheduleSidebarRefresh(payload.session_id);
                 if (payload.kind === "deleted") {
-                    const projectId = tabs.value.find(item => item.id === payload.session_id)?.projectId;
+                    const projectId = tabs.value.find(item => item.id === payload.session_id)?.projectId
+                        ?? projectTreeRef.value?.findCachedSessionProject(payload.session_id);
                     if (projectId) void projectTreeRef.value?.refreshProjectSessions([projectId]);
                     handleSessionDeleted(payload.session_id);
                 }
@@ -1305,10 +1348,11 @@ onUnmounted(() => {
     transition: all 0.15s;
 }
 
-.task-row:hover .task-close { display: block; }
-.task-row:hover .task-action-btn { display: inline-flex; }
+.task-row:hover .task-close, .task-row:focus-within .task-close { display: block; }
+.task-row:hover .task-action-btn, .task-row:focus-within .task-action-btn { display: inline-flex; }
 .task-close:hover { color: var(--theme-text-primary, #fff); background: rgba(var(--theme-foreground-rgb), 0.15); }
 .task-action-btn:hover { color: var(--theme-status-accent, #a5b4fc); background: rgba(129, 140, 248, 0.15); }
+.task-action-btn.task-delete:hover { color: var(--theme-status-danger, #ed9caa); }
 
 .task-rename-box {
     min-width: 0;

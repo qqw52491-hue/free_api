@@ -78,12 +78,15 @@ fn resolve(conn: &Connection, sender: &Actor, target: &str) -> Result<(Actor, St
         return Err("接收方不在当前任务的协作范围内。".into());
     };
     let target_root = root(conn, &actor)?;
-    if target_root.run != own_root.run || target_root.session != own_root.session {
+    if target_root.session != own_root.session {
+        return Err("接收方属于其他任务，消息未发送。".into());
+    }
+    if target_root.run != own_root.run {
         let same_task: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM agent_run_traces a JOIN agent_run_traces b ON b.session_id=a.session_id AND b.history_task_id=a.history_task_id WHERE a.id=?1 AND b.id=?2 AND a.session_id=?3 AND a.history_task_id IS NOT NULL)",
+            concat!("SELECT ?2 IN (", crate::agent::run_trace::task_run_ids!("?1", "?3"), ")"),
             params![own_root.run, target_root.run, own_root.session], |r| r.get(0),
         ).map_err(|e| e.to_string())?;
-        if !same_task || target_root.session != own_root.session {
+        if !same_task {
             return Err("接收方属于其他任务，消息未发送。".into());
         }
     }
@@ -274,7 +277,12 @@ pub(crate) fn deliver_main(
     }
     let messages = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn.prepare("SELECT id,sender_run_id,sender_kind,payload_json,created_at FROM agent_messages WHERE target_session_id=?2 AND claimed_run_id IS NULL AND delivered_at IS NULL AND (target_run_id=?1 OR target_run_id IN (SELECT old.id FROM agent_run_traces current JOIN agent_run_traces old ON old.session_id=current.session_id AND old.history_task_id=current.history_task_id WHERE current.id=?1 AND current.session_id=?2 AND current.history_task_id IS NOT NULL)) ORDER BY rowid LIMIT 16").map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(concat!(
+            "SELECT id,sender_run_id,sender_kind,payload_json,created_at FROM agent_messages
+             WHERE target_session_id=?2 AND claimed_run_id IS NULL AND delivered_at IS NULL
+               AND target_run_id IN (", crate::agent::run_trace::task_run_ids!("?1", "?2"), ")
+             ORDER BY rowid LIMIT 16",
+        )).map_err(|e| e.to_string())?;
         let rows = stmt.query_map(params![actor.run, actor.session], |r| {
             let raw: String = r.get(3)?;
             Ok(json!({"message_id":r.get::<_,String>(0)?,"sender_run_id":r.get::<_,String>(1)?,"sender_kind":r.get::<_,String>(2)?,"payload":serde_json::from_str::<Value>(&raw).unwrap_or(Value::Null),"created_at":r.get::<_,String>(4)?}))
@@ -380,41 +388,43 @@ pub(crate) async fn wait(
     timeout: u64,
     interrupt: &mut tokio::sync::watch::Receiver<u64>,
 ) -> Result<(), String> {
+    use crate::agent::child_task::team_view::{WaitGuard, WaitKind};
     let mut changes = crate::agent::job_engine::job_watch_receiver();
     let _ = changes.borrow_and_update();
     let deadline =
         tokio::time::Instant::now() + std::time::Duration::from_secs(timeout.clamp(1, 600));
+    let mut waiting = None;
     loop {
         if !pending(db, actor)?.is_empty() {
             return Ok(());
         }
-        if target.is_some_and(|id| crate::agent::child_task::runtime::paused(id).is_some()) {
-            // 已有真实人工请求时保持挂起，不用模型反复轮询同一张表单；收到协作消息或停止仍可唤醒。
-            tokio::select! {changed=changes.changed()=>{changed.map_err(|e|e.to_string())?;},_=interrupt.changed()=>return Err(WAIT_INTERRUPTED.into())}
-            continue;
-        }
-        if let Some(id) = target {
-            let conn = db.0.lock().map_err(|e| e.to_string())?;
-            let (target, kind) = resolve(&conn, actor, id)?;
-            let status: Option<String> = if kind == "main" {
-                conn.query_row(
-                    "SELECT status FROM agent_run_traces WHERE id=?1",
-                    [&target.run],
-                    |r| r.get(0),
-                )
-                .optional()
-            } else {
-                conn.query_row(
-                    "SELECT status FROM agent_child_runs WHERE id=?1",
-                    [&target.run],
-                    |r| r.get(0),
-                )
-                .optional()
-            }
-            .map_err(|e| e.to_string())?;
-            if !matches!(status.as_deref(), Some("queued" | "running" | "waiting_human")) {
+        let target_paused = if let Some(id) = target {
+            let (target_run, status) = {
+                let conn = db.0.lock().map_err(|e| e.to_string())?;
+                let (target, kind) = resolve(&conn, actor, id)?;
+                let query = if kind == "main" {
+                    "SELECT status FROM agent_run_traces WHERE id=?1"
+                } else {
+                    "SELECT status FROM agent_child_runs WHERE id=?1"
+                };
+                let status: Option<String> = conn.query_row(query, [&target.run], |r| r.get(0))
+                    .optional().map_err(|e| e.to_string())?;
+                (target.run, status)
+            };
+            let paused = crate::agent::child_task::runtime::paused(&target_run).is_some();
+            if !paused && !matches!(status.as_deref(), Some("queued" | "running" | "waiting_human")) {
                 return Ok(());
             }
+            waiting.get_or_insert_with(|| WaitGuard::enter(&actor.run, WaitKind::Inbox, &[target_run]));
+            paused
+        } else {
+            waiting.get_or_insert_with(|| WaitGuard::enter(&actor.run, WaitKind::Inbox, &[]));
+            false
+        };
+        if target_paused {
+            // 已有人工请求时保持挂起；收到协作消息或停止仍可唤醒。
+            tokio::select! {changed=changes.changed()=>{changed.map_err(|e|e.to_string())?;},_=interrupt.changed()=>return Err(WAIT_INTERRUPTED.into())}
+            continue;
         }
         tokio::select! { _=tokio::time::sleep_until(deadline)=>return Ok(()),changed=changes.changed()=>{changed.map_err(|e|e.to_string())?;},_=interrupt.changed()=>return Err(WAIT_INTERRUPTED.into()) }
     }

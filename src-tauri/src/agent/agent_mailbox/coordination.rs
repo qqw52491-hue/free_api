@@ -8,7 +8,11 @@ const PURPOSE: &str = "readonly_inbox";
 /// A registered message counts before an executor is started. Failed/cancelled
 /// receivers remain visible, but do not become an obligation to restart them.
 pub(super) fn pending_on(conn: &Connection, root: &str) -> Result<bool, String> {
-    conn.query_row("SELECT EXISTS(SELECT 1 FROM agent_messages m JOIN agent_child_runs c ON c.id=COALESCE(m.claimed_run_id,m.target_run_id) WHERE (m.root_run_id=?1 OR m.root_run_id IN (SELECT old.id FROM agent_run_traces current JOIN agent_run_traces old ON old.session_id=current.session_id AND old.history_task_id=current.history_task_id WHERE current.id=?1 AND current.history_task_id IS NOT NULL)) AND m.sender_kind IN ('agent_material','peer_answer') AND m.delivered_at IS NULL AND c.status IN ('queued','running','succeeded'))",
+    conn.query_row(concat!(
+        "SELECT EXISTS(SELECT 1 FROM agent_messages m JOIN agent_child_runs c ON c.id=COALESCE(m.claimed_run_id,m.target_run_id)
+         WHERE m.root_run_id IN (", crate::agent::run_trace::task_run_ids!("?1"), ")
+           AND m.sender_kind IN ('agent_material','peer_answer') AND m.delivered_at IS NULL AND c.status IN ('queued','running','succeeded'))",
+        ),
         [root], |r| r.get(0)).map_err(|e|e.to_string())
 }
 
@@ -18,7 +22,19 @@ fn claim(db: &DbState) -> Result<Vec<Ticket>, String> {
     let mut conn = db.0.lock().map_err(|e| e.to_string())?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let candidates = {
-        let mut stmt = tx.prepare("SELECT m.target_run_id,m.target_session_id,m.root_run_id,active.id,active.session_id,c.model_id,c.workspace_root,COALESCE(c.result_json,'') FROM agent_messages m JOIN agent_child_runs c ON c.id=m.target_run_id JOIN agent_run_traces original ON original.id=m.root_run_id JOIN agent_run_traces active ON (active.id=original.id OR (original.history_task_id IS NOT NULL AND active.session_id=original.session_id AND active.history_task_id=original.history_task_id)) AND active.status IN ('running','waiting_human') WHERE m.sender_kind IN ('agent_material','peer_answer') AND m.delivered_at IS NULL AND m.claimed_run_id IS NULL AND c.status='succeeded' AND (SELECT COUNT(*) FROM agent_run_traces candidate WHERE (candidate.id=original.id OR (original.history_task_id IS NOT NULL AND candidate.session_id=original.session_id AND candidate.history_task_id=original.history_task_id)) AND candidate.status IN ('running','waiting_human'))=1 GROUP BY m.target_run_id,m.root_run_id,active.id ORDER BY MIN(m.rowid)").map_err(|e|e.to_string())?;
+        let mut stmt = tx.prepare(concat!(
+            "SELECT m.target_run_id,m.target_session_id,m.root_run_id,active.id,active.session_id,
+                    c.model_id,c.workspace_root,COALESCE(c.result_json,'')
+             FROM agent_messages m JOIN agent_child_runs c ON c.id=m.target_run_id
+             JOIN agent_run_traces active ON active.id=(
+                 SELECT CASE WHEN COUNT(*)=1 THEN MIN(candidate.id) END
+                 FROM agent_run_traces candidate WHERE candidate.id IN (",
+                 crate::agent::run_trace::task_run_ids!("m.root_run_id"), ")
+                   AND candidate.status IN ('running','waiting_human'))
+             WHERE m.sender_kind IN ('agent_material','peer_answer') AND m.delivered_at IS NULL
+               AND m.claimed_run_id IS NULL AND c.status='succeeded'
+             GROUP BY m.target_run_id,m.root_run_id,active.id ORDER BY MIN(m.rowid)",
+        )).map_err(|e|e.to_string())?;
         let rows = stmt
             .query_map([], |r| {
                 Ok((
@@ -94,7 +110,12 @@ pub(crate) fn kick(db: &DbState) {
 pub(crate) fn list(db: &DbState, actor: &Actor, offset: u64) -> Result<Value, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let owner = root(&conn, actor)?;
-    let mut stmt=conn.prepare("SELECT m.id,m.sender_run_id,m.target_run_id,m.claimed_run_id,m.created_at,m.delivered_at,c.status FROM agent_messages m LEFT JOIN agent_child_runs c ON c.id=COALESCE(m.claimed_run_id,m.target_run_id) WHERE (m.root_run_id=?1 OR m.root_run_id IN (SELECT old.id FROM agent_run_traces current JOIN agent_run_traces old ON old.session_id=current.session_id AND old.history_task_id=current.history_task_id WHERE current.id=?1 AND current.history_task_id IS NOT NULL)) AND m.sender_kind IN ('agent_material','peer_answer') ORDER BY m.rowid LIMIT 101 OFFSET ?2").map_err(|e|e.to_string())?;
+    let mut stmt = conn.prepare(concat!(
+        "SELECT m.id,m.sender_run_id,m.target_run_id,m.claimed_run_id,m.created_at,m.delivered_at,c.status
+         FROM agent_messages m LEFT JOIN agent_child_runs c ON c.id=COALESCE(m.claimed_run_id,m.target_run_id)
+         WHERE m.root_run_id IN (", crate::agent::run_trace::task_run_ids!("?1"), ")
+           AND m.sender_kind IN ('agent_material','peer_answer') ORDER BY m.rowid LIMIT 101 OFFSET ?2",
+    )).map_err(|e|e.to_string())?;
     let rows=stmt.query_map(params![owner.run,offset.min(i64::MAX as u64)],|r|Ok(json!({"message_id":r.get::<_,String>(0)?,"sender_run_id":r.get::<_,String>(1)?,"recipient_run_id":r.get::<_,String>(2)?,"execution_run_id":r.get::<_,Option<String>>(3)?,"created_at":r.get::<_,String>(4)?,"received_at":r.get::<_,Option<String>>(5)?,"execution_status":r.get::<_,Option<String>>(6)?}))).map_err(|e|e.to_string())?;
     let mut items = rows
         .collect::<Result<Vec<_>, _>>()

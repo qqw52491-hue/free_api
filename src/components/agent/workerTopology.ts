@@ -1,5 +1,10 @@
 import type { AgentWorkerItem } from "./types";
 
+export interface WorkerBranch {
+    worker: AgentWorkerItem;
+    children: WorkerBranch[];
+}
+
 export function workerTopology(workers: readonly AgentWorkerItem[]) {
     const children = new Map<string | null, AgentWorkerItem[]>();
     const ids = new Set(workers.map(worker => worker.id));
@@ -12,18 +17,24 @@ export function workerTopology(workers: readonly AgentWorkerItem[]) {
     }
 
     const seen = new Set<string>();
-    const rows: Array<{ worker: AgentWorkerItem; depth: number; connected: boolean }> = [];
-    function append(worker: AgentWorkerItem, depth: number, connected: boolean) {
-        if (seen.has(worker.id)) return;
-        seen.add(worker.id);
-        rows.push({ worker, depth, connected });
-        for (const child of children.get(worker.id) ?? []) append(child, depth + 1, connected);
+    function collect(group: readonly AgentWorkerItem[]): WorkerBranch[] {
+        const branches: WorkerBranch[] = [];
+        for (const worker of group) {
+            if (seen.has(worker.id)) continue;
+            seen.add(worker.id);
+            branches.push({
+                worker,
+                children: collect(children.get(worker.id) ?? []),
+            });
+        }
+        return branches;
     }
-    for (const worker of children.get(null) ?? []) append(worker, 1, true);
+    const connected = collect(children.get(null) ?? []);
     // Start unlinked trees at their own roots even when the input order is reversed.
-    for (const worker of workers) {
-        if (!worker.parentWorkerId || !ids.has(worker.parentWorkerId)) append(worker, 0, false);
-    }
-    for (const worker of workers) append(worker, 0, false);
-    return rows;
+    const unlinked = collect(workers.filter(({ parentWorkerId }) =>
+        parentWorkerId === undefined || (parentWorkerId !== null && !ids.has(parentWorkerId)),
+    ));
+    // If old records contain a cycle, show each member once under an unlinked root.
+    unlinked.push(...collect(workers));
+    return { connected, unlinked };
 }

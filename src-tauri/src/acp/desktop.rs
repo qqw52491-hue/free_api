@@ -223,20 +223,21 @@ impl Desktop {
 
     pub(crate) async fn start_task(
         &self,
+        run_id: &str,
         session_id: &str,
         goal: &str,
         plan_mode: Option<&str>,
-    ) -> Result<String, DesktopError> {
+    ) -> Result<(), DesktopError> {
         let mut body = json!({ "session_id": session_id, "goal": goal, "caller_notifies": true });
         if let Some(mode) = plan_mode {
             body["plan_mode"] = json!(mode);
         }
-        let value = self.post("/channel/task", body).await?;
-        value
-            .get("run_id")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| DesktopError::Other("桌面版派任务未返回 run_id".into()))
+        let value = self.post(&format!("/channel/acp/task/{run_id}"), body).await?;
+        if value.get("run_id").and_then(Value::as_str) == Some(run_id) {
+            Ok(())
+        } else {
+            Err(DesktopError::Other("桌面版派发回执未确认本次运行标识。".into()))
+        }
     }
 
     pub(crate) async fn answer(

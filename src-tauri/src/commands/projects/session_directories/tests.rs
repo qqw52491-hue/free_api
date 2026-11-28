@@ -63,6 +63,27 @@ impl Drop for Fixture {
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn free_session_live_write_grant_reserves_directory_and_preserves_read_only_access() {
+    let f = Fixture::new();
+    let lock = crate::agent::workspace_lock::acquire_workspace_lock;
+    let session_guard = lock(&f.primary, &f.session, "free-run", "free conversation").await.unwrap();
+    let other_guard = lock(&f.reference, &f.other, "other-run", "reference owner").await.unwrap();
+    f.set(DirectoryAccess::ReadOnly);
+
+    let error = set_row(&f.conn, &f.session, f.reference.to_str().unwrap(), DirectoryAccess::ReadWrite).unwrap_err();
+    assert!(error.contains("可写范围重叠"));
+    assert_eq!(read_session_directories(&f.conn, &f.session).unwrap()[0].access, DirectoryAccess::ReadOnly);
+    assert_eq!(workspace_access::directories(Some(&f.session), &f.primary)[0].access, DirectoryAccess::ReadOnly);
+
+    drop(other_guard);
+    f.set(DirectoryAccess::ReadWrite);
+    assert!(lock(&f.reference, &f.other, "other-run", "reference owner").await.is_err());
+    drop(session_guard);
+    let replacement = lock(&f.reference, &f.other, "other-run", "reference owner").await.unwrap();
+    drop(replacement);
+}
+
 #[test]
 fn session_permissions_are_live_isolated_and_write_includes_read() {
     let f = Fixture::new();

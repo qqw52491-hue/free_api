@@ -23,7 +23,7 @@ async function html(s, running = true) {
 }
 async function main() {
     const s = await session('failed');
-    await emit('channel-run-started', { session_id: 'existing-session', goal: 'review progress regression' });
+    await emit('channel-run-started', { session_id: 'existing-session', run_id: 'fixture-run-26', goal: 'review progress regression' });
     await emit('agent-progress-existing-session', { type: 'step_new', step: { id: 7, tool: 'finish', description: '终审' } });
     await emit('agent-progress-existing-session', { type: 'step_start', step_id: 7 });
     const start = Date.now() + 100;
@@ -66,7 +66,7 @@ async function main() {
     assert(stream.includes('getStepReviewRows(item.step)') && stream.includes('getStepReviewRows(step)'), 'both modes anchor final members under their finish step');
     assert(!stream.includes('v-for="review in reviewProgress"'), 'no trailing standalone list after final answer');
     assert(stream.includes('<AgentWorkerProgress') && stream.includes('getAmbientWorkerRows(item.step)'), 'existing compact per-agent execution rows remain connected');
-    await emit('channel-run-started', { session_id: 'existing-session', goal: 'next run' });
+    await emit('channel-run-started', { session_id: 'existing-session', run_id: 'fixture-run-69', goal: 'next run' });
     assert.equal(s.reviewProgress.value.length, 0, 'new run clears previous review cards');
     console.log('PASS review progress: live events, heartbeat, tool, format correction, member isolation, fallback/late-event guard, stop, standalone panel disabled, existing worker rows preserved, new-run reset');
 }

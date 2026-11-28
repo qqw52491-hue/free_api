@@ -181,6 +181,7 @@
                         :final-artifacts="session.finalArtifacts.value"
                         :has-error="session.hasError.value"
                         :human-form="session.humanForm.value"
+                        :human-wait-key="session.humanWaitKey.value"
                         :pause-reason="session.pauseReason.value"
                         :is-waiting-for-human="session.isWaitingForHuman.value"
                         :is-sending-human="session.isSendingHuman.value"
@@ -192,7 +193,7 @@
                         @select-step-thought="handleStepThought"
                         @select-human="handleHumanSelect"
                         @select-active-thought="handleActiveThoughtSelect"
-                        @submit-human="session.answerHuman($event)"
+                        @submit-human="(answer, waitKey) => session.answerHuman(answer, undefined, waitKey)"
                         @open-preview="handleOpenPreview"
                         @open-team-deck="handleOpenTeamDeck"
                         @open-diff="handleOpenDiff"
@@ -205,6 +206,7 @@
                     :session-id="panelId"
                     :is-running="session.isRunning.value"
                     :is-waiting-for-human="session.isWaitingForHuman.value"
+                    :human-wait-key="session.humanWaitKey.value"
                     :is-sending="session.isSendingHuman.value"
                     :stop-requested="session.stopRequested.value"
                     :can-start="session.canStart.value"
@@ -213,7 +215,7 @@
                     :pauseReason="session.pauseReason.value"
                     :humanForm="session.humanForm.value"
                     :all-models="allModels"
-                    :model-routing="session.modelRouting.value"
+                    :model-routing="session.sessionModelRouting.value"
                     :telemetry="session.sessionTelemetry.value"
                     :total-turns="totalTurnsCount"
                     :current-turn="currentTurnIndex"
@@ -223,7 +225,7 @@
                     :auto-pilot="session.autoPilot.value"
                     :plan-mode="session.planMode.value"
                     @update:draft="composerDraft = $event"
-                    @update:model-routing="session.modelRouting.value = $event"
+                    @update:model-routing="session.updateModelRouting"
                     @update:budget-mode="session.updateBudgetMode($event)"
                     @update:auto-pilot="session.setAutoPilot($event)"
                     @update:plan-mode="session.setPlanMode($event)"
@@ -502,8 +504,6 @@ async function handleAttachFiles(filePaths: string[]) {
     }
 }
 
-watch(() => props.allModels, session.ensureModelRouting, { immediate: true });
-
 const activeProModelName = computed(() => {
     const id = session.modelRouting.value.pro;
     const model = props.allModels.find((item) => item.id === id);
@@ -645,17 +645,26 @@ function handleOpenDiff(payload: FileDiffPayload) {
     inspectorCollapsed.value = false;
     inspectorRef.value?.openDiff(payload);
 }
-function submitComposer(payload?: { text: string; attachments?: any[]; mode?: "interrupt" | "queue" | "new"; taskStartMode?: "resume" | "new"; onRejected?: () => void }) {
+function submitComposer(payload?: { text: string; attachments?: any[]; mode?: "interrupt" | "queue" | "new"; taskStartMode?: "resume" | "new"; humanWaitKey?: string | null; onRejected?: () => void }) {
     if (payload?.mode === "new") {
         void session.endTaskAndStartNew(payload.text, payload.attachments).then((accepted) => {
             if (!accepted) payload.onRejected?.();
         });
         return;
     }
-    if (session.stopRequested.value) return;
+    const waiting = session.isWaitingForHuman.value;
+    const currentWaitKey = waiting ? session.humanWaitKey.value : undefined;
+    if (session.stopRequested.value || (payload && payload.humanWaitKey !== currentWaitKey)) {
+        payload?.onRejected?.();
+        return;
+    }
     const text = (payload?.text ?? composerDraft.value).trim();
     if (!text && (!payload?.attachments || payload.attachments.length === 0)) return;
-    if (session.isRunning.value) {
+    if (waiting) {
+        void session.answerHuman(text, payload?.attachments, currentWaitKey).then((accepted) => {
+            if (!accepted) payload?.onRejected?.();
+        });
+    } else if (session.isRunning.value) {
         void session.sendHumanInput(text, payload?.mode || "interrupt", payload?.attachments);
     } else {
         void session.runAgent(text || session.goalInput.value, payload?.attachments, payload?.taskStartMode);

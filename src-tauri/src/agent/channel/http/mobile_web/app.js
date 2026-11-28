@@ -507,8 +507,9 @@ function renderAskCard(run) {
   const form = normalizeHumanForm(rawForm, reason);
 
   // 初始化该轮任务的交互表单状态
-  if (S.humanForm.runId !== run.run_id) {
+  if (!hasCurrentHumanForm(run)) {
     S.humanForm.runId = run.run_id;
+    S.humanForm.waitId = run.wait_id;
     S.humanForm.confirmValue = typeof form.defaultValue === "boolean" ? form.defaultValue : true;
     S.humanForm.singleSelectedId = typeof form.defaultValue === "string"
       ? form.defaultValue
@@ -661,6 +662,18 @@ function renderAskCard(run) {
   `;
 }
 
+function hasCurrentHumanForm(run) {
+  return S.humanForm.runId === run.run_id && S.humanForm.waitId === run.wait_id;
+}
+
+function isOpenSession(sessionId) {
+  return S.view.name === "flow" && S.currentSessionId === sessionId;
+}
+
+function currentFlow() {
+  return S.flow && isOpenSession(S.flow.sessionId) ? S.flow : null;
+}
+
 window.togglePlanRevisionInput = function() {
   const el = $("planRevisionWrap");
   if (!el) return;
@@ -668,8 +681,8 @@ window.togglePlanRevisionInput = function() {
 };
 
 window.submitMobilePlanApproval = async function(approved) {
-  if (!S.flow || !S.flow.run || S.humanForm.isSubmitting) return;
-  const f = S.flow;
+  const f = currentFlow();
+  if (f?.run?.status !== "waiting_human" || !hasCurrentHumanForm(f.run) || S.humanForm.isSubmitting) return;
   let text = "";
   const form = normalizeHumanForm(f.run.paused_form, "");
   const stage = form.kind === "stage_review_arbitration";
@@ -691,13 +704,18 @@ window.submitMobilePlanApproval = async function(approved) {
   try {
     await api(`/channel/run/${f.run.run_id}/answer`, {
       method: "POST",
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, wait_id: f.run.wait_id }),
     });
-    toast(stage ? "阶段仲裁结果已提交" : (approved ? "方案已批准，Agent 开始执行" : "方案已打回，Agent 重新推演"));
-    S.humanForm.runId = "";
-    S.humanForm.writeInText = "";
-    await loadFlow(f.sessionId);
+    if (isOpenSession(f.sessionId)) {
+      toast(stage ? "阶段仲裁结果已提交" : (approved ? "方案已批准，Agent 开始执行" : "方案已打回，Agent 重新推演"));
+      if (hasCurrentHumanForm(f.run)) {
+        S.humanForm.runId = "";
+        S.humanForm.writeInText = "";
+      }
+      await loadFlow(f.sessionId);
+    }
   } catch (e) {
+    if (!isOpenSession(f.sessionId) || !hasCurrentHumanForm(f.run)) return;
     toast(`提交失败: ${e.message}`);
     S.humanForm.isSubmitting = false;
     updateAskCardDom();
@@ -722,15 +740,16 @@ window.toggleHumanMulti = function(id) {
 };
 
 window.selectHumanMultiAll = function(selectAll) {
-  if (!S.flow || !S.flow.run) return;
-  const form = normalizeHumanForm(S.flow.run.paused_form, "");
+  const f = currentFlow();
+  if (f?.run?.status !== "waiting_human") return;
+  const form = normalizeHumanForm(f.run.paused_form, "");
   S.humanForm.multiSelectedIds = selectAll ? form.options.map(o => o.id) : [];
   updateAskCardDom();
 };
 
 window.submitHumanIntervention = async function() {
-  if (!S.flow || !S.flow.run || S.humanForm.isSubmitting) return;
-  const f = S.flow;
+  const f = currentFlow();
+  if (f?.run?.status !== "waiting_human" || !hasCurrentHumanForm(f.run) || S.humanForm.isSubmitting) return;
   const form = normalizeHumanForm(f.run.paused_form, f.run.paused_reason || "");
   const parts = [];
 
@@ -775,32 +794,38 @@ window.submitHumanIntervention = async function() {
   try {
     await api(`/channel/run/${f.run.run_id}/answer`, {
       method: "POST",
-      body: JSON.stringify({ text: answerText }),
+      body: JSON.stringify({ text: answerText, wait_id: f.run.wait_id }),
     });
-    toast("已提交反馈，Agent 继续执行");
-    S.humanForm.runId = "";
-    S.humanForm.writeInText = "";
-    await loadFlow(f.sessionId);
+    if (isOpenSession(f.sessionId)) {
+      toast("已提交反馈，Agent 继续执行");
+      if (hasCurrentHumanForm(f.run)) {
+        S.humanForm.runId = "";
+        S.humanForm.writeInText = "";
+      }
+      await loadFlow(f.sessionId);
+    }
   } catch (e) {
-    toast("提交失败: " + e.message);
+    if (isOpenSession(f.sessionId) && hasCurrentHumanForm(f.run)) toast("提交失败: " + e.message);
   } finally {
-    S.humanForm.isSubmitting = false;
-    updateAskCardDom();
+    if (isOpenSession(f.sessionId) && hasCurrentHumanForm(f.run)) {
+      S.humanForm.isSubmitting = false;
+      updateAskCardDom();
+    }
   }
 };
 
 function updateAskCardDom() {
   const askCard = $("askCard");
-  if (!askCard || !S.flow) return;
-  const html = renderAskCard(S.flow.run);
+  const f = currentFlow();
+  if (!askCard || !f) return;
+  const html = renderAskCard(f.run);
   askCard.innerHTML = html;
   askCard.dataset.renderedHtml = html;
 }
 
 // ---------------------------------------------------------------- 数据加载与多轮会话流渲染
 const traceDetailCache = new Map();
-let _loadFlowInFlight = false;
-let _loadFlowPendingNext = false;
+let activeFlowLoad = null;
 
 async function fetchTraceDetail(t) {
   const stamp = `${t.id}:${t.step_count || 0}:${t.updated_at || ""}`;
@@ -840,11 +865,14 @@ async function loadHome() {
 }
 
 async function loadFlow(sessionId) {
-  if (_loadFlowInFlight) {
-    _loadFlowPendingNext = true;
+  if (!isOpenSession(sessionId)) return;
+  const view = S.view;
+  if (activeFlowLoad?.view === view) {
+    activeFlowLoad.refresh = true;
     return;
   }
-  _loadFlowInFlight = true;
+  const load = { view, refresh: false };
+  activeFlowLoad = load;
   try {
     const promises = [
       api("/channel/runs"),
@@ -856,6 +884,7 @@ async function loadFlow(sessionId) {
       promises.push(api("/channel/sessions"));
     }
     const [runsRes, tracesRes, artsRes, sessRes] = await Promise.all(promises);
+    if (S.view !== view) return;
     if (sessRes && sessRes.sessions) {
       S.sessions = sessRes.sessions;
     }
@@ -866,6 +895,7 @@ async function loadFlow(sessionId) {
     
     // 并行获取该会话所有历史轮次完整步骤（已完成历史轮次直接命中内存缓存，0 网络请求）
     const fullTraces = await Promise.all(traceList.map(t => fetchTraceDetail(t)));
+    if (S.view !== view) return;
 
     // 严格按 ID 与 Goal 去重，彻底杜绝单条消息渲染两次的问题
     const seenIds = new Set();
@@ -905,9 +935,8 @@ async function loadFlow(sessionId) {
     };
     renderFlow();
   } finally {
-    _loadFlowInFlight = false;
-    if (_loadFlowPendingNext) {
-      _loadFlowPendingNext = false;
+    if (activeFlowLoad === load) activeFlowLoad = null;
+    if (load.refresh && S.view === view) {
       loadFlow(sessionId).catch(() => {});
     }
   }
@@ -1095,7 +1124,7 @@ function toggleGroup(key) {
 }
 
 function renderFlow() {
-  const f = S.flow;
+  const f = currentFlow();
   if (!f) return;
   const s = f.session || {};
   const active = f.run && ["running", "waiting_human"].includes(f.run.status);
@@ -1168,10 +1197,13 @@ function renderFlow() {
 
   // 提问卡片（等待人类输入 / 人工协助表单）
   const askCard = $("askCard");
+  const questionChanged = f.run?.status === "waiting_human"
+    ? !hasCurrentHumanForm(f.run)
+    : !!askCard.dataset.renderedHtml;
   const askHtml = renderAskCard(f.run);
   const activeEl = document.activeElement;
   const isTypingInAsk = activeEl && (activeEl.id === "humanWriteInInput" || activeEl.id === "humanTextInput");
-  if (!isTypingInAsk && askCard.dataset.renderedHtml !== askHtml) {
+  if (questionChanged || (!isTypingInAsk && askCard.dataset.renderedHtml !== askHtml)) {
     askCard.innerHTML = askHtml;
     askCard.dataset.renderedHtml = askHtml;
   }
@@ -1192,6 +1224,7 @@ function renderFlow() {
   const input = $("followInput");
   const composer = $("composer");
   const isWaitingHuman = f.run && f.run.status === "waiting_human";
+  $("btnSend").disabled = pendingComposerSends.has(f.sessionId);
   composer.classList.toggle("waiting-human", !!isWaitingHuman);
   $("btnStop").classList.toggle("hidden", !(f.run && f.run.status === "running"));
   if (isWaitingHuman) {
@@ -1203,21 +1236,55 @@ function renderFlow() {
   }
 }
 
+const composerDrafts = new Map();
+const pendingComposerSends = new Set();
+let attachmentSessionId = null;
+
+function rememberComposerDraft(sessionId, text, files) {
+  if (text || files.length) composerDrafts.set(sessionId, { text, files });
+  else composerDrafts.delete(sessionId);
+}
+
+function saveComposerDraft() {
+  if (S.currentSessionId) rememberComposerDraft(S.currentSessionId, $("followInput").value, S.composerFiles);
+}
+
 async function openSession(sessionId) {
   closeSidebarMobile();
+  if (!isOpenSession(sessionId)) {
+    saveComposerDraft();
+    S.view = { name: "flow" };
+    S.flow = null;
+    const draft = composerDrafts.get(sessionId);
+    $("followInput").value = draft?.text ?? "";
+    $("followInput").placeholder = "会话加载中…";
+    S.composerFiles = draft?.files ?? [];
+    $("btnSend").disabled = true;
+    $("btnStop").classList.add("hidden");
+    $("composer").classList.remove("waiting-human");
+    $("topTitle").textContent = S.sessions.find(s => s.id === sessionId)?.title || "任务会话";
+    for (const id of ["timeline", "liveLine", "askCard", "artBox", "topSub"]) {
+      const element = $(id);
+      element.innerHTML = "";
+      delete element.dataset.renderedHtml;
+    }
+    $("timeline").innerHTML = `<div class="empty-tip">加载中…</div>`;
+  }
   S.currentSessionId = sessionId;
   renderSidebar();
-  S.view = { name: "flow" };
   $("viewHome").classList.add("hidden");
   $("viewFlow").classList.remove("hidden");
   $("btnDelSession").classList.remove("hidden");
   $("composer").classList.remove("hidden");
-  $("timeline").innerHTML = `<div class="empty-tip">加载中…</div>`;
-  try { await loadFlow(sessionId); } catch (e) { toast("加载失败：" + e.message); }
+  const view = S.view;
+  try { await loadFlow(sessionId); } catch (e) {
+    if (S.view === view) toast("加载失败：" + e.message);
+  }
 }
 
 function goHome() {
   closeSidebarMobile();
+  saveComposerDraft();
   S.currentSessionId = null;
   S.flow = null;
   S.view = { name: "home" };
@@ -1239,50 +1306,77 @@ async function deleteSession(sessionId) {
     } else {
       await loadHome();
     }
+    composerDrafts.delete(sessionId);
+    if (attachmentSessionId === sessionId) attachmentSessionId = null;
   } catch (e) {
     toast("删除失败: " + e.message);
   }
 }
 
 async function sendComposer() {
+  const f = currentFlow();
   const input = $("followInput");
-  const text = input.value.trim();
-  if (!text || !S.flow) return;
-  const f = S.flow;
+  const draftText = input.value;
+  const text = draftText.trim();
+  if (!text || !f || pendingComposerSends.has(f.sessionId)) return;
+  pendingComposerSends.add(f.sessionId);
+  $("btnSend").disabled = true;
+  const sentFiles = [];
+  let successMessage;
   try {
     if (f.run && f.run.status === "waiting_human") {
-      await api(`/channel/run/${f.run.run_id}/answer`, { method: "POST", body: JSON.stringify({ text }) });
-      toast("已回答，Agent 继续执行");
+      await api(`/channel/run/${f.run.run_id}/answer`, { method: "POST", body: JSON.stringify({ text, wait_id: f.run.wait_id }) });
+      successMessage = "已回答，Agent 继续执行";
     } else if (f.run && f.run.status === "running") {
       await api(`/channel/run/${f.run.run_id}/goal`, { method: "POST", body: JSON.stringify({ goal: text }) });
-      toast("已排队后续修改 (ReplaceGoal)");
+      successMessage = "已排队后续修改 (ReplaceGoal)";
     } else {
-      for (let i = 0; i < S.composerFiles.length; i++) {
-        toast(`上传附件 ${i + 1}/${S.composerFiles.length}…`, 1500);
-        await uploadFile(f.sessionId, S.composerFiles[i]);
-      }
-      S.composerFiles = [];
+      sentFiles.push(...S.composerFiles);
       const routing = {};
       if (S.taskOpts.model_id) routing.pro = routing.flash = routing.vision = S.taskOpts.model_id;
       if (S.taskOpts.context_budget_mode) routing.context_budget_mode = S.taskOpts.context_budget_mode;
+      for (const [i, file] of sentFiles.entries()) {
+        if (isOpenSession(f.sessionId)) toast(`上传附件 ${i + 1}/${sentFiles.length}…`, 1500);
+        await uploadFile(f.sessionId, file);
+      }
       const body = { session_id: f.sessionId, goal: text };
       if (Object.keys(routing).length) body.model_routing = routing;
       await api("/channel/task", { method: "POST", body: JSON.stringify(body) });
-      toast("已发送");
+      successMessage = "已发送";
     }
-    input.value = "";
-    await loadFlow(f.sessionId);
-  } catch (e) { toast("操作失败：" + e.message); }
+    const active = isOpenSession(f.sessionId);
+    const draft = active ? { text: input.value, files: S.composerFiles } : composerDrafts.get(f.sessionId);
+    if (draft) {
+      const remainingText = draft.text === draftText ? "" : draft.text;
+      const remainingFiles = draft.files.filter(file => !sentFiles.includes(file));
+      if (active) {
+        input.value = remainingText;
+        S.composerFiles = remainingFiles;
+      }
+      rememberComposerDraft(f.sessionId, remainingText, remainingFiles);
+    }
+    if (active) {
+      toast(successMessage);
+      await loadFlow(f.sessionId);
+    }
+  } catch (e) {
+    if (isOpenSession(f.sessionId)) toast("操作失败：" + e.message);
+  } finally {
+    pendingComposerSends.delete(f.sessionId);
+    if (currentFlow()?.sessionId === f.sessionId) $("btnSend").disabled = false;
+  }
 }
 
 async function stopRun() {
-  const f = S.flow;
+  const f = currentFlow();
   if (!f || !f.run) return;
   try {
     await api(`/channel/run/${f.run.run_id}/cancel`, { method: "POST" });
-    toast("已请求停止");
-    await loadFlow(f.sessionId);
-  } catch (e) { toast("停止失败：" + e.message); }
+    if (isOpenSession(f.sessionId)) {
+      toast("已请求停止");
+      await loadFlow(f.sessionId);
+    }
+  } catch (e) { if (isOpenSession(f.sessionId)) toast("停止失败：" + e.message); }
 }
 
 // ---------------------------------------------------------------- 带实时搜索的选择弹层
@@ -1509,8 +1603,24 @@ function bind() {
   };
   $("btnSend").onclick = sendComposer;
   $("btnStop").onclick = stopRun;
-  $("btnClip").onclick = () => $("clipInput").click();
-  $("clipInput").onchange = (e) => { S.composerFiles.push(...e.target.files); e.target.value = ""; toast(`已选择 ${S.composerFiles.length} 个附件`); };
+  $("btnClip").onclick = () => {
+    attachmentSessionId = S.currentSessionId;
+    if (attachmentSessionId) $("clipInput").click();
+  };
+  $("clipInput").onchange = (e) => {
+    const sessionId = attachmentSessionId;
+    attachmentSessionId = null;
+    const files = Array.from(e.target.files);
+    e.target.value = "";
+    if (!sessionId || !files.length) return;
+    if (isOpenSession(sessionId)) {
+      S.composerFiles.push(...files);
+      toast(`已选择 ${S.composerFiles.length} 个附件`);
+    } else {
+      const draft = composerDrafts.get(sessionId);
+      rememberComposerDraft(sessionId, draft?.text ?? "", [...(draft?.files ?? []), ...files]);
+    }
+  };
 
   bindOptChips();
 

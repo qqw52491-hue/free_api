@@ -26,6 +26,8 @@ fn desktop_entry_and_shared_driver_future_sizes() {
             None,
             s.plan_mode,
             None,
+            None,
+            None,
         )
     });
     eprintln!("desktop={entry}, driver={driver}, turn={turn}");

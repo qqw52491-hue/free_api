@@ -82,7 +82,7 @@ export function shortText(value: string, max: number): string {
     return trimmed.length > max ? `${trimmed.slice(0, max)}\n\n…（内容较长，已截断显示剩余 ${trimmed.length - max} 字符）` : trimmed;
 }
 
-export function formatPayload(value: unknown): string {
+export function formatPayload(value: unknown, maxLength = 24000): string {
     let text = "";
     if (typeof value === "string") {
         const trimmed = value.trim();
@@ -103,7 +103,7 @@ export function formatPayload(value: unknown): string {
             text = toText(value);
         }
     }
-    return shortText(text, 24000);
+    return shortText(text, maxLength);
 }
 
 export function toTimestamp(value: unknown): number {

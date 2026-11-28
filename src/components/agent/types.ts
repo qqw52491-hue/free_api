@@ -514,6 +514,27 @@ export interface AgentTeamState {
     activeWorkerCount: number;
     completedWorkerCount: number;
     workers: AgentWorkerItem[];
+    masterRunId?: string;
+    masterWaitingForHuman?: boolean;
+    waitingOn?: readonly AgentTeamWait[];
+    waitTargetNames?: ReadonlyMap<string, string>;
+    receipts?: ReadonlyMap<string, AgentTeamReceipt>;
+}
+
+export interface AgentTeamWait {
+    waiter_run_id: string;
+    target_ids: string[];
+    kind: "jobs" | "inbox";
+}
+
+export interface AgentTeamReceipt {
+    child_run_id: string;
+    parent_run_id?: string;
+    execution_status?: string;
+    result_available?: boolean;
+    collected_at?: string | null;
+    finished_at?: string | null;
+    summary?: string;
 }
 
 export type StageState = "pending" | "running" | "collapsed" | "manual_expanded";

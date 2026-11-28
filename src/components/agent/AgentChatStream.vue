@@ -1,7 +1,7 @@
 <template>
     <div class="agent-stream-shell" @click.capture="stopSelectionClick">
         <AgentQuestionNav :marks="questionMarks" :active-id="activeQuestionId" @select="jumpToQuestion" />
-    <div ref="streamElement" class="process-tree" :class="{ 'is-running': isRunning }" aria-label="Agent 分层执行过程" @scroll.passive="onStreamScroll">
+    <div ref="streamElement" class="process-tree" data-preview-viewport :class="{ 'is-running': isRunning }" aria-label="Agent 分层执行过程" @scroll.passive="onStreamScroll">
         <div class="stream-sticky-actions">
             <button v-if="isRunning && !followLiveTail" type="button" class="follow-latest" @click="resumeLiveFollow">跟随最新输出</button>
             <div class="stream-view-toggle floating-view-toggle" @click.stop>
@@ -371,18 +371,28 @@
                                         [`finding-${item.step.findingKind}`]: item.action.isMilestone && item.step.findingKind
                                     }
                                 ]"
-                                :title="item.action.tooltip"
+                                :data-preview-id="item.step.id"
+                                :data-preview-run-id="entry.runId"
+                                aria-haspopup="dialog" aria-expanded="false" aria-keyshortcuts="ArrowDown"
+                                tabindex="0"
+                                @pointerenter="openStepPreview"
+                                @pointermove.passive="moveStepPreview"
+                                @pointerleave="leaveStepPreview"
+                                @focus="openStepPreview"
+                                @blur="blurStepPreview"
+                                @click.capture="stepPreview?.dismiss()"
                                 @click="$emit('select-step', item.step.id)"
+                                @keydown.enter.self="activatePreviewedStep(item.step.id)"
+                                @keydown.space.self.prevent="activatePreviewedStep(item.step.id)"
                             >
                                 <span class="ambient-text-content">
                                     <span
                                         class="ambient-action-lead clickable"
                                         :class="`lead-${item.action.actionKind}`"
-                                        :title="item.action.tooltip"
                                         @click.stop="handleAmbientChipClick(item.step, item.action)"
                                     >
                                         <!-- 1.1 动作类型微标 (全矢量语义图标，专业标准命名) -->
-                                        <span v-if="item.action.actionKind === 'subagent'" class="action-tag action-tag-subagent" :title="item.action.tooltip">
+                                        <span v-if="item.action.actionKind === 'subagent'" class="action-tag action-tag-subagent">
                                             <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                                 <rect x="3" y="11" width="18" height="10" rx="2" />
                                                 <circle cx="12" cy="5" r="2" />
@@ -392,21 +402,21 @@
                                             </svg>
                                             <span>{{ item.action.subagentTag?.replace(/^🤖\s*/, '') || '子智能体' }}</span>
                                         </span>
-                                        <span v-else-if="item.action.actionKind === 'deliver'" class="action-tag action-tag-deliver" title="完成最终交付物">
+                                        <span v-else-if="item.action.actionKind === 'deliver'" class="action-tag action-tag-deliver">
                                             <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                                 <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
                                                 <polyline points="22 4 12 14.01 9 11.01" />
                                             </svg>
                                             <span>终态交付</span>
                                         </span>
-                                        <span v-else-if="item.action.actionKind === 'edit'" class="action-tag action-tag-edit" title="修改现有代码文件">
+                                        <span v-else-if="item.action.actionKind === 'edit'" class="action-tag action-tag-edit">
                                             <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                                 <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
                                                 <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
                                             </svg>
                                             <span>代码修改</span>
                                         </span>
-                                        <span v-else-if="item.action.actionKind === 'write'" class="action-tag action-tag-write" title="创建或写入文件">
+                                        <span v-else-if="item.action.actionKind === 'write'" class="action-tag action-tag-write">
                                             <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                                 <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
                                                 <polyline points="14 2 14 8 20 8" />
@@ -415,7 +425,7 @@
                                             </svg>
                                             <span>代码新建</span>
                                         </span>
-                                        <span v-else-if="item.action.actionKind === 'read'" class="action-tag action-tag-read" :title="item.action.tooltip || '读取或查阅内容'">
+                                        <span v-else-if="item.action.actionKind === 'read'" class="action-tag action-tag-read">
                                             <svg v-if="item.action.capsuleTitle === '目录' || item.action.iconKind === 'folder'" class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                                 <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
                                             </svg>
@@ -425,21 +435,21 @@
                                             </svg>
                                             <span>{{ (item.action.capsuleTitle === '目录' || item.action.iconKind === 'folder') ? '目录查阅' : '文件读取' }}</span>
                                         </span>
-                                        <span v-else-if="item.action.actionKind === 'shell'" class="action-tag action-tag-shell" title="执行终端命令行">
+                                        <span v-else-if="item.action.actionKind === 'shell'" class="action-tag action-tag-shell">
                                             <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                                 <polyline points="4 17 10 11 4 5" />
                                                 <line x1="12" y1="19" x2="20" y2="19" />
                                             </svg>
                                             <span>终端执行</span>
                                         </span>
-                                        <span v-else-if="item.action.actionKind === 'search'" class="action-tag action-tag-search" title="检索代码或内容">
+                                        <span v-else-if="item.action.actionKind === 'search'" class="action-tag action-tag-search">
                                             <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                                 <circle cx="11" cy="11" r="8" />
                                                 <line x1="21" y1="21" x2="16.65" y2="16.65" />
                                             </svg>
                                             <span>代码检索</span>
                                         </span>
-                                        <span v-else-if="item.action.actionKind === 'web'" class="action-tag action-tag-web" title="网页抓取与全网检索">
+                                        <span v-else-if="item.action.actionKind === 'web'" class="action-tag action-tag-web">
                                             <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                                 <circle cx="12" cy="12" r="10" />
                                                 <line x1="2" y1="12" x2="22" y2="12" />
@@ -447,7 +457,7 @@
                                             </svg>
                                             <span>全网检索</span>
                                         </span>
-                                        <span v-else-if="item.action.actionKind === 'recall'" class="action-tag action-tag-recall" title="提取历史步骤输出原文">
+                                        <span v-else-if="item.action.actionKind === 'recall'" class="action-tag action-tag-recall">
                                             <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                                 <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
                                                 <rect x="8" y="2" width="8" height="4" rx="1" ry="1" />
@@ -455,7 +465,7 @@
                                             </svg>
                                             <span>历史取证</span>
                                         </span>
-                                        <span v-else-if="item.action.actionKind === 'artifact'" class="action-tag action-tag-artifact" title="交付产物管理">
+                                        <span v-else-if="item.action.actionKind === 'artifact'" class="action-tag action-tag-artifact">
                                             <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                                 <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
                                                 <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
@@ -463,7 +473,7 @@
                                             </svg>
                                             <span>交付产物</span>
                                         </span>
-                                        <span v-else-if="item.action.actionKind === 'human'" class="action-tag action-tag-human" title="呈报人工问询或确认">
+                                        <span v-else-if="item.action.actionKind === 'human'" class="action-tag action-tag-human">
                                             <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                                 <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
                                                 <line x1="12" y1="8" x2="12" y2="12" />
@@ -471,7 +481,7 @@
                                             </svg>
                                             <span>人工交互</span>
                                         </span>
-                                        <span v-else-if="item.action.actionKind === 'model'" class="action-tag action-tag-model" title="模型平台与配置管理">
+                                        <span v-else-if="item.action.actionKind === 'model'" class="action-tag action-tag-model">
                                             <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                                 <rect x="4" y="4" width="16" height="16" rx="2" />
                                                 <rect x="9" y="9" width="6" height="6" />
@@ -486,7 +496,7 @@
                                             </svg>
                                             <span>模型配置</span>
                                         </span>
-                                        <span v-else-if="item.action.actionKind === 'parallel'" class="action-tag action-tag-parallel" title="多项操作并行并发执行">
+                                        <span v-else-if="item.action.actionKind === 'parallel'" class="action-tag action-tag-parallel">
                                             <svg class="batch-operation-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                                 <line x1="4" y1="7" x2="18" y2="7" />
                                                 <polyline points="14 4 18 7 14 10" />
@@ -495,7 +505,7 @@
                                             </svg>
                                             <span>并行执行{{ item.action.branchCount ? ` · ${item.action.branchCount} 项` : '' }}</span>
                                         </span>
-                                        <span v-else-if="item.action.actionKind === 'pipeline'" class="action-tag action-tag-pipeline" title="按顺序流水线执行多项操作">
+                                        <span v-else-if="item.action.actionKind === 'pipeline'" class="action-tag action-tag-pipeline">
                                             <svg class="batch-operation-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                                 <rect x="3" y="4" width="6" height="6" rx="1.5" />
                                                 <rect x="15" y="14" width="6" height="6" rx="1.5" />
@@ -504,7 +514,7 @@
                                             </svg>
                                             <span>串行执行</span>
                                         </span>
-                                        <span v-else-if="item.action.actionKind === 'batch'" class="action-tag action-tag-batch" title="多项操作组成的执行集合">
+                                        <span v-else-if="item.action.actionKind === 'batch'" class="action-tag action-tag-batch">
                                             <svg class="batch-operation-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                                 <rect x="3" y="3" width="7" height="7" rx="1.5" />
                                                 <rect x="14" y="3" width="7" height="7" rx="1.5" />
@@ -513,13 +523,13 @@
                                             </svg>
                                             <span>任务规划</span>
                                         </span>
-                                        <span v-else-if="item.action.actionKind === 'mcp'" class="action-tag action-tag-mcp" title="调用外部 MCP 插件工具">
+                                        <span v-else-if="item.action.actionKind === 'mcp'" class="action-tag action-tag-mcp">
                                             <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                                 <path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48l2.83-2.83" />
                                             </svg>
                                             <span>MCP 插件</span>
                                         </span>
-                                        <span v-else class="action-tag action-tag-general" :title="item.action.tooltip || '常规工具'">
+                                        <span v-else class="action-tag action-tag-general">
                                             <svg class="action-tag-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                                 <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
                                             </svg>
@@ -567,7 +577,7 @@
                                     type="button"
                                     class="ambient-term-chevron"
                                     :class="{ open: isAmbientTermOpen(item.step) }"
-                                    title="展开/收起命令输出"
+                                    aria-label="展开/收起命令输出"
                                     @click.stop="toggleAmbientTerm(item.step)"
                                 >
                                     <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9" /></svg>
@@ -650,6 +660,15 @@
                                         :key="subStep.id"
                                         type="button"
                                         class="ambient-action-sub-row"
+                                        :data-preview-id="subStep.id"
+                                        :data-preview-run-id="entry.runId"
+                                        aria-haspopup="dialog" aria-expanded="false" aria-keyshortcuts="ArrowDown"
+                                        @pointerenter="openStepPreview"
+                                        @pointermove.passive="moveStepPreview"
+                                        @pointerleave="leaveStepPreview"
+                                        @focus="openStepPreview"
+                                        @blur="blurStepPreview"
+                                        @click.capture="stepPreview?.dismiss()"
                                         @click="$emit('select-step', subStep.id)"
                                     >
                                         <span class="action-sub-body">{{ subStep.description || item.summary }}</span>
@@ -990,7 +1009,18 @@
                             <div class="plan-children">
                                 <article v-for="step in getVisiblePlanSteps(entry)" :key="step.id" class="goal-node" :class="[`status-${step.status}`, { 'is-subagent': isSubAgentTool(step.tool), 'is-waitjobs': isWaitJobsTool(step.tool) }]">
                                     <!-- 主步骤第1行：干脆利落，只展示步骤意图与执行耗时状态，点击查看整体过程 -->
-                                    <button class="goal-row" :class="{ selected: step.id === selectedStepId, 'subagent-row': isSubAgentTool(step.tool), 'waitjobs-row': isWaitJobsTool(step.tool) }" type="button" @click="$emit('select-step', step.id)">
+                                    <button class="goal-row" :class="{ selected: step.id === selectedStepId, 'subagent-row': isSubAgentTool(step.tool), 'waitjobs-row': isWaitJobsTool(step.tool) }" type="button"
+                                        :data-preview-id="step.id"
+                                        :data-preview-run-id="entry.runId"
+                                        aria-haspopup="dialog" aria-expanded="false" aria-keyshortcuts="ArrowDown"
+                                        @pointerenter="openStepPreview"
+                                        @pointermove.passive="moveStepPreview"
+                                        @pointerleave="leaveStepPreview"
+                                        @focus="openStepPreview"
+                                        @blur="blurStepPreview"
+                                        @click.capture="stepPreview?.dismiss()"
+                                        @click="$emit('select-step', step.id)"
+                                    >
                                         <span class="tree-mark"><i></i></span>
                                         <span class="goal-label">
                                             <span v-if="isSubAgentTool(step.tool)" class="subagent-tag-badge">{{ getSubAgentBadgeText(step) }}</span>
@@ -1372,10 +1402,12 @@
             <!-- 人工干预/交互选择卡片 (单选/多选/确认/传文件/补充输入) -->
             <AgentHumanInterventionCard
                 v-if="isWaitingForHuman"
+                :key="humanWaitKey ?? undefined"
+                :wait-key="humanWaitKey"
                 :human-form="humanForm"
                 :pause-reason="pauseReason"
-                :is-sending="isSendingHuman"
-                @submit="$emit('submit-human', $event)"
+                :is-sending="isSendingHuman || !humanWaitKey"
+                @submit="(answer, waitKey) => $emit('submit-human', answer, waitKey)"
             />
 
             <p v-if="isRunning && !timelineEntries.length && !visibleLegacyMessages.length" class="idle-live"><i></i>{{ stateDescription }}</p>
@@ -1389,11 +1421,12 @@
             @close-doc="previewDocModal = null"
         />
     </div>
+        <AgentAnchoredPreview ref="stepPreview" :describe="describeStepPreview" interactive />
     </div>
 </template>
 <script setup lang="ts">
 import { stopSelectionClick } from "../../utils/selection";
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowReactive, watch, type ComputedRef } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowReactive, useTemplateRef, watch, type ComputedRef } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { copyPlainText } from "../../utils/clipboard";
 import { vDeferredHistory } from "../../directives/deferredHistory";
@@ -1404,7 +1437,7 @@ import type { AgentHumanForm, AgentHumanIntervention, AgentStepItem, AgentToolSt
 import { diffPayloadFromChip, extractDiffFromStep, formatStepOperation, parseStepFileChanges, aggregateFileChips, formatStageTitle, formatStageDuration, formatTokenCount, getRunningStagePreview, extractStageChronologicalCapsules, extractActiveThoughtLineInfo } from "./diffUtils";
 import type { StepOperationDisplay } from "./diff/toolOperation";
 import type { AgentArtifactInput, ArtifactDescriptor } from "../../types/artifact";
-import { formatClock, formatDurationSeconds, formatMilliseconds, getToolIcon, shortText } from "./format";
+import { asRecord, formatClock, formatDurationSeconds, formatMilliseconds, getToolIcon, shortText } from "./format";
 import RichContentRenderer from "../charts/RichContentRenderer.vue";
 import AgentHumanInterventionCard from "./AgentHumanInterventionCard.vue";
 import AgentOutcomeNotice from "./AgentOutcomeNotice.vue";
@@ -1414,6 +1447,7 @@ import FileIcon from "./FileIcon.vue";
 import { getStepJobIds, workerRowOwners } from "./workerAssociation";
 import AgentWorkerProgress from "./AgentWorkerProgress.vue";
 import AgentQuestionNav from "./AgentQuestionNav.vue";
+import AgentAnchoredPreview, { type AgentPreviewDetails } from "./AgentAnchoredPreview.vue";
 import AgentTimelineList from "./AgentTimelineList.vue";
 import AgentTimelineSections from "./AgentTimelineSections.vue";
 import { buildQuestionMarks, type QuestionNavigationEntry } from "./questionNavigation";
@@ -1635,17 +1669,18 @@ function pauseLiveFollow() {
 let timelineNavigationRequest = 0;
 async function scrollToTimelineEntry(id: string) {
     const request = ++timelineNavigationRequest;
-    pauseLiveFollow();
     if (id.startsWith("legacy-")) await legacyHistoryList.value?.reveal(id.slice("legacy-".length));
     else await timelineSectionsRef.value?.reveal(id);
     await nextTick();
-    if (request !== timelineNavigationRequest || !props.viewActive) return;
+    if (request !== timelineNavigationRequest || !props.viewActive) return false;
     const el = streamElement.value?.querySelector(`[data-tl="${CSS.escape(id)}"]`);
-    if (!el) return;
+    if (!el) return false;
+    pauseLiveFollow();
     el.scrollIntoView({ behavior: "smooth", block: "center" });
     // 短暂高亮锚定目标，让"跳到的是哪步"肉眼可辨
     el.classList.add("tl-anchor-flash");
     setTimeout(() => el.classList.remove("tl-anchor-flash"), 1600);
+    return true;
 }
 
 const previewImageModal = ref<ParsedAttachment | null>(null);
@@ -1752,6 +1787,7 @@ const props = withDefaults(
         finalArtifacts: AgentArtifactInput[];
         hasError: boolean;
         humanForm?: AgentHumanForm | null;
+        humanWaitKey?: string | null;
         pauseReason?: string;
         isWaitingForHuman?: boolean;
         isSendingHuman?: boolean;
@@ -1779,7 +1815,7 @@ const emit = defineEmits<{
     "select-step-thought": [id: string];
     "select-human": [id: string];
     "select-active-thought": [];
-    "submit-human": [answer: string];
+    "submit-human": [answer: string, waitKey?: string | null];
     "open-preview": [code: string];
     "open-team-deck": [stepId?: string];
     "open-diff": [payload: FileDiffPayload];
@@ -1984,9 +2020,8 @@ function setQuestionAnchor(id: string, element: unknown) {
     questionAnchorOrderDirty = true;
     scheduleQuestionPosition();
 }
-function jumpToQuestion(id: string) {
-    scrollToTimelineEntry(id);
-    activeQuestionId.value = id;
+async function jumpToQuestion(id: string) {
+    if (await scrollToTimelineEntry(id)) activeQuestionId.value = id;
 }
 onBeforeUnmount(() => {
     questionNavDisposed = true;
@@ -2368,6 +2403,112 @@ export interface AmbientInterventionDisplay {
 }
 
 export type AmbientDisplayItem = AmbientStepItemDisplay | AmbientRepeatGroupDisplay | AmbientNarrativeDisplay | AmbientInterventionDisplay;
+
+const stepPreview = useTemplateRef("stepPreview");
+watch([() => props.sessionId, () => props.activeRunId, () => props.liveRunId, () => props.viewActive], () => stepPreview.value?.dismiss());
+
+function openStepPreview(event: PointerEvent | FocusEvent) {
+    const row = event.currentTarget as HTMLElement;
+    const keyboard = event.type === "focus";
+    const pointer = keyboard ? undefined : event as PointerEvent;
+    if (keyboard ? !row.matches(":focus-visible") : pointer?.pointerType === "touch") return;
+    stepPreview.value?.show(row, keyboard, pointer && { x: pointer.clientX, y: pointer.clientY });
+}
+
+function moveStepPreview(event: PointerEvent) {
+    if (event.pointerType !== "touch") {
+        stepPreview.value?.move(event.currentTarget as HTMLElement, { x: event.clientX, y: event.clientY });
+    }
+}
+
+function leaveStepPreview(event: PointerEvent) {
+    if (event.pointerType !== "touch") stepPreview.value?.leave(event.currentTarget as HTMLElement);
+}
+
+function blurStepPreview(event: FocusEvent) {
+    stepPreview.value?.blurAnchor(event.currentTarget as HTMLElement, event.relatedTarget);
+}
+
+function activatePreviewedStep(id: string) {
+    stepPreview.value?.dismiss();
+    emit("select-step", id);
+}
+
+function stepPreviewText(value: unknown, limit: number, multiline = false) {
+    if (typeof value !== "string") return "";
+    const sample = value.slice(0, limit * 2 + 2);
+    const text = (multiline ? sample.replace(/\r\n?/g, "\n") : sample.replace(/\s+/g, " ")).trim();
+    const characters = Array.from(text);
+    return characters.length > limit || value.length > sample.length ? `${characters.slice(0, limit).join("")}…` : text;
+}
+
+function stepOutputPreview(step: AgentStepItem) {
+    const raw = asRecord(step.rawResult);
+    const summarized = asRecord(step.result);
+    const terminal = step.view?.kind === "terminal" ? step.view : undefined;
+    const values = step.status === "failed"
+        ? [raw.stderr, summarized.stderr, asRecord(raw.error).message, raw.error,
+            asRecord(summarized.error).message, summarized.error, terminal?.spawn_error,
+            step.rawResult, terminal?.output_tail, step.result]
+        : [terminal?.output_tail, raw.stdout, summarized.stdout, step.result, step.rawResult];
+    for (const value of values) {
+        const text = stepPreviewText(value, 2400, true);
+        if (text) return text;
+    }
+    return "";
+}
+
+function describeStepPreview(id: string, node: HTMLElement): AgentPreviewDetails | undefined {
+    const runId = node.dataset.previewRunId;
+    const steps = runId ? props.historyTurns.find(turn => turn.id === runId)?.steps : props.steps;
+    const step = steps?.find(item => item.id === id);
+    if (!step) return undefined;
+
+    const operation = formatStepOperation(step);
+    const view = step.view;
+    const terminal = view?.kind === "terminal";
+    const isCommand = terminal || operation.badgeLabel === "终端";
+    const command = terminal ? view.command : undefined;
+    const fallbackCommand = operation.actionText.startsWith("$ ") ? operation.actionText.slice(2) : undefined;
+    const target = isCommand
+        ? stepPreviewText(command, 1200, true) || stepPreviewText(fallbackCommand, 1200, true)
+        : stepPreviewText(view?.kind === "search" ? view.query : operation.filePath, 190);
+    const intent = step.description.trim();
+    const description = ["执行操作", "操作", "执行下一步操作"].includes(intent) ? "" : intent;
+    const explanation = step.explanation?.trim() || "";
+    const heading = description || explanation || operation.actionText;
+    const title = stepPreviewText(heading.split(/\r?\n/, 1)[0], 132) || step.tool;
+    const note = [...new Set([description, explanation])].filter(text => text && text !== title).join("\n\n");
+    const duration = formatDurationSeconds(step.metrics?.toolDurationMs ?? step.durationMs);
+    const time = Number.isFinite(step.timestamp) && step.timestamp > 0 ? formatClock(step.timestamp) : "";
+    const rows: AgentPreviewDetails["rows"] = [];
+    if (target && target !== title) {
+        const label = isCommand ? "命令" : view?.kind === "search" ? "查询" : "目标路径";
+        rows.push({ label, value: target, kind: isCommand ? "command" : undefined });
+    }
+    if (terminal && typeof view.exit_code === "number" && Number.isFinite(view.exit_code)) {
+        rows.push({ label: "退出码", value: String(view.exit_code) });
+    }
+    if (view?.kind === "search" && typeof view.total_hits === "number" && Number.isFinite(view.total_hits)) {
+        rows.push({ label: "结果", value: `找到 ${view.total_hits} 项` });
+    }
+    const output = stepOutputPreview(step);
+    if (output) {
+        rows.push({ label: step.status === "failed" ? "失败信息" : "输出摘要", value: output, kind: "output" });
+    }
+    return {
+        title,
+        status: statusLabel(step.status),
+        tone: step.status === "challenged" ? "waiting" : step.status,
+        subtitle: [operation.badgeLabel, duration && `耗时 ${duration}`, time].filter(Boolean).join(" · "),
+        description: note || undefined,
+        rows,
+        sections: [
+            { id: "input", label: "输入参数", value: step.rawParams ?? step.params, emptyText: "这一步没有记录输入参数。" },
+            { id: "output", label: "执行输出", value: step.rawResult ?? step.result ?? view, emptyText: "这一步没有记录输出。" },
+        ],
+    };
+}
 
 // 简报流终端步骤：命令行右侧箭头展开输出；执行中自动展开、结束后自动收起，手动切换优先
 const ambientTermOverride = reactive<Record<string, boolean>>({});

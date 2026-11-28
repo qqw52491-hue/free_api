@@ -583,7 +583,13 @@ fn recover_final_review(
 ) -> Result<Option<crate::agent::reviewer_gatekeeper::ReviewResult>, String> {
     let candidates: Vec<(String, String, Option<String>)> = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn.prepare("SELECT c.id,c.status,c.result_json FROM agent_child_runs c JOIN agent_run_traces old ON old.id=c.parent_run_id JOIN agent_run_traces current ON current.id=?1 AND current.session_id=?2 AND current.history_task_id IS NOT NULL AND old.session_id=current.session_id AND old.history_task_id=current.history_task_id WHERE old.id!=current.id AND (old.status='interrupted' OR (old.status='cancelled' AND CASE WHEN json_valid(old.completion_json) THEN json_extract(old.completion_json,'$.summary') IN ('应用重启，任务已中断','先前运行已退出，任务等待恢复') ELSE 0 END)) AND c.parent_session_id=?2 AND c.purpose='final_review' ORDER BY c.started_at DESC,c.id DESC").map_err(|e|e.to_string())?;
+        let mut stmt = conn.prepare(concat!(
+            "SELECT c.id,c.status,c.result_json FROM agent_child_runs c JOIN agent_run_traces old ON old.id=c.parent_run_id
+             WHERE old.id<>?1 AND old.id IN (", crate::agent::run_trace::task_run_ids!("?1", "?2"), ")
+               AND (old.status='interrupted' OR (old.status='cancelled' AND CASE WHEN json_valid(old.completion_json)
+                   THEN json_extract(old.completion_json,'$.summary') IN ('应用重启，任务已中断','先前运行已退出，任务等待恢复') ELSE 0 END))
+               AND c.parent_session_id=?2 AND c.purpose='final_review' ORDER BY c.started_at DESC,c.id DESC",
+        )).map_err(|e|e.to_string())?;
         let rows = stmt.query_map(params![parent, session], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(|e|e.to_string())?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|e|e.to_string())?
     };
@@ -687,13 +693,17 @@ pub(crate) async fn run_final(
         crate::agent::execution::runtime::fail_checkpoint(db, &id, error.clone());
         return Err(error.into());
     }
-    let mut interrupt_open = true;
-    while crate::agent::child_task::runtime::attached(&id) {
-        tokio::select! {
-            _=tokio::time::sleep(Duration::from_millis(50))=>{},
-            changed=interrupt.changed(),if interrupt_open=>{
-                interrupt_open=changed.is_ok();
-                let _=crate::agent::child_task::runtime::request_cancel(&id);
+    if crate::agent::child_task::runtime::attached(&id) {
+        use crate::agent::child_task::team_view::{WaitGuard, WaitKind};
+        let _waiting = WaitGuard::enter(parent, WaitKind::Jobs, std::slice::from_ref(&id));
+        let mut interrupt_open = true;
+        while crate::agent::child_task::runtime::attached(&id) {
+            tokio::select! {
+                _=tokio::time::sleep(Duration::from_millis(50))=>{},
+                changed=interrupt.changed(),if interrupt_open=>{
+                    interrupt_open=changed.is_ok();
+                    let _=crate::agent::child_task::runtime::request_cancel(&id);
+                }
             }
         }
     }

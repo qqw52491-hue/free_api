@@ -125,7 +125,13 @@ async fn dispatch_inner(
                 false,
             )?));
         }
-        "models" => return Ok(output(child_task::models::catalog(ctx.state.inner(),params["offset"].as_u64().unwrap_or(0))?)),
+        "models" => {
+            return Ok(output(child_task::models::catalog(
+                ctx.state.inner(),
+                params["offset"].as_u64().unwrap_or(0),
+                &ctx.model_routing.flash,
+            )?));
+        }
         "list" => {
             if params["scope"] == "history" {
                 return Ok(output(crate::agent::agent_mailbox::observation::history(

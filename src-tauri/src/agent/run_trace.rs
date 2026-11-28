@@ -7,6 +7,24 @@ use serde_json::{json, Value};
 mod output_source;
 pub(crate) use output_source::{saved_output_source, source_for_task};
 
+/// SQL set of physical runs owned by one logical task. The supplied run stays
+/// addressable when its trace or task identity is unavailable. Other runs need
+/// an exact, nonempty task identity in the same session. Call sites pass SQL
+/// bind parameters or fixed column references and keep their own transaction.
+macro_rules! task_run_ids {
+    ($run:literal $(, $session:literal)?) => {
+        concat!(
+            "SELECT ", $run, "\n",
+            "UNION ALL SELECT prior.id FROM agent_run_traces focus
+             JOIN agent_run_traces prior ON prior.session_id=focus.session_id
+                 AND prior.history_task_id=focus.history_task_id
+             WHERE focus.id=", $run, " AND focus.history_task_id<>'' AND prior.id<>focus.id"
+            $(, " AND focus.session_id=", $session)?
+        )
+    };
+}
+pub(crate) use task_run_ids;
+
 pub fn upsert_snapshot(
     db: &DbState,
     run_id: &str,

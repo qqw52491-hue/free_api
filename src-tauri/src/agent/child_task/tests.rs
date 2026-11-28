@@ -549,6 +549,129 @@ fn desktop_tree_is_session_scoped_and_returns_real_parent_and_depth() {
 }
 
 #[test]
+fn desktop_receipts_distinguish_persisted_result_from_collection() {
+    let f = Fixture::new();
+    let id = &f.binding.child_run;
+    f.finish_readonly();
+    settle(&f.db, &f.binding, &Ok(()), 1).unwrap();
+
+    let specialist = crate::agent::child_reviewer::begin_child_run(
+        &f.db, id, &f.binding.child_session, &f.root, "model", 0, "review", None,
+    ).unwrap();
+    let unrelated = crate::agent::child_reviewer::begin_child_run(
+        &f.db, "unrelated-run", "unrelated-session", &f.root, "model", 0, "worker", None,
+    ).unwrap();
+    let body = status(&f.db, &f.binding.parent_session, id).unwrap();
+    assert_eq!(body["parent_run_id"], f.binding.parent_run);
+    assert_eq!(body["result_available"], true);
+    assert_eq!(body["collected_at"], Value::Null);
+    assert!(body["finished_at"].is_string());
+    assert_eq!(body["summary"], "read-only findings");
+
+    let context = SandwichContext::new("system".into(), "parent goal".into());
+    let mut cp = AgentCheckpoint::new(f.binding.parent_session.clone(), &context);
+    crate::agent::checkpoint::save_checkpoint_and_consume(
+        &f.db,
+        &mut cp,
+        &context,
+        &[crate::agent::checkpoint::AppliedReceipt { run_id: id.clone(), verdict: None }],
+    ).unwrap();
+
+    let body = status(&f.db, &f.binding.parent_session, id).unwrap();
+    let collected_at = body["collected_at"].as_str().unwrap();
+    let view = serde_json::to_value(team_view::observe(&f.db, &f.binding.parent_session).unwrap()).unwrap();
+    let rows = view["receipts"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    let child = rows.iter().find(|row| row["child_run_id"] == *id).unwrap();
+    assert_eq!(child["collected_at"], collected_at);
+    let nested = rows.iter().find(|row| row["child_run_id"] == specialist).unwrap();
+    assert_eq!(nested["parent_run_id"], *id);
+    assert_eq!(nested["result_available"], false);
+    assert_eq!(nested["collected_at"], Value::Null);
+    assert!(!rows.iter().any(|row| row["child_run_id"] == unrelated));
+    assert!(visible_tasks(&f.db, &f.binding.parent_session, Some(&specialist)).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn desktop_wait_snapshot_tracks_real_root_and_nested_waits() {
+    use crate::agent::{agent_mailbox, control::SessionExecutionOwner, job_engine};
+    let f = Fixture::new();
+    let session = &f.binding.parent_session;
+    let run = format!("wait-root-{}", uuid::Uuid::new_v4());
+    let _owner = SessionExecutionOwner::acquire(session, &run).unwrap();
+    let child = crate::agent::child_reviewer::begin_child_run(
+        &f.db, &run, session, &f.root, "model", 0, "task", None,
+    ).unwrap();
+    let child_session = format!("task-{child}");
+    let _child_owner = SessionExecutionOwner::acquire(&child_session, &child).unwrap();
+    let grandchild = crate::agent::child_reviewer::begin_child_run(
+        &f.db, &child, &child_session, &f.root, "model", 0, "task", None,
+    ).unwrap();
+    let actor = agent_mailbox::Actor::new(&child, &child_session);
+    let (interrupt, mut inbox_rx) = tokio::sync::watch::channel(0);
+    let completed = crate::agent::child_reviewer::begin_child_run(
+        &f.db, &run, session, &f.root, "model", 0, "review", None,
+    ).unwrap();
+    f.db.0.lock().unwrap().execute(
+        "UPDATE agent_child_runs SET status='succeeded',applied_at='done' WHERE id=?1", [&completed],
+    ).unwrap();
+    let targets = [child.clone(), completed, grandchild.clone(), "missing".into(), child.clone()];
+    let mut jobs = Box::pin(job_engine::wait_for_jobs(&f.db, &run, Some(&targets), 600, None));
+    let mut inbox = Box::pin(agent_mailbox::wait(&f.db, &actor, Some(&grandchild), 600, &mut inbox_rx));
+    assert!(futures_util::poll!(jobs.as_mut()).is_pending());
+    assert!(futures_util::poll!(inbox.as_mut()).is_pending());
+
+    let view = |session| serde_json::to_value(team_view::observe(&f.db, session).unwrap()).unwrap();
+    assert_eq!(view(session)["waiting_on"], json!([
+        {"waiter_run_id":run,"kind":"jobs","target_ids":[child]},
+        {"waiter_run_id":child,"kind":"inbox","target_ids":[grandchild]},
+    ]));
+    assert_eq!(view("unrelated-session")["waiting_on"], json!([]));
+    assert_eq!(view(&child_session)["waiting_on"], json!([
+        {"waiter_run_id":child,"kind":"inbox","target_ids":[grandchild]},
+    ]));
+
+    drop(jobs);
+    interrupt.send_replace(1);
+    assert_eq!(inbox.await.unwrap_err(), agent_mailbox::WAIT_INTERRUPTED);
+    assert_eq!(view(session)["waiting_on"], json!([]));
+}
+
+#[test]
+fn desktop_collaboration_focus_uses_registered_attempts_from_the_same_task() {
+    use crate::agent::{control::SessionExecutionOwner, run_trace::upsert_snapshot};
+    let f = Fixture::new();
+    let session = &f.binding.parent_session;
+    let prefix = uuid::Uuid::new_v4().to_string();
+    let old = format!("{prefix}-old");
+    let resumed = format!("{prefix}-resumed");
+    let separate = format!("{prefix}-separate");
+    let foreign = format!("{prefix}-foreign");
+    let empty_key = format!("{prefix}-empty");
+    for (run, owner, date, task) in [
+        (&old, session.as_str(), "2026-01-01", "same-task"),
+        (&resumed, session.as_str(), "2026-01-02", "same-task"),
+        (&separate, session.as_str(), "2026-01-03", "separate-task"),
+        (&foreign, "foreign-session", "2026-01-04", "same-task"),
+        (&empty_key, session.as_str(), "2026-01-04", ""),
+    ] {
+        upsert_snapshot(&f.db, run, owner, "goal", "running", &[], None).unwrap();
+        f.db.0.lock().unwrap().execute(
+            "UPDATE agent_run_traces SET started_at=?2,history_task_id=?3 WHERE id=?1",
+            params![run, date, task],
+        ).unwrap();
+    }
+    let view = || serde_json::to_value(team_view::observe(&f.db, session).unwrap()).unwrap();
+    assert_eq!(view()["focus_run_id"], empty_key);
+    assert_eq!(view()["focus_run_ids"], json!([empty_key]));
+    let owner = SessionExecutionOwner::acquire(session, &resumed).unwrap();
+    assert_eq!(view()["focus_run_id"], resumed);
+    assert_eq!(view()["focus_run_ids"], json!([old, resumed]));
+    drop(owner);
+    assert_eq!(view()["focus_run_ids"], json!([empty_key]));
+}
+
+#[test]
 fn nested_artifact_path_survives_parent_binding_cleanup() {
     let f = Fixture::new();
     let first = TaskGuard::enter(f.binding.clone());

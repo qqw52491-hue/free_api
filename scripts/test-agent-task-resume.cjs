@@ -7,9 +7,10 @@ const ts = require('typescript');
 const vue = require('vue');
 const root = path.resolve(__dirname, '..');
 const cache = new Map();
-let mounted = [], requests = [], traceStatus = 'cancelled', creations = [], failCreation = false;
+let mounted = [], unmounted = [], requests = [], traceStatus = 'cancelled', creations = [], failCreation = false;
 let traceFixtures, messageFixtures = [];
 let invokeFixtures = {};
+let deferredListen;
 const storage = new Map();
 const handlers = new Map();
 global.localStorage = { getItem: k => storage.get(k) ?? null, setItem: (k,v) => storage.set(k,v) };
@@ -27,14 +28,15 @@ async function invoke(name, args) {
         if (failCreation) throw Error('cannot create session');
         return { id: 'saved-session' };
     }
+    if (name === 'run_agent_main_loop') requests.push(args);
+    if (invokeFixtures[name]) return invokeFixtures[name](args);
     if (name === 'get_session_run_traces') return traceFixtures ?? [{
         id: 'previous-run', goal: 'original complex task', status: traceStatus,
         started_at: '2026-10-13T08:00:00Z', updated_at: '2026-10-13T08:01:00Z', steps: [],
     }];
-    if (name === 'run_agent_main_loop') requests.push(args);
-    if (invokeFixtures[name]) return invokeFixtures[name](args);
     if (name === 'run_agent_main_loop') return;
     if (name === 'get_agent_checkpoint') return null;
+    if (name === 'get_agent_execution_snapshot') return { active: null, waiting_checkpoint: null };
     return [];
 }
 function load(filename) {
@@ -45,12 +47,16 @@ function load(filename) {
         compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
     }).outputText;
     function localRequire(id) {
-        if (id === 'vue') return { ...vue, onMounted: fn => mounted.push(fn), onUnmounted: noOp };
+        if (id === 'vue') return { ...vue, onMounted: fn => mounted.push(fn), onUnmounted: fn => unmounted.push(fn) };
         if (id === '@tauri-apps/api/core') return { invoke };
-        if (id === '@tauri-apps/api/event') return { listen: async (channel, fn) => { handlers.set(channel, fn); return () => { if (handlers.get(channel) === fn) handlers.delete(channel); }; } };
+        if (id === '@tauri-apps/api/event') return { listen: async (channel, fn) => {
+            if (deferredListen) await deferredListen;
+            handlers.set(channel, fn);
+            return () => { if (handlers.get(channel) === fn) handlers.delete(channel); };
+        } };
         if (id.endsWith('/format')) return format;
         if (id.endsWith('/usePersistedAgentConversation')) return {
-            usePersistedAgentConversation: () => ({ conversationMessages: vue.ref(messageFixtures), isConversationLoading: vue.ref(false), loadConversation: async () => {} }),
+            usePersistedAgentConversation: () => ({ conversationMessages: vue.ref(messageFixtures), isConversationLoading: vue.ref(false), loadConversation: async () => {}, invalidateConversationLoad: noOp }),
         };
         if (id.endsWith('/useAgentTaskResources')) return {
             useAgentTaskResources: () => new Proxy({}, { get: (_o, k) =>
@@ -68,8 +74,11 @@ function load(filename) {
     return m.exports;
 }
 const { useAgentSession } = load(path.join(root, 'src/composables/useAgentSession.ts'));
+const { useModelRoutingPreferences } = load(path.join(root, 'src/composables/useModelRoutingPreferences.ts'));
+const routingDefaults = structuredClone(vue.toRaw(useModelRoutingPreferences().value));
 async function session(status, fixtures = {}) {
-    traceStatus = status; mounted = []; requests = []; storage.clear();
+    traceStatus = status; mounted = []; unmounted = []; requests = []; storage.clear();
+    useModelRoutingPreferences().value = structuredClone(routingDefaults);
     traceFixtures = fixtures.traces;
     messageFixtures = fixtures.messages ?? [];
     invokeFixtures = fixtures.invoke ?? {};
@@ -81,9 +90,9 @@ async function session(status, fixtures = {}) {
 
 async function replaceWaitingTask() {
     const event = (channel, payload) => handlers.get(channel)({payload});
-    const pausedRun = async () => {
-        await event('channel-run-started', {session_id:'existing-session',run_id:'old-run',goal:'改造 License'});
-        await event('agent-progress-existing-session', {type:'agent_paused',run_id:'old-run',message:'是否继续改造？'});
+    const pausedRun = async (runId = 'old-run') => {
+        await event('channel-run-started', {session_id:'existing-session',run_id:runId,goal:'改造 License'});
+        await event('agent-progress-existing-session', {type:'agent_paused',run_id:runId,wait_id:'old-wait',message:'是否继续改造？'});
     };
     const ask = '停止改造，解释为什么反复读取';
     const activeStop = {delivered:true,has_active_run:true,active_run_id:'old-run'};
@@ -91,15 +100,16 @@ async function replaceWaitingTask() {
     let releaseOld;
     let s = await session('cancelled', {invoke:{
         run_agent_main_loop: () => requests.length === 1 ? new Promise(resolve => {releaseOld = resolve;}) : undefined,
-        cancel_agent_run: () => activeStop,
+        cancel_agent_execution: ({runId}) => ({...activeStop,active_run_id:runId}),
         send_human_intervention: () => assert.fail('新任务不能写进人工回答'),
     }});
     const old = s.runAgent('改造 License', undefined, 'new');
     await new Promise(resolve => setImmediate(resolve));
-    await pausedRun();
+    const oldDesktopId = requests[0].desktopRunId;
+    await pausedRun(oldDesktopId);
     assert.equal(s.isWaitingForHuman.value, true);
     assert.equal(await s.endTaskAndStartNew(ask), true);
-    await event('channel-run-done', {session_id:'existing-session',run_id:'old-run',status:'cancelled'});
+    await event('channel-run-done', {session_id:'existing-session',run_id:oldDesktopId,status:'cancelled'});
     assert.equal(requests.length, 1, '本地旧任务还未完成收尾');
     releaseOld();
     await old;
@@ -107,7 +117,7 @@ async function replaceWaitingTask() {
     assert.equal(requests[1].goal, ask);
     assert.equal(requests[1].taskStartMode, 'new');
 
-    s = await session('running', {invoke:{cancel_agent_run: () => activeStop}});
+    s = await session('running', {invoke:{cancel_agent_execution: () => activeStop}});
     await pausedRun();
     assert.equal(await s.endTaskAndStartNew(ask), true);
     await event('channel-run-done', {session_id:'existing-session',run_id:'unrelated-run',status:'cancelled'});
@@ -118,14 +128,14 @@ async function replaceWaitingTask() {
     assert.equal(requests[0].taskStartMode, 'new');
 
     s = await session('waiting_human', {invoke:{
-        get_agent_checkpoint: () => ({run_id:'old-run',is_waiting_human:true,user_goal:'改造 License',step_id:1}),
-        cancel_agent_run: () => ({delivered:false,has_active_run:false,active_run_id:null}),
+        get_agent_execution_snapshot: () => ({active:null,waiting_checkpoint:{version:1,user_goal:'改造 License'}}),
+        cancel_agent_waiting_checkpoint: ({checkpointVersion}) => assert.equal(checkpointVersion, 1),
     }});
     assert.equal(s.isWaitingForHuman.value, true);
     assert.equal(await s.endTaskAndStartNew(ask), true);
     assert.equal(requests[0].taskStartMode, 'new');
 
-    s = await session('running', {invoke:{cancel_agent_run: () => ({...activeStop,delivered:false})}});
+    s = await session('running', {invoke:{cancel_agent_execution: () => ({...activeStop,delivered:false}),get_agent_execution_snapshot: () => ({active:{run_id:'old-run',wait_id:'old-wait',question:'是否继续改造？'},waiting_checkpoint:null})}});
     await pausedRun();
     assert.equal(await s.endTaskAndStartNew(ask), false);
     assert.equal(s.isWaitingForHuman.value, true);
@@ -133,6 +143,139 @@ async function replaceWaitingTask() {
     await event('channel-run-done', {session_id:'existing-session',run_id:'old-run',status:'cancelled'});
     assert.equal(requests.length, 0, '失败的切换不能留待未来误启动');
 }
+
+function deferred() {
+    let resolve;
+    const promise = new Promise(done => { resolve = done; });
+    return { promise, resolve };
+}
+
+async function testExecutionBoundaries() {
+    const event = (channel, payload) => handlers.get(channel)({payload});
+    const progress = payload => event('agent-progress-existing-session', payload);
+    const started = runId => event('channel-run-started', {session_id:'existing-session',run_id:runId,goal:'外部任务'});
+    const done = runId => event('channel-run-done', {session_id:'existing-session',run_id:runId,status:'done'});
+    const live = (runId, waitId, question) => ({
+        active:{run_id:runId,goal:'外部任务',wait_id:waitId,question},
+        waiting_checkpoint:null,
+    });
+
+    let snapshot = live('R1', null, null);
+    const reply = deferred();
+    const answerRequests = [];
+    const stopRequests = [];
+    let s = await session('running', { invoke: {
+        get_agent_execution_snapshot: () => snapshot,
+        send_human_intervention: args => {
+            answerRequests.push(args);
+            if (args.waitId === 'W1') return reply.promise;
+            throw Error('question expired');
+        },
+        cancel_agent_execution: args => {
+            stopRequests.push(args);
+            return {delivered:true,has_active_run:true,active_run_id:'R2'};
+        },
+    }});
+    assert.equal(s.isRunning.value, true, 'first open snapshots the actual active external run');
+    assert.equal(s.activeRunId.value, 'R1');
+    assert.equal(s.canResumeTask.value, false);
+    await s.runAgent('do not start a second run');
+    assert.equal(requests.length, 0);
+    await progress({type:'agent_paused',run_id:'R1',wait_id:'W1',message:'第一张审批'});
+    const oldKey = s.humanWaitKey.value;
+    const answer = s.answerHuman('第一张的回答', undefined, oldKey);
+    snapshot = live('R1', 'W2', '第二张审批');
+    await progress({type:'agent_paused',run_id:'R1',wait_id:'W2',message:'第二张审批'});
+    reply.resolve({id:'answer-1'});
+    assert.equal(await answer, true);
+    assert.deepEqual(answerRequests[0], {sessionId:'existing-session',runId:'R1',waitId:'W1',message:'第一张的回答'});
+    assert.equal(s.pauseReason.value, '第二张审批', 'old acknowledgement cannot clear the new question');
+    assert.equal(s.isWaitingForHuman.value, true);
+    assert.equal(await s.answerHuman('旧卡再次提交', undefined, oldKey), false);
+    assert.equal(answerRequests.length, 1, 'a click from the old card must not send an answer to the new card');
+    assert.equal(await s.answerHuman('后端拒绝的回答', undefined, s.humanWaitKey.value), false);
+    assert.equal(answerRequests[1].waitId, 'W2');
+    assert.equal(requests.length, 0, 'a normal failure never launches checkpoint recovery');
+    assert.equal(s.pauseReason.value, '第二张审批');
+    assert.equal(await s.requestStop(), false, 'an unrelated receipt does not report a successful stop');
+    assert.deepEqual(stopRequests, [{sessionId:'existing-session',runId:'R1'}]);
+    assert.equal(s.activeRunId.value,'R1', 'unrelated stop receipt does not adopt another run');
+    unmounted.forEach(fn => fn());
+
+    let saved = {version:23,user_goal:'保存的任务',last_error:'保存的审批'};
+    const savedFixture = {
+        get_agent_execution_snapshot: () => ({active:null,waiting_checkpoint:saved}),
+        cancel_agent_waiting_checkpoint: args => {
+            assert.deepEqual(args, {sessionId:'existing-session',checkpointVersion:23});
+            saved = null;
+        },
+    };
+    s = await session('waiting_human', {invoke:savedFixture});
+    assert.equal(s.humanWaitKey.value,'saved:23');
+    await done('stale-r');
+    assert.equal(s.humanWaitKey.value,'saved:23', 'an unrelated done must not dismiss a saved wait');
+    assert.equal(await s.requestStop(), true);
+    assert.equal(s.isWaitingForHuman.value,false);
+    s = await session('cancelled', {invoke:savedFixture});
+    assert.equal(s.isWaitingForHuman.value,false, 'stopped saved wait stays dismissed after reopen');
+    saved = {version:24,user_goal:'另一个保存的任务'};
+    s = await session('waiting_human', {invoke:savedFixture});
+    assert.equal(await s.answerHuman('明确回答保存的审批'), true);
+    assert.equal(requests[0].taskStartMode, 'resume');
+    assert.equal(requests[0].waitingCheckpointVersion, 24);
+
+    const previousTrace = deferred();
+    let reads = 0;
+    const trace = status => [{id:'racing-run',goal:'外部任务',status,started_at:'2026-10-13T08:00:00Z',steps:[]}];
+    s = await session('succeeded', {invoke:{
+        get_session_run_traces: () => ++reads === 2 ? previousTrace.promise : trace('succeeded'),
+    }});
+    const oldRead = started('racing-run');
+    await done('racing-run');
+    assert.equal(s.historyTurns.value[0].status, 'succeeded');
+    previousTrace.resolve(trace('running'));
+    await oldRead;
+    assert.equal(s.historyTurns.value[0].status, 'succeeded', 'late old read cannot roll terminal history backwards');
+    assert.equal(s.canResumeTask.value, false);
+    unmounted.forEach(fn => fn());
+
+    const localExit = deferred();
+    const inFlightLocalStops = [];
+    s = await session('succeeded', {invoke:{
+        run_agent_main_loop: () => localExit.promise,
+        cancel_agent_execution: ({runId}) => {
+            inFlightLocalStops.push(runId);
+            return {delivered:true,has_active_run:true,active_run_id:runId};
+        },
+    }});
+    const localAttempt = s.runAgent('本地任务');
+    await new Promise(resolve => setImmediate(resolve));
+    const localRunId = requests[0].desktopRunId;
+    assert.match(localRunId, /^[0-9a-f-]{36}$/);
+    assert.equal(await s.requestStop(), true, 'stop is queued while its own registration is pending');
+    assert.deepEqual(inFlightLocalStops, []);
+    await started('external-started-first');
+    assert.equal(s.activeRunId.value, 'external-started-first');
+    assert.deepEqual(inFlightLocalStops, [], 'an external admission does not consume the earlier local stop');
+    await done('external-started-first');
+    await started(localRunId);
+    assert.deepEqual(inFlightLocalStops, [localRunId], 'queued stop targets only the locally submitted run');
+    await done(localRunId);
+    localExit.resolve();
+    await localAttempt;
+    unmounted.forEach(fn => fn());
+
+    const listenGate = deferred();
+    deferredListen = listenGate.promise;
+    useAgentSession('existing-session');
+    const mount = mounted.at(-1)();
+    unmounted.at(-1)();
+    listenGate.resolve();
+    await mount;
+    deferredListen = undefined;
+    assert.equal(handlers.size, 0, 'listeners registered after unmount are released immediately');
+}
+
 async function main() {
     for (const status of ['failed', 'cancelled', 'running', 'waiting_human']) {
         const s = await session(status);
@@ -166,6 +309,7 @@ async function main() {
     assert.equal(requests[0].taskStartMode, 'resume');
     assert.equal(requests[1].taskStartMode, 'new', 'queued task must not inherit failed predecessor');
     await replaceWaitingTask();
+    await testExecutionBoundaries();
     invokeFixtures = {};
     requests = []; creations = []; failCreation = false;
     let promoted = [];
@@ -193,7 +337,20 @@ async function main() {
     s = useAgentSession('draft-project', { projectId: 'p1' });
     await s.ensureSession(); assert.equal(creations[0].name, 'create_agent_project_session');
     assert.equal(creations[0].args.projectId, 'p1');
-    console.log('PASS: task intent, replacement during human wait, and settings session creation; real composable, mocked I/O');
+
+    s = await session('cancelled');
+    const other = useAgentSession('second-open-session');
+    s.updateModelRouting({ ...s.sessionModelRouting.value, disabled_role_cards: ['reviewer:chosen'] });
+    const preferences = useModelRoutingPreferences();
+    preferences.value.pro = 'updated-project-pro';
+    assert.equal(other.sessionModelRouting.value.pro, 'updated-project-pro');
+    assert.equal(other.sessionModelRouting.value.disabled_role_cards, undefined, 'role exclusions belong to the session');
+    await s.runAgent('resume after updating the model');
+    assert.equal(requests[0].taskStartMode, 'resume');
+    assert.equal(requests[0].modelRouting.pro, 'updated-project-pro');
+    assert.deepEqual(requests[0].modelRouting.disabled_role_cards, ['reviewer:chosen']);
+    assert.equal(JSON.parse(storage.get('free-api.agent.model-routing.v1')).disabled_role_cards, undefined);
+    console.log('PASS: task intent, replacement, scoped controls, saved waits, initial snapshot and late refresh/listener isolation; real composable with mocked I/O');
 }
 module.exports = { load, session, emit: (channel, payload) => { assert(handlers.has(channel), channel); return handlers.get(channel)({ payload }); } };
 if (require.main === module) main().then(() => process.exit(0), e => { console.error(e); process.exit(1); });

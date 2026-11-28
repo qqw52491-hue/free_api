@@ -14,18 +14,66 @@ pub(crate) fn model_id_of_session(
     .map_err(|_| bad_request("会话缺少模型，请先在通道配置中填写默认模型"))
 }
 
-pub(crate) fn last_assistant_message<R: tauri::Runtime>(app: &AppHandle<R>, session_id: &str) -> Option<String> {
+pub(crate) fn assistant_message_for_run<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    session_id: &str,
+    run_id: &str,
+) -> Option<String> {
     let conn = db_conn(app).ok()?;
-    load_last_assistant_message(&conn, session_id)
+    load_assistant_message_for_run(&conn, session_id, run_id).ok().flatten()
 }
 
-fn load_last_assistant_message(conn: &rusqlite::Connection, session_id: &str) -> Option<String> {
+fn load_assistant_message_for_run(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    run_id: &str,
+) -> rusqlite::Result<Option<String>> {
     conn.query_row(
-        "SELECT content FROM chat_messages WHERE session_id=?1 AND role='assistant' ORDER BY created_at DESC, id DESC LIMIT 1",
-        rusqlite::params![session_id],
+        "SELECT content FROM chat_messages WHERE session_id=?1 AND run_id=?2 AND role='assistant'
+         ORDER BY rowid DESC LIMIT 1",
+        rusqlite::params![session_id, run_id],
         |row| row.get::<_, String>(0),
-    )
-    .ok()
+    ).optional()
+}
+
+fn load_persisted_run_status(
+    conn: &rusqlite::Connection,
+    run_id: &str,
+) -> rusqlite::Result<Option<Value>> {
+    let row = conn.query_row(
+        "SELECT session_id, status, completion_json FROM agent_run_traces WHERE id=?1",
+        [run_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)),
+    ).optional()?;
+    let Some((session_id, status, completion)) = row else { return Ok(None) };
+    let status = super::run_spawn::terminal_status(&status).unwrap_or(&status);
+    let completion = completion.and_then(|body| serde_json::from_str::<Value>(&body).ok());
+    let error = completion.as_ref().and_then(|body| body.get("reason").or_else(|| body.get("summary")));
+    let result = if status == "done" {
+        load_assistant_message_for_run(conn, &session_id, run_id)?
+    } else {
+        None
+    };
+    Ok(Some(json!({
+        "run_id": run_id, "session_id": session_id, "status": status, "result": result,
+        "error": if status == "failed" { error } else { None },
+    })))
+}
+
+fn run_status_value(record: &RunRecord) -> Result<Value, (StatusCode, Json<Value>)> {
+    let mut value = serde_json::to_value(record).map_err(internal_error)?;
+    if let Some(wait_id) = record.paused_wait_id.as_ref().filter(|_| record.status == "waiting_human") {
+        if crate::agent::control::current_human_wait(&record.session_id, &record.run_id).as_ref() == Some(wait_id) {
+            value["wait_id"] = json!(wait_id);
+        } else {
+            // The control slot has already advanced even if a progress event
+            // has not updated the display record yet.
+            value["status"] = json!("running");
+            value["paused_reason"] = Value::Null;
+            value["paused_form"] = Value::Null;
+        }
+    }
+    Ok(value)
 }
 
 pub(crate) async fn handler_run_status(
@@ -38,22 +86,16 @@ pub(crate) async fn handler_run_status(
         return Err(unauthorized());
     }
     let record = runs_store().lock().expect("runs store poisoned").get(&run_id).cloned();
-    match record {
-        Some(record) => {
-            let wait_id = state.acp_token.as_ref()
-                .and_then(|_| crate::agent::control::current_human_wait(&record.session_id, &run_id))
-                .filter(|id| record.paused_wait_id.as_ref() == Some(id));
-            let mut value = serde_json::to_value(record).map_err(internal_error)?;
-            if let Some(wait_id) = wait_id {
-                value["wait_id"] = json!(wait_id);
-            }
-            Ok(Json(value))
-        }
-        None => Err((
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "任务不存在或已被清理"})),
-        )),
+    if let Some(record) = record {
+        return Ok(Json(run_status_value(&record)?));
     }
+    if state.acp_token.is_some() {
+        let conn = db_conn(&state.app)?;
+        if let Some(record) = load_persisted_run_status(&conn, &run_id).map_err(internal_error)? {
+            return Ok(Json(record));
+        }
+    }
+    Err(not_found("任务不存在或已被清理"))
 }
 
 pub(crate) async fn handler_run_list(
@@ -71,6 +113,7 @@ pub(crate) async fn handler_run_list(
         .cloned()
         .collect();
     runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    let runs = runs.iter().map(run_status_value).collect::<Result<Vec<_>, _>>()?;
     Ok(Json(json!({ "runs": runs })))
 }
 
@@ -96,20 +139,17 @@ pub(crate) async fn handler_run_answer(
         }
         (run.session_id.clone(), run.paused_wait_id.clone())
     };
+    let legacy_wait = if state.acp_token.is_none() { pending_wait.as_deref() } else { None };
+    let wait_id = req.wait_id.as_deref()
+        .or(legacy_wait)
+        .ok_or_else(|| bad_request("缺少人工问题标识，请刷新任务状态"))?;
     let answer_state = state.app.state::<DbState>();
-    if state.acp_token.is_some() {
-        let wait_id = req.wait_id.as_deref().ok_or_else(|| bad_request("缺少人工问题标识"))?;
-        crate::agent::control::send_human_reply(answer_state.inner(), &session_id, text, Some((&run_id, wait_id)))
-            .await.map_err(|error| (StatusCode::CONFLICT, Json(json!({ "error": error }))))?;
-    } else {
-        crate::agent::control::send_human_intervention(answer_state, session_id.clone(), text)
-            .await
-            .map_err(|e| bad_request(&e))?;
-    }
+    crate::agent::control::send_human_reply(answer_state.inner(), &session_id, text, Some((&run_id, wait_id)))
+        .await.map_err(|error| (StatusCode::CONFLICT, Json(json!({ "error": error }))))?;
     patch_run(&run_id, |record| {
         // A fast continuation may already have displayed a different question
         // or published a terminal result by the time the send returns.
-        if record.status == "waiting_human" && record.paused_wait_id == pending_wait {
+        if record.status == "waiting_human" && record.paused_wait_id.as_deref() == Some(wait_id) {
             record.status = "running".to_string();
             record.paused_reason = None;
             record.paused_form = None;
@@ -183,15 +223,9 @@ pub(crate) async fn handler_run_goal(
     if goal.is_empty() {
         return Err(bad_request("新目标不能为空"));
     }
-    crate::agent::control::replace_agent_goal(session_id.clone(), goal)
+    crate::agent::control::replace_goal_for_run(&session_id, goal, Some(&run_id))
         .await
-        .map_err(|e| bad_request(&e))?;
-    patch_run(&run_id, |record| {
-        record.status = "running".to_string();
-        record.paused_reason = None;
-        record.paused_form = None;
-        record.paused_wait_id = None;
-    });
+        .map_err(|error| (StatusCode::CONFLICT, Json(json!({ "error": error }))))?;
     Ok(Json(json!({"ok": true, "session_id": session_id})))
 }
 
@@ -210,23 +244,11 @@ pub(crate) async fn handler_run_cancel(
             .map(|r| r.session_id.clone())
             .ok_or_else(|| not_found("任务不存在"))?
     };
-    if state.acp_token.is_some() {
-        let result = crate::agent::control::cancel_run(&session_id, Some(&run_id))
-            .await.map_err(|error| (StatusCode::CONFLICT, Json(json!({ "error": error }))))?;
-        return Ok(Json(json!({"ok": result.delivered, "session_id": session_id})));
+    let result = crate::agent::control::cancel_run(&session_id, Some(&run_id))
+        .await.map_err(|error| (StatusCode::CONFLICT, Json(json!({ "error": error }))))?;
+    if !result.delivered {
+        return Err((StatusCode::CONFLICT, Json(json!({"error": "当前运行未收到停止请求，请刷新任务状态"}))));
     }
-    crate::agent::control::cancel_agent_run(session_id.clone())
-        .await
-        .map_err(|e| bad_request(&e))?;
-    patch_run(&run_id, |record| {
-        // 已到终态（done/failed/cancelled）的任务不再覆盖，避免取消请求把完成态改写
-        if matches!(record.status.as_str(), "running" | "waiting_human") {
-            record.status = "cancelled".to_string();
-        }
-        record.paused_reason = None;
-        record.paused_form = None;
-        record.paused_wait_id = None;
-    });
     Ok(Json(json!({"ok": true, "session_id": session_id})))
 }
 
@@ -249,18 +271,29 @@ pub(crate) struct GoalReq {
 
 #[cfg(test)]
 mod result_delivery_tests {
-    use super::load_last_assistant_message;
+    use super::{load_assistant_message_for_run, load_persisted_run_status};
 
     #[test]
-    fn last_assistant_result_preserves_text_beyond_24000_and_session_boundary() {
+    fn result_preserves_full_text_and_matches_run_even_when_clock_moves_back() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE chat_messages (id TEXT, session_id TEXT, role TEXT, content TEXT, created_at INTEGER)").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE chat_messages (id TEXT, session_id TEXT, role TEXT, content TEXT, created_at INTEGER, run_id TEXT);
+             CREATE TABLE agent_run_traces (id TEXT PRIMARY KEY, session_id TEXT, status TEXT, completion_json TEXT);
+             INSERT INTO agent_run_traces VALUES ('this-run','target','succeeded',NULL);
+             INSERT INTO chat_messages VALUES
+                ('0','target','assistant','previous answer with later timestamp',6,'previous-run'),
+                ('2','target','user','later user message',3,'this-run'),
+                ('3','other','assistant','other session',4,'this-run'),
+                ('4','target','assistant','legacy unbound answer',5,NULL);",
+        ).unwrap();
         let text = "结果🙂\n".repeat(9000);
-        conn.execute("INSERT INTO chat_messages VALUES ('1','target','assistant',?1,1)", [&text]).unwrap();
-        conn.execute("INSERT INTO chat_messages VALUES ('2','target','user','later user message',2)", []).unwrap();
-        conn.execute("INSERT INTO chat_messages VALUES ('3','other','assistant','other session',3)", []).unwrap();
-        assert_eq!(load_last_assistant_message(&conn, "target"), Some(text));
-        assert_eq!(load_last_assistant_message(&conn, "missing"), None);
+        conn.execute("INSERT INTO chat_messages VALUES ('1','target','assistant',?1,1,'this-run')", [&text]).unwrap();
+        assert_eq!(load_assistant_message_for_run(&conn, "target", "this-run").unwrap().as_deref(), Some(text.as_str()));
+        assert_eq!(load_assistant_message_for_run(&conn, "target", "missing").unwrap(), None);
+        let record = load_persisted_run_status(&conn, "this-run").unwrap().unwrap();
+        assert_eq!(record["session_id"], "target");
+        assert_eq!(record["status"], "done");
+        assert_eq!(record["result"].as_str(), Some(text.as_str()));
     }
 }
 

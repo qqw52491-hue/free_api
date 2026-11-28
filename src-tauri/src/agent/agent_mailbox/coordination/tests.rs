@@ -152,6 +152,44 @@ fn resumed_root_claims_old_undelivered_mail_without_changing_its_owner() {
 }
 
 #[test]
+fn legacy_run_ownership_does_not_adopt_or_consume_another_runs_mail() {
+    let f = Fixture::new();
+    f.end(&f.b);
+    let child_message = f.send(&f.a, &f.b, "old team material");
+    let root_message = f.send(&f.a, &f.root, "old direct material");
+    let other = f.resumed_root();
+    {
+        let conn = f.db.0.lock().unwrap();
+        conn.execute("UPDATE agent_run_traces SET history_task_id=''", []).unwrap();
+        conn.execute("UPDATE agent_run_traces SET status='interrupted' WHERE id=?1", [&f.root.run]).unwrap();
+        assert!(pending_on(&conn, &f.root.run).unwrap());
+        assert!(!pending_on(&conn, &other.run).unwrap());
+        assert!(!super::replies::pending_on(&conn, &other.run).unwrap());
+    }
+    assert!(claim(&f.db).unwrap().is_empty());
+    assert_eq!(list(&f.db, &other, 0).unwrap()["items"], json!([]));
+    assert!(send(&f.db, &other, &json!({"target":f.b.run,"message":"not my task"}), None, false).is_err());
+
+    let mut context = crate::agent::context::SandwichContext::new("system".into(), "other goal".into());
+    let mut checkpoint = crate::agent::checkpoint::AgentCheckpoint::new(other.session.clone(), &context);
+    assert_eq!(deliver_main(&f.db, &other, &mut context, &mut checkpoint).unwrap(), 0);
+    crate::agent::checkpoint::save_checkpoint_and_messages(
+        &f.db, &mut checkpoint, &context, &other.run,
+        &[root_message["message_id"].as_str().unwrap().to_owned()],
+    ).unwrap();
+
+    let conn = f.db.0.lock().unwrap();
+    for message in [child_message, root_message] {
+        let (root, claimed, delivered): (String, Option<String>, Option<String>) = conn.query_row(
+            "SELECT root_run_id,claimed_run_id,delivered_at FROM agent_messages WHERE id=?1",
+            [message["message_id"].as_str().unwrap()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(root, f.root.run);
+        assert!(claimed.is_none() && delivered.is_none());
+    }
+}
+
+#[test]
 fn ambiguous_active_roots_do_not_claim_old_mail() {
     let f = Fixture::new();
     f.end(&f.b);

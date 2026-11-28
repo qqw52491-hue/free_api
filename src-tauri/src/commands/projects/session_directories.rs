@@ -73,11 +73,24 @@ fn set_row(
     access: DirectoryAccess,
 ) -> Result<Vec<ProjectDirectory>, String> {
     ensure_free_session(conn, session)?;
-    let path = super::directories::canonical_extra_directory(raw, &session_workspace(session))?;
-    conn.execute("INSERT INTO agent_session_directories (session_id, canonical_path, access, updated_at) VALUES (?1, ?2, ?3, ?4)
+    let primary = session_workspace(session);
+    let path = super::directories::canonical_extra_directory(raw, &primary)?;
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    tx.execute("INSERT INTO agent_session_directories (session_id, canonical_path, access, updated_at) VALUES (?1, ?2, ?3, ?4)
         ON CONFLICT(session_id, canonical_path) DO UPDATE SET access=excluded.access, updated_at=excluded.updated_at",
         params![session, path.to_string_lossy(), access.as_str(), Utc::now().to_rfc3339()]).map_err(|e| e.to_string())?;
-    refresh(conn, session)
+    let dirs = read_session_directories(&tx, session)?;
+    crate::agent::reviewer_gatekeeper::capture_new_writable_directories_on(&tx, session, &primary, &dirs)?;
+    let publish = || {
+        tx.commit().map_err(|e| e.to_string())?;
+        workspace_access::bind_conversation(session, &primary, dirs.clone());
+        Ok(dirs)
+    };
+    if access == DirectoryAccess::ReadWrite {
+        crate::agent::workspace_lock::publish_writable_directory([session], &path, publish)
+    } else {
+        publish()
+    }
 }
 fn remove_row(
     conn: &Connection,

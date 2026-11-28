@@ -233,7 +233,11 @@ pub fn poll_pending_inbox(
 
 pub(crate) fn task_runs(db: &DbState, current: &str) -> Result<Vec<String>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    let mut stmt = conn.prepare("SELECT old.id FROM agent_run_traces current JOIN agent_run_traces old ON old.session_id=current.session_id AND old.history_task_id=current.history_task_id WHERE current.id=?1 AND current.history_task_id IS NOT NULL ORDER BY old.started_at, old.id").map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(concat!(
+        "SELECT id FROM agent_run_traces WHERE id IN (",
+        crate::agent::run_trace::task_run_ids!("?1"),
+        ") ORDER BY started_at, id"
+    )).map_err(|e| e.to_string())?;
     let rows = stmt.query_map([current], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?;
     let mut runs = rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
     if !runs.iter().any(|run| run == current) { runs.push(current.to_owned()); }
@@ -351,43 +355,41 @@ fn poll_targeted_inbox_one(db: &DbState, parent_run_id: &str, target_job_ids: &[
     Ok(results)
 }
 
-/// 检查指定 parent_run 是否仍有处于 running 状态的异步任务（包含通用任务与子审查任务）
-pub fn has_any_running_jobs(db: &DbState, parent_run_id: &str) -> bool {
-    task_runs(db, parent_run_id).unwrap_or_else(|_| vec![parent_run_id.to_owned()]).iter()
-        .any(|run| has_running_jobs(db, run) || crate::agent::child_reviewer::has_running_child_runs(db, run))
-}
-
-/// 定向语义：给定目标 id 集合中是否还有处于 running 的任务（两张表都查）。
-/// 定向 wait 的早退判据必须是「目标是否仍在途」，不能用全局 running 计数——
-/// 否则目标已全部终态/已消费、只有无关任务在跑时，调用方会被迫空等满超时。
-fn has_running_targets(db: &DbState, parent_run_id: &str, targets: &[String]) -> bool {
-    if targets.is_empty() {
-        return false;
+/// 从本任务及其前次运行的登记中找出仍在途、符合本次等待范围的任务。
+fn running_targets(db: &DbState, parent_run_id: &str, targets: Option<&[String]>) -> Vec<String> {
+    if targets.is_some_and(<[String]>::is_empty) {
+        return Vec::new();
     }
     let runs = task_runs(db, parent_run_id).unwrap_or_else(|_| vec![parent_run_id.to_owned()]);
-    let Ok(conn) = db.0.lock() else { return false; };
-    let marks = std::iter::repeat("?")
-        .take(targets.len())
-        .collect::<Vec<_>>()
-        .join(",");
-    for run in &runs {
-      for table in ["agent_background_jobs", "agent_child_runs"] {
-        let sql = format!(
-            "SELECT COUNT(*) FROM {} WHERE parent_run_id = ? AND status IN ('queued','running') AND id IN ({})",
-            table, marks
-        );
-        let params_vec: Vec<&dyn rusqlite::ToSql> = std::iter::once(run as &dyn rusqlite::ToSql)
-            .chain(targets.iter().map(|t| t as &dyn rusqlite::ToSql))
-            .collect();
-        let count: i64 = conn
-            .query_row(&sql, rusqlite::params_from_iter(params_vec), |row| row.get(0))
-            .unwrap_or(0);
-        if count > 0 {
-            return true;
+    let Ok(conn) = db.0.lock() else { return Vec::new(); };
+    let (background_status, filter) = match targets {
+        Some(ids) => {
+            let marks = std::iter::repeat("?").take(ids.len()).collect::<Vec<_>>().join(",");
+            ("status IN ('queued','running')", format!("WHERE id IN ({marks})"))
         }
-      }
+        None => ("status='running'", String::new()),
+    };
+    let sql = format!(
+        "SELECT id FROM (
+            SELECT id FROM agent_background_jobs WHERE parent_run_id=?1 AND {background_status}
+            UNION ALL
+            SELECT id FROM agent_child_runs WHERE parent_run_id=?1 AND status IN ('queued','running')
+         ) {filter}"
+    );
+    let Ok(mut stmt) = conn.prepare(&sql) else { return Vec::new(); };
+    let mut matching = std::collections::BTreeSet::new();
+    for run in &runs {
+        let params_vec: Vec<&dyn rusqlite::ToSql> = std::iter::once(run as &dyn rusqlite::ToSql)
+            .chain(targets.unwrap_or_default().iter().map(|t| t as &dyn rusqlite::ToSql))
+            .collect();
+        if let Ok(rows) = stmt.query_map(rusqlite::params_from_iter(params_vec), |row| row.get::<_, String>(0)) {
+            matching.extend(rows.flatten());
+        }
     }
-    false
+    match targets {
+        Some(ids) => ids.iter().filter(|id| matching.remove(*id)).cloned().collect(),
+        None => matching.into_iter().collect(),
+    }
 }
 
 /// 批内去重投递：同一 job_id 在一次 wait 内只入列一次。
@@ -606,19 +608,24 @@ pub async fn wait_for_jobs(
         collect_completed_child_results(db, parent_run_id, target_job_ids),
     );
 
-    // 早退判据：无目标时看全局 running；有目标时只看目标是否仍在途——
-    // 无关任务还在跑不构成继续等待的理由。
-    let no_pending = || match target_job_ids {
-        None => !has_any_running_jobs(db, parent_run_id),
-        Some(targets) => !has_running_targets(db, parent_run_id, targets),
-    };
-
-    if crate::agent::agent_mailbox::has_pending(db,parent_run_id) || found_target(&collected) || no_pending() {
+    if crate::agent::agent_mailbox::has_pending(db,parent_run_id) || found_target(&collected) {
+        enrich_and_refresh_collected_results(db, &mut collected).await;
+        return Ok(collected);
+    }
+    // 同一份登记用于早退与协作图。未指定时可在任一在途工作完成后唤醒。
+    let active_targets = || running_targets(db, parent_run_id, target_job_ids);
+    let initial_targets = active_targets();
+    if initial_targets.is_empty() {
         enrich_and_refresh_collected_results(db, &mut collected).await;
         return Ok(collected);
     }
 
     // 2. 反应式休眠：监听全局版本号变更、超时与打断
+    let waiting = crate::agent::child_task::team_view::WaitGuard::enter(
+        parent_run_id,
+        crate::agent::child_task::team_view::WaitKind::Jobs,
+        &initial_targets,
+    );
     while start_time.elapsed() < timeout_duration {
         let remaining = timeout_duration.saturating_sub(start_time.elapsed());
         if remaining.is_zero() {
@@ -648,9 +655,9 @@ pub async fn wait_for_jobs(
                     &mut seen_job_ids,
                     collect_completed_child_results(db, parent_run_id, target_job_ids),
                 );
-                if crate::agent::agent_mailbox::has_pending(db,parent_run_id) || found_target(&collected) || no_pending() {
-                    enrich_and_refresh_collected_results(db, &mut collected).await;
-                    return Ok(collected);
+                if crate::agent::agent_mailbox::has_pending(db,parent_run_id)
+                    || found_target(&collected) || active_targets().is_empty() {
+                    break;
                 }
             }
             _ = tokio::time::sleep(remaining) => {
@@ -694,6 +701,7 @@ pub async fn wait_for_jobs(
         }
     }
 
+    drop(waiting);
     enrich_and_refresh_collected_results(db, &mut collected).await;
     Ok(collected)
 }
@@ -717,14 +725,15 @@ pub(crate) fn running_job_finish_blockers(
     parent_run_id: &str,
 ) -> Result<Vec<String>, String> {
     let conn = db.0.lock().map_err(|error| error.to_string())?;
-    let mut stmt = conn.prepare(
-        "SELECT id, job_type, title FROM agent_background_jobs
-         WHERE (parent_run_id = ?1 OR parent_run_id IN (SELECT old.id FROM agent_run_traces current JOIN agent_run_traces old ON old.session_id=current.session_id AND old.history_task_id=current.history_task_id WHERE current.id=?1 AND current.history_task_id IS NOT NULL)) AND status = 'running'
+    let mut stmt = conn.prepare(concat!(
+        "WITH task_runs(id) AS (", crate::agent::run_trace::task_run_ids!("?1"), ")
+         SELECT id, job_type, title FROM agent_background_jobs
+         WHERE parent_run_id IN (SELECT id FROM task_runs) AND status = 'running'
          UNION ALL
          SELECT id, 'child_' || COALESCE(NULLIF(kind, ''), 'review'), COALESCE(purpose, '')
-         FROM agent_child_runs WHERE (parent_run_id = ?1 OR parent_run_id IN (SELECT old.id FROM agent_run_traces current JOIN agent_run_traces old ON old.session_id=current.session_id AND old.history_task_id=current.history_task_id WHERE current.id=?1 AND current.history_task_id IS NOT NULL)) AND status = 'running'
+         FROM agent_child_runs WHERE parent_run_id IN (SELECT id FROM task_runs) AND status = 'running'
          ORDER BY 1",
-    ).map_err(|error| error.to_string())?;
+    )).map_err(|error| error.to_string())?;
     let rows = stmt.query_map(params![parent_run_id], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
     }).map_err(|error| error.to_string())?;
@@ -779,6 +788,75 @@ pub fn cancel_all_running_jobs(db: &DbState, parent_run_id: &str) -> Result<usiz
     for pid in pids { crate::agent::tools::local_shell::kill_process_group(pid, "KILL"); }
     notify_job_state_changed();
     Ok(rows_updated)
+}
+
+pub(crate) fn cancel_recovered_running_jobs(db: &DbState, parent_run_id: &str) -> Result<Vec<String>, String> {
+    let jobs = {
+        let conn = db.0.lock().map_err(|error| error.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT id, job_type, params_json FROM agent_background_jobs
+             WHERE parent_run_id = ?1 AND status = 'running'",
+        ).map_err(|error| error.to_string())?;
+        let rows = stmt.query_map([parent_run_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        }).map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?
+    };
+
+    let mut warnings = Vec::new();
+    for (id, kind, params) in jobs {
+        let result = if kind == "shell" {
+            cancel_recovered_shell(db, &id, &params)
+        } else {
+            finish_job(db, &id, "cancelled", 0, None, Some("cancelled"))
+        };
+        if let Err(error) = result {
+            warnings.push(format!("历史后台任务 {id}：{error}"));
+        }
+    }
+    Ok(warnings)
+}
+
+fn cancel_recovered_shell(db: &DbState, id: &str, params: &str) -> Result<(), String> {
+    use crate::shell_receipt::{self, ReceiptState};
+    let params = serde_json::from_str::<serde_json::Value>(params).unwrap_or_default();
+
+    // Only an actively held supervisor receipt corroborates a PID from an old attempt.
+    if let Some(token) = params["exit_receipt_id"].as_str() {
+        let database = shell_receipt::database_path(db).map_err(|error| error.to_string())?;
+        match shell_receipt::inspect(&database, token).map_err(|error| error.to_string())? {
+            ReceiptState::Finished(receipt) => {
+                apply_shell_receipt(db, id, receipt)?;
+                shell_receipt::discard(&database, token);
+                return Ok(());
+            }
+            ReceiptState::Running => {}
+            ReceiptState::Unknown => {
+                mark_unknown_shell(db, id)?;
+                return Err("缺少有效的退出回执，无法确认并收停原进程。".into());
+            }
+        }
+    } else {
+        mark_unknown_shell(db, id)?;
+        return Err("缺少原进程存活的凭据，无法确认并收停原进程。".into());
+    }
+    let pid = params["pid"].as_u64()
+        .and_then(|pid| i32::try_from(pid).ok())
+        .filter(|pid| *pid > 1)
+        .ok_or_else(|| "原进程仍有活动凭据，但缺少有效的进程组编号。".to_owned())?;
+
+    #[cfg(unix)]
+    if unsafe { libc::kill(-pid, libc::SIGKILL) } != 0 {
+        return Err(format!("向原进程组发送停止信号失败：{}", std::io::Error::last_os_error()));
+    }
+    #[cfg(windows)]
+    if !std::process::Command::new("taskkill")
+        .args(["/F", "/T", "/PID", &pid.to_string()])
+        .status().map_err(|error| error.to_string())?.success()
+    {
+        return Err("终止原进程树失败。".into());
+    }
+    finish_job(db, id, "cancelled", 0, None, Some("cancelled"))
 }
 
 /// 会话重新启动时，将历史异常未退出的 running 任务收敛为 interrupted
@@ -1123,6 +1201,12 @@ mod tests {
             crate::agent::run_trace::upsert_snapshot(&db, run, "session", "goal", "running", &[], None).unwrap();
             bind_run_and_save_checkpoint(&db, &mut cp, run, &mut context).unwrap();
         }
+        crate::agent::run_trace::upsert_snapshot(&db, "foreign", "other-session", "goal", "running", &[], None).unwrap();
+        db.0.lock().unwrap().execute(
+            "UPDATE agent_run_traces SET history_task_id=?1 WHERE id='foreign'", [&context.history_task_id],
+        ).unwrap();
+        let foreign = begin_job(&db, "foreign", "other-session", "shell", "unrelated", "{}").unwrap();
+        finish_job(&db, &foreign, "succeeded", 5, Some("unrelated"), None).unwrap();
         let id = begin_job(&db, "a", "session", "shell", "work", "{}").unwrap();
         finish_job(&db, &id, "succeeded", 5, Some("evidence"), None).unwrap();
         let child = crate::agent::child_reviewer::begin_child_run(&db, "a", "session", &_base, "model", 0, "task", None).unwrap();
@@ -1131,8 +1215,9 @@ mod tests {
         assert_eq!(poll_pending_inbox(&db, "c", 5).unwrap().len(), 1);
         assert_eq!(poll_targeted_inbox(&db, "c", &[id.clone()]).unwrap().len(), 1);
         context.add_error_feedback("evidence");
-        save_checkpoint_and_consume_jobs(&db, &mut cp, &context, &[], "c", &[id.clone()]).unwrap();
+        save_checkpoint_and_consume_jobs(&db, &mut cp, &context, &[], "c", &[id.clone(), foreign.clone()]).unwrap();
         assert!(poll_pending_inbox(&db, "c", 5).unwrap().is_empty());
+        assert_eq!(poll_pending_inbox(&db, "foreign", 5).unwrap()[0].job_id, foreign);
         let mut fresh_context = SandwichContext::new("system".into(), "new goal".into());
         let mut fresh = AgentCheckpoint::new("session".into(), &fresh_context);
         fresh.version = load_checkpoint(&db, "session").unwrap().unwrap().version;
@@ -1142,6 +1227,31 @@ mod tests {
         finish_job(&db, &old, "succeeded", 1, Some("old"), None).unwrap();
         assert!(poll_pending_inbox(&db, "d", 5).unwrap().is_empty());
         assert!(crate::agent::child_reviewer::poll_completed_delivery_receipts(&db, "d", Some(&[child])).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn legacy_run_ownership_keeps_background_results_and_finish_gate_exact() {
+        let (_base, db) = setup_test_db();
+        for run in ["old", "current"] {
+            crate::agent::run_trace::upsert_snapshot(&db, run, "session", "goal", "running", &[], None).unwrap();
+        }
+        db.0.lock().unwrap().execute("UPDATE agent_run_traces SET history_task_id=''", []).unwrap();
+        let old = begin_job(&db, "old", "session", "shell", "unrelated old work", "{}").unwrap();
+        let current = begin_job(&db, "current", "session", "shell", "current work", "{}").unwrap();
+        let blockers = running_job_finish_blockers(&db, "current").unwrap().join("\n");
+        assert!(blockers.contains(&current));
+        assert!(!blockers.contains(&old));
+
+        finish_job(&db, &old, "succeeded", 1, Some("unrelated"), None).unwrap();
+        assert!(crate::agent::agent_mailbox::replies::pending_on(&db.0.lock().unwrap(), "old").unwrap());
+        finish_job(&db, &current, "succeeded", 1, Some("own result"), None).unwrap();
+        let results = wait_for_jobs(&db, "current", None, 1, None).await.unwrap();
+        assert_eq!(results.iter().map(|item| item.job_id.as_str()).collect::<Vec<_>>(), [current.as_str()]);
+
+        commit_jobs(&db, "current", &[old.clone(), current]);
+        assert!(poll_pending_inbox(&db, "current", 5).unwrap().is_empty());
+        assert!(!crate::agent::agent_mailbox::replies::pending_on(&db.0.lock().unwrap(), "current").unwrap());
+        assert_eq!(poll_pending_inbox(&db, "old", 5).unwrap()[0].job_id, old);
     }
 
     #[test]

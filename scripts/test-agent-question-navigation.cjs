@@ -57,19 +57,31 @@ function fn(name) {
 }
 let projections = 0;
 const props = vue.reactive({
-    legacyMessages: [{ id: 'q0', role: 'user', content: '旧问题' }, { id: 'a0', role: 'assistant', content: '旧回答' }],
+    legacyMessages: [
+        { id: 'q0', role: 'user', content: '旧问题' },
+        { id: 'a0', role: 'assistant', content: '旧回答' },
+        { id: 'legacy-human', role: 'user', content: '已经显示为人工确认' },
+    ],
+    historyTurns: [],
+    humanInterventions: [{ messageId: 'legacy-human' }],
     isRunning: false,
 });
-const timelineEntries = vue.ref([
+const historyTimelineEntries = vue.ref([
     { id: 'history-user-run1', type: 'user', content: '历史问题' },
     { id: 'p1', type: 'plan', status: 'running' },
     { id: 'human1', type: 'message', role: 'user', content: '确认', isHuman: true },
     { id: 'history-completion-run1', type: 'completion', summary: '**历史回答**' },
 ]);
+const liveTimelineEntries = vue.ref([{ id: 'live-review', type: 'review', workers: [] }]);
 const compiled = text => ts.transpileModule(text, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-const state = vm.runInNewContext(compiled(declaration('questionNavigationKey') + '\n'
-    + declaration('questionMarks') + '\n({get marks(){return questionMarks.value}});'), {
-    computed: vue.computed, props, timelineEntries,
+const projection = [
+    ...['showLiveTimeline', 'liveHumanMessageIds', 'visibleLegacyMessages'].map(declaration),
+    fn('questionNavigationEntries'),
+    ...['historicalQuestionNavigationKey', 'liveQuestionNavigationKey', 'questionMarks'].map(declaration),
+    '({get marks(){return questionMarks.value}});',
+].join('\n');
+const state = vm.runInNewContext(compiled(projection), {
+    computed: vue.computed, props, historyTimelineEntries, liveTimelineEntries,
     buildQuestionMarks: entries => { projections++; return buildQuestionMarks(entries); },
 });
 assert.deepEqual(Array.from(state.marks, m => m.id), ['legacy-q0', 'history-user-run1']);
@@ -77,25 +89,28 @@ assert.equal(state.marks[0].answer, '旧回答');
 assert.equal(state.marks[1].answer, '历史回答');
 assert.equal(projections, 1);
 for (let i = 0; i < 100; i++) {
-    timelineEntries.value[1] = { id: 'p1', type: 'plan', phase: `heartbeat-${i}` };
+    historyTimelineEntries.value[1] = { id: 'p1', type: 'plan', phase: `heartbeat-${i}` };
+    liveTimelineEntries.value[0].workers = [{ id: 'review', currentStep: `heartbeat-${i}` }];
     assert.equal(state.marks.length, 2);
 }
 assert.equal(projections, 1, 'token/heartbeat-only timeline updates do not rebuild every preview');
-timelineEntries.value[3].summary = '更新后的真实回答';
+historyTimelineEntries.value[3].summary = '更新后的真实回答';
 assert.equal(state.marks[1].answer, '更新后的真实回答');
 props.isRunning = true;
-timelineEntries.value.push({ id: 'live-user-goal', type: 'user', content: '运行中的新问题' });
+liveTimelineEntries.value.unshift({ id: 'live-user-goal', type: 'user', content: '运行中的新问题' });
 assert.equal(state.marks[2].pending, true);
 assert.equal(state.marks[2].answer, '', 'a running question cannot borrow the last answer');
-timelineEntries.value.push({ id: 'live-completion', type: 'completion', summary: '新回答' });
+liveTimelineEntries.value.push({ id: 'live-completion', type: 'completion', summary: '新回答' });
 assert.equal(state.marks[2].answer, '新回答');
 assert.equal(state.marks[2].pending, false);
 props.legacyMessages = [];
-timelineEntries.value = [];
+historyTimelineEntries.value = [];
+liveTimelineEntries.value = [];
 assert.equal(state.marks.length, 0, 'switching to an empty conversation leaves no stale questions');
 
 const calls = [];
 const followLiveTail = { value: true };
+const activeQuestionId = { value: null };
 const target = { scrollIntoView: args => calls.push(['scroll', args]), classList: {
     add: name => calls.push(['highlight', name]), remove: () => {},
 } };
@@ -103,41 +118,83 @@ const scroller = { scrollHeight: 2000, clientHeight: 600, scrollTop: 1400, query
     calls.push(['selector', selector]); return selector.includes('missing') ? null : target;
 } };
 let queuedFollow = null;
-const navigation = vm.runInNewContext(compiled(['scrollToTimelineEntry', 'isNearBottom', 'onStreamScroll', 'followLatest', 'resumeLiveFollow'].map(fn).join('\n') + '\n({scrollToTimelineEntry,onStreamScroll,followLatest,resumeLiveFollow});'), {
-    streamElement: { value: scroller }, props: { isRunning: true }, BOTTOM_THRESHOLD_PX: 56,
-    CSS: { escape: id => id }, followLiveTail, scrollRafId: 42, navigationLeavingBottom: false,
+let historyExpanded = false;
+const revealWaits = new Map();
+assert(component.includes('@before-expand="pauseLiveFollow"'), 'real virtual expansion pauses following before moving the viewport');
+const navigationSource = [
+    declaration('timelineNavigationRequest'),
+    ...['pauseLiveFollow', 'scrollToTimelineEntry', 'jumpToQuestion', 'isNearBottom', 'onStreamScroll', 'followLatest', 'resumeLiveFollow'].map(fn),
+    '({pauseLiveFollow,scrollToTimelineEntry,jumpToQuestion,onStreamScroll,followLatest,resumeLiveFollow});',
+].join('\n');
+const navigation = vm.runInNewContext(compiled(navigationSource), {
+    streamElement: { value: scroller }, props: { isRunning: true, viewActive: true }, BOTTOM_THRESHOLD_PX: 56,
+    legacyHistoryList: { value: { async reveal(id) { calls.push(['reveal-legacy', id]); return true; } } },
+    timelineSectionsRef: { value: { async reveal(id) {
+        calls.push(['reveal-timeline', id]);
+        if (id === 'history-user-run1' && !historyExpanded) {
+            historyExpanded = true;
+            navigation.pauseLiveFollow();
+        }
+        await revealWaits.get(id);
+        return !id.includes('missing');
+    } } },
+    nextTick: vue.nextTick,
+    CSS: { escape: id => id }, followLiveTail, activeQuestionId, scrollRafId: 42, navigationLeavingBottom: false,
     requestAnimationFrame: callback => { queuedFollow = callback; return 43; },
     cancelAnimationFrame: id => { calls.push(['cancel', id]); queuedFollow = null; },
     scheduleQuestionPosition: () => {}, setTimeout: () => 0,
 });
-const jump = navigation.scrollToTimelineEntry;
-jump('history-user-run1');
-assert.equal(followLiveTail.value, false, 'navigation detaches live follow');
-assert(calls.some(([kind, value]) => kind === 'cancel' && value === 42), 'pending tail scroll cannot override navigation');
-assert(calls.some(([kind, value]) => kind === 'selector' && value === '[data-tl="history-user-run1"]'));
-assert(calls.some(([kind, value]) => kind === 'scroll' && value.block === 'center'));
-assert(calls.some(([kind, value]) => kind === 'highlight' && value === 'tl-anchor-flash'));
-// Smooth scrolling emits several events before moving out of the bottom threshold.
-for (const top of [1400, 1399, 1390, 1344, 1343, 900]) {
-    scroller.scrollTop = top;
+async function verifyNavigation() {
+    const jump = navigation.scrollToTimelineEntry;
+    const historyJump = jump('history-user-run1');
+    assert.equal(followLiveTail.value, false, 'virtual expansion detaches live follow before revealing an anchor');
+    assert(calls.some(([kind, value]) => kind === 'cancel' && value === 42), 'pending tail scroll cannot override navigation');
+    assert.equal(await historyJump, true);
+    assert(calls.some(([kind, value]) => kind === 'reveal-timeline' && value === 'history-user-run1'));
+    assert(calls.some(([kind, value]) => kind === 'selector' && value === '[data-tl="history-user-run1"]'));
+    assert(calls.some(([kind, value]) => kind === 'scroll' && value.block === 'center'));
+    assert(calls.some(([kind, value]) => kind === 'highlight' && value === 'tl-anchor-flash'));
+    await jump('legacy-q0');
+    assert(calls.some(([kind, value]) => kind === 'reveal-legacy' && value === 'q0'));
+    assert(calls.some(([kind, value]) => kind === 'selector' && value === '[data-tl="legacy-q0"]'));
+
+    // Smooth scrolling emits several events before moving out of the bottom threshold.
+    for (const top of [1400, 1399, 1390, 1344, 1343, 900]) {
+        scroller.scrollTop = top;
+        navigation.onStreamScroll({ currentTarget: scroller });
+        navigation.followLatest(); // Simulate the existing watcher receiving new output.
+        assert.equal(followLiveTail.value, false, 'programmatic jump must remain detached at ' + top);
+        assert.equal(queuedFollow, null, 'new output cannot enqueue a tail scroll during history navigation');
+        assert.equal(scroller.scrollTop, top);
+    }
+    scroller.scrollTop = 1400;
     navigation.onStreamScroll({ currentTarget: scroller });
-    navigation.followLatest(); // Simulate the existing watcher receiving new output.
-    assert.equal(followLiveTail.value, false, 'programmatic jump must remain detached at ' + top);
-    assert.equal(queuedFollow, null, 'new output cannot enqueue a tail scroll during history navigation');
-    assert.equal(scroller.scrollTop, top);
+    assert.equal(followLiveTail.value, true, 'returning to the bottom after leaving it resumes follow');
+    await navigation.jumpToQuestion('history-user-run1');
+    assert.equal(activeQuestionId.value, 'history-user-run1', 'jump highlights the reached question');
+    navigation.resumeLiveFollow();
+    assert.equal(followLiveTail.value, true, 'explicit follow overrides a navigation detach immediately');
+    assert.equal(typeof queuedFollow, 'function');
+    queuedFollow(); queuedFollow = null;
+    const scrollCount = calls.filter(([kind]) => kind === 'scroll').length;
+    await navigation.jumpToQuestion('missing');
+    assert.equal(calls.filter(([kind]) => kind === 'scroll').length, scrollCount, 'a missing anchor cannot scroll another entry');
+    assert.equal(followLiveTail.value, true, 'a missing anchor must not detach a reader');
+    assert.equal(activeQuestionId.value, 'history-user-run1', 'a missing anchor cannot become the active question');
+    await jump('history-user-run1');
+    scroller.scrollTop = 1390;
+    navigation.onStreamScroll({ currentTarget: scroller });
+    assert.equal(followLiveTail.value, false, 'a second jump gets a fresh bottom-threshold guard');
+
+    let finishOlderReveal;
+    revealWaits.set('older-question', new Promise(resolve => { finishOlderReveal = resolve; }));
+    const older = navigation.jumpToQuestion('older-question');
+    await navigation.jumpToQuestion('newer-question');
+    assert.equal(activeQuestionId.value, 'newer-question');
+    finishOlderReveal();
+    await older;
+    assert.equal(activeQuestionId.value, 'newer-question', 'the slower reveal cannot replace a newer active mark');
+    assert(!calls.some(([kind, value]) => kind === 'selector' && value === '[data-tl="older-question"]'));
+    console.log('PASS question navigation: answer presence, stable history/live projection, virtual reveal, active jump ownership and live-follow isolation');
 }
-scroller.scrollTop = 1400;
-navigation.onStreamScroll({ currentTarget: scroller });
-assert.equal(followLiveTail.value, true, 'returning to the bottom after leaving it resumes follow');
-jump('history-user-run1');
-navigation.resumeLiveFollow();
-assert.equal(followLiveTail.value, true, 'explicit follow overrides a navigation detach immediately');
-assert.equal(typeof queuedFollow, 'function');
-queuedFollow(); queuedFollow = null;
-jump('missing');
-assert.equal(followLiveTail.value, true, 'a missing anchor must not detach a reader');
-jump('history-user-run1');
-scroller.scrollTop = 1390;
-navigation.onStreamScroll({ currentTarget: scroller });
-assert.equal(followLiveTail.value, false, 'a second jump gets a fresh bottom-threshold guard');
-console.log('PASS question navigation: answer-presence/code fallback, per-message previews, stable projection, smooth-scroll first-frame guard, incoming output isolation, bottom return and explicit follow');
+verifyNavigation().catch(error => { console.error(error); process.exitCode = 1; });

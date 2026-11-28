@@ -436,9 +436,12 @@
                 type="button"
                 class="pw-task-delete-btn"
                 title="删除会话"
-                @click.stop="deleteSession(s.id)"
+                aria-label="删除会话"
+                @click.stop="emit('delete-session', s.id, s.title || '未命名对话', projectId)"
               >
-                ×
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                  <path d="M3 6h18M9 6V3h6v3m4 0-1 15H6L5 6m5 4v7m4-7v7"/>
+                </svg>
               </button>
             </div>
           </div>
@@ -609,6 +612,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { useModelRoutingPreferences } from "../composables/useModelRoutingPreferences";
 import ProjectDirectoryAccess from "./ProjectDirectoryAccess.vue";
 import ModelSelectDropdown from "./common/ModelSelectDropdown.vue";
 import RichContentRenderer from "./charts/RichContentRenderer.vue";
@@ -616,7 +620,7 @@ import {
   CONTEXT_BUDGET_MODES,
   type AgentModelOption,
   type ContextBudgetMode,
-  type ModelRouting,
+  type ReasoningEffort,
 } from "./agent/types";
 
 function isMarkdownOrDoc(path?: string): boolean {
@@ -652,8 +656,6 @@ interface ProjectResourcePreview {
   truncated: boolean;
 }
 
-const MODEL_ROUTING_STORAGE_KEY = "free-api.agent.model-routing.v1";
-
 const props = defineProps<{
   projectId: string;
   allModels?: AgentModelOption[];
@@ -663,7 +665,7 @@ const emit = defineEmits<{
   (event: "open-session", session: { id: string; title: string }): void;
   (event: "start-task", projectId: string, goal: string): void;
   (event: "project-deleted", projectId: string): void;
-  (event: "session-deleted", sessionId: string): void;
+  (event: "delete-session", sessionId: string, title: string, projectId: string): void;
   (event: "refresh-projects"): void;
   (event: "refresh-models"): void;
 }>();
@@ -838,11 +840,6 @@ const currentBudgetTooltip = computed(() => currentBudgetModeObj.value.tooltip);
 
 function selectBudgetMode(mode: ContextBudgetMode) {
   modelRouting.value.context_budget_mode = mode;
-  try {
-    localStorage.setItem(MODEL_ROUTING_STORAGE_KEY, JSON.stringify(modelRouting.value));
-  } catch {
-    // 忽略
-  }
   budgetMenuOpen.value = false;
 }
 
@@ -850,9 +847,9 @@ function selectBudgetMode(mode: ContextBudgetMode) {
 type RoleKey = "planner" | "executor" | "reviewer" | "scout" | "writer";
 const activeRoutingTab = ref<"models" | "roles">("models");
 
-const reasoningEffortOptions = [
+const reasoningEffortOptions: Array<{ value: ReasoningEffort; label: string; tooltip: string }> = [
   { value: "auto", label: "自", tooltip: "自动思考预算 (Auto)" },
-  { value: "none", label: "关", tooltip: "关闭思考 (none)" },
+  { value: "off", label: "关", tooltip: "关闭思考 (off)" },
   { value: "low", label: "低", tooltip: "低度思考 (low)" },
   { value: "medium", label: "中", tooltip: "中度思考 (medium)" },
   { value: "high", label: "高", tooltip: "深度思考 (high)" },
@@ -873,79 +870,33 @@ const roleTierOptions: Array<{ value: string; label: string; icon: string; toolt
   { value: "vision", label: "视觉 Vision", icon: "👁️", tooltip: "钉死为视觉模型槽 (Vision)" },
 ];
 
-const modelRouting = ref<ModelRouting>(loadModelRouting());
-const routingMode = computed(() => (modelRouting.value as { routing_mode?: string }).routing_mode || "rules");
-
-function loadModelRouting(): ModelRouting {
-  try {
-    const raw = localStorage.getItem(MODEL_ROUTING_STORAGE_KEY);
-    if (raw) return JSON.parse(raw);
-  } catch {
-    // 忽略
-  }
-  return {
-    reasoning_effort_version: 2,
-    pro_reasoning_effort: "auto",
-    flash_reasoning_effort: "auto",
-    vision_reasoning_effort: "auto",
-    context_budget_mode: "deep_coding",
-    routing_mode: "rules",
-    role_models: {},
-    stage_reviewer_override: undefined,
-    stage_review_committee: false,
-  };
-}
-
-function saveModelRouting() {
-  try {
-    localStorage.setItem(MODEL_ROUTING_STORAGE_KEY, JSON.stringify(modelRouting.value));
-  } catch {
-    // 忽略
-  }
-}
+const modelRouting = useModelRoutingPreferences();
+const routingMode = computed(() => modelRouting.value.routing_mode);
 
 function updateRouteValue(route: "pro" | "flash" | "vision", modelId: string) {
-  modelRouting.value = {
-    ...modelRouting.value,
-    [route]: modelId,
-  };
-  saveModelRouting();
+  modelRouting.value[route] = modelId;
 }
 
 function setRoutingMode(mode: "rules" | "scored") {
-  modelRouting.value = {
-    ...modelRouting.value,
-    routing_mode: mode,
-  };
-  saveModelRouting();
+  modelRouting.value.routing_mode = mode;
 }
 
-function setReasoningEffort(slot: "pro" | "flash" | "vision", effort: string) {
-  const key = `${slot}_reasoning_effort` as keyof ModelRouting;
-  modelRouting.value = {
-    ...modelRouting.value,
-    [key]: effort,
-  };
-  saveModelRouting();
+function setReasoningEffort(slot: "pro" | "flash" | "vision", effort: ReasoningEffort) {
+  modelRouting.value[`${slot}_reasoning_effort`] = effort;
 }
 
 function roleModelValue(key: RoleKey): string {
-  const map = (modelRouting.value as { role_models?: Record<string, string> }).role_models || {};
-  return map[key] || "";
+  return modelRouting.value.role_models[key] || "";
 }
 
 function setRoleModel(key: RoleKey, value: string) {
-  const map = { ...((modelRouting.value as { role_models?: Record<string, string> }).role_models || {}) };
+  const map = { ...modelRouting.value.role_models };
   if (value) {
     map[key] = value;
   } else {
     delete map[key];
   }
-  modelRouting.value = {
-    ...modelRouting.value,
-    role_models: map,
-  };
-  saveModelRouting();
+  modelRouting.value.role_models = map;
 }
 
 function getRoleTagLabel(key: RoleKey): string {
@@ -960,7 +911,6 @@ function syncAllToPro() {
     flash: modelRouting.value.pro,
     vision: modelRouting.value.pro,
   };
-  saveModelRouting();
 }
 
 const currentProModelName = computed(() => {
@@ -1059,17 +1009,6 @@ async function removeResource(resourceId: string) {
     emit("refresh-projects");
   } catch (e) {
     console.error("移除资源失败:", e);
-  }
-}
-
-async function deleteSession(sessionId: string) {
-  try {
-    await invoke("delete_session", { id: sessionId });
-    emit("session-deleted", sessionId);
-    await loadProject();
-    emit("refresh-projects");
-  } catch (e) {
-    console.error("删除会话失败:", e);
   }
 }
 

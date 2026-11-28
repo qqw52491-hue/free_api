@@ -257,6 +257,7 @@ async fn fire_run(
         config.phase_pushes,
         None,
         true, // spawn_completion_watcher 负责带定时任务名的终态通知
+        None,
     )
     .map_err(
         |error| match error {
@@ -264,6 +265,7 @@ async fn fire_run(
                 "该会话已有在途任务（上一轮尚未结束，本轮跳过）".to_string()
             }
             crate::agent::channel::SubmitError::Other(message) => message,
+            crate::agent::channel::SubmitError::AdmissionConflict => "任务提交标识冲突。".to_string(),
         },
     )
 }

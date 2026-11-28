@@ -1,16 +1,28 @@
+import type { AgentTeamReceipt, AgentTeamWait } from './types';
+
 // 子任务面板与对话流共用的纯状态逻辑：终态单向、自动展开只认新事件、刷新串行补查、结算重试。
 export interface ChildTaskSnapshot {
     child_run_id: string;
     parent_session_id?: string;
     root_run_id?: string;
+    task?: string;
     depth?: number;
     role_label?: string;
     execution_status?: string;
     execution_ended?: boolean;
     delivery_accepted?: boolean;
     handoff_accepted?: boolean;
+    summary?: string;
     human_request?: unknown;
     updated_at?: string;
+}
+
+export interface ChildTaskListSnapshot<T extends ChildTaskSnapshot = ChildTaskSnapshot> {
+    tasks: T[];
+    receipts?: AgentTeamReceipt[];
+    waiting_on?: AgentTeamWait[];
+    focus_run_id?: string | null;
+    focus_run_ids?: string[];
 }
 
 /** 宿主已结算：执行结束才算终态；complete 事件本身不是终态证据。 */

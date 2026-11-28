@@ -36,10 +36,26 @@ pub(crate) fn set_project_directory_row(
     let primary = canonical_directory(&project.root_path)?;
     let path = canonical_extra_directory(raw, &primary)?;
     let text = path.to_string_lossy().into_owned();
-    conn.execute("INSERT INTO agent_project_directories (project_id, canonical_path, access, updated_at) VALUES (?1, ?2, ?3, ?4)
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    tx.execute("INSERT INTO agent_project_directories (project_id, canonical_path, access, updated_at) VALUES (?1, ?2, ?3, ?4)
         ON CONFLICT(project_id, canonical_path) DO UPDATE SET access=excluded.access, updated_at=excluded.updated_at",
         params![project_id, text, access.as_str(), Utc::now().to_rfc3339()]).map_err(|e| e.to_string())?;
-    refresh_project_directories(conn, project_id)
+    let sessions = crate::agent::workspace_access::project_sessions(project_id);
+    let dirs = read_with_directory_baselines(&tx, project_id, &sessions)?;
+    let publish = || {
+        tx.commit().map_err(|e| e.to_string())?;
+        crate::agent::workspace_access::update_project(project_id, &dirs);
+        Ok(dirs)
+    };
+    if access == DirectoryAccess::ReadWrite {
+        crate::agent::workspace_lock::publish_writable_directory(
+            sessions.iter().map(|(session, _)| session.as_str()),
+            &path,
+            publish,
+        )
+    } else {
+        publish()
+    }
 }
 
 pub(super) fn canonical_extra_directory(raw: &str, primary: &Path) -> Result<PathBuf, String> {
@@ -75,11 +91,21 @@ fn refresh_project_directories(
     conn: &Connection,
     project_id: &str,
 ) -> Result<Vec<ProjectDirectory>, String> {
-    let dirs = list_project_directories_row(conn, project_id)?;
-    for (session, primary) in crate::agent::workspace_access::project_sessions(project_id) {
-        crate::agent::reviewer_gatekeeper::capture_new_writable_directories_on(conn, &session, &primary, &dirs)?;
-    }
+    let sessions = crate::agent::workspace_access::project_sessions(project_id);
+    let dirs = read_with_directory_baselines(conn, project_id, &sessions)?;
     crate::agent::workspace_access::update_project(project_id, &dirs);
+    Ok(dirs)
+}
+
+fn read_with_directory_baselines(
+    conn: &Connection,
+    project_id: &str,
+    sessions: &[(String, PathBuf)],
+) -> Result<Vec<ProjectDirectory>, String> {
+    let dirs = list_project_directories_row(conn, project_id)?;
+    for (session, primary) in sessions {
+        crate::agent::reviewer_gatekeeper::capture_new_writable_directories_on(conn, session, primary, &dirs)?;
+    }
     Ok(dirs)
 }
 

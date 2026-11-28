@@ -124,16 +124,11 @@ pub(crate) fn live_attempt_for_task(
 ) -> Option<String> {
     let conn = db.0.lock().ok()?;
     conn.query_row(
-        "SELECT id FROM agent_child_runs
-         WHERE (parent_run_id = ?1 OR parent_run_id IN (
-             SELECT old.id FROM agent_run_traces current
-             JOIN agent_run_traces old ON old.session_id = current.session_id
-                 AND old.history_task_id = current.history_task_id
-             WHERE current.id = ?1 AND current.history_task_id IS NOT NULL
-         )) AND task_id = ?2 AND id != ?3
+        concat!("SELECT id FROM agent_child_runs
+         WHERE parent_run_id IN (", crate::agent::run_trace::task_run_ids!("?1"), ") AND task_id = ?2 AND id != ?3
            AND COALESCE(attempt_id, 1) > ?4
            AND (status IN ('queued','running') OR applied_at IS NULL OR applied_at = '')
-         ORDER BY COALESCE(attempt_id, 1) DESC LIMIT 1",
+         ORDER BY COALESCE(attempt_id, 1) DESC LIMIT 1"),
         params![parent_run_id, task_id, exclude_run_id, exclude_attempt],
         |row| row.get::<_, String>(0),
     )
@@ -260,11 +255,8 @@ pub(crate) fn begin_child_run_extended(
     // 只需继承 task_id，attempt 计数在这里自动正确，调用方想传错都难。
     let derived_attempt: i64 = conn
         .query_row(
-            "SELECT COALESCE(MAX(attempt_id), 0) + 1 FROM agent_child_runs WHERE task_id = ?1 AND (parent_run_id = ?2 OR parent_run_id IN (
-                SELECT old.id FROM agent_run_traces current
-                JOIN agent_run_traces old ON old.session_id = current.session_id AND old.history_task_id = current.history_task_id
-                WHERE current.id = ?2 AND current.history_task_id IS NOT NULL
-            ))",
+            concat!("SELECT COALESCE(MAX(attempt_id), 0) + 1 FROM agent_child_runs
+                     WHERE task_id = ?1 AND parent_run_id IN (", crate::agent::run_trace::task_run_ids!("?2"), ")"),
             params![identity.task_id, parent_run_id],
             |row| row.get(0),
         )

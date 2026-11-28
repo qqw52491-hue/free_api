@@ -293,6 +293,27 @@ test("a delayed waiting snapshot cannot restore a question that has already been
   assert.equal(h.sent.length, 0);
 });
 
+test("a late answer receipt neither clears nor answers a newer wait in the same run", async () => {
+  const reply = deferred();
+  let wait = { status: "waiting_human", paused_reason: "第一问", wait_id: "wait-1" };
+  const h = harness(async (method, url, body) => {
+    if (method === "GET") return wait;
+    assert.equal(url, "/channel/run/r/answer");
+    assert.equal(body.wait_id, "wait-1");
+    return reply.promise;
+  });
+  h.watchRun("owner", "r", 1, { sessionId: "s" });
+  await h.callbacks[0]();
+  const answer = h.chat("回答：A");
+  await flush();
+  wait = { status: "waiting_human", paused_reason: "第二问", wait_id: "wait-2" };
+  await h.callbacks[0]();
+  reply.resolve({ ok: true });
+  await answer;
+  assert.equal(h.pendingQuestions.get("owner").waitId, "wait-2");
+  assert.equal(h.activeRuns.get("owner").status, "waiting_human");
+});
+
 test("received files are registered before dispatch, and registration failure keeps the queued input", async () => {
   const calls = [];
   const h = harness(async (method, url, body) => {

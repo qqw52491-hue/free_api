@@ -130,6 +130,13 @@ pub(crate) fn directories(session: Option<&str>, primary: &Path) -> Vec<ProjectD
         return vec![];
     };
     let primary = primary.canonicalize().unwrap_or_else(|_| primary.into());
+    directories_for_canonical_primary(session, &primary)
+}
+
+pub(crate) fn directories_for_canonical_primary(
+    session: &str,
+    primary: &Path,
+) -> Vec<ProjectDirectory> {
     SESSIONS
         .read()
         .unwrap_or_else(|e| e.into_inner())

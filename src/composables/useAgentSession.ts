@@ -1,7 +1,8 @@
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, shallowReactive, shallowRef, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useAgentTaskResources } from "./useAgentTaskResources";
+import { useModelRoutingPreferences } from "./useModelRoutingPreferences";
 import { usePersistedAgentConversation, type PersistedConversationMessage } from "./usePersistedAgentConversation";
 import type { ArtifactDescriptor, AgentArtifactInput } from "../types/artifact";
 import { normalizeArtifact, normalizeArtifactList } from "../utils/artifact";
@@ -23,6 +24,27 @@ export interface AgentHistoryTurn {
     completedAt: number;
 }
 interface HistoryRunSnapshot extends Omit<AgentHistoryTurn, "messages"> { }
+
+type HumanWaitTarget =
+    | { kind: "live"; runId: string; waitId: string }
+    | { kind: "saved"; version: number };
+
+interface AgentExecutionSnapshot {
+    active: {
+        run_id: string;
+        goal?: string | null;
+        started_at?: string | null;
+        wait_id?: string | null;
+        question?: string | null;
+        form?: unknown;
+    } | null;
+    waiting_checkpoint: {
+        version: number;
+        user_goal: string;
+        last_error?: string | null;
+        form?: unknown;
+    } | null;
+}
 
 export function isMessageInsideRunInterval(
     timestamp: number,
@@ -174,13 +196,14 @@ import {
     type AgentHumanFormKind,
     type AgentHumanIntervention,
     type AgentLogEntry,
-    type AgentModelOption,
     type AgentRunState,
     type AgentStepItem,
     type AgentTokenUsage,
     type AgentSessionTelemetry,
     type AgentToolStatus,
     type AgentTeamState,
+    type AgentTeamReceipt,
+    type AgentTeamWait,
     type AgentWorkerItem,
     type ContextBudgetMode,
     type LlmParseErrorItem,
@@ -193,12 +216,10 @@ import { asRecord, numberOrUndefined, toText, toTimestamp } from "../components/
 import { extractWorkerDetails, parseWorkerArtifacts } from "../components/agent/workerUtils";
 import { stripPlanDecisionMarker } from "../components/agent/planDecision";
 import { getStepJobIds, isWorkerStep, parseChildJobReceipts, stepWorkerTool } from "../components/agent/workerAssociation";
-import { mergeSnapshot, settleWithRetry, type ChildTaskSnapshot } from "../components/agent/delegatedTaskState";
+import { mergeSnapshot, settleWithRetry, type ChildTaskListSnapshot, type ChildTaskSnapshot } from "../components/agent/delegatedTaskState";
 import { createIncrementalThoughtPreview } from "../components/agent/liveThoughtPreview";
 
 const MAX_LOGS = 600;
-type ReasoningEffort = "auto" | "off" | "low" | "medium" | "high";
-type StoredReasoningEffort = ReasoningEffort | "max";
 
 export interface RunDoneMatchInput {
     isDeletedSession: boolean;
@@ -247,65 +268,6 @@ export function evaluateRunDoneEvent(input: RunDoneMatchInput): RunDoneMatchDeci
         acceptRunEnd: Boolean(input.doneRunId),
         releaseStop: false,
     };
-}
-
-const MODEL_ROUTING_STORAGE_KEY = "free-api.agent.model-routing.v1";
-const REASONING_EFFORTS: ReasoningEffort[] = ["auto", "off", "low", "medium", "high"];
-const STORED_REASONING_EFFORTS: StoredReasoningEffort[] = [...REASONING_EFFORTS, "max"];
-
-function migrateReasoningEffort(value: unknown, fallback: ReasoningEffort, isLegacy: boolean): ReasoningEffort {
-    const stored = STORED_REASONING_EFFORTS.includes(value as StoredReasoningEffort)
-        ? value as StoredReasoningEffort
-        : fallback;
-    if (stored === "max") return "high";
-    if (isLegacy && stored === "high") return "medium";
-    return stored;
-}
-
-function loadModelRouting(): ModelRouting {
-    const fallback: ModelRouting = {
-        reasoning_effort_version: 2,
-        pro_reasoning_effort: "auto",
-        flash_reasoning_effort: "auto",
-        vision_reasoning_effort: "auto",
-        context_budget_mode: "deep_coding",
-        routing_mode: "rules",
-        role_models: {},
-        stage_reviewer_override: undefined,
-        stage_review_committee: false,
-        reviewer_backup_model: "",
-    };
-    try {
-        const stored = JSON.parse(localStorage.getItem(MODEL_ROUTING_STORAGE_KEY) || "{}") as Partial<ModelRouting> & { reasoning_effort?: unknown; reasoning_effort_version?: unknown };
-        const isLegacy = stored.reasoning_effort_version !== 2;
-        const legacyEffort = migrateReasoningEffort(stored.reasoning_effort, fallback.pro_reasoning_effort, isLegacy);
-        const validBudgetModes: ContextBudgetMode[] = ["deep_coding", "cost_saving", "ultra_fast"];
-        const budgetMode = validBudgetModes.includes(stored.context_budget_mode as ContextBudgetMode)
-            ? (stored.context_budget_mode as ContextBudgetMode)
-            : "deep_coding";
-        return {
-            reasoning_effort_version: 2,
-            pro: typeof stored.pro === "string" ? stored.pro : fallback.pro,
-            flash: typeof stored.flash === "string" ? stored.flash : fallback.flash,
-            vision: typeof stored.vision === "string" ? stored.vision : fallback.vision,
-            pro_reasoning_effort: migrateReasoningEffort(stored.pro_reasoning_effort, legacyEffort, isLegacy),
-            flash_reasoning_effort: migrateReasoningEffort(stored.flash_reasoning_effort, legacyEffort, isLegacy),
-            vision_reasoning_effort: migrateReasoningEffort(stored.vision_reasoning_effort, legacyEffort, isLegacy),
-            context_budget_mode: budgetMode,
-            routing_mode: stored.routing_mode === "scored" ? "scored" : "rules",
-            role_models: stored.role_models && typeof stored.role_models === "object" && !Array.isArray(stored.role_models)
-                ? stored.role_models as Record<string, string>
-                : {},
-            stage_reviewer_override: typeof stored.stage_reviewer_override === "string" ? stored.stage_reviewer_override : undefined,
-            stage_review_committee: stored.stage_review_committee === true,
-            stages: stored.stages && typeof stored.stages === 'object' ? Object.fromEntries(
-                ['plan','plan_review','stage_review','final_review'].filter(key => typeof (stored.stages as Record<string, unknown>)[key] === 'boolean').map(key => [key, (stored.stages as Record<string, unknown>)[key]])
-            ) : undefined,
-            reviewer_backup_model: typeof stored.reviewer_backup_model === "string" ? stored.reviewer_backup_model.trim() : "",
-        };
-    } catch {
-        return fallback;
-    }
 }
 
 function normalizeState(value: unknown): AgentRunState {
@@ -429,12 +391,21 @@ export interface QueuedAgentGoal {
 
 export function useAgentSession(sessionId: string, options?: UseAgentSessionOptions) {
     const activeSessionId = ref(sessionId);
-    const modelRouting = ref<ModelRouting>(loadModelRouting());
-    watch(modelRouting, (value) => {
-        try { localStorage.setItem(MODEL_ROUTING_STORAGE_KEY, JSON.stringify(value)); } catch { /* 存储不可用时继续使用当前会话配置 */ }
-    }, { deep: true });
+    let disposed = false;
+    let initialExecutionSync: Promise<void> | null = null;
+    let executionRevision = 0;
+    let executionSnapshotRequest = 0;
+    const modelRouting = useModelRoutingPreferences();
+    const disabledRoleCards = ref<string[]>();
+    const sessionModelRouting = computed<ModelRouting>(() => disabledRoleCards.value === undefined
+        ? modelRouting.value
+        : { ...modelRouting.value, disabled_role_cards: disabledRoleCards.value });
+    function updateModelRouting({ disabled_role_cards, ...preferences }: ModelRouting) {
+        disabledRoleCards.value = disabled_role_cards;
+        modelRouting.value = preferences;
+    }
     function modelRoutingForRun() {
-        const { pro = "", flash = "", vision = "", ...options } = modelRouting.value;
+        const { pro = "", flash = "", vision = "", ...options } = sessionModelRouting.value;
         return { ...options, pro, flash, vision };
     }
     const logContext = ref(false);
@@ -449,6 +420,12 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     // agent_paused 时快照发起挂起的步骤 id——人工应答后回填到该步骤行内，
     // 让"问→答"在时间线上同位可见，而不是孤零零沉到底部。
     const pausedStepId = ref<string | undefined>(undefined);
+    const humanWait = ref<HumanWaitTarget | null>(null);
+    const humanWaitKey = computed(() => {
+        const wait = humanWait.value;
+        if (!wait) return null;
+        return wait.kind === "live" ? `live:${wait.runId}:${wait.waitId}` : `saved:${wait.version}`;
+    });
     const humanForm = ref<AgentHumanForm | null>(null);
     const humanInput = ref("");
     const pendingReplacementGoal = ref<{
@@ -480,13 +457,14 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     const historyRuns = ref<HistoryRunSnapshot[]>([]);
     const taskWorkflowSnapshot = ref<TaskWorkflowSnapshot | null>(null);
     let checkpointRequest = 0;
+    let runTraceRequest = 0;
     watch(activeSessionId, () => { checkpointRequest++; taskWorkflowSnapshot.value = null; });
     async function refreshTaskWorkflowSnapshot(session: string) {
         const request = ++checkpointRequest;
         taskWorkflowSnapshot.value = null;
         try {
             const cp = await invoke<TaskWorkflowSnapshot | null>("get_agent_checkpoint", { sessionId: session });
-            if (request === checkpointRequest && session === activeSessionId.value) taskWorkflowSnapshot.value = cp;
+            if (!disposed && request === checkpointRequest && session === activeSessionId.value) taskWorkflowSnapshot.value = cp;
         } catch (error) {
             if (request === checkpointRequest && session === activeSessionId.value) console.warn("读取原任务流程失败", error);
         }
@@ -507,7 +485,15 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     const llmParseErrors = ref<LlmParseErrorItem[]>([]);
     const teamWorkers = ref<AgentWorkerItem[]>([]);
     const childTaskSnapshots = ref<ChildTaskSnapshot[]>([]);
-    watch(activeSessionId, () => { childTaskSnapshots.value = []; });
+    const teamReceipts = shallowReactive(new Map<string, AgentTeamReceipt>());
+    const teamWaitingOn = shallowRef<AgentTeamWait[]>([]);
+    const teamFocus = shallowRef<{ run: string; roots: Set<string> } | null>(null);
+    watch(activeSessionId, () => {
+        childTaskSnapshots.value = [];
+        teamReceipts.clear();
+        teamWaitingOn.value = [];
+        teamFocus.value = null;
+    });
     const workerPreviewStreams = new Map<string, {
         thinking: ReturnType<typeof createIncrementalThoughtPreview>;
         content: ReturnType<typeof createIncrementalThoughtPreview>;
@@ -515,7 +501,19 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
 
     // Workers are registered by exact child id. Keep reactive item identity stable:
     // spreading them here subscribed the whole list to every thought/output token.
-    const derivedWorkers = computed<AgentWorkerItem[]>(() => teamWorkers.value);
+    const latestTeamRun = computed(() => activeRunId.value ?? liveStepsRunId.value
+        ?? ((!isRunning.value || runState.value === "waiting_for_human") ? historyRuns.value.at(-1)?.id : undefined));
+    const derivedWorkers = computed<AgentWorkerItem[]>(() => {
+        const run = latestTeamRun.value;
+        if (!run) return teamWorkers.value;
+        const roots = teamFocus.value?.run === run ? teamFocus.value.roots : new Set([run]);
+        const known = new Set(teamWorkers.value.map(worker => worker.id));
+        const restored = childTaskSnapshots.value.flatMap(task => {
+            if (!task.root_run_id || !roots.has(task.root_run_id) || known.has(task.child_run_id)) return [];
+            return [workerFromTaskSnapshot(task)];
+        });
+        return restored.length ? [...teamWorkers.value, ...restored] : teamWorkers.value;
+    });
 
     const teamState = computed<AgentTeamState>(() => {
         const workers = derivedWorkers.value;
@@ -528,12 +526,19 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             masterStatus = "failed";
         } else if (steps.value.length > 0) {
             masterStatus = "succeeded";
+        } else if (workers.length && latestTeamRun.value === historyRuns.value.at(-1)?.id) {
+            masterStatus = traceStepStatus(historyRuns.value.at(-1)?.status);
         }
         return {
             masterStatus,
             activeWorkerCount: activeCount,
             completedWorkerCount: completedCount,
             workers,
+            masterRunId: latestTeamRun.value,
+            masterWaitingForHuman: runState.value === "waiting_for_human",
+            receipts: teamReceipts,
+            waitingOn: teamWaitingOn.value,
+            waitTargetNames: reviewWaitTargetNames.value,
         };
     });
 
@@ -601,13 +606,22 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     const activeStepNumber = ref<number>(1);
     const actionPhaseText = ref<string>("");
     const reviewProgress = ref<ReviewProgressItem[]>([]);
+    const reviewWaitTargetNames = computed(() => {
+        const targets = new Set(teamWaitingOn.value.flatMap(wait => wait.target_ids));
+        const names = new Map<string, string>();
+        if (!targets.size) return names;
+        for (const member of reviewProgress.value) {
+            if (member.childRunId && targets.has(member.childRunId)) names.set(member.childRunId, member.label);
+        }
+        return names;
+    });
     const stoppedReviewIds = new Set<string>();
     const reviewProgressStartedAt = ref(0);
     const reviewRunId = ref('');
     const lastRunTelemetry = ref<AgentSessionTelemetry | null>(null);
     const completionMessage = ref("");
     const streamingSummary = ref("");
-    const { conversationMessages, isConversationLoading, loadConversation } = usePersistedAgentConversation(
+    const { conversationMessages, isConversationLoading, loadConversation, invalidateConversationLoad } = usePersistedAgentConversation(
         () => activeSessionId.value,
         (message) => appendLog(`[会话历史加载失败] ${message}`),
     );
@@ -679,6 +693,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
 
     let elapsedTimer: ReturnType<typeof setInterval> | null = null;
     let unlisteners: UnlistenFn[] = [];
+    let listenerGeneration = 0;
     let streamDisplayTimer: ReturnType<typeof setTimeout> | null = null;
     let pendingThought: string | undefined;
     let pendingSummary: string | undefined;
@@ -710,6 +725,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     // 启动窗口标记：新一代 runAgent 的 invoke 在途且 channel-run-started 未到期间为 true，
     // 用于识别"迟到的旧代 run-done"——该事件自身不携带代数，无法靠代数比对识别自己已过期。
     let awaitingRunStart = false;
+    let startingDesktopRunId: string | null = null;
+    let deferredStopRunId: string | null = null;
 
     const stateMeta = computed(() => AGENT_RUN_STATE_CATALOG[runState.value]);
     const isWaitingForHuman = computed(() => runState.value === "waiting_for_human");
@@ -992,15 +1009,18 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         return [...byId.values()].sort((a, b) => a.startedAt - b.startedAt || a.id.localeCompare(b.id));
     }
     async function loadRunTraces() {
+        if (disposed) return;
+        const request = ++runTraceRequest;
         if (activeSessionId.value.startsWith("draft-")) {
             historyRuns.value = [];
             return;
         }
         const session = activeSessionId.value;
+        const isCurrent = () => !disposed && request === runTraceRequest && session === activeSessionId.value;
         void refreshTaskWorkflowSnapshot(session);
         try {
             const traces = await invoke<unknown[]>("get_session_run_traces", { sessionId: session });
-            if (session !== activeSessionId.value) return;
+            if (!isCurrent()) return;
             const normalized = (Array.isArray(traces) ? traces : []).map((trace) => normalizeRunTrace(trace));
             normalized.forEach((run) => {
                 if (!run.summary && ["succeeded", "failed", "cancelled"].includes(run.status)) {
@@ -1009,11 +1029,14 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             });
             historyRuns.value = dedupeHistoryRuns(normalized);
             // 历史卡片不能只依赖派发回执；主动从宿主加载本会话任务树的结算状态。
-            void invoke<{ tasks: ChildTaskSnapshot[] }>("control_child_task", { sessionId: session, action: "list", params: {} })
-                .then((result) => { if (session === activeSessionId.value && Array.isArray(result.tasks)) updateChildTaskSnapshots(result.tasks); })
+            void invoke<ChildTaskListSnapshot>("control_child_task", { sessionId: session, action: "list", params: {} })
+                .then((result) => {
+                    if (!isCurrent()) return;
+                    updateChildTaskList(result);
+                })
                 .catch(() => { /* 查询失败保持未知状态，不推断成功或失败 */ });
         } catch (error) {
-            appendLog(`[过程历史加载失败] ${toText(error)}`);
+            if (isCurrent()) appendLog(`[过程历史加载失败] ${toText(error)}`);
         }
     }
     function setScrollElement(element: HTMLElement | null) {
@@ -1030,31 +1053,6 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 });
             }
         });
-    }
-
-    function ensureModelRouting(availableModels: AgentModelOption[]) {
-        if (!availableModels || availableModels.length === 0) return;
-        const first = availableModels[0]?.id || "";
-        const findModel = (predicate: (m: AgentModelOption) => boolean) => {
-            const found = availableModels.find(predicate);
-            return found ? found.id : first;
-        };
-
-        if (modelRouting.value.pro === undefined) {
-            const deepSeekPro = availableModels.find(m => /deepseek.*v4.*pro|v4.*pro.*deepseek/i.test(`${m.display_name} ${m.name}`));
-            modelRouting.value.pro = deepSeekPro?.id || findModel(m => {
-                const label = `${m.display_name} ${m.name}`;
-                return !/flash|mini|haiku|speed|turbo/i.test(label)
-                    && /pro|opus|claude-3-5|gpt-4o|deepseek/i.test(label);
-            });
-        }
-        if (modelRouting.value.flash === undefined) {
-            const deepSeekFlash = availableModels.find(m => /deepseek.*v4.*flash|v4.*flash.*deepseek/i.test(`${m.display_name} ${m.name}`));
-            modelRouting.value.flash = deepSeekFlash?.id || findModel(m => /flash|mini|haiku|speed|turbo/i.test(`${m.display_name} ${m.name}`));
-        }
-        if (modelRouting.value.vision === undefined) {
-            modelRouting.value.vision = findModel(m => /vision|vl|multimodal|gpt-4o/i.test(`${m.display_name} ${m.name}`));
-        }
     }
 
     function setRunState(nextState: AgentRunState, description?: string) {
@@ -1141,11 +1139,12 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         if (runTerminal.value) return;
         const state = normalizeState(payload.state);
         const message = toText(payload.message || payload.description);
+        if (activeRunId.value) executionRevision++;
         setRunState(state, message || undefined);
         if (state === "waiting_for_human") {
             pauseReason.value = message || AGENT_RUN_STATE_CATALOG.waiting_for_human.description;
         } else {
-            pauseReason.value = "";
+            clearHumanWait();
         }
         if (state === "failed" || state === "cancelled") {
             hasError.value = state === "failed";
@@ -1247,15 +1246,15 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         }
     }
 
-    function applySettledChildTaskToWorker(taskRecord: Record<string, unknown>) {
+    function applySettledChildTaskToWorker(taskRecord: Record<string, unknown>, target?: AgentWorkerItem) {
         const id = toText(taskRecord.child_run_id);
         if (!id) return;
-        const worker = teamWorkers.value.find((w) => w.id === id);
+        const worker = target ?? teamWorkers.value.find((w) => w.id === id);
         if (!worker) return;
         const ended = taskRecord.execution_ended === true || ["succeeded", "failed", "cancelled"].includes(toText(taskRecord.execution_status));
         // 已见终态单向：迟到的“运行中”查询结果不得覆盖已结算状态。
         if (worker.extra?.settledByHost === true && !ended) return;
-        if (ended) worker.extra = { ...worker.extra, settledByHost: true };
+        if (ended && worker.extra?.settledByHost !== true) worker.extra = { ...worker.extra, settledByHost: true };
         worker.waitingForHuman = !ended && Object.keys(asRecord(taskRecord.human_request)).length > 0;
         const model = toText(taskRecord.model_id);
         if (model && !worker.model) worker.model = model;
@@ -1297,43 +1296,88 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         }
     }
 
+    function applyWorkerSnapshot(worker: AgentWorkerItem, task: ChildTaskSnapshot) {
+        if (task.depth === 1) worker.parentWorkerId = null;
+        else if (task.depth && task.parent_session_id?.startsWith("task-")) {
+            worker.parentWorkerId = task.parent_session_id.slice(5);
+        }
+        applySettledChildTaskToWorker(asRecord(task), worker);
+    }
+
+    function workerFromTaskSnapshot(task: ChildTaskSnapshot): AgentWorkerItem {
+        const roleLabel = task.role_label || "子任务";
+        const worker: AgentWorkerItem = {
+            id: task.child_run_id,
+            name: task.task?.split(/\r?\n/)[0].trim() || roleLabel,
+            role: "worker",
+            roleLabel,
+            status: "pending",
+            progress: 0,
+            startedAt: 0,
+        };
+        applyWorkerSnapshot(worker, task);
+        return worker;
+    }
+
     function updateChildTaskSnapshots(tasks: ChildTaskSnapshot[]) {
         const previous = new Map(childTaskSnapshots.value.map((task) => [task.child_run_id, task]));
-        const currentRun = liveStepsRunId.value || activeRunId.value;
+        const currentRun = activeRunId.value || liveStepsRunId.value;
+        const roots = currentRun && teamFocus.value?.run === currentRun ? teamFocus.value.roots : new Set([currentRun]);
         const workers = new Map(teamWorkers.value.map(worker => [worker.id, worker]));
         for (const task of tasks) {
             if (typeof task.child_run_id !== "string") continue;
-            previous.set(task.child_run_id, mergeSnapshot(previous.get(task.child_run_id), task));
-            let worker = workers.get(task.child_run_id);
-            if (!worker && currentRun && task.root_run_id === currentRun) {
-                worker = {
-                    id: task.child_run_id,
-                    name: task.role_label || "子任务",
-                    role: "worker",
-                    roleLabel: task.role_label || "子任务",
-                    status: "pending",
-                    progress: 0,
-                    startedAt: 0,
-                };
-                teamWorkers.value.push(worker);
-                worker = teamWorkers.value[teamWorkers.value.length - 1];
-                workers.set(worker.id, worker);
-            }
-            if (worker) {
-                if (task.depth === 1) worker.parentWorkerId = null;
-                else if (task.depth && task.parent_session_id?.startsWith("task-")) {
-                    worker.parentWorkerId = task.parent_session_id.slice(5);
-                }
-                applySettledChildTaskToWorker(asRecord(task));
-            }
+            const merged = mergeSnapshot(previous.get(task.child_run_id), task);
+            previous.set(task.child_run_id, merged);
+            const worker = workers.get(task.child_run_id);
+            if (worker) applyWorkerSnapshot(worker, merged);
+            else if (task.root_run_id && roots.has(task.root_run_id)) teamWorkers.value.push(workerFromTaskSnapshot(merged));
         }
         childTaskSnapshots.value = [...previous.values()];
     }
 
     function handleChildTasksSynced(e: Event) {
-        const detail = (e as CustomEvent).detail;
+        const detail = (e as CustomEvent<ChildTaskListSnapshot & { sessionId: string }>).detail;
         if (!detail || detail.sessionId !== activeSessionId.value || !Array.isArray(detail.tasks)) return;
-        updateChildTaskSnapshots(detail.tasks);
+        updateChildTaskList(detail);
+        const next = detail.waiting_on ?? [];
+        const previous = teamWaitingOn.value;
+        if (next.length !== previous.length || next.some((wait, index) => {
+            const old = previous[index];
+            return !old || old.waiter_run_id !== wait.waiter_run_id || old.kind !== wait.kind
+                || old.target_ids.length !== wait.target_ids.length
+                || wait.target_ids.some((id, i) => id !== old.target_ids[i]);
+        })) teamWaitingOn.value = next;
+    }
+
+    function updateChildTaskList(snapshot: ChildTaskListSnapshot) {
+        if (snapshot.focus_run_id && snapshot.focus_run_id === latestTeamRun.value) {
+            const roots = new Set(snapshot.focus_run_ids ?? [snapshot.focus_run_id]);
+            const previous = teamFocus.value;
+            if (previous?.run !== snapshot.focus_run_id || previous.roots.size !== roots.size
+                || [...roots].some(id => !previous.roots.has(id))) {
+                teamFocus.value = { run: snapshot.focus_run_id, roots };
+            }
+        }
+        if (Array.isArray(snapshot.tasks)) updateChildTaskSnapshots(snapshot.tasks);
+        updateTeamReceipts(snapshot);
+    }
+
+    function updateTeamReceipts(snapshot: ChildTaskListSnapshot) {
+        if (!snapshot.receipts?.length) return;
+        const summaries = new Map(snapshot.tasks.map(task => [task.child_run_id, task.summary]));
+        for (const receipt of snapshot.receipts) {
+            const previous = teamReceipts.get(receipt.child_run_id);
+            const summary = summaries.get(receipt.child_run_id) ?? previous?.summary;
+            // The history read and live poll can finish out of order. A persisted
+            // receipt can only advance to collected for a given child run.
+            if (previous?.collected_at && !receipt.collected_at) continue;
+            if (previous?.result_available && !receipt.result_available) continue;
+            if (previous && previous.parent_run_id === receipt.parent_run_id &&
+                previous.collected_at === receipt.collected_at && previous.finished_at === receipt.finished_at &&
+                previous.summary === summary && previous.result_available === receipt.result_available &&
+                previous.execution_status === receipt.execution_status) continue;
+            teamReceipts.set(receipt.child_run_id, { ...receipt, summary });
+        }
     }
 
     function handleToolEvent(payload: Record<string, unknown>) {
@@ -1969,15 +2013,10 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         // ask_human 暂停：只接收受控 form JSON，未知结构退回为普通文本回答。
         if (eventType === "agent_paused") {
             const message = toText(payload.message) || "Agent 正在等待你的输入。";
-            runTerminal.value = false;
-            isRunning.value = true;
-            isThinking.value = false;
-            pauseReason.value = message;
-            // 快照发起本次挂起的步骤：优先最近的运行中/待执行 ask_human/human 步骤，
-            // 其次最近仍在 running/pending 的步骤——应答送达后回填进该步骤行内，绝不误绑早期已完成的提问。
-            pausedStepId.value = findPausedStepId(steps.value);
-            humanForm.value = normalizeHumanForm(payload.form, message);
-            setRunState("waiting_for_human", message);
+            const runId = toText(payload.run_id || payload.runId);
+            const waitId = toText(payload.wait_id || payload.waitId);
+            executionRevision++;
+            setHumanWait(runId && waitId ? { kind: "live", runId, waitId } : null, message, payload.form);
             appendLog(`⏸️ [人类协助] ${message}`);
             autoScrollToBottom();
             return;
@@ -2218,9 +2257,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         currentRunArtifacts.value = [];
         hasError.value = false;
         currentGoal.value = "";
-        pauseReason.value = "";
-        pausedStepId.value = undefined;
-        humanForm.value = null;
+        clearHumanWait();
         humanInput.value = "";
         stopRequested.value = false;
         activeRunId.value = null;
@@ -2231,21 +2268,147 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         setRunState("idle");
     }
 
+    function clearHumanWait() {
+        humanWait.value = null;
+        pauseReason.value = "";
+        pausedStepId.value = undefined;
+        humanForm.value = null;
+    }
+
+    function setHumanWait(target: HumanWaitTarget | null, question: string, form: unknown) {
+        humanWait.value = target;
+        isRunning.value = true;
+        isThinking.value = false;
+        runTerminal.value = false;
+        pauseReason.value = question;
+        pausedStepId.value = findPausedStepId(steps.value);
+        humanForm.value = normalizeHumanForm(form, question);
+        setRunState("waiting_for_human", question);
+    }
+
+    function adoptLiveRun(runId: string, goal: string, startedAt: unknown) {
+        if (activeRunId.value === runId) {
+            if (goal && !currentGoal.value) currentGoal.value = goal;
+            return;
+        }
+        const ownStart = awaitingRunStart && startingDesktopRunId === runId;
+        const deferredStop = deferredStopRunId === runId;
+        if (!ownStart) {
+            runGeneration++;
+            stopRequested.value = false;
+            stoppingRunId = null;
+            if (pendingReplacementGoal.value?.afterStop) pendingReplacementGoal.value = null;
+        }
+        awaitingRunStart = false;
+        clearStreamDisplay();
+        if (liveStepsRunId.value && liveStepsRunId.value !== runId) {
+            steps.value = [];
+            teamWorkers.value = [];
+            workerPreviewStreams.clear();
+            humanInterventions.value = [];
+            selectedStepId.value = null;
+        }
+        clearHumanWait();
+        liveStepsRunId.value = runId;
+        activeRunId.value = runId;
+        reviewProgress.value = [];
+        reviewProgressStartedAt.value = Date.now();
+        stoppedReviewIds.clear();
+        reviewRunId.value = runId;
+        if (goal || !ownStart) currentGoal.value = goal;
+        runTerminal.value = false;
+        completionMessage.value = "";
+        streamingSummary.value = "";
+        finishOutput.value = null;
+        isRunning.value = true;
+        isThinking.value = true;
+        runStartedAt.value = historyRuns.value.find(run => run.id === runId)?.startedAt
+            ?? traceTimestamp(startedAt);
+        startElapsedTimer();
+        setRunState("executing", "Agent 正在执行任务...");
+        if (deferredStop) {
+            deferredStopRunId = null;
+            stopRequested.value = true;
+            void sendStopForRun(activeSessionId.value, runId);
+        }
+    }
+
+    async function syncExecutionSnapshot() {
+        const session = activeSessionId.value;
+        if (disposed || session.startsWith("draft-")) return;
+        const revision = executionRevision;
+        const request = ++executionSnapshotRequest;
+        const isCurrent = () => !disposed && session === activeSessionId.value
+            && revision === executionRevision && request === executionSnapshotRequest;
+        try {
+            const snapshot = await invoke<AgentExecutionSnapshot>("get_agent_execution_snapshot", { sessionId: session });
+            if (!isCurrent()) return;
+            const active = snapshot?.active;
+            if (active && !completedRunIds.has(active.run_id)) {
+                adoptLiveRun(active.run_id, active.goal || "", active.started_at);
+                if (runTerminal.value) return;
+                if (active.wait_id) {
+                    const current = humanWait.value;
+                    if (current?.kind !== "live" || current.runId !== active.run_id || current.waitId !== active.wait_id) {
+                        setHumanWait(
+                            { kind: "live", runId: active.run_id, waitId: active.wait_id },
+                            active.question || "Agent 正在等待你的输入。",
+                            active.form,
+                        );
+                    }
+                } else if (isWaitingForHuman.value) {
+                    clearHumanWait();
+                    setRunState("executing");
+                }
+                return;
+            }
+            if (activeLocalRunCount > 0 || awaitingRunStart || stopRequested.value) return;
+            const saved = snapshot?.waiting_checkpoint;
+            if (saved) {
+                activeRunId.value = null;
+                currentGoal.value = saved.user_goal;
+                setHumanWait(
+                    { kind: "saved", version: saved.version },
+                    saved.last_error || "已保存的任务正在等待你的输入。",
+                    saved.form,
+                );
+            } else if (isRunning.value) {
+                activeRunId.value = null;
+                isRunning.value = false;
+                isThinking.value = false;
+                runTerminal.value = true;
+                clearHumanWait();
+                stopElapsedTimer();
+                setRunState("idle");
+            }
+        } catch (error) {
+            if (isCurrent()) appendLog(`[运行态同步失败] ${toText(error)}`);
+        }
+    }
+
     async function setupListeners(sid: string) {
+        if (disposed) return;
         clearStreamDisplay();
         unlisteners.forEach((unlisten) => unlisten());
         unlisteners = [];
+        const generation = ++listenerGeneration;
+        const isCurrent = () => !disposed && generation === listenerGeneration && sid === activeSessionId.value;
+        const registrations: Promise<void>[] = [];
         const register = async (channel: string, handler: (payload: unknown) => void) => {
             try {
-                unlisteners.push(await listen<unknown>(channel, (event) => handler(event.payload)));
+                const unlisten = await listen<unknown>(channel, (event) => {
+                    if (isCurrent()) return handler(event.payload);
+                });
+                if (isCurrent()) unlisteners.push(unlisten);
+                else unlisten();
             } catch (error) {
-                appendLog(`[监听失败] ${channel}: ${toText(error)}`);
+                if (isCurrent()) appendLog(`[监听失败] ${channel}: ${toText(error)}`);
             }
         };
         // 会话事件中枢（notify_session_event 的桌面侧落点）：
         // message = run 中段人工应答/新消息已落库 → 立即重拉对话气泡，
         // 否则"人的回答"只在 run 边界（started/done）才刷新上屏。
-        await register("channel-session-event", async (payload: any) => {
+        registrations.push(register("channel-session-event", async (payload: any) => {
             if (payload?.session_id !== sid) return;
             if (payload?.kind !== "message") return;
             try {
@@ -2253,60 +2416,23 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             } catch (error) {
                 appendLog(`[消息刷新失败] ${toText(error)}`);
             }
-        });
-        await register(`agent-run-state-${sid}`, (payload) => handleRunState(asRecord(payload)));
-        await register(`agent-progress-${sid}`, (payload) => handleProgress(asRecord(payload)));
-        await register(`agent-log-${sid}`, handleLog);
-        await register(`agent-context-${sid}`, handleContext);
-        await register(`agent-tool-event-${sid}`, (payload) => handleToolEvent(asRecord(payload)));
-        await register("channel-run-started", async (payload: any) => {
+        }));
+        registrations.push(register(`agent-run-state-${sid}`, (payload) => handleRunState(asRecord(payload))));
+        registrations.push(register(`agent-progress-${sid}`, (payload) => handleProgress(asRecord(payload))));
+        registrations.push(register(`agent-log-${sid}`, handleLog));
+        registrations.push(register(`agent-context-${sid}`, handleContext));
+        registrations.push(register(`agent-tool-event-${sid}`, (payload) => handleToolEvent(asRecord(payload))));
+        registrations.push(register("channel-run-started", async (payload: any) => {
             if (payload?.session_id === sid) {
-                clearStreamDisplay();
-                // 新一代任务已亮明身份，启动窗口结束；此后属于本代的 done 事件正常重置运行态
-                awaitingRunStart = false;
                 const startedRunId = toText(payload.run_id);
-                if (startedRunId && liveStepsRunId.value && liveStepsRunId.value !== startedRunId) {
-                    steps.value = [];
-                    humanInterventions.value = [];
-                    selectedStepId.value = null;
-                    pauseReason.value = "";
-                    humanForm.value = null;
-                }
-                if (startedRunId) liveStepsRunId.value = startedRunId;
-                activeRunId.value = startedRunId || null;
-                if (startedRunId) {
-                    completedRunIds.delete(startedRunId);
-                    if (stopRequested.value && !stoppingRunId) {
-                        stoppingRunId = startedRunId;
-                    }
-                }
-                reviewProgress.value = [];
-                reviewProgressStartedAt.value = Date.now();
-                stoppedReviewIds.clear();
-                reviewRunId.value = startedRunId;
-                if (payload?.goal) {
-                    currentGoal.value = payload.goal;
-                }
-                runTerminal.value = false;
-                completionMessage.value = "";
-                streamingSummary.value = "";
-                finishOutput.value = null;
-                isRunning.value = true;
-                isThinking.value = true;
-                // 新代任务起跑：上一轮挂起步骤快照随之作废
-                pausedStepId.value = undefined;
-                if (!runStartedAt.value) {
-                    const startedTrace = startedRunId
-                        ? historyRuns.value.find(run => run.id === startedRunId)
-                        : undefined;
-                    runStartedAt.value = startedTrace?.startedAt ?? traceTimestamp(payload?.at);
-                }
-                setRunState("executing", "Agent 正在执行任务...");
+                if (!startedRunId || completedRunIds.has(startedRunId)) return;
+                executionRevision++;
+                adoptLiveRun(startedRunId, toText(payload.goal), payload.at);
                 await loadRunTraces();
-                await loadConversation();
+                if (isCurrent()) await loadConversation();
             }
-        });
-        await register("channel-run-done", async (payload: any) => {
+        }));
+        registrations.push(register("channel-run-done", async (payload: any) => {
             if (payload?.session_id === sid) {
                 const doneRunId = toText(payload?.run_id);
                 const doneStatus = toText(payload?.status);
@@ -2321,6 +2447,13 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 };
                 if (!awaitingRunStart && activeLocalRunCount === 0 && pendingStopCommand) {
                     await pendingStopCommand;
+                }
+                if (!isCurrent()) return;
+                if (!isDeletedSession && humanWait.value?.kind === "saved" && !activeRunId.value) {
+                    recordDoneRun();
+                    await loadRunTraces();
+                    if (isCurrent()) await loadConversation();
+                    return;
                 }
                 const initialDecision = evaluateRunDoneEvent({
                     isDeletedSession,
@@ -2344,21 +2477,23 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                     return;
                 }
                 const currentGenAtDone = runGeneration;
+                executionRevision++;
                 // 目标 ID 已核对匹配，再重置运行态，避免旧任务或无 ID 事件提前清掉 isRunning。
                 isRunning.value = false;
                 isThinking.value = false;
+                clearHumanWait();
                 if (!doneRunId || activeRunId.value === doneRunId || isDeletedSession) {
                     activeRunId.value = null;
                 }
                 stopElapsedTimer();
                 try {
                     await loadRunTraces();
-                    await loadConversation();
+                    if (isCurrent()) await loadConversation();
                 } catch (error) {
                     appendLog(`[后台同步失败] ${toText(error)}`);
                 } finally {
                     recordDoneRun();
-                    if (currentGenAtDone === runGeneration) {
+                    if (isCurrent() && currentGenAtDone === runGeneration) {
                         if (activeLocalRunCount === 0 && pendingStopCommand) {
                             await pendingStopCommand;
                         }
@@ -2389,7 +2524,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                     }
                 }
             }
-        });
+        }));
+        await Promise.all(registrations);
     }
 
     let creatingSession: Promise<string> | null = null;
@@ -2414,19 +2550,33 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         finally { creatingSession = null; }
     }
 
-    async function runAgent(nextGoal?: string, attachments?: ParsedAttachment[], taskStartMode?: "resume" | "new") {
+    async function runAgent(
+        nextGoal?: string,
+        attachments?: ParsedAttachment[],
+        taskStartMode?: "resume" | "new",
+        waitingCheckpointVersion?: number,
+    ) {
+        const requestedGoal = (nextGoal ?? goalInput.value).trim();
+        if (!requestedGoal) return;
+        if (initialExecutionSync) await initialExecutionSync;
+        if (disposed || isRunning.value || stopRequested.value) return;
         // 不按消息关键词猜意图；失败/取消后默认续跑，排队/目标替换显式新任务。
         const selectedTaskMode = taskStartMode ?? (canResumeTask.value ? "resume" : undefined);
         const requestedPlanMode = selectedTaskMode === "resume" ? undefined : planMode.value;
-        const requestedGoal = (nextGoal ?? goalInput.value).trim();
-        if (!requestedGoal || isRunning.value || stopRequested.value) return;
 
         let currentSessionId: string;
         try { currentSessionId = await ensureSession(); }
         catch (err) { appendLog(`[会话持久化异常] ${toText(err)}`); return; }
-        if (isRunning.value || stopRequested.value) return;
+        if (disposed || isRunning.value || stopRequested.value) return;
+        // getRandomValues is also available in desktop webviews without a secure web origin.
+        const bytes = crypto.getRandomValues(new Uint8Array(16));
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
+        const desktopRunId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 
         const currentGeneration = ++runGeneration;
+        executionRevision++;
         // 关键修复：点击发送后，第一步立即重置并更新运行态，使气泡与规划指示 0ms 即刻上屏响应！
         clearSession();
         runTerminal.value = false;
@@ -2444,6 +2594,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         void loadRunTraces();
 
         // 进入启动窗口：invoke 在途且 channel-run-started 未到达期间，迟到的旧代 run-done 不得重置运行态
+        startingDesktopRunId = desktopRunId;
         awaitingRunStart = true;
         activeLocalRunCount += 1;
         try {
@@ -2453,12 +2604,15 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 autoPilot: autoPilot.value,
                 planMode: requestedPlanMode,
                 taskStartMode: selectedTaskMode,
+                waitingCheckpointVersion,
+                desktopRunId,
                 sessionId: currentSessionId,
                 logContext: logContext.value,
                 transientLlmRequestRetries: retryAttempts.value === 0 ? 1 : Math.min(100, Math.max(1, retryAttempts.value + 1)),
                 attachments: attachments && attachments.length > 0 ? attachments : undefined,
             });
         } catch (error) {
+            if (disposed || currentGeneration !== runGeneration) return;
             const message = toText(error) || "任务初始化失败。";
             completionMessage.value = message;
             hasError.value = true;
@@ -2472,7 +2626,9 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
             }
         } finally {
             activeLocalRunCount = Math.max(0, activeLocalRunCount - 1);
-            if (currentGeneration === runGeneration) {
+            if (startingDesktopRunId === desktopRunId) startingDesktopRunId = null;
+            if (deferredStopRunId === desktopRunId) deferredStopRunId = null;
+            if (!disposed && currentGeneration === runGeneration) {
                 // 停止请求本身也要返回，避免迟到的停止信号落到下一轮。
                 if (pendingStopCommand) await pendingStopCommand;
                 if (currentGeneration !== runGeneration) return;
@@ -2505,6 +2661,9 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                     return;
                 }
                 stopRequested.value = false;
+                if (waitingCheckpointVersion !== undefined && hasError.value) {
+                    await syncExecutionSnapshot();
+                }
                 if (!startPendingReplacement() && queuedGoals.value.length > 0) {
                     const next = queuedGoals.value.shift();
                     if (next) {
@@ -2568,139 +2727,114 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
 
     async function requestStop() {
         if (!isRunning.value || stopRequested.value) return false;
+        const session = activeSessionId.value;
+        const target = humanWait.value;
+        const runId = activeRunId.value;
+        if (!runId && target?.kind !== "saved" && !awaitingRunStart) return false;
         flushStreamDisplay();
         stopRequested.value = true;
         stoppingRunId = null;
-        statusDescription.value = "正在向模型发送中断信号并安全停止任务...";
-        appendLog("[停止请求] 正在向模型与工具发送中断信号...");
-        const command = invoke<CancelAgentRunResult>("cancel_agent_run", { sessionId: activeSessionId.value })
+        statusDescription.value = "正在安全停止当前任务...";
+        appendLog("[停止请求] 正在停止当前任务。");
+        if (target?.kind === "saved") {
+            try {
+                await invoke("cancel_agent_waiting_checkpoint", { sessionId: session, checkpointVersion: target.version });
+                if (!disposed && session === activeSessionId.value && humanWait.value === target) {
+                    executionRevision++;
+                    clearHumanWait();
+                    stopRequested.value = false;
+                    setRunState("cancelled", "已停止保存的人工等待。");
+                    await loadRunTraces();
+                }
+                return true;
+            } catch (error) {
+                if (!disposed && session === activeSessionId.value && humanWait.value === target) {
+                    pendingReplacementGoal.value = null;
+                    stopRequested.value = false;
+                    appendLog(`[停止失败] ${toText(error)}`);
+                    await syncExecutionSnapshot();
+                }
+                return false;
+            }
+        }
+        // Existing desktop requests may still be before the run-started event.
+        // Remember the click, then issue a scoped cancellation once its run ID is known.
+        if (runId) return sendStopForRun(session, runId);
+        deferredStopRunId = startingDesktopRunId;
+        return true;
+    }
+
+    async function sendStopForRun(session: string, runId: string) {
+        stoppingRunId = runId;
+        const generation = runGeneration;
+        const isCurrent = () => !disposed && session === activeSessionId.value
+            && generation === runGeneration && stoppingRunId === runId;
+        const command = invoke<CancelAgentRunResult>("cancel_agent_execution", { sessionId: session, runId })
             .catch((error) => {
-                appendLog(`[停止指令] ${toText(error)}`);
+                if (isCurrent()) appendLog(`[停止指令] ${toText(error)}`);
                 return null;
             });
         pendingStopCommand = command;
         const outcome = await command;
         if (pendingStopCommand === command) pendingStopCommand = null;
+        if (!isCurrent()) return false;
+        if (completedRunIds.has(runId)) return true;
+        if (outcome?.delivered && (!outcome.active_run_id || outcome.active_run_id === runId)) return true;
 
-        if (!outcome) {
-            if (pendingReplacementGoal.value?.afterStop) pendingReplacementGoal.value = null;
-            stoppingRunId = null;
-            stopRequested.value = false;
+        if (pendingReplacementGoal.value?.afterStop) pendingReplacementGoal.value = null;
+        stoppingRunId = null;
+        stopRequested.value = false;
+        statusDescription.value = "停止信号未送达目标任务，正在同步运行状态。";
+        await syncExecutionSnapshot();
+        return false;
+    }
+
+    async function answerHuman(answer: string, attachments?: ParsedAttachment[], expectedWaitKey?: string | null) {
+        const message = answer.trim();
+        if (!message || isSendingHuman.value || stopRequested.value || !isWaitingForHuman.value
+            || (expectedWaitKey !== undefined && expectedWaitKey !== humanWaitKey.value)) return false;
+        const target = humanWait.value;
+        if (!target) {
+            // A state transition may precede the question event. Do not guess its identity.
+            await syncExecutionSnapshot();
             return false;
         }
-
-        if (outcome.has_active_run) {
-            if (outcome.active_run_id) {
-                activeRunId.value = outcome.active_run_id;
-                stoppingRunId = outcome.active_run_id;
-                if (activeLocalRunCount === 0 && completedRunIds.has(outcome.active_run_id)) {
-                    isRunning.value = false;
-                    isThinking.value = false;
-                    activeRunId.value = null;
-                    stoppingRunId = null;
-                    stopRequested.value = false;
-                    return true;
-                }
-            }
-            if (!outcome.delivered) {
-                if (pendingReplacementGoal.value?.afterStop) pendingReplacementGoal.value = null;
-                // 后台存在活动运行但停止信号未能投递：解除“停止中”按钮锁定以便重试停止，
-                // 同时保留 isRunning 阻止误启动新一轮。
-                stoppingRunId = null;
-                stopRequested.value = false;
-                statusDescription.value = "停止信号未送达当前任务，请重试停止。";
-                appendLog("[停止未送达] 后台仍有活动任务，但停止指令未送达，请再次点击停止重试。");
-            }
-            return outcome.delivered;
-        }
-
-        // 后端明确确认不存在活动运行（如重启遗留的人工挂起检查点），安全解除锁定。
-        if (activeLocalRunCount === 0) {
-            activeRunId.value = null;
-            stoppingRunId = null;
-            stopRequested.value = false;
-            if (runState.value === "waiting_for_human") {
-                pauseReason.value = "";
-                humanForm.value = null;
-                setRunState("cancelled", "已停止等待人工输入。");
-            } else if (isRunning.value) {
-                setRunState("cancelled", "任务已停止。");
-            }
-        }
-        return true;
-    }
-    async function checkAndRestoreCheckpointState() {
-        try {
-            if (activeSessionId.value.startsWith("draft-")) return;
-            const cp = await invoke<{
-                run_id: string;
-                phase: string;
-                step_id: number;
-                user_goal: string;
-                last_error: string | null;
-                is_waiting_human: boolean;
-                form?: unknown;
-            } | null>("get_agent_checkpoint", { sessionId: activeSessionId.value });
-            if (cp && cp.is_waiting_human) {
-                activeRunId.value = cp.run_id || null;
-                liveStepsRunId.value = cp.run_id || null;
-                runTerminal.value = false;
-                isRunning.value = true;
-                isThinking.value = false;
-                setRunState("waiting_for_human", "Agent 正在等待你的输入。");
-                pauseReason.value = cp.last_error || "Agent 正在等待你的输入。";
-                if (!runStartedAt.value) {
-                    const runningTrace = [...historyRuns.value].reverse().find(run => run.status === "running");
-                    runStartedAt.value = runningTrace?.startedAt ?? Date.now();
-                }
-                humanForm.value = normalizeHumanForm(cp.form, pauseReason.value);
-                currentGoal.value = cp.user_goal;
-                appendLog(`⏸️ [状态恢复] 会话正处于人工交互挂起状态 (步骤 #${cp.step_id + 1}): ${pauseReason.value}`);
-            }
-        } catch (e) {
-            console.error("检查 Checkpoint 状态失败:", e);
-        }
-    }
-
-    async function answerHuman(answer: string) {
-        const message = answer.trim();
-        if (!message || isSendingHuman.value || stopRequested.value) return;
-        // 日志展示用清洗后的文本（剥离后端解析用的结构化标记），但传给 Agent 的 message 保持原样
+        const session = activeSessionId.value;
+        const generation = runGeneration;
+        const isCurrent = () => !disposed && session === activeSessionId.value && generation === runGeneration;
+        const stepId = pausedStepId.value;
+        const question = pauseReason.value || undefined;
         const displayMessage = stripPlanDecisionMarker(message);
         isSendingHuman.value = true;
         try {
-            try {
-                const stepId = pausedStepId.value;
-                const question = pauseReason.value || undefined;
-                const receipt = await invoke<{ id: string } | null>("send_human_intervention", { sessionId: activeSessionId.value, message });
-                // 应答落账：绑定发起挂起的步骤与当时的提问原文（须在清空 pauseReason 前快照），
-                // 让时间线能把"你的回答"直接回填到对应 ask_human 步骤行内。
-                humanInterventions.value.push({
-                    message: displayMessage,
-                    timestamp: Date.now(),
-                    messageId: receipt?.id,
-                    stepId,
-                    question,
-                });
-                pausedStepId.value = undefined;
+            if (target.kind === "saved") {
+                executionRevision++;
+                clearHumanWait();
                 humanInput.value = "";
-                pauseReason.value = "";
-                humanForm.value = null;
-                setRunState("executing", "已收到人工回答，等待 Agent 继续执行。");
-                appendLog(`[人工回答] ${displayMessage}`);
-                autoScrollToBottom();
-            } catch {
-                // 内存通道不存在（应用曾重启过），无缝唤醒主循环续跑
-                appendLog(`[人工回答] 正在携带回答唤醒并继续任务: ${displayMessage}`);
-                humanInput.value = "";
-                pauseReason.value = "";
-                humanForm.value = null;
                 isRunning.value = false;
-                runTerminal.value = false;
-                await runAgent(message, undefined, "resume");
+                await runAgent(message, attachments, "resume", target.version);
+                return true;
             }
+            const receipt = await invoke<{ id: string } | null>("send_human_intervention", {
+                sessionId: session, runId: target.runId, waitId: target.waitId, message,
+            });
+            if (!isCurrent() || activeRunId.value !== target.runId) return true;
+            humanInterventions.value.push({ message: displayMessage, timestamp: Date.now(), messageId: receipt?.id, stepId, question });
+            // The host may advance to another question before this RPC replies.
+            if (humanWait.value !== target) return true;
+            executionRevision++;
+            clearHumanWait();
+            humanInput.value = "";
+            setRunState("executing", "已收到人工回答，等待 Agent 继续执行。");
+            appendLog(`[人工回答] ${displayMessage}`);
+            autoScrollToBottom();
+            return true;
         } catch (error) {
-            appendLog(`[人工回答失败] ${toText(error)}`);
+            if (isCurrent() && humanWait.value === target) {
+                appendLog(`[人工回答失败] ${toText(error)}`);
+                await syncExecutionSnapshot();
+            }
+            return false;
         } finally {
             isSendingHuman.value = false;
         }
@@ -2724,38 +2858,12 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
     ) {
         const message = (overrideText ?? humanInput.value).trim();
         if (!message || isSendingHuman.value || stopRequested.value) return;
+        if (isWaitingForHuman.value) {
+            return answerHuman(message, attachments);
+        }
         isSendingHuman.value = true;
         try {
-            if (isWaitingForHuman.value) {
-                try {
-                    const stepId = pausedStepId.value;
-                    const question = pauseReason.value || undefined;
-                    const receipt = await invoke<{ id: string } | null>("send_human_intervention", { sessionId: activeSessionId.value, message });
-                    // 同 answerHuman：落账时快照步骤与提问，回填时间线步骤行
-                    humanInterventions.value.push({
-                        message: stripPlanDecisionMarker(message),
-                        timestamp: Date.now(),
-                        messageId: receipt?.id,
-                        stepId,
-                        question,
-                    });
-                    pausedStepId.value = undefined;
-                    humanInput.value = "";
-                    pauseReason.value = "";
-                    humanForm.value = null;
-                    setRunState("executing", "已收到人工回答，等待 Agent 继续执行。");
-                    appendLog("[人工回答] 已写入当前 ask_human 步骤。");
-                } catch {
-                    // 内存通道失效（应用曾重启过），无缝唤醒主循环续跑
-                    appendLog(`[人工回答] 正在携带回答唤醒并继续任务: ${message}`);
-                    humanInput.value = "";
-                    pauseReason.value = "";
-                    humanForm.value = null;
-                    isRunning.value = false;
-                    runTerminal.value = false;
-                    await runAgent(message, attachments, "resume");
-                }
-            } else if (mode === "queue") {
+            if (mode === "queue") {
                 // ⏳ 排队模式：加入排队队列，等当前任务正常执行完毕后再执行
                 queuedGoals.value.push({
                     id: String(Date.now()),
@@ -2765,31 +2873,30 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 });
                 appendLog(`[排队任务] 已排队后续执行：${message}`);
             } else {
-                // ⚡ 立即打断模式：立即中断前序任务，切换为新目标
+                // A late replace request must never target the next run or silently create a new one.
+                const session = activeSessionId.value;
+                const generation = runGeneration;
+                const runId = activeRunId.value;
+                if (!runId) {
+                    appendLog("[目标变更未提交] 当前运行尚未登记。");
+                    return;
+                }
                 pendingReplacementGoal.value = { text: message, attachments };
+                const pending = pendingReplacementGoal.value;
                 try {
-                    await invoke("replace_agent_goal", { sessionId: activeSessionId.value, goal: message });
+                    await invoke("replace_agent_goal", { sessionId: session, runId, goal: message });
+                    if (disposed || generation !== runGeneration || session !== activeSessionId.value
+                        || (activeRunId.value !== runId && !completedRunIds.has(runId))) return;
                     humanInput.value = "";
                     appendLog(`[目标打断替换] 已请求中断当前任务并切换：${message}`);
-                } catch (interruptErr) {
-                    const errStr = toText(interruptErr);
-                    if (errStr.includes("任务已结束") || errStr.includes("通道不存在") || errStr.includes("not found")) {
-                        // 任务在后端其实已经结束，通道已被释放。此时前端 isRunning 尚未刷新导致误判。
-                        // 修正前端运行态，并无缝转为启动新任务，确保用户输入绝不被吞！
-                        appendLog(`[运行态同步] 检测到前序任务已终结，无缝转为新任务启动: ${message}`);
-                        pendingReplacementGoal.value = null;
-                        humanInput.value = "";
-                        isRunning.value = false;
-                        await runAgent(message, attachments, "new");
-                        return;
-                    }
-                    throw interruptErr;
+                } catch (error) {
+                    if (disposed || generation !== runGeneration || session !== activeSessionId.value) return;
+                    if (pendingReplacementGoal.value === pending) pendingReplacementGoal.value = null;
+                    appendLog(`[输入发送失败] ${toText(error)}`);
+                    await syncExecutionSnapshot();
                 }
             }
             autoScrollToBottom();
-        } catch (error) {
-            pendingReplacementGoal.value = null;
-            appendLog(`[输入发送失败] ${toText(error)}`);
         } finally {
             isSendingHuman.value = false;
         }
@@ -2803,16 +2910,24 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         if (typeof window !== "undefined") {
             window.addEventListener("agent:child-tasks-synced", handleChildTasksSynced);
         }
-        if (!activeSessionId.value.startsWith("draft-")) {
-            await loadConversation();
-            await loadRunTraces();
-            await checkAndRestoreCheckpointState();
-            void refreshResources();
-        }
-        await setupListeners(activeSessionId.value);
+        const session = activeSessionId.value;
+        if (session.startsWith("draft-")) return;
+        initialExecutionSync = (async () => {
+            await setupListeners(session);
+            if (!disposed && session === activeSessionId.value) await syncExecutionSnapshot();
+        })();
+        await initialExecutionSync;
+        initialExecutionSync = null;
+        if (disposed || session !== activeSessionId.value) return;
+        await Promise.all([loadConversation(), loadRunTraces()]);
+        if (!disposed && session === activeSessionId.value) void refreshResources();
     });
 
     onUnmounted(() => {
+        disposed = true;
+        listenerGeneration++;
+        runGeneration++;
+        invalidateConversationLoad();
         if (typeof window !== "undefined") {
             window.removeEventListener("agent:child-tasks-synced", handleChildTasksSynced);
         }
@@ -2848,6 +2963,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         stopReview,
         ensureSession,
         modelRouting,
+        sessionModelRouting,
+        updateModelRouting,
         updateBudgetMode,
         logContext,
         latestContext,
@@ -2905,6 +3022,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         teamWorkers,
         childTaskSnapshots,
         isWaitingForHuman,
+        humanWaitKey,
         canStart,
         completedToolCount,
         failedToolCount,
@@ -2918,7 +3036,6 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         recordLoadError,
         recordPage,
         setScrollElement,
-        ensureModelRouting,
         queuedGoals,
         removeQueuedGoal,
         clearQueuedGoals,

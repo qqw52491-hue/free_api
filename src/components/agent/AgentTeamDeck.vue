@@ -16,6 +16,12 @@
         <AgentTeamTopology
             :workers="displayedWorkers"
             :master-status="teamState.masterStatus"
+            :master-run-id="teamState.masterRunId"
+            :master-waiting-for-human="!isViewingHistoryStep && teamState.masterWaitingForHuman"
+            :waiting-on="isViewingHistoryStep ? undefined : teamState.waitingOn"
+            :wait-target-names="teamState.waitTargetNames"
+            :receipts="teamState.receipts"
+            :historical="isViewingHistoryStep"
             :goal="currentGoal"
             :selected-id="selectedWorker?.id || 'master'"
             @select="handleWorkerClick"

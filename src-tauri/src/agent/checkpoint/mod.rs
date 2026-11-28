@@ -902,7 +902,8 @@ pub(crate) fn save_checkpoint_and_consume_jobs(
             }
             for id in job_ids {
                 tx.execute(
-                    "UPDATE agent_background_jobs SET consumed=1 WHERE id=?1 AND consumed=0 AND (parent_run_id=?2 OR parent_run_id IN (SELECT old.id FROM agent_run_traces current JOIN agent_run_traces old ON old.session_id=current.session_id AND old.history_task_id=current.history_task_id WHERE current.id=?2 AND current.history_task_id IS NOT NULL))",
+                    concat!("UPDATE agent_background_jobs SET consumed=1 WHERE id=?1 AND consumed=0 AND parent_run_id IN (",
+                        crate::agent::run_trace::task_run_ids!("?2"), ")"),
                     params![id, parent_run_id],
                 ).map_err(|error| error.to_string())?;
             }
@@ -991,6 +992,7 @@ pub(crate) fn bind_run_and_save_checkpoint(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentCheckpointSummary {
     pub run_id: String,
+    pub version: i64,
     pub phase: String,
     #[serde(default)]
     pub plan_phase: Option<String>,
@@ -1014,8 +1016,11 @@ pub async fn get_agent_checkpoint(
     state: State<'_, DbState>,
     session_id: String,
 ) -> Result<Option<AgentCheckpointSummary>, String> {
-    let checkpoint = load_checkpoint(state.inner(), &session_id)?;
-    Ok(checkpoint.map(|cp| {
+    Ok(load_checkpoint(state.inner(), &session_id)?.map(AgentCheckpointSummary::from_checkpoint))
+}
+
+impl AgentCheckpointSummary {
+    pub(crate) fn from_checkpoint(cp: AgentCheckpoint) -> Self {
         let form = cp.stage_arbitration.as_ref()
             .filter(|_| cp.phase == AgentPhase::WaitUser)
             .map(|request| request.form(cp.last_error.as_deref().unwrap_or_default()))
@@ -1027,20 +1032,10 @@ pub async fn get_agent_checkpoint(
                 cp.pending
                     .as_ref()
                     .and_then(|p| p.instruction.get_params().get("form").cloned())
-            })
-            .or_else(|| {
-                crate::agent::channel::runs_store()
-                    .lock()
-                    .ok()
-                    .and_then(|store| {
-                        store
-                            .values()
-                            .find(|r| r.session_id == session_id && r.status == "waiting_human")
-                            .and_then(|r| r.paused_form.clone())
-                    })
             });
-        AgentCheckpointSummary {
+        Self {
             run_id: cp.run_id,
+            version: cp.version,
             phase: cp.phase.as_str().to_string(),
             plan_phase: Some(cp.plan_phase.as_str().to_string()),
             plan_mode: Some(cp.plan_mode.as_str().to_string()),
@@ -1057,7 +1052,38 @@ pub async fn get_agent_checkpoint(
             is_waiting_human: cp.phase == AgentPhase::WaitUser,
             form,
         }
-    }))
+    }
+}
+
+pub(crate) fn load_waiting_checkpoint(
+    db: &DbState,
+    session_id: &str,
+    version: i64,
+) -> Result<AgentCheckpoint, String> {
+    load_checkpoint(db, session_id)?
+        .filter(|cp| cp.version == version && cp.phase == AgentPhase::WaitUser)
+        .ok_or_else(|| "已保存的人工确认已更换，操作未执行，请重新查看任务".to_string())
+}
+
+/// Called with session execution admission held. Preserve the recovery evidence.
+pub(crate) fn cancel_waiting_checkpoint(db: &DbState, session_id: &str, version: i64) -> Result<(), String> {
+    let mut checkpoint = load_waiting_checkpoint(db, session_id, version)?;
+    let reason = "用户停止了已保存的人工等待。";
+    checkpoint.phase = AgentPhase::Failed;
+    checkpoint.prepared_instruction = None;
+    checkpoint.last_error = Some(reason.into());
+    checkpoint.updated_at = Utc::now().to_rfc3339();
+    let mut conn = db.0.lock().map_err(|error| error.to_string())?;
+    let tx = conn.transaction().map_err(|error| error.to_string())?;
+    if matches!(write_checkpoint_on(&tx, &mut checkpoint)?, WriteOutcome::Conflict) {
+        return Err("已保存的人工确认已更换，停止未提交".into());
+    }
+    tx.execute(
+        "UPDATE agent_run_traces SET status='cancelled', updated_at=?3, completed_at=?3, completion_json=json_object('summary',?4)
+         WHERE session_id=?1 AND history_task_id=?2 AND ?2<>'' AND status IN ('running','waiting_human')",
+        params![session_id, checkpoint.data.history_task_id, checkpoint.updated_at, reason],
+    ).map_err(|error| error.to_string())?;
+    tx.commit().map_err(|error| error.to_string())
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {
@@ -1087,7 +1113,9 @@ pub(crate) fn save_checkpoint_and_messages(
         |tx, updated_at| {
             for id in ids {
                 tx.execute(
-                    "UPDATE agent_messages SET delivered_at=?1 WHERE id=?2 AND target_session_id=?4 AND claimed_run_id IS NULL AND delivered_at IS NULL AND (target_run_id=?3 OR target_run_id IN (SELECT old.id FROM agent_run_traces current JOIN agent_run_traces old ON old.session_id=current.session_id AND old.history_task_id=current.history_task_id WHERE current.id=?3 AND current.session_id=?4 AND current.history_task_id IS NOT NULL))",
+                    concat!("UPDATE agent_messages SET delivered_at=?1 WHERE id=?2 AND target_session_id=?4
+                        AND claimed_run_id IS NULL AND delivered_at IS NULL AND target_run_id IN (",
+                        crate::agent::run_trace::task_run_ids!("?3", "?4"), ")"),
                     params![updated_at, id, run, session],
                 ).map_err(|e| e.to_string())?;
             }

@@ -1,7 +1,8 @@
 //! Explicit dispatch selection, independent of task role, complexity and retries.
 use crate::{agent::router::ModelRoutingConfig, db::DbState};
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct Selection {
@@ -63,15 +64,48 @@ pub(crate) fn validate(db: &DbState, selection: &Selection) -> Result<(), String
 }
 
 /// IDs and display metadata only: no provider credentials enter task context.
-pub(crate) fn catalog(db: &DbState, offset: u64) -> Result<Value, String> {
+pub(crate) fn catalog(db: &DbState, offset: u64, flash_model_id: &str) -> Result<Value, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    let mut stmt=conn.prepare("SELECT m.id,m.name,m.display_name,p.name FROM models m JOIN platforms p ON p.id=m.platform_id WHERE m.enabled=1 ORDER BY m.id LIMIT 101 OFFSET ?1").map_err(|e|e.to_string())?;
-    let mut rows=stmt.query_map([offset.min(i64::MAX as u64) as i64],|r|Ok(serde_json::json!({"model_id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"display_name":r.get::<_,String>(2)?,"platform":r.get::<_,String>(3)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    // Resolve the configured slot independently of which catalog page is requested.
+    let configured_flash_model_id: Option<String> = if flash_model_id.trim().is_empty() {
+        None
+    } else {
+        conn.query_row(
+            "SELECT m.id FROM models m JOIN platforms p ON p.id=m.platform_id
+             WHERE m.id=?1 AND m.enabled=1",
+            [flash_model_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+    };
+    let mut stmt = conn
+        .prepare(
+            "SELECT m.id,m.name,m.display_name,p.name FROM models m JOIN platforms p ON p.id=m.platform_id
+             WHERE m.enabled=1 ORDER BY m.id LIMIT 101 OFFSET ?1",
+        )
+        .map_err(|e| e.to_string())?;
+    let mut rows = stmt
+        .query_map([offset.min(i64::MAX as u64) as i64], |row| {
+            Ok(json!({
+                "model_id": row.get::<_, String>(0)?,
+                "name": row.get::<_, String>(1)?,
+                "display_name": row.get::<_, String>(2)?,
+                "platform": row.get::<_, String>(3)?,
+            }))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
     let has_more = rows.len() > 100;
     rows.truncate(100);
-    Ok(
-        serde_json::json!({"models":rows,"offset":offset,"has_more":has_more,"next_offset":offset.saturating_add(rows.len() as u64)}),
-    )
+    Ok(json!({
+        "configured_flash_model_id": configured_flash_model_id,
+        "offset": offset,
+        "has_more": has_more,
+        "next_offset": offset.saturating_add(rows.len() as u64),
+        "models": rows,
+    }))
 }
 
 pub(crate) fn pin(routing: &mut ModelRoutingConfig, model: &str) {
@@ -173,10 +207,19 @@ mod tests {
                 conn.execute("INSERT INTO models(id,platform_id,name,display_name,enabled,created_at) VALUES (?1,'p',?1,?1,?2,'now')",rusqlite::params![id,enabled]).unwrap();
             }
         }
-        let list = catalog(&db, 0).unwrap();
+        // Choose a model whose name doesn't imply the configured routing slot.
+        let list = catalog(&db, 0, "pro").unwrap();
+        assert_eq!(list["configured_flash_model_id"], "pro");
         assert_eq!(list["models"].as_array().unwrap().len(), 2);
         assert!(!list.to_string().contains("test-secret"));
-        assert_eq!(catalog(&db, 2).unwrap()["models"], serde_json::json!([]));
+        let empty_page = catalog(&db, 2, "pro").unwrap();
+        assert_eq!(empty_page["models"], json!([]));
+        assert_eq!(empty_page["configured_flash_model_id"], "pro");
+        for unavailable in ["", "disabled", "missing"] {
+            let list = catalog(&db, 0, unavailable).unwrap();
+            assert_eq!(list["models"].as_array().unwrap().len(), 2);
+            assert_eq!(list["configured_flash_model_id"], Value::Null);
+        }
         assert!(validate(
             &db,
             &select(&serde_json::json!({"model_id":"pro"}), "flash", None).unwrap()
