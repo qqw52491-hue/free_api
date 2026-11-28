@@ -18,6 +18,7 @@ async fn cancellation_before_channel_registration_survives_and_parent_waits_for_
             done,
             cancel,
             paused: Arc::new(Mutex::new(None)),
+            external_wait: None,
         },
     );
     request_cancel(&token).unwrap();
@@ -117,6 +118,7 @@ async fn human_wait_does_not_spend_model_rounds_at_the_normal_wait_deadline_and_
             done,
             cancel: stop,
             paused: Arc::new(Mutex::new(Some(json!({"message":"真实的待审批请求"})))),
+            external_wait: None,
         },
     );
     let (cancel, mut rx) = watch::channel(0);
@@ -150,7 +152,7 @@ async fn nested_cancellation_waits_for_descendants() {
     ] {
         RUNS.lock().unwrap().insert(id.clone(), Running {
             binding: TaskBinding { parent_session: format!("session-{parent_run}"), parent_run, child_session: format!("task-{id}"), child_run:id },
-            done, cancel, paused:Arc::new(Mutex::new(None)),
+            done, cancel, paused:Arc::new(Mutex::new(None)), external_wait: None,
         });
     }
     let grand_id = grandchild.clone();
@@ -207,7 +209,7 @@ async fn parent_cancellation_waits_for_child_before_publishing_even_if_checkpoin
         let (done_tx, done) = watch::channel(false);
         let (cancel, mut cancel_rx) = watch::channel(false);
         RUNS.lock().unwrap().insert(child_run.clone(), Running {
-            binding, done, cancel, paused: Arc::new(Mutex::new(None)),
+            binding, done, cancel, paused: Arc::new(Mutex::new(None)), external_wait: None,
         });
         let finish = crate::agent::control::finish_interrupted_run(
             app.handle(), &db, &parent_session, &parent_run, "goal", &[], &mut checkpoint,

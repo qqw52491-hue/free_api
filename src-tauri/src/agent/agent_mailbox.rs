@@ -144,6 +144,9 @@ pub(crate) fn send(
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let target_name = params["target"].as_str().unwrap();
     let (target, kind) = resolve(&tx, sender, target_name)?;
+    if kind == "task" && crate::agent::child_task::external::is_external(&tx, &target.run)? {
+        return Err("外部 Agent 当前只接收派发时的任务与背景，消息未发送。".into());
+    }
     if !matches!(kind.as_str(), "main" | "task" | "worker" | "writer") {
         return Err(
             "该专用角色没有运行中消息入口；审查员沿用原有 resume_child 对质/追问。消息未发送。"

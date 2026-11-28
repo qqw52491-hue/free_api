@@ -1,4 +1,4 @@
-import type { AgentTeamReceipt, AgentTeamWait } from './types';
+import type { AgentExternalWorker, AgentTeamReceipt, AgentTeamWait } from './types';
 
 // 子任务面板与对话流共用的纯状态逻辑：终态单向、自动展开只认新事件、刷新串行补查、结算重试。
 export interface ChildTaskSnapshot {
@@ -14,6 +14,8 @@ export interface ChildTaskSnapshot {
     handoff_accepted?: boolean;
     summary?: string;
     human_request?: unknown;
+    external_agent?: AgentExternalWorker;
+    external_wait_reason?: string | null;
     updated_at?: string;
 }
 
@@ -113,14 +115,15 @@ export async function settleWithRetry<T extends ChildTaskSnapshot>(
 }
 
 /** 历史记录的派发回执不是终态；按真实子任务 ID 叠加宿主快照。 */
-export function historicalWorkerSnapshot<T extends { id: string; status: string; currentStep?: string; progress?: number; extra?: Record<string, unknown> }>(worker: T, snapshot: ChildTaskSnapshot | undefined): T {
+export function historicalWorkerSnapshot<T extends { id: string; status: string; currentStep?: string; progress?: number; externalAgent?: AgentExternalWorker; extra?: Record<string, unknown> }>(worker: T, snapshot: ChildTaskSnapshot | undefined): T {
     if (!snapshot || snapshot.child_run_id !== worker.id) return worker;
     const ended = isSettled(snapshot);
-    const label = !ended ? (snapshot.human_request ? '等待回答' : '执行中')
+    const label = !ended ? (snapshot.human_request ? '等待回答' : snapshot.external_wait_reason || '执行中')
         : snapshot.delivery_accepted ? '已交付'
-        : snapshot.handoff_accepted ? '已交接'
+        : snapshot.handoff_accepted ? (snapshot.external_agent ? '结果已返回' : '已交接')
         : snapshot.execution_status === 'cancelled' ? '已停止' : '未完成';
     const status = !ended ? 'running' : snapshot.delivery_accepted || snapshot.handoff_accepted ? 'succeeded' : 'failed';
     return { ...worker, status, currentStep: label, progress: ended ? 100 : worker.progress,
+        externalAgent: snapshot.external_agent ?? worker.externalAgent,
         extra: { ...worker.extra, hostTaskState: label } } as T;
 }

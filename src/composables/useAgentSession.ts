@@ -1256,6 +1256,14 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         if (worker.extra?.settledByHost === true && !ended) return;
         if (ended && worker.extra?.settledByHost !== true) worker.extra = { ...worker.extra, settledByHost: true };
         worker.waitingForHuman = !ended && Object.keys(asRecord(taskRecord.human_request)).length > 0;
+        const externalAgent = asRecord(taskRecord.external_agent);
+        const externalName = toText(externalAgent.name);
+        if (externalAgent.kind === "codex" && externalName && worker.externalAgent?.name !== externalName) {
+            worker.externalAgent = { kind: "codex", name: externalName };
+        }
+        if (worker.externalAgent) {
+            worker.externalWaitReason = ended ? undefined : toText(taskRecord.external_wait_reason) || undefined;
+        }
         const model = toText(taskRecord.model_id);
         if (model && !worker.model) worker.model = model;
         const roleLabel = toText(taskRecord.role_label);
@@ -1288,7 +1296,8 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         if (deliveryAccepted) {
             worker.currentStep = summary ? `子目标已交付 · ${summary.split(/\r?\n/)[0]}` : "子目标已正式交付";
         } else if (handoffAccepted) {
-            worker.currentStep = summary ? `已交接 · ${summary.split(/\r?\n/)[0]}` : "已交接回父任务";
+            const label = worker.externalAgent ? "结果已返回" : "已交接";
+            worker.currentStep = summary ? `${label} · ${summary.split(/\r?\n/)[0]}` : worker.externalAgent ? label : "已交接回父任务";
         } else if (execStatus === "cancelled") {
             worker.currentStep = "已停止";
         } else {

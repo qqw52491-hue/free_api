@@ -20,6 +20,7 @@ struct Running {
     done: watch::Receiver<bool>,
     cancel: watch::Sender<bool>,
     paused: Arc<Mutex<Option<Value>>>,
+    external_wait: Option<Arc<Mutex<Option<String>>>>,
 }
 static RUNS: LazyLock<Mutex<HashMap<String, Running>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -41,6 +42,9 @@ pub(crate) fn paused(id: &str) -> Option<Value> {
         .unwrap_or_else(|e| e.into_inner())
         .get(id)
         .and_then(|r| r.paused.lock().ok().and_then(|v| v.clone()))
+}
+pub(super) fn external_wait(id: &str) -> Option<String> {
+    RUNS.lock().ok()?.get(id)?.external_wait.as_ref()?.lock().ok()?.clone()
 }
 pub(crate) fn request_cancel(id: &str) -> Result<(), String> {
     let runs = RUNS.lock().map_err(|e| e.to_string())?;
@@ -282,6 +286,7 @@ pub(crate) fn spawn(
             done,
             cancel,
             paused: paused.clone(),
+            external_wait: None,
         },
     );
     let event_app = app.clone();
@@ -442,6 +447,60 @@ async fn supervise(
             }
         }
     }
+}
+
+pub(crate) fn spawn_external<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    db: DbState,
+    binding: TaskBinding,
+    request: super::external::Request,
+    workspace_guard: Option<WorkspaceRunGuard>,
+) -> Result<(), String> {
+    use crate::agent::external_codex::{self, Progress};
+
+    let (done_tx, done) = watch::channel(false);
+    let (cancel, cancel_rx) = watch::channel(false);
+    let waiting = Arc::new(Mutex::new(Some("正在等待本地 Codex 启动".into())));
+    {
+        let mut runs = RUNS.lock().map_err(|e| e.to_string())?;
+        if runs.contains_key(&binding.child_run) { return Err("该外部 Agent 任务已在运行。".into()); }
+        runs.insert(binding.child_run.clone(), Running {
+            binding: binding.clone(), done, cancel, paused: Arc::new(Mutex::new(None)), external_wait: Some(waiting.clone()),
+        });
+    }
+    let guard = TaskGuard::enter(binding.clone());
+    fn emit<R: tauri::Runtime>(app: &AppHandle<R>, binding: &TaskBinding, event: &str, description: &str) {
+        let _ = app.emit_agent_progress(&binding.parent_session, json!({
+            "type":"child_task_progress", "run_id":binding.parent_run,
+            "child_run_id":binding.child_run, "event":{"type":event,"description":description},
+        }));
+    }
+    emit(&app, &binding, "external_activity", "正在等待本地 Codex 启动");
+    tauri::async_runtime::spawn(async move {
+        let started = std::time::Instant::now();
+        let outcome = external_codex::run(&request.command, &request.workspace, &request.prompt,
+            || *cancel_rx.borrow(), |progress| {
+                let next = match progress {
+                    Progress::Waiting { reason } => Some(reason),
+                    Progress::Running => None,
+                };
+                let mut current = waiting.lock().unwrap_or_else(|e| e.into_inner());
+                if *current == next { return; }
+                *current = next.clone();
+                drop(current);
+                emit(&app, &binding, "external_activity", next.as_deref().unwrap_or("本地 Codex 正在执行"));
+            }).await;
+        if let Err(error) = super::external::store_result(&db, &binding, outcome, *cancel_rx.borrow(), started.elapsed().as_millis() as u64) {
+            crate::agent::execution::runtime::fail_checkpoint(&db, &binding.child_run, error.clone());
+            let _ = app.emit_agent_log(&binding.parent_session, format!("外部 Agent 结果保存失败：{error}"));
+        }
+        drop(workspace_guard);
+        drop(guard);
+        RUNS.lock().unwrap_or_else(|e| e.into_inner()).remove(&binding.child_run);
+        done_tx.send_replace(true);
+        emit(&app, &binding, "returned", "本地 Codex 执行已结束");
+    });
+    Ok(())
 }
 
 #[cfg(test)]

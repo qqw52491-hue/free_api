@@ -81,6 +81,9 @@ pub fn run() {
                 let lock = state.0.lock();
                 match lock {
                     Ok(conn) => {
+                        if let Err(e) = crate::agent::child_task::external::interrupt_orphans(&conn) {
+                            eprintln!("[cleanup] 清理中断的外部 Agent 执行失败: {e}");
+                        }
                         match crate::db::mark_orphan_running_traces_interrupted(&conn) {
                             Ok(n) if n > 0 => println!("[cleanup] 已将 {n} 条遗留 running trace 标记为已中断"),
                             Ok(_) => {}
@@ -153,6 +156,10 @@ pub fn run() {
             commands::vacuum_database,
             // 项目、项目会话与用户明确授权的项目内资源
             commands::list_agent_projects,
+            agent::external_agents::list_external_agents,
+            agent::external_agents::save_external_agent,
+            agent::external_agents::get_project_external_agent,
+            agent::external_agents::set_project_external_agent,
             commands::projects::directories::list_agent_project_directories,
             commands::projects::directories::set_agent_project_directory,
             commands::projects::directories::remove_agent_project_directory,

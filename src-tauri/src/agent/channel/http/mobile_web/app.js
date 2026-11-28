@@ -6,8 +6,7 @@ const S = {
   models: [], modelById: {},
   roleCards: [],
   projects: [],
-  expandedPlans: new Set(),
-  collapsedPlans: new Set(),
+  expandedTurns: new Map(),
   sessions: [],
   runs: [],
   evals: [],
@@ -15,8 +14,6 @@ const S = {
   openGroups: new Set(JSON.parse(localStorage.getItem("free_api_open_groups") || "[]")),
   currentSessionId: null,
   flow: null,
-  expandedSteps: new Set(),
-  expandedThoughts: new Set(),
   taskOpts: { model_id: "", context_budget_mode: "", role_card: "" },
   selectedNewModelId: "",
   composerFiles: [],
@@ -46,10 +43,18 @@ function esc(s) {
 /* ---------- 完整超全 Markdown 与富文本解析引擎 ---------- */
 function formatInline(text) {
   if (!text) return "";
-  let out = esc(text);
-  
-  // 1. 行内代码 `code`
-  out = out.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
+  const markup = [];
+  // Keep code and link attributes out of the text-formatting passes.
+  const plain = String(text).replace(/\0/g, "\uFFFD").replace(
+    /`([^`]+)`|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+    (_, code, label, url) => {
+      const fragment = code === undefined
+        ? `<a class="md-link" href="${esc(url)}" target="_blank" rel="noopener">${formatInline(label)} ↗</a>`
+        : `<code class="inline-code">${esc(code)}</code>`;
+      return "\0" + (markup.push(fragment) - 1) + "\0";
+    },
+  );
+  let out = esc(plain);
   
   // 2. 加粗 **bold**
   out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
@@ -60,16 +65,13 @@ function formatInline(text) {
   // 4. 删除线 ~~del~~
   out = out.replace(/~~([^~]+)~~/g, '<del class="md-del">$1</del>');
   
-  // 5. 超链接 [title](url)
-  out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^\s\)]+)\)/g, '<a class="md-link" href="$2" target="_blank" rel="noopener">$1 ↗</a>');
-  
   // 6. 文件路径与代码文件自动高亮胶囊
   out = out.replace(/\b([a-zA-Z0-9_\-\.\/]+\.(?:md|ts|js|rs|json|vue|html|css|py|yaml|yml|toml|sql|sh))\b/g, '<code class="inline-code">$1</code>');
   
   // 7. 序号加粗美化
   out = out.replace(/([①②③④⑤⑥⑦⑧⑨⑩])/g, '<strong style="color:var(--accent2); margin-right:2px;">$1</strong>');
   
-  return out;
+  return out.replace(/\0(\d+)\0/g, (_, index) => markup[Number(index)]);
 }
 
 function formatMarkdown(raw) {
@@ -211,9 +213,25 @@ window.copyCode = function(btn) {
 
 function setConn(ok, msg) {
   const dot = $("connDot");
-  if (dot) dot.className = "dot " + (ok ? "ok" : "bad");
+  const dotClass = "dot " + (ok ? "ok" : "bad");
+  if (dot && dot.className !== dotClass) dot.className = dotClass;
   const txt = $("connText");
-  if (txt) txt.textContent = msg || (ok ? "已连接到当前桌面窗口" : "未连接");
+  const label = msg || (ok ? "已连接到当前桌面窗口" : "未连接");
+  if (txt) {
+    if (txt.textContent !== label) txt.textContent = label;
+    txt.classList.toggle("is-error", !ok);
+  }
+  $("topSub").classList.toggle("has-error", !ok);
+}
+
+function renderHeaderSubtitle(label = "") {
+  const element = $("topLocation");
+  if (element.textContent !== label) {
+    element.textContent = label;
+    element.title = label;
+  }
+  element.classList.toggle("hidden", !label);
+  $("topSub").classList.toggle("has-location", !!label);
 }
 
 function closeSidebarMobile() {
@@ -224,21 +242,38 @@ function closeSidebarMobile() {
 }
 
 async function api(path, opts = {}) {
-  const headers = Object.assign({ "X-Channel-Token": S.token }, opts.headers || {});
+  const token = S.token;
+  const headers = Object.assign({ "X-Channel-Token": token }, opts.headers || {});
   if (opts.body && typeof opts.body === "string" && !headers["Content-Type"]) {
     headers["Content-Type"] = "application/json";
   }
+  // Bound stalled reads without interrupting uploads, submissions or approvals.
+  const canTimeOut = (opts.method || "GET").toUpperCase() === "GET"
+    && !opts.signal && typeof AbortController !== "undefined";
+  const controller = canTimeOut ? new AbortController() : null;
+  const deadline = controller ? setTimeout(() => controller.abort(), 20000) : null;
   let res;
+  let data = {};
   try {
-    res = await fetch(path, Object.assign({}, opts, { headers }));
-  } catch (e) {
-    setConn(false, "无法连接桌面端");
-    throw e;
+    res = await fetch(path, { ...opts, headers, signal: controller?.signal ?? opts.signal });
+    if (res.status !== 401 && res.status !== 204) data = await res.json();
+  } catch (error) {
+    // An HTTP 200 can arrive before the body is lost. Keep the last rendered snapshot.
+    if (!res || res.ok) {
+      let message = res ? "响应未收完整，等待重试" : "无法连接桌面端";
+      if (controller?.signal.aborted) message = "读取超时，等待重试";
+      if (S.token === token) setConn(false, message);
+      throw new Error(message, { cause: error });
+    }
+  } finally {
+    if (deadline !== null) clearTimeout(deadline);
   }
-  if (res.status === 401) { showGate("令牌已失效，请重新输入"); throw new Error("unauthorized"); }
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
-  setConn(true);
+  if (res.status === 401) {
+    if (S.token === token) showGate("令牌已失效，请重新输入");
+    throw new Error("unauthorized");
+  }
+  if (!res.ok) throw new Error(data?.error || ("HTTP " + res.status));
+  if (S.token === token) setConn(true);
   return data;
 }
 
@@ -342,8 +377,8 @@ function formatToolBadge(tool) {
 }
 
 /* 渲染二级树形子步骤 */
-function renderTreeSubStep(st, sIdx, isLast) {
-  const open = S.expandedSteps.has(String(st.id));
+function renderTreeSubStep(st, sIdx, isLast, expansion) {
+  const open = expansion?.steps.has(String(st.id));
   const tool = String(st.tool || "工具").trim();
   const act = (st.action && st.action !== st.tool) ? st.action : (st.description || st.action || "");
   
@@ -351,15 +386,18 @@ function renderTreeSubStep(st, sIdx, isLast) {
   let formattedMain = esc(act || tool || `步骤 #${sIdx + 1}`);
   formattedMain = formattedMain.replace(/\b([a-zA-Z0-9_\-\.\/]+\.(?:md|ts|js|rs|json|vue|html|css|py|yaml|yml|toml))\b/g, '<span class="t-target">$1</span>');
 
-  // 详细参数与输出
-  const params = st.command || st.params;
-  const paramsHtml = params ? `<div class="label">⌨️ 参数</div><pre>${esc(typeof params === "string" ? params : JSON.stringify(params, null, 2))}</pre>` : "";
-  const output = st.output ? `<div class="label">📄 输出</div><pre>${esc(st.output)}</pre>` : "";
+  let details = "";
+  if (open) {
+    const params = st.command || st.params;
+    const paramsHtml = params ? `<div class="label">⌨️ 参数</div><pre>${esc(typeof params === "string" ? params : JSON.stringify(params, null, 2))}</pre>` : "";
+    const output = st.output ? `<div class="label">📄 输出</div><pre>${esc(st.output)}</pre>` : "";
+    details = `<div class="step-detail-box">${paramsHtml}${output}</div>`;
+  }
 
   // 思考块
   let thoughtHtml = "";
   if (st.thought) {
-    const thOpen = S.expandedThoughts.has(String(st.id));
+    const thOpen = expansion?.thoughts.has(String(st.id));
     thoughtHtml = `
       <div class="thought-block">
         <div class="thought-header" data-thought-toggle="${esc(st.id)}">
@@ -374,7 +412,7 @@ function renderTreeSubStep(st, sIdx, isLast) {
   const isLastClass = isLast ? "is-last" : "";
 
   return `
-    <div class="mobile-sub-step-row ${isLastClass} ${esc(st.status || 'pending')}">
+    <div class="mobile-sub-step-row ${isLastClass} ${esc(st.status || 'pending')}" data-step-id="${esc(st.id)}">
       <div class="mobile-tree-node-col">
         <span class="mobile-branch-line"></span>
         <span class="mobile-node-dot ${esc(st.status || 'pending')}"></span>
@@ -386,14 +424,14 @@ function renderTreeSubStep(st, sIdx, isLast) {
           <span class="mobile-status-tag">${stepChip(st.status)}</span>
         </div>
         ${thoughtHtml}
-        ${open ? `<div class="step-detail-box">${paramsHtml}${output}</div>` : ""}
+        ${details}
       </div>
     </div>
   `;
 }
 
 /* 🌟 将物理步骤按阶段上下级聚合成树形折叠清单 */
-function renderStepsTree(steps) {
+function renderStepsTree(steps, expansion) {
   if (!steps || !steps.length) return "";
   
   // 按 planId 或 planTitle 聚合成阶段组
@@ -430,15 +468,17 @@ function renderStepsTree(steps) {
   return groups.map((g, gIdx) => {
     // 默认展开正在运行的阶段或最后一个阶段，或者用户显式展开
     const defaultOpen = g.hasRunning || gIdx === groups.length - 1;
-    const isOpen = S.expandedPlans.has(g.id) || (defaultOpen && !S.collapsedPlans.has(g.id));
+    const isOpen = expansion?.plans.get(g.id) ?? defaultOpen;
     const statusIcon = g.status === "running" 
       ? '<span class="mobile-plan-spinner"></span>' 
       : (g.status === "failed" ? '<span class="mobile-plan-ic fail">✕</span>' : '<span class="mobile-plan-ic ok">✓</span>');
 
-    const subStepsHtml = g.steps.map((st, sIdx) => renderTreeSubStep(st, sIdx, sIdx === g.steps.length - 1)).join("");
+    const subStepsHtml = isOpen
+      ? g.steps.map((st, sIdx) => renderTreeSubStep(st, sIdx, sIdx === g.steps.length - 1, expansion)).join("")
+      : "";
 
     return `
-      <div class="mobile-plan-tree-group ${g.status} ${isOpen ? 'is-expanded' : ''}" id="${esc(g.id)}">
+      <div class="mobile-plan-tree-group ${g.status} ${isOpen ? 'is-expanded' : ''}">
         <div class="mobile-plan-card-header" data-plan-toggle="${esc(g.id)}">
           <div class="mobile-plan-title-row">
             <div class="mobile-plan-icon-wrap">${statusIcon}</div>
@@ -458,11 +498,6 @@ function renderStepsTree(steps) {
       </div>
     `;
   }).join("");
-}
-
-/* 兼容单步渲染 */
-function renderStep(st) {
-  return renderTreeSubStep(st, 0, true);
 }
 
 /* ---------- 结构化人类协助与提问交互 (Human Intervention) ---------- */
@@ -674,6 +709,134 @@ function currentFlow() {
   return S.flow && isOpenSession(S.flow.sessionId) ? S.flow : null;
 }
 
+const flowScroll = { following: true, awaitingFirstLayout: true, top: 0, frame: null, anchor: null };
+const FLOW_TAIL_THRESHOLD = 48;
+
+function flowScrollBounds() {
+  const root = document.scrollingElement || document.documentElement;
+  return {
+    top: Math.max(0, window.scrollY ?? root.scrollTop ?? 0),
+    end: Math.max(0, (root.scrollHeight ?? 0) - (root.clientHeight || window.innerHeight || 0)),
+  };
+}
+
+function updateLatestButton() {
+  $("btnScrollBottom").classList.toggle("hidden", !currentFlow() || flowScroll.following);
+}
+
+function resetFlowScroll() {
+  if (flowScroll.frame !== null) window.cancelAnimationFrame(flowScroll.frame);
+  flowScroll.frame = null;
+  flowScroll.anchor = null;
+  flowScroll.following = true;
+  flowScroll.awaitingFirstLayout = true;
+  flowScroll.top = flowScrollBounds().top;
+  updateLatestButton();
+}
+
+function captureFlowAnchor() {
+  if (flowScroll.following || flowScroll.anchor) return null;
+  const { top } = flowScrollBounds();
+  const timeline = $("timeline");
+  const rect = timeline.getBoundingClientRect();
+  const x = (rect.left + rect.right) / 2;
+  const topbar = document.querySelector(".topbar")?.getBoundingClientRect().bottom ?? 0;
+  for (const offset of [8, 28, 56]) {
+    const node = document.elementFromPoint(x, topbar + offset)?.closest("[data-step-id], [data-turn-id]");
+    if (!node || !timeline.contains(node)) continue;
+    const turn = node.closest("[data-turn-id]");
+    return { top, node, y: node.getBoundingClientRect().top, turn, turnY: turn?.getBoundingClientRect().top };
+  }
+  return { top };
+}
+
+function restoreFlowAnchor(anchor, top) {
+  if (!anchor.node) return anchor.top;
+  let node = anchor.node;
+  if (!node.isConnected && anchor.turn?.isConnected && node.dataset.stepId !== undefined) {
+    node = anchor.turn.querySelector(`[data-step-id="${CSS.escape(node.dataset.stepId)}"]`);
+  }
+  if (node?.isConnected) return top + node.getBoundingClientRect().top - anchor.y;
+  if (anchor.turn?.isConnected) return top + anchor.turn.getBoundingClientRect().top - anchor.turnY;
+  return anchor.top;
+}
+
+function scheduleFlowScroll(anchor = null) {
+  if (!currentFlow()) return;
+  flowScroll.anchor ??= anchor;
+  if (flowScroll.frame !== null) return;
+  flowScroll.frame = window.requestAnimationFrame(() => {
+    flowScroll.frame = null;
+    const anchor = flowScroll.anchor;
+    flowScroll.anchor = null;
+    if (!currentFlow()) return;
+    const { top, end } = flowScrollBounds();
+    const next = flowScroll.following ? end : anchor ? restoreFlowAnchor(anchor, top) : top;
+    const target = Math.max(0, Math.min(end, next));
+    if (Math.abs(target - top) > 1) window.scrollTo(0, target);
+    flowScroll.top = flowScrollBounds().top;
+    flowScroll.awaitingFirstLayout = false;
+    updateLatestButton();
+  });
+}
+
+function resumeFlowFollow() {
+  flowScroll.following = true;
+  flowScroll.anchor = null;
+  scheduleFlowScroll();
+  updateLatestButton();
+}
+
+function markFlowGesture(towardHistory) {
+  flowScroll.anchor = null;
+  if (towardHistory && flowScrollBounds().top > 0) {
+    flowScroll.following = false;
+    updateLatestButton();
+  }
+}
+
+function bindFlowScroll() {
+  const isPageGesture = target => !target.closest?.(".modal, .sidebar, .composer-wrap, .thought-content, .step-detail-box pre, .human-plan-desc");
+  window.addEventListener("scroll", () => {
+    const { top, end } = flowScrollBounds();
+    if (currentFlow()) {
+      const towardLatest = top > flowScroll.top + 1;
+      const nearLatest = end - top <= FLOW_TAIL_THRESHOLD;
+      const composerFocused = document.activeElement === $("followInput");
+      // Replacing the previous session can clamp its old scroll position before the first layout.
+      if (top < flowScroll.top - 1 && !nearLatest && !composerFocused && !flowScroll.awaitingFirstLayout) flowScroll.following = false;
+      if (towardLatest && nearLatest) flowScroll.following = true;
+      updateLatestButton();
+    }
+    flowScroll.top = top;
+  }, { passive: true });
+  window.addEventListener("wheel", event => {
+    if (currentFlow() && isPageGesture(event.target) && Math.abs(event.deltaY) > Math.abs(event.deltaX)) {
+      markFlowGesture(event.deltaY < 0);
+    }
+  }, { passive: true });
+  let touchStart = null;
+  window.addEventListener("touchstart", event => {
+    touchStart = currentFlow() && event.touches.length === 1 && isPageGesture(event.target)
+      ? { x: event.touches[0].clientX, y: event.touches[0].clientY } : null;
+  }, { passive: true });
+  window.addEventListener("touchmove", event => {
+    if (event.touches.length !== 1) touchStart = null;
+    if (!touchStart || !currentFlow()) return;
+    const touch = event.touches[0];
+    const dy = touch.clientY - touchStart.y;
+    if (Math.abs(dy) >= 6 && Math.abs(dy) > Math.abs(touch.clientX - touchStart.x)) {
+      markFlowGesture(dy > 0);
+      touchStart = { x: touch.clientX, y: touch.clientY };
+    }
+  }, { passive: true });
+  const endTouch = () => { touchStart = null; };
+  window.addEventListener("touchend", endTouch, { passive: true });
+  window.addEventListener("touchcancel", endTouch, { passive: true });
+  window.addEventListener("mobile:composer-geometry", () => scheduleFlowScroll());
+  $("btnScrollBottom").onclick = resumeFlowFollow;
+}
+
 window.togglePlanRevisionInput = function() {
   const el = $("planRevisionWrap");
   if (!el) return;
@@ -824,22 +987,68 @@ function updateAskCardDom() {
 }
 
 // ---------------------------------------------------------------- 数据加载与多轮会话流渲染
-const traceDetailCache = new Map();
+const traceDetailCache = new WeakMap();
+const TRACE_HISTORY_BATCH = 4;
 let activeFlowLoad = null;
 
-async function fetchTraceDetail(t) {
-  const stamp = `${t.id}:${t.step_count || 0}:${t.updated_at || ""}`;
-  if (traceDetailCache.has(t.id) && traceDetailCache.get(t.id).stamp === stamp) {
-    return traceDetailCache.get(t.id).trace;
-  }
+function traceDetailStamp(trace) {
+  return `${trace.step_count ?? ""}:${trace.updated_at || ""}:${trace.status || ""}`;
+}
+
+async function fetchTraceDetail(t, cache, isCurrent = () => true) {
+  if (t.step_count === 0) return t;
+  const stamp = traceDetailStamp(t);
+  const previous = cache.get(t.id);
+  if (previous?.stamp === stamp) return previous.trace;
   try {
     const detail = await api(`/channel/trace/${encodeURIComponent(t.id)}`);
-    if (detail && detail.trace) {
-      traceDetailCache.set(t.id, { stamp, trace: detail.trace });
+    if (detail?.trace?.id === t.id) {
+      if (isCurrent()) cache.set(t.id, { stamp, trace: detail.trace });
       return detail.trace;
     }
-  } catch (e) {}
-  return t;
+  } catch { /* Retain the last received steps until this trace can be refreshed. */ }
+  return previous ? { ...t, steps: previous.trace.steps } : t;
+}
+
+async function hydrateTraceBatch(view, details, batch) {
+  if (!batch.length || S.view !== view) return;
+  await Promise.all(batch.map(async summary => {
+    const stamp = traceDetailStamp(summary);
+    const isCurrent = () => S.view === view && details.expected.get(summary.id) === stamp;
+    if (!isCurrent()) return;
+    const key = JSON.stringify([summary.id, stamp]);
+    let request = details.inflight.get(key);
+    if (!request) {
+      request = fetchTraceDetail(summary, details.cache, isCurrent).finally(() => details.inflight.delete(key));
+      details.inflight.set(key, request);
+    }
+    await request;
+  }));
+  if (S.view !== view) return;
+  const loaded = new Map();
+  for (const summary of batch) {
+    const stamp = traceDetailStamp(summary);
+    const saved = details.cache.get(summary.id);
+    if (details.expected.get(summary.id) === stamp && saved?.stamp === stamp) loaded.set(summary.id, saved.trace);
+  }
+  if (!loaded.size) return;
+  const flow = currentFlow();
+  if (!flow || !flow.traces.some(trace => loaded.has(trace.id) && loaded.get(trace.id) !== trace)) return;
+  flow.traces = flow.traces.map(trace => loaded.get(trace.id) ?? trace);
+  renderFlow();
+}
+
+async function hydrateOlderTraceDetails(view, details) {
+  if (details.loadingOlder) return;
+  details.loadingOlder = true;
+  try {
+    while (details.older.length && S.view === view) {
+      const batch = details.older.splice(0, TRACE_HISTORY_BATCH);
+      await hydrateTraceBatch(view, details, batch);
+    }
+  } finally {
+    details.loadingOlder = false;
+  }
 }
 
 async function loadHome() {
@@ -873,10 +1082,18 @@ async function loadFlow(sessionId) {
   }
   const load = { view, refresh: false };
   activeFlowLoad = load;
+  // Each open view owns its cache and in-flight history so navigation releases both.
+  let details = traceDetailCache.get(view);
+  if (!details) {
+    details = { cache: new Map(), expected: new Map(), inflight: new Map(), older: [], loadingOlder: false };
+    traceDetailCache.set(view, details);
+  }
   try {
     const promises = [
       api("/channel/runs"),
-      api(`/channel/session/${encodeURIComponent(sessionId)}/traces`),
+      api(`/channel/session/${encodeURIComponent(sessionId)}/traces`, {
+        headers: { "X-Channel-Trace-Metadata": "compact" },
+      }),
       api(`/channel/session/${encodeURIComponent(sessionId)}/artifacts`),
     ];
     const needSessions = !S.sessions.length || !S.sessions.some(s => s.id === sessionId);
@@ -893,37 +1110,31 @@ async function loadFlow(sessionId) {
       .sort((a, b) => (b.started_at || "").localeCompare(a.started_at || ""))[0] || null;
     const traceList = tracesRes.traces || [];
     
-    // 并行获取该会话所有历史轮次完整步骤（已完成历史轮次直接命中内存缓存，0 网络请求）
-    const fullTraces = await Promise.all(traceList.map(t => fetchTraceDetail(t)));
-    if (S.view !== view) return;
-
-    // 严格按 ID 与 Goal 去重，彻底杜绝单条消息渲染两次的问题
-    const seenIds = new Set();
-    const seenGoals = new Set();
+    // Distinct runs can have identical user prompts. Reconcile the placeholder by run identity.
+    const expected = new Map();
+    const pending = [];
     const uniqueTraces = [];
-    for (const tr of fullTraces) {
-      if (tr && tr.id && !seenIds.has(tr.id)) {
-        seenIds.add(tr.id);
-        if (tr.goal) seenGoals.add(tr.goal.trim());
-        uniqueTraces.push(tr);
+    for (const trace of traceList) {
+      if (!trace?.id || expected.has(trace.id)) continue;
+      const stamp = traceDetailStamp(trace);
+      expected.set(trace.id, stamp);
+      const cached = details.cache.get(trace.id);
+      if (trace.step_count === 0) uniqueTraces.push(trace);
+      else if (cached?.stamp === stamp) uniqueTraces.push(cached.trace);
+      else {
+        uniqueTraces.push(cached ? { ...trace, steps: cached.trace.steps } : trace);
+        pending.push(trace);
       }
     }
 
     // 仅当没有任何一条已入库 trace 与当前 run 匹配时，才补充临时执行中占位
-    if (run && ["running", "waiting_human"].includes(run.status)) {
-      const alreadyPresent = uniqueTraces.some(t =>
-        t.id === run.run_id ||
-        (t.goal && run.goal_preview && (t.goal.trim() === run.goal_preview.trim() || seenGoals.has(run.goal_preview.trim())))
-      );
-      if (!alreadyPresent && run.goal_preview) {
-        uniqueTraces.push({
-          id: run.run_id,
-          goal: run.goal_preview,
-          status: run.status,
-          steps: [],
-          started_at: run.started_at,
-        });
-      }
+    if (run?.run_id && run.goal_preview && ["running", "waiting_human"].includes(run.status) && !expected.has(run.run_id)) {
+      uniqueTraces.push({
+        id: run.run_id,
+        goal: run.goal_preview,
+        status: run.status,
+        started_at: run.started_at,
+      });
     }
 
     S.flow = {
@@ -933,7 +1144,21 @@ async function loadFlow(sessionId) {
       traces: uniqueTraces,
       artifacts: artsRes.artifacts || [],
     };
+    details.expected = expected;
+    for (const id of details.cache.keys()) {
+      if (!expected.has(id)) details.cache.delete(id);
+    }
     renderFlow();
+    const latest = pending.at(-1);
+    const priority = latest && latest.id === uniqueTraces.at(-1)?.id ? [pending.pop()] : [];
+    details.older = pending.reverse();
+    // Detail requests can survive a disconnect. Release the metadata refresh
+    // slot now so a reconnect can fetch a newer snapshot while they settle.
+    hydrateTraceBatch(view, details, priority).then(() => {
+      if (S.view === view && details.expected === expected) {
+        return hydrateOlderTraceDetails(view, details);
+      }
+    }).catch(() => {});
   } finally {
     if (activeFlowLoad === load) activeFlowLoad = null;
     if (load.refresh && S.view === view) {
@@ -973,7 +1198,7 @@ function taskCard(s) {
 function renderHome() {
   if (S.view.name !== "home") return;
   $("topTitle").textContent = "free_api 远程控制";
-  $("topSub").innerHTML = `<span id="connDot" class="dot ok"></span><span id="connText">已连接到当前桌面窗口</span>`;
+  renderHeaderSubtitle();
   $("btnBackTop").classList.add("hidden");
   $("btnDelSession").classList.add("hidden");
   $("btnMenu").classList.remove("hidden");
@@ -1123,9 +1348,92 @@ function toggleGroup(key) {
   renderHome(); renderSidebar();
 }
 
+const renderedTimelines = new WeakMap();
+
+function createTurnNode(id) {
+  const element = document.createElement("div");
+  element.className = "turn-section";
+  element.dataset.turnId = id;
+  element.style.marginBottom = "12px";
+  const goal = document.createElement("div");
+  const steps = document.createElement("div");
+  const result = document.createElement("div");
+  element.append(goal, steps, result);
+  return { element, goal, steps, result };
+}
+
+function renderTimeline(flow, active, dirLabel, fullDirPath) {
+  const timeline = $("timeline");
+  let rendered = renderedTimelines.get(S.view);
+  if (!rendered) {
+    rendered = { turns: new Map(), empty: null };
+    renderedTimelines.set(S.view, rendered);
+    timeline.innerHTML = "";
+  }
+  if (!flow.traces.length) {
+    const empty = `<div class="empty-tip">当前对话所在目录：<b>${esc(dirLabel)}</b><br><span style="font-size:11px; color:var(--dim);">${esc(fullDirPath)}</span><br><br>直接在下方输入内容即可开始</div>`;
+    if (rendered.empty !== empty) timeline.innerHTML = empty;
+    rendered.empty = empty;
+    rendered.turns.clear();
+    return;
+  }
+  if (rendered.empty !== null) {
+    rendered.empty = null;
+    timeline.innerHTML = "";
+  }
+
+  const ids = new Set(flow.traces.map(trace => trace.id));
+  for (const [id, node] of rendered.turns) {
+    if (!ids.has(id)) {
+      node.element.remove();
+      rendered.turns.delete(id);
+    }
+  }
+  let next = timeline.firstElementChild;
+  for (const [index, trace] of flow.traces.entries()) {
+    let node = rendered.turns.get(trace.id);
+    if (!node) {
+      node = createTurnNode(trace.id);
+      rendered.turns.set(trace.id, node);
+    }
+    if (node.element !== next) timeline.insertBefore(node.element, next);
+    next = node.element.nextElementSibling;
+
+    if (node.goalText !== trace.goal) {
+      node.goalText = trace.goal;
+      node.goal.innerHTML = trace.goal
+        ? `<div class="goal-bubble"><span class="arrow">→</span><div class="gtxt">${formatMarkdown(trace.goal)}</div></div>`
+        : "";
+    }
+    const expansion = S.expandedTurns.get(trace.id);
+    if (node.stepData !== trace.steps || node.stepRevision !== expansion?.revision) {
+      node.stepData = trace.steps;
+      node.stepRevision = expansion?.revision;
+      const steps = renderStepsTree(trace.steps, expansion);
+      if (node.stepsHtml !== steps) {
+        node.steps.innerHTML = steps;
+        node.stepsHtml = steps;
+      }
+    }
+
+    const isLatest = index === flow.traces.length - 1;
+    const failed = trace.status === "failed";
+    const result = (isLatest && active) ? "" :
+      (trace.completion?.summary || (isLatest && failed ? flow.run?.error : "") || "");
+    if (node.resultText !== result || node.failed !== failed) {
+      node.resultText = result;
+      node.failed = failed;
+      node.result.innerHTML = result
+        ? `<div class="result-card ${failed ? "fail" : ""}"><div class="rlabel">${failed ? "✕ 失败原因" : "✓ 执行结果"}</div>${formatMarkdown(result)}</div>`
+        : "";
+    }
+  }
+}
+
 function renderFlow() {
   const f = currentFlow();
   if (!f) return;
+  const scrollAnchor = captureFlowAnchor();
   const s = f.session || {};
   const active = f.run && ["running", "waiting_human"].includes(f.run.status);
   const proj = s.project_id ? S.projects.find(p => p.id === s.project_id) : null;
@@ -1133,47 +1441,12 @@ function renderFlow() {
   const fullDirPath = proj ? (proj.root_path || "") : "scratch (临时目录)";
 
   $("topTitle").textContent = s.title || "任务会话";
-  $("topSub").innerHTML = `<span id="connDot" class="dot ok"></span><span style="color:var(--dim); font-size:11px; max-width:230px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block; vertical-align:middle;">[${esc(dirLabel)}] ${esc(fullDirPath)}</span>`;
+  renderHeaderSubtitle(proj ? `${dirLabel} · ${fullDirPath}` : dirLabel);
   $("btnBackTop").classList.remove("hidden");
   $("btnDelSession").classList.remove("hidden");
   $("btnMenu").classList.add("hidden");
 
-  // 完整渲染会话中的每一轮历史对话（按时间顺序自上而下完整排列）
-  let html = "";
-  if (!f.traces.length) {
-    html += `<div class="empty-tip">当前对话所在目录：<b>${esc(dirLabel)}</b><br><span style="font-size:11px; color:var(--dim);">${esc(fullDirPath)}</span><br><br>直接在下方输入内容即可开始</div>`;
-  } else {
-    html = f.traces.map((tr, idx) => {
-      const isLatest = idx === f.traces.length - 1;
-      const trGoal = tr.goal ? `<div class="goal-bubble"><span class="arrow">→</span><div class="gtxt">${formatMarkdown(tr.goal)}</div></div>` : "";
-      const trSteps = renderStepsTree(tr.steps || []);
-      
-      const trFailed = tr.status === "failed";
-      const trResult = (tr.completion && tr.completion.summary)
-        ? tr.completion.summary
-        : (isLatest && trFailed && f.run && f.run.error ? f.run.error : null);
-      const resultHtml = (!active || !isLatest) && trResult
-        ? `<div class="result-card ${trFailed ? "fail" : ""}"><div class="rlabel">${trFailed ? "✕ 失败原因" : "✓ 执行结果"}</div>${formatMarkdown(trResult)}</div>`
-        : "";
-
-      return `
-        <div class="turn-section" style="margin-bottom: 12px;">
-          ${trGoal}
-          ${trSteps}
-          ${resultHtml}
-        </div>
-      `;
-    }).join("");
-  }
-
-  // 仅在 html 内容真正变动时才重写 DOM，彻底杜绝轮询导致的整体重绘闪烁
-  const timelineEl = $("timeline");
-  if (timelineEl.dataset.renderedHtml !== html) {
-    const currentScroll = window.scrollY || document.documentElement.scrollTop;
-    timelineEl.innerHTML = html;
-    timelineEl.dataset.renderedHtml = html;
-    window.scrollTo(0, currentScroll);
-  }
+  renderTimeline(f, active, dirLabel, fullDirPath);
 
   // 实时状态行（带 DOM 差异防闪烁）
   const live = $("liveLine");
@@ -1210,7 +1483,8 @@ function renderFlow() {
 
   // 产物清单
   const arts = f.artifacts || [];
-  $("artBox").innerHTML = arts.length ? `<div style="margin-top:12px;"><div style="font-size:12px; font-weight:700; margin-bottom:6px;">📦 任务产物 (${arts.length})</div>` +
+  const artBox = $("artBox");
+  const artsHtml = arts.length ? `<div style="margin-top:12px;"><div style="font-size:12px; font-weight:700; margin-bottom:6px;">📦 任务产物 (${arts.length})</div>` +
     arts.map(a => `
       <div style="display:flex; align-items:center; gap:6px; background:var(--card); border:1px solid var(--line); border-radius:8px; padding:6px 10px; margin-bottom:4px;">
         <span>${artIcon(a)}</span>
@@ -1219,6 +1493,10 @@ function renderFlow() {
         <a class="btn primary" style="padding:2px 7px; font-size:10.5px;" href="/channel/artifact/${encodeURIComponent(a.id)}/raw?token=${encodeURIComponent(S.token)}&dl=1" download>下载</a>
       </div>
     `).join("") + `</div>` : "";
+  if (artBox.dataset.renderedHtml !== artsHtml) {
+    artBox.innerHTML = artsHtml;
+    artBox.dataset.renderedHtml = artsHtml;
+  }
 
   // Composer 状态与占位符
   const input = $("followInput");
@@ -1234,11 +1512,78 @@ function renderFlow() {
   } else {
     input.placeholder = "在当前会话继续对话…";
   }
+  scheduleFlowScroll(scrollAnchor);
 }
 
 const composerDrafts = new Map();
 const pendingComposerSends = new Set();
 let attachmentSessionId = null;
+let refreshComposerGeometry = () => {};
+
+function bindComposerViewport() {
+  const composer = $("composer");
+  const input = $("followInput");
+  const rootStyle = document.documentElement.style;
+  const viewport = window.visualViewport;
+  let frame = null;
+  let lastInputWidth = 0;
+  let lastInputText = null;
+  let lastVisibleHeight = 0;
+  let lastInset = -1;
+  let lastSpacer = -1;
+
+  refreshComposerGeometry = () => {
+    if (frame !== null) return;
+    frame = window.requestAnimationFrame(() => {
+      frame = null;
+      const editable = document.activeElement?.matches("textarea, input:not([type='button'], [type='file'], [type='checkbox'], [type='radio']), [contenteditable='true']");
+      const normalScale = viewport && Math.abs(viewport.scale - 1) < 0.01;
+      const visibleHeight = Math.round(normalScale ? viewport.height : window.innerHeight);
+      const covered = normalScale && editable ? window.innerHeight - viewport.height - viewport.offsetTop : 0;
+      const inset = covered > 48 ? Math.round(covered) : 0;
+      const viewportChanged = visibleHeight !== lastVisibleHeight || inset !== lastInset;
+      if (viewportChanged) {
+        rootStyle.setProperty("--visible-viewport-height", `${visibleHeight}px`);
+        rootStyle.setProperty("--keyboard-inset", `${inset}px`);
+        lastVisibleHeight = visibleHeight;
+        lastInset = inset;
+      }
+
+      const inputWidth = input.clientWidth;
+      if (inputWidth && (inputWidth !== lastInputWidth || input.value !== lastInputText)) {
+        input.style.height = "auto";
+        input.style.height = `${input.scrollHeight}px`;
+        lastInputWidth = inputWidth;
+        lastInputText = input.value;
+      }
+
+      const composerHeight = composer.offsetHeight;
+      const spacer = composerHeight ? composerHeight + inset : 0;
+      const spacerChanged = spacer !== lastSpacer;
+      if (spacerChanged) {
+        rootStyle.setProperty("--composer-spacer", `${spacer}px`);
+        lastSpacer = spacer;
+      }
+      if (spacerChanged || viewportChanged) window.dispatchEvent(new Event("mobile:composer-geometry"));
+    });
+  };
+  input.addEventListener("input", refreshComposerGeometry);
+  document.addEventListener("focusin", refreshComposerGeometry);
+  document.addEventListener("focusout", refreshComposerGeometry);
+  window.addEventListener("resize", refreshComposerGeometry);
+  viewport?.addEventListener("resize", refreshComposerGeometry);
+  viewport?.addEventListener("scroll", refreshComposerGeometry);
+  if (typeof ResizeObserver !== "undefined") new ResizeObserver(refreshComposerGeometry).observe(composer);
+  refreshComposerGeometry();
+}
+
+function renderComposerFiles() {
+  $("composerFiles").innerHTML = S.composerFiles.map((file, index) => {
+    const name = esc(file.name ?? file);
+    return `<span class="composer-file"><span class="composer-file-name" title="${name}">${name}</span><button type="button" data-remove-composer-file="${index}" aria-label="移除附件 ${name}">×</button></span>`;
+  }).join("");
+  refreshComposerGeometry();
+}
 
 function rememberComposerDraft(sessionId, text, files) {
   if (text || files.length) composerDrafts.set(sessionId, { text, files });
@@ -1255,15 +1600,18 @@ async function openSession(sessionId) {
     saveComposerDraft();
     S.view = { name: "flow" };
     S.flow = null;
+    resetFlowScroll();
     const draft = composerDrafts.get(sessionId);
     $("followInput").value = draft?.text ?? "";
     $("followInput").placeholder = "会话加载中…";
     S.composerFiles = draft?.files ?? [];
+    renderComposerFiles();
     $("btnSend").disabled = true;
     $("btnStop").classList.add("hidden");
     $("composer").classList.remove("waiting-human");
     $("topTitle").textContent = S.sessions.find(s => s.id === sessionId)?.title || "任务会话";
-    for (const id of ["timeline", "liveLine", "askCard", "artBox", "topSub"]) {
+    renderHeaderSubtitle();
+    for (const id of ["timeline", "liveLine", "askCard", "artBox"]) {
       const element = $(id);
       element.innerHTML = "";
       delete element.dataset.renderedHtml;
@@ -1276,6 +1624,7 @@ async function openSession(sessionId) {
   $("viewFlow").classList.remove("hidden");
   $("btnDelSession").classList.remove("hidden");
   $("composer").classList.remove("hidden");
+  refreshComposerGeometry();
   const view = S.view;
   try { await loadFlow(sessionId); } catch (e) {
     if (S.view === view) toast("加载失败：" + e.message);
@@ -1288,10 +1637,12 @@ function goHome() {
   S.currentSessionId = null;
   S.flow = null;
   S.view = { name: "home" };
+  resetFlowScroll();
   $("viewFlow").classList.add("hidden");
   $("viewHome").classList.remove("hidden");
   $("btnDelSession").classList.add("hidden");
   $("composer").classList.add("hidden");
+  refreshComposerGeometry();
   renderHome(); renderSidebar();
   loadHome().catch(() => {});
 }
@@ -1321,6 +1672,7 @@ async function sendComposer() {
   if (!text || !f || pendingComposerSends.has(f.sessionId)) return;
   pendingComposerSends.add(f.sessionId);
   $("btnSend").disabled = true;
+  resumeFlowFollow();
   const sentFiles = [];
   let successMessage;
   try {
@@ -1352,6 +1704,7 @@ async function sendComposer() {
       if (active) {
         input.value = remainingText;
         S.composerFiles = remainingFiles;
+        renderComposerFiles();
       }
       rememberComposerDraft(f.sessionId, remainingText, remainingFiles);
     }
@@ -1448,7 +1801,7 @@ function openSearchableSheet(title, allItems, currentValue, onPick) {
   };
   renderList("");
   $("sheetPick").classList.remove("hidden");
-  if (allItems.length > 5) setTimeout(() => searchInput.focus(), 150);
+  if (allItems.length > 5 && window.matchMedia?.("(pointer: fine)").matches) searchInput.focus({ preventScroll: true });
 }
 
 function bindOptChips() {
@@ -1561,13 +1914,6 @@ async function quickCreateSession(projectId) {
     await loadHome();
     await openSession(res.session_id);
     toast(`已进入 ${proj ? proj.name : '临时工作区'}，直接在下方输入即可`);
-    setTimeout(() => {
-      const input = $("followInput");
-      if (input) {
-        input.focus();
-        input.scrollIntoView({ behavior: "smooth" });
-      }
-    }, 200);
   } catch (e) {
     toast("创建失败: " + e.message);
   }
@@ -1603,6 +1949,14 @@ function bind() {
   };
   $("btnSend").onclick = sendComposer;
   $("btnStop").onclick = stopRun;
+  bindComposerViewport();
+  $("composerFiles").onclick = (event) => {
+    const remove = event.target.closest("[data-remove-composer-file]");
+    if (!remove) return;
+    S.composerFiles.splice(Number(remove.dataset.removeComposerFile), 1);
+    saveComposerDraft();
+    renderComposerFiles();
+  };
   $("btnClip").onclick = () => {
     attachmentSessionId = S.currentSessionId;
     if (attachmentSessionId) $("clipInput").click();
@@ -1615,6 +1969,7 @@ function bind() {
     if (!sessionId || !files.length) return;
     if (isOpenSession(sessionId)) {
       S.composerFiles.push(...files);
+      renderComposerFiles();
       toast(`已选择 ${S.composerFiles.length} 个附件`);
     } else {
       const draft = composerDrafts.get(sessionId);
@@ -1642,12 +1997,7 @@ function bind() {
   $("modalNew").onclick = (e) => { if (e.target === $("modalNew")) $("modalNew").classList.add("hidden"); };
   $("newSubmit").onclick = submitNew;
 
-  // 快捷回到底部
-  window.addEventListener("scroll", () => {
-    const show = window.scrollY < (document.documentElement.scrollHeight - window.innerHeight - 250);
-    $("btnScrollBottom").classList.toggle("hidden", !show || S.view.name !== "flow");
-  });
-  $("btnScrollBottom").onclick = () => { window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "smooth" }); };
+  bindFlowScroll();
 
   // 全局事件代理
   document.addEventListener("click", (e) => {
@@ -1658,45 +2008,40 @@ function bind() {
       deleteSession(del.dataset.delSession);
       return;
     }
-    const planToggle = e.target.closest("[data-plan-toggle]");
-    if (planToggle) {
-      const id = planToggle.dataset.planToggle;
-      const groupEl = planToggle.closest(".mobile-plan-tree-group");
-      const isCurrentlyOpen = groupEl ? groupEl.classList.contains("is-expanded") : false;
-      if (isCurrentlyOpen) {
-        S.collapsedPlans.add(id);
-        S.expandedPlans.delete(id);
-      } else {
-        S.expandedPlans.add(id);
-        S.collapsedPlans.delete(id);
+    const toggle = e.target.closest("[data-plan-toggle], [data-thought-toggle], [data-step]");
+    if (toggle) {
+      const turnId = toggle.closest("[data-turn-id]")?.dataset.turnId;
+      if (!turnId) return;
+      flowScroll.following = false;
+      let expansion = S.expandedTurns.get(turnId);
+      if (!expansion) {
+        expansion = { plans: new Map(), thoughts: new Set(), steps: new Set(), revision: 0 };
+        S.expandedTurns.set(turnId, expansion);
       }
-      renderFlow();
-      return;
-    }
-    const th = e.target.closest("[data-thought-toggle]");
-    if (th) {
-      const id = th.dataset.thoughtToggle;
-      if (S.expandedThoughts.has(id)) S.expandedThoughts.delete(id); else S.expandedThoughts.add(id);
-      renderFlow();
-      return;
-    }
-    const st = e.target.closest("[data-step]");
-    if (st) {
-      const id = st.dataset.step;
-      if (S.expandedSteps.has(id)) S.expandedSteps.delete(id); else S.expandedSteps.add(id);
+      const { planToggle, thoughtToggle, step } = toggle.dataset;
+      if (planToggle !== undefined) {
+        const isOpen = toggle.closest(".mobile-plan-tree-group")?.classList.contains("is-expanded");
+        expansion.plans.set(planToggle, !isOpen);
+      } else {
+        const items = thoughtToggle === undefined ? expansion.steps : expansion.thoughts;
+        const id = thoughtToggle ?? step;
+        if (items.has(id)) items.delete(id); else items.add(id);
+      }
+      expansion.revision++;
       renderFlow();
       return;
     }
     const plus = e.target.closest("[data-new]");
     if (plus) { e.stopPropagation(); openModal(plus.dataset.new); return; }
-    const toggle = e.target.closest("[data-toggle]");
-    if (toggle) { toggleGroup(toggle.dataset.toggle); return; }
+    const group = e.target.closest("[data-toggle]");
+    if (group) { toggleGroup(group.dataset.toggle); return; }
     const sess = e.target.closest("[data-session]");
     if (sess) { openSession(sess.dataset.session); return; }
   });
 }
 
 function showGate(err) {
+  closeChannelEvents();
   $("gateErr").textContent = err || "";
   $("gate").classList.remove("hidden");
   $("app").classList.add("hidden");
@@ -1721,11 +2066,11 @@ async function loadModels() {
   try {
     const [mData, rData] = await Promise.all([
       api("/channel/models"),
-      api("/channel/role-cards").catch(() => ({ cards: [] })),
+      api("/channel/role-cards").catch(() => ({})),
     ]);
     S.models = (mData.models || []).filter(m => m.enabled !== 0 && m.enabled !== false);
     S.modelById = Object.fromEntries(S.models.map(m => [m.id, m]));
-    S.roleCards = rData.cards || [];
+    S.roleCards = rData.role_cards || rData.cards || [];
   } catch (e) {}
 }
 
@@ -1738,42 +2083,93 @@ function sseAlive() {
   return !!(S.es && S.es.readyState === 1);
 }
 
-function connectSSE(force) {
-  if (!window.EventSource) return;
-  if (S.es && S.es.readyState <= 1 && !force) return;
-  if (S.es) { try { S.es.close(); } catch (e) {} S.es = null; }
+const channelRefresh = {
+  home: { timer: null, running: false, pending: false, delay: 400 },
+  flow: { timer: null, running: false, pending: false, delay: 150 },
+};
+let channelEventRetry = null;
+let mobileEventsBound = false;
+
+function isChannelVisible() {
+  return !document.hidden && !$("app").classList.contains("hidden");
+}
+
+function queueChannelRefresh(kind) {
+  const refresh = channelRefresh[kind];
+  if (!isChannelVisible() || refresh.timer !== null) return;
+  if (refresh.running) {
+    refresh.pending = true;
+    return;
+  }
+  refresh.timer = setTimeout(async () => {
+    refresh.timer = null;
+    if (!isChannelVisible()) return;
+    refresh.running = true;
+    try {
+      if (kind === "home") await loadHome();
+      else if (S.view.name === "flow" && S.currentSessionId) await loadFlow(S.currentSessionId);
+    } catch (_) {
+      // The next event or the fallback poll can recover transient failures.
+    } finally {
+      refresh.running = false;
+      if (refresh.pending) {
+        refresh.pending = false;
+        queueChannelRefresh(kind);
+      }
+    }
+  }, refresh.delay);
+}
+
+function queueVisibleRefresh() {
+  queueChannelRefresh(S.view.name === "flow" ? "flow" : "home");
+}
+
+function closeChannelEvents() {
+  if (channelEventRetry !== null) clearTimeout(channelEventRetry);
+  channelEventRetry = null;
+  const es = S.es;
+  S.es = null;
+  es?.close();
+  for (const refresh of Object.values(channelRefresh)) {
+    if (refresh.timer !== null) clearTimeout(refresh.timer);
+    refresh.timer = null;
+    refresh.pending = false;
+  }
+}
+
+function connectSSE() {
+  if (!window.EventSource || !isChannelVisible() || (S.es && S.es.readyState <= 1)) return;
   try {
     const es = new EventSource(`/channel/events?token=${encodeURIComponent(S.token)}`);
     S.es = es;
-    es.onopen = () => { setConn(true); };
+    es.onopen = () => {
+      if (S.es !== es) return;
+      setConn(true);
+      queueVisibleRefresh();
+    };
     es.onmessage = (ev) => {
-      // SSE 实时推送驱动：桌面端 / 微信 / Agent 产生步骤、新任务或完成时立即刷新
+      if (S.es !== es || !isChannelVisible()) return;
       try {
         const payload = JSON.parse(ev.data || "{}");
         const eventType = (payload.event && payload.event.type) || "";
-        const sid = payload.session_id;
-        if (S.view.name === "flow" && S.currentSessionId) {
-          if (!sid || sid === S.currentSessionId) {
-            loadFlow(S.currentSessionId).catch(() => {});
-          }
-          if (["start", "done", "failed", "cancelled", "deleted"].includes(eventType)) {
-            loadHome().catch(() => {});
-          }
+        if (S.view.name === "flow") {
+          if (!payload.session_id || payload.session_id === S.currentSessionId) queueChannelRefresh("flow");
+          if (["start", "done", "failed", "cancelled", "created", "deleted"].includes(eventType)) queueChannelRefresh("home");
         } else {
-          loadHome().catch(() => {});
+          queueChannelRefresh("home");
         }
       } catch (e) {
-        if (S.view.name === "flow" && S.currentSessionId) {
-          loadFlow(S.currentSessionId).catch(() => {});
-        } else {
-          loadHome().catch(() => {});
-        }
+        queueVisibleRefresh();
       }
     };
     es.onerror = () => {
-      if (es.readyState === 2) {
+      if (S.es === es && es.readyState === 2) {
         S.es = null;
-        setTimeout(() => connectSSE(true), 3000);
+        if (channelEventRetry !== null) clearTimeout(channelEventRetry);
+        channelEventRetry = setTimeout(() => {
+          channelEventRetry = null;
+          connectSSE();
+        }, 3000);
       }
     };
   } catch (e) {}
@@ -1781,47 +2177,34 @@ function connectSSE(force) {
 
 async function boot() {
   applyTheme(S.theme);
-  bind();
-  if ($("composer")) $("composer").classList.add("hidden");
+  if (!mobileEventsBound) {
+    mobileEventsBound = true;
+    bind();
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        closeChannelEvents();
+      } else if (isChannelVisible()) {
+        queueVisibleRefresh();
+        connectSSE();
+      }
+    });
+    setInterval(pollChannel, 2000);
+  }
   await loadModels().catch(() => {});
   await loadHome().catch(() => {});
+  if (S.view.name === "flow") queueVisibleRefresh();
   connectSSE();
+}
 
-  // 自适应智能轮询：
-  // - SSE 在线 → 全部交由 SSE 实时推送，仅每 10s 兜底心跳一次
-  // - SSE 断线 + Agent 运行中 → 每 2s 短轮询
-  // - SSE 断线 + Agent 空闲 → 每 6s 慢轮询
-  setInterval(() => {
-    if (document.hidden) return;
-    // ⚠️ 弹层/弹窗打开时跳过轮询重渲，防止 DOM 重建破坏弹层交互或卡顿
-    if (S.sheetOpen) return;
-    if ($('modalNew') && !$('modalNew').classList.contains('hidden')) return;
-    if ($('artPreview') && !$('artPreview').classList.contains('hidden')) return;
-    const active = isAgentActive();
-    const alive = sseAlive();
-    const now = Date.now();
-
-    if (alive) {
-      // SSE 存活时，绝大部分状态靠实时推送更新，轮询只做 10s 兜底
-      if (!S._lastPoll || now - S._lastPoll >= 10000) {
-        S._lastPoll = now;
-        if (S.view.name === "home") loadHome().catch(() => {});
-        else if (S.view.name === "flow" && S.currentSessionId) loadFlow(S.currentSessionId).catch(() => {});
-      }
-      return;
-    }
-
-    // SSE 断线时，才启用短轮询
-    const interval = active ? 2000 : 6000;
-    if (!S._lastPoll || now - S._lastPoll >= interval) {
-      S._lastPoll = now;
-      if (S.view.name === "home") {
-        loadHome().catch(() => {});
-      } else if (S.view.name === "flow" && S.currentSessionId) {
-        loadFlow(S.currentSessionId).catch(() => {});
-      }
-    }
-  }, 2000);
+function pollChannel() {
+  if (!isChannelVisible() || S.sheetOpen ||
+      !$("modalNew").classList.contains("hidden") || !$("artPreview").classList.contains("hidden")) return;
+  const interval = sseAlive() ? 10000 : isAgentActive() ? 2000 : 6000;
+  const now = Date.now();
+  if (!S._lastPoll || now - S._lastPoll >= interval) {
+    S._lastPoll = now;
+    queueVisibleRefresh();
+  }
 }
 
 (function init() {

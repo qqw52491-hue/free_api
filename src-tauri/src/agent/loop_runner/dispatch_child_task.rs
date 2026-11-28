@@ -15,6 +15,9 @@ fn output(body: Value) -> DispatchResult {
 }
 
 fn apply_return(ctx: &mut DispatchCtx<'_>, id: &str) -> Result<(), String> {
+    if child_task::external::collect(ctx.state.inner(), ctx.final_session_id, id, ctx.checkpoint, ctx.context)? {
+        return Ok(());
+    }
     child_task::import_effects(ctx.state.inner(), id, ctx.step_id, ctx.context)?;
     crate::agent::checkpoint::save_checkpoint_and_consume(
         ctx.state.inner(),
@@ -55,12 +58,24 @@ async fn dispatch_inner(
     slot: Option<usize>,
 ) -> Result<DispatchResult, String> {
     let raw=inst.get_params();
+    if child_task::request_action(&inst.get_action(), &raw) == "resume" {
+        let conn = ctx.state.writer()?;
+        let id = raw["child_run_id"].as_str().unwrap_or_default();
+        let owned = conn.query_row("SELECT EXISTS(SELECT 1 FROM agent_child_runs WHERE id=?1 AND parent_session_id=?2)",
+            rusqlite::params![id, ctx.final_session_id], |r| r.get::<_, bool>(0)).map_err(|e| e.to_string())?;
+        if owned && child_task::external::is_external(&conn, id)? {
+            return Err("追加调查请用 child_task.dispatch(executor=project_external) 创建新任务，并附上必要的前次资料。".into());
+        }
+    }
     let resume_inherits_model=child_task::request_action(&inst.get_action(),&raw)=="resume" && raw.get("model_id").is_none();
     let raw=if child_task::request_action(&inst.get_action(),&raw)=="resume" {child_task::presets::inherit_resume(ctx.state.inner(),ctx.final_session_id,raw)?}else{raw};
     let requested=child_task::presets::requested(raw,None)?;
     let key = child_task::dispatch::key(&ctx.context.history_task_id, ctx.step_id, &requested, slot);
     if let Some(error)=crate::agent::tools::input_validation::native_rejection("child_task",&inst.get_action(),&requested) {return Ok(error);}
     let effective_action = child_task::request_action(&inst.get_action(), &requested);
+    if effective_action == "dispatch" && requested["executor"] == crate::agent::external_agents::EXECUTOR {
+        return dispatch_external(ctx, inst, requested, key, slot).await;
+    }
     let registered_id = if matches!(effective_action.as_str(), "dispatch" | "resume") {
         child_task::find_task(ctx.state.inner(), ctx.final_session_id, &key)?
     } else {
@@ -126,11 +141,14 @@ async fn dispatch_inner(
             )?));
         }
         "models" => {
-            return Ok(output(child_task::models::catalog(
+            let mut catalog = child_task::models::catalog(
                 ctx.state.inner(),
                 params["offset"].as_u64().unwrap_or(0),
                 &ctx.model_routing.flash,
-            )?));
+            )?;
+            let selected = crate::agent::external_agents::active_for_session(ctx.state.inner(), ctx.final_session_id)?;
+            catalog["project_external_agent"] = selected.map(|(agent, _)| json!({"name":agent.name,"kind":"codex","executor":crate::agent::external_agents::EXECUTOR})).unwrap_or(Value::Null);
+            return Ok(output(catalog));
         }
         "list" => {
             if params["scope"] == "history" {
@@ -214,9 +232,12 @@ async fn dispatch_inner(
             )?;
             let body = if let Some(id) = id {
                 let owner = child_task::task_owner(ctx.state.inner(), &actor, id)?;
-                let body = child_task::status(ctx.state.inner(), &owner, id)?;
+                let mut body = child_task::status(ctx.state.inner(), &owner, id)?;
                 if body["execution_ended"] == true && owner == actor.session {
                     apply_return(ctx, id)?;
+                    if body.get("external_agent").is_some() {
+                        body = child_task::status(ctx.state.inner(), &owner, id)?;
+                    }
                 }
                 body
             } else {
@@ -250,6 +271,9 @@ async fn dispatch_inner(
                 "get_step_output",
                 &query,
             ));
+        }
+        if owner == actor.session && body["execution_ended"] == true {
+            child_task::external::collect(ctx.state.inner(), &owner, id, ctx.checkpoint, ctx.context)?;
         }
         return Ok(DispatchResult {
             view: None,
@@ -495,6 +519,90 @@ async fn dispatch_inner(
         None,
     )?;
     Ok(DispatchResult {view:None,success:true,stdout:json!({"child_run_id":id,"model_selection":model_selection,"execution_status":"running","delivery_accepted":false,"next":"可用 child_task.status / send / wait / cancel；共享工作区可并行使用，请协调相关修改。需要信息时子任务可给 parent 发消息，父任务等待会被消息唤醒。"}).to_string(),stderr:String::new(),route:"child_task:spawned".into()})
+}
+
+async fn dispatch_external(
+    ctx: &mut DispatchCtx<'_>,
+    inst: &AgentInstruction,
+    params: Value,
+    key: String,
+    slot: Option<usize>,
+) -> Result<DispatchResult, String> {
+    use crate::agent::external_agents;
+    let db = ctx.state.inner();
+    if let Some(id) = child_task::find_task(db, ctx.final_session_id, &key)? {
+        let body = child_task::result(db, ctx.final_session_id, &id)?;
+        if body["execution_ended"] == true {
+            apply_return(ctx, &id)?;
+            return Ok(output(body));
+        }
+        if child_task::runtime::attached(&id) {
+            return Ok(output(child_task::status(db, ctx.final_session_id, &id)?));
+        }
+        let binding = TaskBinding {
+            parent_session: ctx.final_session_id.clone(),
+            parent_run: ctx.parent_run_id.into(),
+            child_session: format!("task-{id}"),
+            child_run: id.clone(),
+        };
+        child_task::external::store_result(
+            db, &binding, Err(child_task::external::INTERRUPTED.into()), true, 0,
+        )?;
+        apply_return(ctx, &id)?;
+        return Ok(output(child_task::result(db, ctx.final_session_id, &id)?));
+    }
+    if inst.dispatches.is_some() || slot.is_some() {
+        return Err("外部 Agent 请逐次派发；本次未启动。".into());
+    }
+    // An external executable cannot inherit a restricted delegate's host tool configuration.
+    if child_task::parent_session(ctx.final_session_id).is_some()
+        || crate::agent::execution::runtime::config(db, ctx.parent_run_id)?.allowed_tools.is_some()
+    {
+        return Err("外部 Agent 仅可由项目主任务派发；本次未启动。".into());
+    }
+    let (agent, project_root) = external_agents::active_for_session(db, ctx.final_session_id)?
+        .ok_or("项目未选择启用的外部 Agent；请在项目页选择后重新派发。")?;
+    let workspace = std::path::Path::new(&project_root).canonicalize()
+        .map_err(|e| format!("项目工作区不可用，未启动本地 Codex：{e}"))?;
+    if ctx.workspace_dir.canonicalize().ok().as_ref() != Some(&workspace) {
+        return Err("当前会话工作区与外部 Agent 所属项目不一致；未启动本地 Codex。".into());
+    }
+    let command = std::path::PathBuf::from(&agent.command);
+    if !command.is_absolute() || !command.is_file() {
+        return Err("本地 Codex 启动文件不可用，请更新「外部 Agent」连接；本次未启动。".into());
+    }
+    let prompt = format!(
+        "请在当前项目工作区完成以下只读子任务，并回交结论、证据出处、验证结果和未解决事项。\n\n【子任务】\n{}\n\n【父任务提供的参考材料】\n{}",
+        params["task"].as_str().unwrap_or_default(), params["context"].as_str().unwrap_or_default(),
+    );
+    let workspace_guard = crate::agent::workspace_lock::acquire_delegation_lock(
+        &workspace, ctx.final_session_id, ctx.parent_run_id,
+    ).await?;
+    ctx.checkpoint.prepare_child_dispatch(inst, ctx.context, None, true)?;
+    save_checkpoint(db, ctx.checkpoint)?;
+    let metadata = json!({"name":agent.name,"kind":"codex"});
+    let binding = child_task::external::register(
+        db, ctx.final_session_id, ctx.parent_run_id, &workspace, key, &params, &metadata,
+    )?;
+    let id = binding.child_run.clone();
+    let request = child_task::external::Request { command, workspace, prompt };
+    if let Err(error) = child_task::runtime::spawn_external(
+        ctx.app.clone(), db.clone(), binding.clone(), request, workspace_guard,
+    ) {
+        child_task::external::store_result(db, &binding, Err(error.clone()), false, 0)?;
+        return Err(error);
+    }
+    Ok(DispatchResult {
+        view: None,
+        success: true,
+        stdout: json!({
+            "child_run_id": id, "external_agent": metadata,
+            "execution_status":"running", "delivery_accepted":false,
+            "next":"用 child_task.wait 回收子任务回执，或通过 status 查询、cancel 取消。",
+        }).to_string(),
+        stderr: String::new(),
+        route: "child_task:spawned".into(),
+    })
 }
 
 /// Legacy dispatch spellings select a preset; they do not own a second executor.

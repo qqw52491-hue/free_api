@@ -193,6 +193,9 @@ fn register(
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let owner = root(&tx, actor)?;
     let (target, kind) = resolve(&tx, actor, params["target"].as_str().unwrap())?;
+    if kind == "task" && crate::agent::child_task::external::is_external(&tx, &target.run)? {
+        return Err("外部 Agent 追加调查请重新派发并附上必要的前次资料，本次未启动。".into());
+    }
     if kind == "main" {
         return Err("运行中的父任务请用 send 提问，未启动答复任务。".into());
     }

@@ -14,7 +14,7 @@
           <span class="dock-title">协同子 Agent ({{ tasks.length }})</span>
           <div class="dock-pills">
             <span v-if="runningCount" class="dock-pill is-running">{{ runningCount }} 运行中</span>
-            <span v-if="waitingCount" class="dock-pill is-waiting">{{ waitingCount }} 待回答</span>
+            <span v-if="waitingCount" class="dock-pill is-waiting">{{ waitingCount }} 等待中</span>
             <span v-if="deliveredCount" class="dock-pill is-done">{{ deliveredCount }} 已交付</span>
             <span v-if="handoffCount" class="dock-pill is-handoff">{{ handoffCount }} 已交接</span>
             <span v-if="cancelledCount" class="dock-pill is-cancelled">{{ cancelledCount }} 已停止</span>
@@ -120,7 +120,7 @@
             <div v-if="fullFor(task)?.summary || task.summary" class="task-summary-box">{{ fullFor(task)?.summary || task.summary }}</div>
 
             <AgentHumanInterventionCard
-              v-if="task.human_request"
+              v-if="task.human_request && !task.external_agent"
               :human-form="form(task)"
               :pause-reason="task.human_request.message"
               :is-sending="busy[task.child_run_id]"
@@ -129,8 +129,10 @@
             />
 
             <form v-if="!task.execution_ended" class="subagent-msg-form" @submit.prevent="send(task)">
-              <input v-model="drafts[task.child_run_id]" class="subagent-msg-input" aria-label="给子任务补充资料" placeholder="给这个子 Agent 补充上下文或约束…" />
-              <button type="submit" class="subagent-btn is-primary" :disabled="busy[task.child_run_id] || !drafts[task.child_run_id]?.trim()">发送补充</button>
+              <template v-if="!task.external_agent">
+                <input v-model="drafts[task.child_run_id]" class="subagent-msg-input" aria-label="给子任务补充资料" placeholder="给这个子 Agent 补充上下文或约束…" />
+                <button type="submit" class="subagent-btn is-primary" :disabled="busy[task.child_run_id] || !drafts[task.child_run_id]?.trim()">发送补充</button>
+              </template>
               <button type="button" class="subagent-btn is-danger" :disabled="busy[task.child_run_id]" @click="cancel(task)">停止</button>
             </form>
 
@@ -153,10 +155,10 @@ import AgentHumanInterventionCard from './AgentHumanInterventionCard.vue';
 import { normalizeHumanForm } from '../../composables/useAgentSession';
 import {
   createSerialRefresher, detectAutoOpen, fullCacheIsFresh, isSettled, mergeSnapshot,
-  type ChildTaskListSnapshot, type FullDetailCache,
+  type ChildTaskListSnapshot, type ChildTaskSnapshot, type FullDetailCache,
 } from './delegatedTaskState';
 type StepTrace = { seq: number; tool: string; target?: string | null; description?: string | null; status?: string };
-type Task = {
+type Task = ChildTaskSnapshot & {
   child_run_id: string;
   depth?: number;
   parent_session_id?: string;
@@ -206,8 +208,8 @@ let timer: ReturnType<typeof setInterval> | undefined;
 const seenActiveIds = new Set<string>();
 const seenWaitingIds = new Set<string>();
 
-const runningCount = computed(() => tasks.value.filter((t) => !t.execution_ended && !t.human_request).length);
-const waitingCount = computed(() => tasks.value.filter((t) => !!t.human_request).length);
+const runningCount = computed(() => tasks.value.filter((t) => stateKey(t) === 'running').length);
+const waitingCount = computed(() => tasks.value.filter((t) => stateKey(t) === 'waiting').length);
 const deliveredCount = computed(() => tasks.value.filter((t) => t.delivery_accepted === true).length);
 const handoffCount = computed(() => tasks.value.filter((t) => !t.delivery_accepted && t.handoff_accepted === true).length);
 const cancelledCount = computed(() => tasks.value.filter((t) => t.execution_ended && !t.delivery_accepted && !t.handoff_accepted && t.execution_status === 'cancelled').length);
@@ -219,7 +221,7 @@ const dockOpen = computed(() => {
 });
 
 const headerPreview = computed(() => {
-  const active = tasks.value.find((t) => !!t.human_request) || tasks.value.find((t) => !t.execution_ended) || tasks.value[tasks.value.length - 1];
+  const active = tasks.value.find((t) => stateKey(t) === 'waiting') || tasks.value.find((t) => !t.execution_ended) || tasks.value[tasks.value.length - 1];
   if (!active) return '';
   const step = liveTicker(active);
   return step ? `${taskTitle(active)} · ${step}` : taskTitle(active);
@@ -230,11 +232,11 @@ function toggleDock() {
 }
 
 function stateKey(t: Task): 'waiting' | 'running' | 'done' | 'handoff' | 'cancelled' | 'failed' {
-  if (t.human_request) return 'waiting';
   if (t.delivery_accepted) return 'done';
   if (t.handoff_accepted) return 'handoff';
   if (t.execution_status === 'cancelled') return 'cancelled';
   if (t.execution_ended) return 'failed';
+  if (t.human_request || t.external_wait_reason) return 'waiting';
   return 'running';
 }
 
@@ -265,6 +267,7 @@ function fullFor(t: Task): { goal?: string; summary?: string } | undefined {
 }
 
 function roleBadge(t: Task): string {
+  if (t.external_agent) return t.external_agent.name;
   if (t.role_label) return t.role_label;
   if (t.purpose === 'worker') return '侦察探针';
   if (t.purpose === 'writer') return '代码写入';
@@ -283,8 +286,9 @@ function hasMultiLineGoal(t: Task): boolean {
 }
 
 function liveTicker(t: Task): string {
-  if (t.human_request?.message) return t.human_request.message.split(/\r?\n/)[0];
   if (!t.execution_ended) {
+    if (t.human_request?.message) return t.human_request.message.split(/\r?\n/)[0];
+    if (t.external_wait_reason) return t.external_wait_reason;
     if (t.latest_step) return t.latest_step.split(/\r?\n/)[0];
     if (t.stage) return t.stage.replace(/^child_task:/, '');
     return '正在思考与推进…';
@@ -329,11 +333,12 @@ function call<T>(action: string, params: unknown = {}) {
 }
 
 function label(t: Task) {
-  if (t.human_request) return '等待回答';
   if (t.delivery_accepted) return '子目标已交付';
-  if (t.handoff_accepted) return '已交接';
+  if (t.handoff_accepted) return t.external_agent ? '结果已返回' : '已交接';
   if (t.execution_status === 'cancelled') return '已停止';
   if (t.execution_ended) return '未完成';
+  if (t.human_request) return '等待回答';
+  if (t.external_wait_reason) return '等待中';
   return t.phase === 'done' ? '正在收尾' : t.runtime_attached === false ? '等待核对状态' : '执行中';
 }
 
@@ -346,7 +351,9 @@ async function loadFull(t: Task) {
     const res = await call<Record<string, any>>('result', { child_run_id: t.child_run_id });
     if (session !== props.sessionId) return;
     const goal = typeof res?.goal === 'string' ? res.goal.split('【宿主提供')[0].trim() : t.task;
-    const summary = typeof res?.delivery?.summary === 'string' ? res.delivery.summary.trim() : undefined;
+    const output = t.external_agent ? res?.delivery?.output : undefined;
+    const summary = typeof output === 'string' ? output.trim()
+      : typeof res?.delivery?.summary === 'string' ? res.delivery.summary.trim() : undefined;
     fullDetails.value[t.child_run_id] = {
       goal, summary,
       // 以读取结果自身的执行状态为准；任务结算后失效重读。

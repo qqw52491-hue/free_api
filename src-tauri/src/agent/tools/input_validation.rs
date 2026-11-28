@@ -136,6 +136,14 @@ pub(crate) fn validate_native(tool: &str, action: &str, params: &Value) -> Resul
         "child_task" => {
             crate::agent::child_task::models::requested(params)?;
             let effective=crate::agent::child_task::request_action(act,params);
+            if params.get("executor").is_some() {
+                if effective != "dispatch" || params["executor"] != crate::agent::external_agents::EXECUTOR {
+                    return Err("executor 仅用于子任务派发，可选值 project_external；本次未执行。".into());
+                }
+                if params.as_object().is_some_and(|fields| fields.keys().any(|field| !matches!(field.as_str(), "executor" | "action" | "task" | "context"))) {
+                    return Err("外部 Agent 派发只接受 executor、task 和可选 context；本次未启动。".into());
+                }
+            }
             match effective.as_str(){
                 "send"|"ask"=>crate::agent::agent_mailbox::validate_payload(params)?,
                 "read_agent_result"=>{text(&tool,params,&["child_run_id"],false)?;optional(&tool,params,"view","string")?;optional(&tool,params,"offset","非负整数")?;optional(&tool,params,"limit","非负整数")?;optional(&tool,params,"output_id","string")?;},

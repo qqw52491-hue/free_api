@@ -28,15 +28,16 @@
                             <span class="node-marker" :data-status="workerWaits.get(worker.id) ? 'waiting' : worker.status" aria-hidden="true"></span>
                             <span class="node-copy">
                                 <strong>{{ worker.name }}</strong>
+                                <span v-if="worker.externalAgent" class="external-agent-label">{{ worker.externalAgent.name }} · 外部 Agent</span>
                                 <span v-if="workerWaits.get(worker.id)" class="wait-line">{{ workerWaits.get(worker.id) }}</span>
-                                <small v-if="!receiptViews.has(worker.id) && (worker.currentStep || worker.currentTool)">{{ worker.currentStep || worker.currentTool }}</small>
+                                <small v-if="!receiptViews.has(worker.id) && nodeProgress(worker)">{{ nodeProgress(worker) }}</small>
                                 <span v-if="receiptViews.get(worker.id)" class="receipt-line" :data-state="receiptViews.get(worker.id)?.state">
                                     {{ receiptViews.get(worker.id)?.label }}
                                 </span>
                             </span>
                             <span class="node-meta">
                                 <span class="node-state" data-preview-align :class="{ 'is-waiting': workerWaits.has(worker.id) }">{{ status(worker) }}</span>
-                                <small>{{ worker.roleLabel }}</small>
+                                <small v-if="!worker.externalAgent">{{ worker.roleLabel }}</small>
                             </span>
                         </button>
                     </AgentTeamBranches>
@@ -110,8 +111,12 @@ const waitsByRun = computed(() => {
         if (wait.target_ids.length) {
             for (const id of wait.target_ids) {
                 if (id === props.masterRunId) names.add("主 Agent");
-                else names.add(workersById.value.get(id)?.name || props.waitTargetNames?.get(id)
-                    || (wait.kind === "jobs" ? "后台任务" : "成员（名称未知）"));
+                else {
+                    const worker = workersById.value.get(id);
+                    const name = worker?.externalAgent ? `${worker.externalAgent.name}（${worker.name}）` : worker?.name;
+                    names.add(name || props.waitTargetNames?.get(id)
+                        || (wait.kind === "jobs" ? "后台任务" : "成员（名称未知）"));
+                }
             }
         } else {
             names.add(wait.kind === "jobs" ? "后台任务" : "信箱消息");
@@ -127,11 +132,16 @@ const workerWaits = computed(() => {
     if (props.historical) return waits;
     for (const worker of props.workers) {
         if (worker.status !== "running" && worker.status !== "pending") continue;
-        const wait = worker.waitingForHuman ? "等你的回答" : waitsByRun.value.get(worker.id);
+        const wait = worker.waitingForHuman ? "等你的回答" : worker.externalWaitReason || waitsByRun.value.get(worker.id);
         if (wait) waits.set(worker.id, wait);
     }
     return waits;
 });
+
+function nodeProgress(worker: AgentWorkerItem) {
+    const progress = worker.currentStep || worker.currentTool;
+    return progress !== workerWaits.value.get(worker.id) ? progress : undefined;
+}
 
 const dateFormatter = new Intl.DateTimeFormat(undefined, { dateStyle: "short", timeStyle: "medium" });
 function formatTime(value?: string | null) {
@@ -148,7 +158,8 @@ const receiptViews = computed(() => new Map(props.workers.flatMap((worker) => {
     if (!state) return [];
     const owner = worker.parentWorkerId === null || (receipt?.parent_run_id && receipt.parent_run_id === props.masterRunId) ? "主任务"
         : workersById.value.get(receipt?.parent_run_id ?? worker.parentWorkerId ?? "")?.name || "父任务";
-    const result = (receipt?.execution_status ?? worker.status) === "succeeded" ? "已交付" : "回执已保存";
+    const succeeded = (receipt?.execution_status ?? worker.status) === "succeeded";
+    const result = succeeded ? (worker.externalAgent ? "结果已返回" : "已交付") : "回执已保存";
     const collection = state === "collected" ? `${owner}已收取`
         : state === "pending" ? `待${owner}收取` : "收取状态未知";
     const label = state !== "unknown" && receipt?.result_available ? `${result} · ${collection}` : collection;
@@ -176,7 +187,7 @@ function describeNode(id: string): AgentPreviewDetails | undefined {
     const worker = workersById.value.get(id);
     if (!worker) return undefined;
     const wait = workerWaits.value.get(id);
-    const step = worker.currentStep || worker.currentTool;
+    const step = nodeProgress(worker);
     const receipt = receiptViews.value.get(id);
     if (wait) rows.push({ label: "等待", value: wait, tone: "waiting" });
     if (step) rows.push({ label: "当前进度", value: step });
@@ -187,7 +198,8 @@ function describeNode(id: string): AgentPreviewDetails | undefined {
     return {
         title: worker.name, status: status(worker),
         tone: worker.reviewStopped ? "stopped" : wait ? "waiting" : worker.status,
-        subtitle: [worker.roleLabel, worker.model].filter(Boolean).join(" · "), rows,
+        subtitle: worker.externalAgent ? `${worker.externalAgent.name} · 外部 Agent`
+            : [worker.roleLabel, worker.model].filter(Boolean).join(" · "), rows,
     };
 }
 function status(worker: AgentWorkerItem) {
@@ -256,6 +268,7 @@ const summary = computed(() => {
 .receipt-line { color: var(--theme-text-secondary, #a4a9b5); }
 .receipt-line[data-state="collected"] { color: var(--theme-status-success, #36c295); }
 .node-copy strong { font-size: 12px; }
+.external-agent-label { color: var(--map-focus); font-size: 11px; }
 .node-meta { justify-items: end; max-width: 93px; }
 .node-state { font-size: 11px; white-space: nowrap; }
 .node-marker { width: 7px; height: 7px; border-radius: 50%; background: var(--theme-text-secondary, #a4a9b5); }

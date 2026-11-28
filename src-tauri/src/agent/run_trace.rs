@@ -187,6 +187,53 @@ pub fn list_session_traces(db: &DbState, session_id: &str) -> Result<Vec<Value>,
     .collect()
 }
 
+/// Mobile polling uses trace identity and counts to decide which details to fetch.
+/// Count indexed steps without reading their bodies, and still count legacy snapshots.
+pub(crate) fn list_session_trace_metadata(
+    db: &DbState,
+    session_id: &str,
+) -> Result<Vec<Value>, String> {
+    let conn = db.reader()?;
+    let goal_message_id = if conn
+        .prepare("SELECT goal_message_id FROM agent_run_traces LIMIT 0")
+        .is_ok()
+    {
+        "t.goal_message_id"
+    } else {
+        "NULL"
+    };
+    let step_count = if conn.prepare("SELECT 1 FROM agent_run_steps LIMIT 0").is_ok() {
+        "NULLIF((SELECT COUNT(*) FROM agent_run_steps s WHERE s.run_id=t.id), 0)"
+    } else {
+        "NULL"
+    };
+    let query = format!(
+        "SELECT t.id,t.goal,t.status,t.completion_json,t.started_at,t.updated_at,t.completed_at,
+                {goal_message_id},COALESCE({step_count},
+                    CASE WHEN json_valid(t.steps_json) THEN json_array_length(t.steps_json) ELSE 0 END)
+         FROM agent_run_traces t WHERE t.session_id=?1 ORDER BY t.started_at ASC,t.id ASC"
+    );
+    let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([session_id], |row| {
+        let completion: Option<String> = row.get(3)?;
+        let completion = completion.as_deref()
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            .unwrap_or(Value::Null);
+        Ok(json!({
+            "id":row.get::<_, String>(0)?,
+            "goal":row.get::<_, String>(1)?,
+            "status":row.get::<_, String>(2)?,
+            "completion":completion,
+            "started_at":row.get::<_, String>(4)?,
+            "updated_at":row.get::<_, String>(5)?,
+            "completed_at":row.get::<_, Option<String>>(6)?,
+            "goal_message_id":row.get::<_, Option<String>>(7)?,
+            "step_count":row.get::<_, usize>(8)?,
+        }))
+    }).map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
 fn first_line_clipped(raw: &str, max_chars: usize) -> Option<String> {
     let line = raw
         .lines()
@@ -868,6 +915,37 @@ mod tests {
         assert_eq!(traces.len(), 1);
         assert_eq!(traces[0]["status"], "succeeded");
         assert_eq!(traces[0]["completion"]["summary"], "完成");
+    }
+
+    #[test]
+    fn mobile_trace_metadata_counts_indexed_and_legacy_steps_in_the_owning_session() {
+        let db = test_db();
+        upsert_snapshot(&db, "legacy", "selected", "旧目标", "succeeded",
+            &[json!({"id":1}), json!({"id":2})], Some(&json!({"summary":"旧结果"}))).unwrap();
+        upsert_snapshot(&db, "indexed", "selected", "新目标", "running",
+            &[json!({"id":100}), json!({"id":101}), json!({"id":102})], None).unwrap();
+        upsert_snapshot(&db, "other", "other-session", "其他目标", "running", &[], None).unwrap();
+        let before_migration = list_session_trace_metadata(&db, "selected").unwrap();
+        assert_eq!(before_migration.iter().find(|item| item["id"] == "legacy").unwrap()["step_count"], 2);
+        {
+            let conn = db.writer().unwrap();
+            conn.execute_batch(
+                "ALTER TABLE agent_run_traces ADD COLUMN goal_message_id TEXT;
+                 CREATE TABLE agent_run_steps (run_id TEXT, seq INTEGER, step_json TEXT, PRIMARY KEY(run_id,seq));
+                 INSERT INTO agent_run_steps VALUES ('indexed',7,'{\"id\":7,\"output\":\"body-does-not-belong-in-the-index\"}');
+                 UPDATE agent_run_traces SET goal_message_id='message-1' WHERE id='indexed';"
+            ).unwrap();
+        }
+        let records = list_session_trace_metadata(&db, "selected").unwrap();
+        assert_eq!(records.len(), 2);
+        let legacy = records.iter().find(|item| item["id"] == "legacy").unwrap();
+        assert_eq!(legacy["step_count"], 2);
+        assert_eq!(legacy["completion"]["summary"], "旧结果");
+        let indexed = records.iter().find(|item| item["id"] == "indexed").unwrap();
+        assert_eq!(indexed["step_count"], 1, "incremental rows take precedence over the snapshot");
+        assert_eq!(indexed["goal_message_id"], "message-1");
+        assert!(indexed.get("steps").is_none() && indexed.get("reviewers").is_none());
+        assert!(!indexed.to_string().contains("body-does-not-belong-in-the-index"));
     }
 
     #[test]

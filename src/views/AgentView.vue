@@ -86,6 +86,10 @@
                     <svg viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="5" rx="1"/><path d="M12 7v5M5 16v-4h14v4"/><rect x="2" y="16" width="6" height="5" rx="1"/><rect x="16" y="16" width="6" height="5" rx="1"/></svg>
                     <span v-if="!sidebarCollapsed">子任务流程</span>
                 </button>
+                <button type="button" class="nav-row" :class="{ active: currentNavView === 'external-agents', 'icon-only': sidebarCollapsed }" title="外部 Agent" @click="openExternalAgents(false)">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="3"/><path d="m7 9 3 2-3 2m6 0h4m-9 8h8"/></svg>
+                    <span v-if="!sidebarCollapsed">外部 Agent</span>
+                </button>
                 <button
                     type="button"
                     class="nav-row"
@@ -257,10 +261,15 @@
             </div>
 
             <!-- 2. 📁 Project 工作区面板 (类似 Manus Project Dashboard) -->
-            <div v-if="currentNavView === 'project' && selectedProjectId" class="full-view-panel">
+            <div
+                v-if="selectedProjectId && (currentNavView === 'project' || (currentNavView === 'external-agents' && externalAgentsOpenedFromProject))"
+                v-show="currentNavView === 'project'"
+                class="full-view-panel"
+            >
                 <ProjectWorkspace
                     ref="projectWorkspaceRef"
                     :project-id="selectedProjectId"
+                    :view-active="currentNavView === 'project'"
                     :all-models="allModels"
                     @open-session="openTreeSession"
                     @start-task="handleStartProjectTask"
@@ -268,6 +277,7 @@
                     @delete-session="requestDeleteSession"
                     @refresh-projects="projectTreeRef?.refreshProjects()"
                     @refresh-models="loadAllModels"
+                    @manage-external-agents="openExternalAgents(true)"
                 />
             </div>
 
@@ -282,6 +292,10 @@
             </div>
 
             <div v-if="currentNavView === 'child-workflow'" class="full-view-panel"><ChildWorkflowView /></div>
+
+            <div v-if="currentNavView === 'external-agents'" class="full-view-panel">
+                <ExternalAgentsView :can-return-to-project="externalAgentsOpenedFromProject" @return-to-project="currentNavView = 'project'" />
+            </div>
 
             <!-- 5. 🔌 插件 / 提示词与 Skill 库 -->
             <div v-if="currentNavView === 'plugins' || currentNavView === 'library'" class="full-view-panel">
@@ -358,14 +372,16 @@ const WeChatBindView = defineAsyncComponent(() => import("./WeChatBindView.vue")
 const ScheduledView = defineAsyncComponent(() => import("./ScheduledView.vue"));
 const ChildWorkflowView = defineAsyncComponent(() => import("./ChildWorkflowView.vue"));
 const RoleManagerView = defineAsyncComponent(() => import("./RoleManagerView.vue"));
+const ExternalAgentsView = defineAsyncComponent(() => import("./ExternalAgentsView.vue"));
 
 interface ModelOption { id: string; name: string; display_name: string; platform_id: string; platform_name: string; }
 interface ChatSessionRow { id: string; title: string; model_id: string; created_at: string; updated_at: string; message_count: number; project_id?: string | null; }
 interface TabInfo { uid: string; id: string; label: string; running: boolean; projectId?: string; isDraft?: boolean; }
 interface FloatingToast { id: number; text: string; type: "success" | "info" | "warning"; }
 
-const currentNavView = ref<"agent" | "project" | "llm" | "roles" | "child-workflow" | "plugins" | "scheduled" | "library" | "wechat">("agent");
+const currentNavView = ref<"agent" | "project" | "llm" | "roles" | "child-workflow" | "external-agents" | "plugins" | "scheduled" | "library" | "wechat">("agent");
 const selectedProjectId = ref<string>("");
+const externalAgentsOpenedFromProject = ref(false);
 const allModels = ref<ModelOption[]>([]);
 const sidebarCollapsed = ref(false);
 const mobileSidebarOpen = ref(false);
@@ -483,6 +499,12 @@ function asTab(session: ChatSessionRow, projectId?: string): TabInfo {
 function handleSelectProject(project: AgentProject) {
     selectedProjectId.value = project.id;
     currentNavView.value = "project";
+}
+
+function openExternalAgents(fromProject: boolean) {
+    externalAgentsOpenedFromProject.value = fromProject;
+    mobileSidebarOpen.value = false;
+    currentNavView.value = "external-agents";
 }
 
 function handleProjectDeleted(deletedProjectId: string) {

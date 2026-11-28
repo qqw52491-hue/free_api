@@ -15,20 +15,36 @@ function deferred() {
 function createPage(runs) {
     const elements = new Map();
     const requests = [];
+    const frames = new Map();
+    const properties = new Map();
+    let nextFrame = 0;
+    const visualViewport = Object.assign(new EventTarget(), { height: 800, offsetTop: 0, scale: 1 });
+    const fakeWindow = Object.assign(new EventTarget(), {
+        visualViewport, innerHeight: 800, scrollTo() {},
+        requestAnimationFrame(callback) { frames.set(++nextFrame, callback); return nextFrame; },
+        cancelAnimationFrame(id) { frames.delete(id); },
+    });
     const getElementById = id => {
         if (!elements.has(id)) elements.set(id, {
-            id, value: '', dataset: {}, writes: 0, html: '',
+            id, value: '', dataset: {}, writes: 0, html: '', style: {},
             get innerHTML() { return this.html; },
             set innerHTML(value) { this.writes++; this.html = value; },
             classList: { add() {}, remove() {}, toggle() {} },
-            addEventListener() {}, click() {},
+            addEventListener() {}, click() {}, matches() { return id === 'followInput'; },
         });
         return elements.get(id);
     };
+    const fakeDocument = Object.assign(new EventTarget(), {
+        getElementById, documentElement: { style: { setProperty: (key, value) => properties.set(key, value) } },
+    });
+    function flushFrame() {
+        const callbacks = Array.from(frames.values());
+        frames.clear();
+        for (const callback of callbacks) callback();
+    }
     const localStorage = { getItem() { return null; } };
     const context = vm.createContext({
-        localStorage, document: { getElementById, documentElement: {}, addEventListener() {} },
-        window: { scrollTo() {}, addEventListener() {} }, URL,
+        localStorage, document: fakeDocument, window: fakeWindow, URL, Event,
         location: { href: 'http://127.0.0.1/' },
     });
     vm.runInContext(source, context);
@@ -50,7 +66,7 @@ function createPage(runs) {
             return Promise.resolve(responses[url] ?? {});
         },
     });
-    return { ...context, requests, liveState, pending, uploads, getElementById, input: getElementById('followInput') };
+    return { ...context, requests, liveState, pending, uploads, getElementById, input: getElementById('followInput'), visualViewport, properties, flushFrame };
 }
 
 async function main() {
@@ -188,6 +204,54 @@ async function main() {
     assert.deepEqual(Array.from(compose.liveState.composerFiles), ['B 文件']);
     await compose.openSession('A');
     assert.deepEqual(Array.from(compose.liveState.composerFiles), ['A 后选文件']);
+    compose.getElementById('btnClip').onclick();
+    compose.getElementById('clipInput').onchange({ target: { files: [{name: '<tag>.txt'}] } });
+    const filesTray = compose.getElementById('composerFiles');
+    assert(filesTray.innerHTML.includes('&lt;tag&gt;.txt'), '附件名按文本展示');
+    filesTray.onclick({target: { closest: () => ({dataset: {removeComposerFile: '1'}}) }});
+    assert.deepEqual(Array.from(compose.liveState.composerFiles), ['A 后选文件']);
+    assert(!filesTray.innerHTML.includes('&lt;tag&gt;.txt'));
+
+    const mobile = createPage([]);
+    mobile.bind();
+    await mobile.openSession('A');
+    const dock = mobile.getElementById('composer');
+    Object.assign(mobile.input, { clientWidth: 300, scrollHeight: 34 });
+    dock.offsetHeight = 92;
+    let geometryEvents = 0;
+    mobile.window.addEventListener('mobile:composer-geometry', () => geometryEvents++);
+    mobile.flushFrame();
+    assert.equal(mobile.input.style.height, '34px');
+    assert.equal(mobile.properties.get('--composer-spacer'), '92px');
+    assert.equal(geometryEvents, 1);
+    mobile.document.activeElement = mobile.input;
+    Object.assign(mobile.visualViewport, { height: 490, offsetTop: 30 });
+    mobile.visualViewport.dispatchEvent(new Event('resize'));
+    mobile.visualViewport.dispatchEvent(new Event('scroll'));
+    mobile.flushFrame();
+    assert.equal(mobile.properties.get('--keyboard-inset'), '280px');
+    assert.equal(mobile.properties.get('--composer-spacer'), '372px');
+    assert.equal(geometryEvents, 2, '同一帧合并键盘滚动与缩放通知');
+    Object.assign(mobile.input, { value: '多行草稿', scrollHeight: 75 });
+    dock.offsetHeight = 128;
+    mobile.window.dispatchEvent(new Event('resize'));
+    mobile.flushFrame();
+    assert.equal(mobile.input.style.height, '75px');
+    assert.equal(mobile.properties.get('--composer-spacer'), '408px');
+    mobile.visualViewport.scale = 1.3;
+    mobile.visualViewport.dispatchEvent(new Event('resize'));
+    mobile.flushFrame();
+    assert.equal(mobile.properties.get('--keyboard-inset'), '0px', '手动放大不误判为键盘覆盖');
+    mobile.window.innerHeight = 490;
+    Object.assign(mobile.visualViewport, { scale: 1, offsetTop: 0 });
+    mobile.window.dispatchEvent(new Event('resize'));
+    mobile.flushFrame();
+    assert.equal(mobile.properties.get('--visible-viewport-height'), '490px');
+    assert.equal(mobile.properties.get('--composer-spacer'), '128px', '布局视口已缩小时不再叠加键盘占位');
+    dock.offsetHeight = 0;
+    mobile.goHome();
+    mobile.flushFrame();
+    assert.equal(mobile.properties.get('--composer-spacer'), '0px');
 
     const concurrent = createPage(activeRuns);
     await concurrent.openSession('A');
@@ -209,7 +273,7 @@ async function main() {
     await concurrent.openSession('A');
     assert.equal(concurrent.getElementById('btnSend').disabled, false, '请求结束重新允许发送');
 
-    console.log('PASS: mobile session loading, run actions, human answers, drafts and attachments stay bound to their originating session');
+    console.log('PASS: mobile session actions, scoped drafts and attachments, and coalesced keyboard/composer geometry');
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1; });

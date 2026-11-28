@@ -200,6 +200,39 @@ async function main() {
  await emit('channel-run-started', {session_id:'existing-session', run_id:'unrelated-next-run', goal:'新任务'});
  syncTeam({detail:graph});
  assert.deepEqual(reopened.teamState.value.workers.map(w=>w.id), [], 'an old focus snapshot cannot repopulate a new run');
- console.log('PASS: exact dispatch/wait/history association, batch partial failure, failover, resume, both real event channels, 100-chunk reactivity regression');
+
+ const externalChild = {
+  child_run_id:c, root_run_id:'unrelated-next-run', task:'核对模型路由', depth:1,
+  execution_status:'running', latest_step:'正在读取会话配置',
+  external_agent:{name:'本地 Codex',kind:'codex'},
+ };
+ const externalTeam = {sessionId:'existing-session',focus_run_id:'unrelated-next-run',tasks:[externalChild],
+  waiting_on:[{waiter_run_id:'unrelated-next-run',target_ids:[c],kind:'jobs'}]};
+ syncTeam({detail:externalTeam});
+ const externalWorker = reopened.teamState.value.workers[0];
+ assert.deepEqual(externalWorker.externalAgent, {name:'本地 Codex',kind:'codex'});
+ assert.equal(externalWorker.currentStep, '正在读取会话配置');
+ assert.equal(externalWorker.status, 'running');
+ assert.equal(externalWorker.externalWaitReason, undefined);
+ const waitingChild = {...externalChild,external_wait_reason:'等待 Codex 响应'};
+ syncTeam({detail:{...externalTeam,tasks:[waitingChild]}});
+ assert.equal(externalWorker.externalWaitReason, '等待 Codex 响应');
+ assert.equal(externalWorker.waitingForHuman, false, 'external wait must not open a human prompt');
+ syncTeam({detail:externalTeam});
+ assert.equal(externalWorker.externalWaitReason, undefined, 'a fresh running snapshot clears the external wait');
+ const returnedChild = {...waitingChild, execution_status:'succeeded',handoff_accepted:true,summary:'路由核对完成'};
+ const returnedReceipt = {child_run_id:c,parent_run_id:'unrelated-next-run',execution_status:'succeeded',result_available:true,collected_at:null};
+ const returnedTeam = {...externalTeam,tasks:[returnedChild],receipts:[returnedReceipt],waiting_on:[]};
+ syncTeam({detail:returnedTeam});
+ assert.equal(externalWorker.status, 'succeeded');
+ assert.equal(externalWorker.externalWaitReason, undefined, 'the saved terminal state supersedes the live wait');
+ assert.equal(reopened.teamState.value.receipts.get(c).collected_at, null, 'child completion alone is not collection');
+ const collected = '2026-11-28T03:18:00Z';
+ syncTeam({detail:{...returnedTeam,receipts:[{...returnedReceipt,collected_at:collected}]}});
+ syncTeam({detail:{...externalTeam,tasks:[waitingChild]}});
+ assert.equal(externalWorker.status, 'succeeded', 'late progress cannot reopen a settled external child');
+ assert.equal(externalWorker.externalWaitReason, undefined);
+ assert.equal(reopened.teamState.value.receipts.get(c).collected_at, collected);
+ console.log('PASS: child association, batch partial failure, failover, resume, both event channels, reactivity, external wait and result collection');
 }
 main().then(()=>process.exit(0),e=>{console.error(e);process.exit(1)});

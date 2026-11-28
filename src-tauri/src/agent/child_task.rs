@@ -5,6 +5,7 @@ pub(crate) mod presets;
 pub(crate) mod dispatch;
 pub(crate) mod models;
 pub(crate) mod defaults;
+pub(crate) mod external;
 pub(crate) mod team_view;
 use crate::db::DbState;
 use rusqlite::{params, OptionalExtension};
@@ -525,8 +526,10 @@ pub(crate) fn status(db: &DbState, parent: &str, id: &str) -> Result<Value, Stri
         }
         if let Some(raw_cp) = cp_json {
             if let Ok(parsed) = serde_json::from_str::<Value>(&raw_cp) {
-                if let Some(selection)=parsed["state"]["dispatch_input"].get("model_selection") {body["model_selection"]=selection.clone();}
-                let params = &parsed["state"]["dispatch_input"]["params"];
+                let input = &parsed["state"]["dispatch_input"];
+                if let Some(selection)=input.get("model_selection") {body["model_selection"]=selection.clone();}
+                if let Some(agent) = input.get("external_agent") { body["external_agent"] = agent.clone(); }
+                let params = &input["params"];
                 if let Some(clean_task) = params["task"]
                     .as_str()
                     .map(str::trim)
@@ -656,7 +659,14 @@ pub(crate) fn status(db: &DbState, parent: &str, id: &str) -> Result<Value, Stri
         )
         .map_err(|e| e.to_string())?;
     body["queued_messages"] = json!(pending);
-    if runtime::paused(id).is_some() {
+    if body["execution_status"] == "running" && body.get("external_agent").is_some() {
+        if let Some(reason) = runtime::external_wait(id) {
+            body["external_wait_reason"] = json!(reason);
+            body["activity"] = json!("waiting_external");
+        } else {
+            body["activity"] = json!("running");
+        }
+    } else if runtime::paused(id).is_some() {
         body["activity"] = json!("waiting_human")
     } else {
         body["activity"] = body["execution_status"].clone()

@@ -94,6 +94,16 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE,
             FOREIGN KEY (project_id) REFERENCES agent_projects(id) ON DELETE CASCADE
         );
+        CREATE TABLE IF NOT EXISTS external_agents (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            command TEXT NOT NULL,
+            enabled INTEGER NOT NULL CHECK(enabled IN (0, 1))
+        );
+        CREATE TABLE IF NOT EXISTS agent_project_external_agents (
+            project_id TEXT PRIMARY KEY REFERENCES agent_projects(id) ON DELETE CASCADE,
+            agent_id TEXT NOT NULL REFERENCES external_agents(id) ON DELETE RESTRICT
+        );
         -- 资源只保存项目内 canonical 路径及元数据；读取时再次 canonicalize 并校验边界。
         CREATE TABLE IF NOT EXISTS agent_project_resources (
             resource_id TEXT PRIMARY KEY,

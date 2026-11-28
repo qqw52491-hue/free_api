@@ -8,6 +8,8 @@ pub mod child_receipt;
 pub mod child_reviewer;
 pub mod child_worker;
 pub(crate) mod execution;
+pub(crate) mod external_agents;
+mod external_codex;
 pub(crate) mod child_task;
 pub(crate) mod agent_mailbox;
 pub mod child_writer;

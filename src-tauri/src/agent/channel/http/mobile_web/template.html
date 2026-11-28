@@ -17,14 +17,18 @@
       <button id="btnBackTop" class="icon-btn hidden" title="返回看板">←</button>
       <div class="topbar-titles">
         <h1 id="topTitle">free_api 远程控制</h1>
-        <div class="sub" id="topSub"><span id="connDot" class="dot"></span><span id="connText">连接中…</span></div>
+        <div class="sub" id="topSub">
+          <span id="connDot" class="dot" aria-hidden="true"></span>
+          <span id="connText" role="status">连接中…</span>
+          <span id="topLocation" class="hidden"></span>
+        </div>
       </div>
     </div>
     <div class="topbar-right">
       <button id="btnDelSession" class="icon-btn hidden" title="删除当前会话" style="color:var(--red);">🗑</button>
       <button id="btnTheme" class="icon-btn" title="切换主题">🎨</button>
       <button id="btnRefresh" class="icon-btn" title="刷新">⟳</button>
-      <button id="btnNew" class="btn-new-pill" title="新建任务">＋ 新任务</button>
+      <button id="btnNew" class="btn-new-pill" title="新建任务" aria-label="新建任务">＋<span class="new-task-label">新任务</span></button>
     </div>
   </header>
 
@@ -77,16 +81,16 @@
   </div>
 
   <!-- 悬浮快速滚动到底部按钮 -->
-  <button id="btnScrollBottom" class="scroll-bottom-btn hidden" title="回到底部">↓</button>
+  <button type="button" id="btnScrollBottom" class="scroll-bottom-btn hidden"><span aria-hidden="true">↓</span> 回到最新</button>
 
   <!-- 底部 Composer 输入底座 -->
   <div class="composer-wrap hidden" id="composer">
     <div class="composer-inner">
-      <div id="composerFiles" style="margin-bottom: 4px;"></div>
+      <div id="composerFiles" class="composer-files"></div>
       
       <div class="composer-dock">
         <div class="composer-input-row">
-          <textarea id="followInput" rows="1" placeholder="在当前会话继续对话…" autocomplete="off"></textarea>
+          <textarea id="followInput" rows="1" aria-label="继续对话" placeholder="在当前会话继续对话…" autocomplete="off"></textarea>
         </div>
         
         <div class="composer-toolbar">

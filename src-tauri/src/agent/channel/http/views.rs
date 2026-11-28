@@ -286,6 +286,11 @@ pub(crate) async fn handler_session_traces(
         return Err(unauthorized());
     }
     let db = state.app.state::<DbState>();
+    if headers.get("X-Channel-Trace-Metadata").is_some_and(|value| value == "compact") {
+        let traces = crate::agent::run_trace::list_session_trace_metadata(db.inner(), session_id.trim())
+            .map_err(internal_error)?;
+        return Ok(Json(json!({ "traces": traces })));
+    }
     let records = crate::agent::run_trace::list_session_traces(db.inner(), session_id.trim())
         .map_err(internal_error)?;
     let traces: Vec<Value> = records

@@ -479,11 +479,18 @@ export interface ContractSchema {
     strict_closed_set?: boolean;
 }
 
+export interface AgentExternalWorker {
+    name: string;
+    kind: "codex";
+}
+
 export interface AgentWorkerItem {
     id: string;
     /** null means the main run is the recorded parent. */
     parentWorkerId?: string | null;
     waitingForHuman?: boolean;
+    externalAgent?: AgentExternalWorker;
+    externalWaitReason?: string;
     name: string;
     role: "reviewer" | "coder" | "researcher" | "master" | "worker";
     roleLabel: string;

@@ -54,6 +54,14 @@
           </div>
         </div>
 
+        <ProjectExternalAgent
+          v-if="project?.id === projectId"
+          :key="projectId"
+          v-model:saving="externalAgentSaving"
+          :project-id="projectId"
+          :view-active="viewActive"
+          @manage="emit('manage-external-agents')"
+        />
         <ProjectDirectoryAccess v-if="project" :project-id="project.id" :root-path="project.root_path" />
 
         <!-- 2. 发起任务输入框 ("Start a task in this project" - 复用与 AgentComposer 一致的模型路由选择) -->
@@ -384,7 +392,7 @@
               <button
                 type="button"
                 class="pw-send-btn"
-                :disabled="!taskGoal.trim() || busy"
+                :disabled="!taskGoal.trim() || busy || externalAgentSaving"
                 title="在本项目中开启对话并直接执行"
                 @click="submitNewTask"
               >
@@ -405,6 +413,7 @@
               type="button"
               class="btn-new-chat-subtle"
               title="在本项目下发起空白对话"
+              :disabled="externalAgentSaving"
               @click="submitNewTaskDirect"
             >
               <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
@@ -614,6 +623,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useModelRoutingPreferences } from "../composables/useModelRoutingPreferences";
 import ProjectDirectoryAccess from "./ProjectDirectoryAccess.vue";
+import ProjectExternalAgent from "./ProjectExternalAgent.vue";
 import ModelSelectDropdown from "./common/ModelSelectDropdown.vue";
 import RichContentRenderer from "./charts/RichContentRenderer.vue";
 import {
@@ -658,6 +668,7 @@ interface ProjectResourcePreview {
 
 const props = defineProps<{
   projectId: string;
+  viewActive: boolean;
   allModels?: AgentModelOption[];
 }>();
 
@@ -668,6 +679,7 @@ const emit = defineEmits<{
   (event: "delete-session", sessionId: string, title: string, projectId: string): void;
   (event: "refresh-projects"): void;
   (event: "refresh-models"): void;
+  (event: "manage-external-agents"): void;
 }>();
 
 const project = ref<AgentProject | null>(null);
@@ -677,6 +689,7 @@ const taskGoal = ref("");
 const taskInputRef = ref<HTMLTextAreaElement | null>(null);
 const inputFocused = ref(false);
 const busy = ref(false);
+const externalAgentSaving = ref(false);
 const copiedPath = ref(false);
 const showDeleteConfirm = ref(false);
 const resourceFilter = ref("");
@@ -967,13 +980,13 @@ function focusInput() {
 
 function submitNewTask() {
   const goal = taskGoal.value.trim();
-  if (!goal || !props.projectId) return;
+  if (!goal || !props.projectId || externalAgentSaving.value) return;
   taskGoal.value = "";
   emit("start-task", props.projectId, goal);
 }
 
 function submitNewTaskDirect() {
-  if (!props.projectId) return;
+  if (!props.projectId || externalAgentSaving.value) return;
   emit("start-task", props.projectId, "");
 }
 

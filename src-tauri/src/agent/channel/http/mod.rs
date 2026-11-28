@@ -50,7 +50,7 @@ pub(crate) const CHANNEL_WEB_PAGE: &str = concat!(
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="color-scheme" content="dark">
 <title>free_api 远程控制</title>
 <style>

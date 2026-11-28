@@ -37,7 +37,8 @@
                             <span class="agent-big-icon">{{ getRoleIcon(selectedWorker.role) }}</span>
                             <div class="detail-name-meta">
                                 <strong class="detail-agent-name" :title="selectedWorker.name">{{ formatWorkerName(selectedWorker.name) }} 链路</strong>
-                                <span class="detail-agent-tool">{{ selectedWorker.roleLabel }}<template v-if="selectedWorker.currentTool"> · {{ getShortToolName(selectedWorker.currentTool) }}</template></span>
+                                <span v-if="selectedWorker.externalAgent" class="detail-agent-tool">{{ selectedWorker.externalAgent.name }} · 外部 Agent</span>
+                                <span v-else class="detail-agent-tool">{{ selectedWorker.roleLabel }}<template v-if="selectedWorker.currentTool"> · {{ getShortToolName(selectedWorker.currentTool) }}</template></span>
                                 <span v-if="selectedWorker.model" class="worker-card-model" :title="`模型: ${selectedWorker.model}`">{{ selectedWorker.model }}</span>
                             </div>
                         </div>
@@ -45,8 +46,8 @@
                             <span v-if="selectedWorker.durationMs" class="worker-dur-pill">
                                 ⏱ {{ (selectedWorker.durationMs / 1000).toFixed(2) }}s
                             </span>
-                            <span class="stage-metric-pill" :class="`status-${selectedWorker.status}`">
-                                {{ statusText(selectedWorker.status) }}
+                            <span class="stage-metric-pill" :class="selectedExternalWait ? 'status-waiting' : `status-${selectedWorker.status}`" :title="selectedExternalWait">
+                                {{ selectedExternalWait ? '等待中' : statusText(selectedWorker.status) }}
                             </span>
                         </div>
                     </div>
@@ -451,6 +452,7 @@ watch(
 );
 
 const selectedWorker = computed(() => displayedWorkers.value.find(worker => worker.id === activeTab.value) ?? null);
+const selectedExternalWait = computed(() => isViewingHistoryStep.value ? undefined : selectedWorker.value?.externalWaitReason);
 const activeWorkerSteps = computed<AgentWorkerStep[]>(() => selectedWorker.value?.steps ?? []);
 
 const expandAllSteps = ref(false);
@@ -760,6 +762,10 @@ async function copyOutput(text?: string) {
 .stage-metric-pill.status-succeeded {
     background: rgba(52, 211, 153, 0.2);
     color: var(--theme-status-success, #34d399);
+}
+.stage-metric-pill.status-waiting {
+    background: rgba(217, 164, 77, 0.2);
+    color: var(--theme-status-warning, #d9a44d);
 }
 
 .worker-dur-pill {
