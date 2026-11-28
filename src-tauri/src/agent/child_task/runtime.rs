@@ -1,4 +1,5 @@
 //! 独立运行任务：仅持有宿主身份与资源，不复制主循环。
+use crate::agent::events::EngineEmit;
 use super::{TaskBinding, TaskGuard};
 use crate::{
     agent::{router::ModelRoutingConfig, workspace_lock::WorkspaceRunGuard},
@@ -339,7 +340,7 @@ pub(crate) fn spawn(
                         detail["event"]["duration_ms"] = json!(duration);
                     }
                 }
-                let _ = event_app.emit(&format!("agent-progress-{parent}"), detail);
+                let _ = event_app.emit_agent_progress(&parent, detail);
             }
         }
     });
@@ -354,7 +355,7 @@ pub(crate) fn spawn(
         let mut detail = json!({"type":"child_task_progress","child_run_id":binding.child_run,"event":{"type":"started"}});
         detail["run_id"] = json!(&binding.parent_run);
         review.annotate(&mut detail, &binding.parent_run);
-        let _ = app.emit(&format!("agent-progress-{}", binding.parent_session), detail);
+        let _ = app.emit_agent_progress(&binding.parent_session, detail);
     }
     tauri::async_runtime::spawn(async move {
         let _relay = relay;
@@ -388,13 +389,13 @@ pub(crate) fn spawn(
             // Execution has ended; a conversion/storage error must not leave a
             // running child forever. Existing terminal CAS preserves cancellation.
             crate::agent::execution::runtime::fail_checkpoint(&db,&binding.child_run,error.clone());
-            let _ = app.emit(
-                &format!("agent-log-{}", binding.parent_session),
+            let _ = app.emit_agent_log(
+                &binding.parent_session,
                 format!("子任务 {} 交接保存失败：{error}", binding.child_run),
             );
         }
         for warning in warnings {
-            let _ = app.emit(&format!("agent-log-{}", binding.parent_session), warning);
+            let _ = app.emit_agent_log(&binding.parent_session, warning);
         }
         drop(workspace_guard);
         drop(guard);
@@ -418,7 +419,7 @@ pub(crate) fn spawn(
                 }
             }
         }
-        let _ = app.emit(&format!("agent-progress-{}", binding.parent_session), detail);
+        let _ = app.emit_agent_progress(&binding.parent_session, detail);
     });
     Ok(())
 }

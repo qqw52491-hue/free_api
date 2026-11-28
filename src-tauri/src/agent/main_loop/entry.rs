@@ -1,5 +1,6 @@
 //! 主循环入口：run_agent_main_loop 包装、工作区锁定与方案审查员故障转移。
 
+use crate::agent::events::EngineEmit;
 use super::*;
 use crate::agent::change_verification::{
     apply_change_verification_update, change_verification_blocker, ChangeVerification,
@@ -74,7 +75,7 @@ pub fn advance_run_state<R: tauri::Runtime>(
     let snapshot = machine.transition(event).map_err(|err| err.to_string())?;
     let mut payload = serde_json::to_value(snapshot).map_err(|err| err.to_string())?;
     payload["run_id"] = serde_json::json!(run_id);
-    app.emit(&format!("agent-run-state-{}", session_id), payload)
+    app.emit_agent_run_state(session_id, payload)
         .map_err(|err| err.to_string())?;
     Ok(())
 }

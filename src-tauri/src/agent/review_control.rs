@@ -1,4 +1,5 @@
 //! 人工停止单个审查请求；模型排除按现有任务身份持久化，不改写审查意见。
+use crate::agent::events::EngineEmit;
 use crate::db::DbState;
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
@@ -137,10 +138,10 @@ fn stop_member(db: &DbState, session: &str, id: &str) -> Result<StopReviewOutcom
 pub async fn stop_review_member(app: AppHandle, state: State<'_, DbState>, session_id: String, review_id: String) -> Result<StopReviewOutcome, String> {
     let outcome = stop_member(state.inner(), &session_id, &review_id)?;
     let note = if outcome.stopped { STOP_NOTE } else { "该审查已完成，原结论保留；当前任务后续排除此审查模型" };
-    let _ = app.emit(&format!("agent-progress-{session_id}"), json!({
+    let _ = app.emit_agent_progress(&session_id, json!({
         "type":"review_member_stopped", "review_id":review_id, "model_id":outcome.model_id, "stopped":outcome.stopped, "description":note
     }));
-    let _ = app.emit(&format!("agent-log-{session_id}"), note);
+    let _ = app.emit_agent_log(&session_id, note);
     Ok(outcome)
 }
 

@@ -1,3 +1,4 @@
+use crate::agent::events::EngineEmit;
 use crate::agent::change_verification::{
     apply_change_verification_update, change_verification_blocker, ChangeVerification,
 };
@@ -166,8 +167,8 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
                     &[],
                     Some(&serde_json::json!({ "summary": reason })),
                 );
-                let _ = w_app.emit(
-                    &format!("agent-log-{}", w_session),
+                let _ = w_app.emit_agent_log(
+                    &w_session,
                     format!("⏱️ {}", reason),
                 );
                 crate::agent::control::release_run_channels(&w_session, &w_run, true).await;
@@ -279,8 +280,8 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
     .await?;
 
     // 2. 初始化三明治上下文：加载系统提示词 + 可视化/HTML沙箱 Skill + 动态注入 MCP 工具
-    let _ = app.emit(
-        &format!("agent-progress-{}", final_session_id),
+    let _ = app.emit_agent_progress(
+        &final_session_id,
         json!({
             "run_id": &run_id,
             "type": "action_phase",
@@ -636,11 +637,13 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
             cp.restore_task_for_entry(&mut context, &goal);
             match cp.retire_interrupted_plan_wait(state.inner(), &run_id, &mut context) {
                 Ok(true) => {
-                    let _ = app.emit(&format!("agent-log-{}", final_session_id),
+                    let _ = app.emit_agent_log(
+                        &final_session_id,
                         "上轮方案审查已中断且无回执；继续原任务时需重新派发审查。");
                 }
                 Err(error) => {
-                    let _ = app.emit(&format!("agent-log-{}", final_session_id),
+                    let _ = app.emit_agent_log(
+                        &final_session_id,
                         format!("读取上一轮方案审查状态失败：{error}"));
                 }
                 Ok(false) => {}
@@ -667,7 +670,8 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
     }
     let legacy_review_routing = checkpoint.bind_task_review_routing(is_resuming_existing, &mut model_routing);
     if legacy_review_routing {
-        let _ = app.emit(&format!("agent-log-{}", final_session_id),
+        let _ = app.emit_agent_log(
+            &final_session_id,
             "⚠️ 旧任务未保存审查人数和旧审查覆盖的原始配置；本次沿用当前设置并记录，无法还原此前值。执行模式和固定环节仍沿用原检查点。");
     }
     if is_resuming_existing {
@@ -714,7 +718,8 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
             crate::agent::reviewer_gatekeeper::GitBaseline::git_for_session(&final_session_id)
                 // 旧存档没有起点，不能用本次 pre_dirty 隐藏已发生的任务写入。
                 .unwrap_or_else(|| {
-                    let _ = app.emit(&format!("agent-log-{}", final_session_id),
+                    let _ = app.emit_agent_log(
+                        &final_session_id,
                         "⚠️ 旧检查点未保存原始 diff 基线，按当前 HEAD 收集审查材料，可能包含任务开始前的未提交改动；请核对归属。");
                     crate::agent::reviewer_gatekeeper::GitBaseline::capture(&workspace_dir)
                 })
@@ -749,7 +754,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
     git_baseline.register_for_session(&final_session_id);
     if is_resuming_existing {
         let message = "↪️ 继续原任务：已恢复目标、方案、契约和审查要求；模型配置使用本次选择。";
-        let _ = app.emit(&format!("agent-log-{}", final_session_id), message);
+        let _ = app.emit_agent_log(&final_session_id, message);
     }
 
     // 🧭 任务入口 LLM 分流（Triage）：新 turn 起步时由 Pro 档做一次结构化复杂度判决，
@@ -837,8 +842,8 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
                 state.inner(),
             );
             if !verdict.loaded_skills.is_empty() || !verdict.skill_load_failures.is_empty() {
-                let _ = app.emit(
-                    &format!("agent-log-{}", final_session_id),
+                let _ = app.emit_agent_log(
+                    &final_session_id,
                     format!(
                         "📚 Skill 路由：已加载 [{}]{}",
                         verdict.loaded_skills.join(", "),
@@ -874,7 +879,7 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
         } else {
             format!("🧭 任务分流: {} — {}", verdict.route, verdict.reason)
         };
-        let _ = app.emit(&format!("agent-log-{}", final_session_id), log_line);
+        let _ = app.emit_agent_log(&final_session_id, log_line);
         // 需求歧义判决：提示模型先 ask_human 澄清，澄清前不要写文件（仅注入提示，不改门禁）
         if verdict.needs_user_clarification() {
             context.turns_history.push(crate::agent::context::ChatMessage {
@@ -908,8 +913,8 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
         // 审查覆盖面观测行：分流判决如何塑形阶段/终审一目了然；判决关闭阶段审查
         // 时额外落 gate 留痕（step_id 此处未就位，与上方 triage 记录一致用 0）。
         if let Some(v) = checkpoint.triage_verdict.as_ref() {
-            let _ = app.emit(
-                &format!("agent-log-{}", final_session_id),
+            let _ = app.emit_agent_log(
+                &final_session_id,
                 format!(
                     "🧭 分流判决审查覆盖面：stage_review={} | final_review={} | final_roles={}",
                     v.stage_review_mode,
@@ -1254,8 +1259,8 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
                     question: reason.clone(),
                 },
             )?;
-            app.emit(
-                &format!("agent-progress-{}", final_session_id),
+            app.emit_agent_progress(
+                &final_session_id,
                 json!({
                 "run_id": &run_id, "type": "agent_paused", "message": reason }),
             )

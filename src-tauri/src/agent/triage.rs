@@ -7,6 +7,7 @@
 //! - 失败一律保守降级（fallback = technical_plan，等价维持旧行为），绝不 panic；
 //! - tmp/ 下的复杂产物（PPT/HTML/报告）质量复杂度照样可以是 high——路径不代表复杂度。
 
+use crate::agent::events::EngineEmit;
 use crate::agent::router::ModelRoutingConfig;
 use crate::db::DbState;
 use crate::llm::{self, ModelConfig};
@@ -416,8 +417,8 @@ pub async fn run_triage<R: tauri::Runtime>(
         return TriageVerdict::fallback("未配置可用模型");
     }
 
-    let _ = app.emit(
-        &format!("agent-progress-{}", session_id),
+    let _ = app.emit_agent_progress(
+        &session_id,
         json!({
             "type": "action_phase",
             "run_id": run_id,

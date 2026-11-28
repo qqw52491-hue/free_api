@@ -1,3 +1,4 @@
+use crate::agent::events::EngineEmit;
 use crate::db::DbState;
 use crate::llm::{self, ModelConfig};
 use serde::{Deserialize, Serialize};
@@ -542,8 +543,8 @@ pub async fn run_writer(
         hist_json.as_deref(),
     );
     if let Some(handle) = app {
-        let _ = handle.emit(
-            &format!("agent-log-{}", parent_session_id),
+        let _ = handle.emit_agent_log(
+            &parent_session_id,
             format!(
                 "🛠️ 写入 worker {} 结束：{}（{} 个文件修改，测试 {}）",
                 child_run_id,

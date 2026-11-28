@@ -1,5 +1,6 @@
 //! 终态 diff 评审主流程（Level 1 审查门禁核心）。
 
+use crate::agent::events::EngineEmit;
 use super::*;
 use crate::agent::context::SandwichContext;
 use crate::agent::router::{AgentRouter, ModelRoutingConfig, roles};
@@ -275,7 +276,7 @@ pub(super) async fn evaluate_finish_diff_single<R: tauri::Runtime>(
     match backup {
         Ok(Some((id, name))) => {
             if crate::agent::review_control::ensure_allowed(db, session_id, &id).is_err() { return result; }
-            let _ = app.emit(&format!("agent-log-{session_id}"), format!("终审通道失败；仅尝试用户配置的备用 {name}，不放行交付。"));
+            let _ = app.emit_agent_log(&session_id, format!("终审通道失败；仅尝试用户配置的备用 {name}，不放行交付。"));
             evaluate_finish_diff_once(app, db, context, model_routing, step_id, workspace, baseline, run_started_at, session_id, interrupt_rx, None, None, stage_carry_over, host_verification, human_waivers, gate_notices, approved_target_files, triage, _plan_mode, finish_summary, delivery_paths, Some(&id), log_suffix, verification_lock.as_ref()).await
         }
         Ok(None) => result,
@@ -702,7 +703,7 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
         for name in &verdict.final_review_roles {
             if let Some(card) = crate::agent::review_team::recommended_primary(db, &[name.clone()], &model_routing.disabled_role_cards) {
                 if let Err(error) = crate::agent::tools::role_manager::validate_dispatch_inputs(&card, None) {
-                    let _ = app.emit(&format!("agent-log-{session_id}"), format!("终审跳过角色 {}：{error}", card.name));
+                    let _ = app.emit_agent_log(&session_id, format!("终审跳过角色 {}：{error}", card.name));
                 }
             }
         }
@@ -755,8 +756,8 @@ async fn evaluate_finish_diff_once<R: tauri::Runtime>(
     }
 
     // 3. 广播审查进度通知前端
-    let _ = app.emit(
-        &format!("agent-progress-{}", session_id),
+    let _ = app.emit_agent_progress(
+        &session_id,
         json!({
             "type": "action_phase",
             "phase": "reviewing",

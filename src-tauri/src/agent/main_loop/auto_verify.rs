@@ -1,5 +1,6 @@
 //! 改动自动验证：机械 diff 证据与变更确认。
 
+use crate::agent::events::EngineEmit;
 use super::*;
 use crate::agent::change_verification::{
     apply_change_verification_update, change_verification_blocker, ChangeVerification,
@@ -107,8 +108,8 @@ pub(crate) fn try_auto_verify_change(
             若目标相反（安装/启用/部署），请修复后重试。",
             snippet, step_id, step_id
         ));
-        let _ = app.emit(
-            &format!("agent-log-{}", session_id),
+        let _ = app.emit_agent_log(
+            &session_id,
             format!(
                 "🧪 存在性断言 `{}` 返回非零退出（step_{}）——是否达标取决于任务意图，已提示显式举证",
                 snippet, step_id
@@ -131,8 +132,8 @@ pub(crate) fn try_auto_verify_change(
             evidence_refs: vec![evidence],
             waived_reason: None,
         });
-        let _ = app.emit(
-            &format!("agent-log-{}", session_id),
+        let _ = app.emit_agent_log(
+            &session_id,
             format!(
                 "🧪 系统自动感知：检测到验证命令 `{}` 成功执行，已自动标记写入验证通过 (verified)",
                 snippet

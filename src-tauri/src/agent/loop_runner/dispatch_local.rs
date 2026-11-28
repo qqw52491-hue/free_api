@@ -1,5 +1,6 @@
 //! 通用本地工具臂：spawn_blocking 执行、可中断等待与结果观测注入。
 
+use crate::agent::events::EngineEmit;
 use crate::agent::checkpoint::{save_checkpoint, AgentCheckpoint};
 use crate::agent::child_reviewer::result_as_dispatch_output;
 use crate::agent::context::resource_scope::ResourceOperation;
@@ -158,22 +159,22 @@ pub(super) async fn dispatch_local_tool(
 
                 if is_write_tool {
                     // 写盘/事务类工具：给予最多 1.5 秒安全落盘缓冲期，避免破坏正在保存的文件
-                    ctx.app.emit(
-                        &format!("agent-log-{}", ctx.final_session_id),
+                    ctx.app.emit_agent_log(
+                        &ctx.final_session_id,
                         "⏳ 收到停止指令，正在给予写盘/事务操作 1.5s 安全保存缓冲期...".to_string(),
                     ).ok();
 
                     tokio::select! {
                         res = &mut tool_task => {
-                            ctx.app.emit(
-                                &format!("agent-log-{}", ctx.final_session_id),
+                            ctx.app.emit_agent_log(
+                                &ctx.final_session_id,
                                 "✅ 写盘操作已安全完成，任务即将终止。".to_string(),
                             ).ok();
                             res.map_err(|e| e.to_string())?
                         }
                         _ = tokio::time::sleep(tokio::time::Duration::from_millis(1500)) => {
-                            ctx.app.emit(
-                                &format!("agent-log-{}", ctx.final_session_id),
+                            ctx.app.emit_agent_log(
+                                &ctx.final_session_id,
                                 "⚠️ 写盘操作耗时超 1.5s，已强制安全终止。".to_string(),
                             ).ok();
                             DispatchResult { view: None,

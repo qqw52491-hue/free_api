@@ -1,3 +1,4 @@
+use crate::agent::events::EngineEmit;
 use crate::agent::checkpoint::{load_checkpoint, AgentPhase};
 use crate::agent::control::{cancel_agent_run, HumanControl};
 use crate::agent::evaluation;
@@ -617,8 +618,8 @@ pub async fn start_background_agent_evaluation(
                         );
                     }
                     Err(error) => {
-                        let _ = monitor_app.emit(
-                            &format!("agent-log-{}", monitor_session_id),
+                        let _ = monitor_app.emit_agent_log(
+                            &monitor_session_id,
                             format!("[回归监控] 读取最新结构化记录失败：{}", error),
                         );
                     }
@@ -696,8 +697,8 @@ pub async fn start_background_agent_evaluation(
                             .unwrap_or(Err("通道不存在".to_string()));
                         drop(channels);
                         if answered.is_ok() {
-                            let _ = human_wait_app.emit(
-                                &format!("agent-log-{}", human_wait_session_id),
+                            let _ = human_wait_app.emit_agent_log(
+                                &human_wait_session_id,
                                 format!(
                                     "[回归评测] 检测到 ask_human：{}；已注入自动仲裁 {}/{}，评测继续。",
                                     reason,
@@ -710,8 +711,8 @@ pub async fn start_background_agent_evaluation(
                             continue;
                         }
                     }
-                    let _ = human_wait_app.emit(
-                        &format!("agent-log-{}", human_wait_session_id),
+                    let _ = human_wait_app.emit_agent_log(
+                        &human_wait_session_id,
                         format!(
                             "[回归评测] 检测到 ask_human：{}；已保存最新结构化记录，正在安全停止。",
                             reason
@@ -729,8 +730,8 @@ pub async fn start_background_agent_evaluation(
             Duration::from_secs(duration_minutes * 60),
             STOP_GRACE_PERIOD,
             || async {
-                let _ = event_app.emit(
-                    &format!("agent-log-{}", worker_session_id),
+                let _ = event_app.emit_agent_log(
+                    &worker_session_id,
                     "[回归评测] 已到达时限，已请求在下一个安全边界停止。",
                 );
                 let _ = cancel_agent_run(worker_session_id.clone()).await;
@@ -769,14 +770,14 @@ pub async fn start_background_agent_evaluation(
                         );
                     }
                     Err(error) => {
-                        let _ = event_app.emit(
-                            &format!("agent-log-{}", worker_session_id),
+                        let _ = event_app.emit_agent_log(
+                            &worker_session_id,
                             format!("[回归监控] 写入终态结构化记录失败：{}", error),
                         );
                     }
                 }
-                let _ = event_app.emit(
-                    &format!("agent-log-{}", worker_session_id),
+                let _ = event_app.emit_agent_log(
+                    &worker_session_id,
                     format!(
                         "[回归报告] 判定：{}；已写入 {}",
                         report.verdict, report.report_markdown_path
@@ -784,8 +785,8 @@ pub async fn start_background_agent_evaluation(
                 );
             }
             Err(error) => {
-                let _ = event_app.emit(
-                    &format!("agent-log-{}", worker_session_id),
+                let _ = event_app.emit_agent_log(
+                    &worker_session_id,
                     format!("[回归报告生成失败] {}", error),
                 );
             }

@@ -1,3 +1,4 @@
+use crate::agent::events::EngineEmit;
 use crate::agent::types::{ChildErrorKind, TokenUsage};
 use crate::commands::projects::read_project_resource_excerpts_for_session;
 use crate::db::DbState;
@@ -556,8 +557,8 @@ pub async fn spawn_child_reviewer(
             if let Some(ref handle) = app_handle {
                 match event {
                     llm::StreamEvent::Thinking { chunk, .. } => {
-                        let _ = handle.emit(
-                            &format!("agent-progress-{}", session_id_clone),
+                        let _ = handle.emit_agent_progress(
+                            &session_id_clone,
                             json!({
                                 "type": "child_reviewer_stream",
                                 "stream_type": "thinking",
@@ -570,8 +571,8 @@ pub async fn spawn_child_reviewer(
                         );
                     }
                     llm::StreamEvent::Content { chunk, .. } => {
-                        let _ = handle.emit(
-                            &format!("agent-progress-{}", session_id_clone),
+                        let _ = handle.emit_agent_progress(
+                            &session_id_clone,
                             json!({
                                 "type": "child_reviewer_stream",
                                 "stream_type": "content",
@@ -656,8 +657,8 @@ pub async fn spawn_child_reviewer(
             // 心跳：LLM 调用开始的动作事件——审查循环此前全程静默，
             // 前端只见流式 chunk，provider 慢/不流式时表现为"假死"。
             if let Some(ref handle) = app_handle {
-                let _ = handle.emit(
-                    &format!("agent-progress-{}", session_id_clone),
+                let _ = handle.emit_agent_progress(
+                    &session_id_clone,
                     json!({
                         "type": "child_reviewer_action",
                         "child_run_id": &child_run_id_clone,
@@ -835,8 +836,8 @@ pub async fn spawn_child_reviewer(
                     );
                     // 取证动作事件：让前端步骤链实时显示「审查员在读什么」
                     if let Some(ref handle) = app_handle {
-                        let _ = handle.emit(
-                            &format!("agent-progress-{}", session_id_clone),
+                        let _ = handle.emit_agent_progress(
+                            &session_id_clone,
                             json!({
                                 "type": "child_reviewer_action",
                                 "child_run_id": &child_run_id_clone,
@@ -911,8 +912,8 @@ pub async fn spawn_child_reviewer(
                 &rejection_reason, non_compliant_strikes, MAX_NON_COMPLIANT_STRIKES,
             );
             if let Some(ref handle) = app_handle {
-                let _ = handle.emit(
-                    &format!("agent-log-{}", session_id_clone),
+                let _ = handle.emit_agent_log(
+                    &session_id_clone,
                     format!("[child_reviewer {}] {}", child_run_id_clone, feedback),
                 );
             }

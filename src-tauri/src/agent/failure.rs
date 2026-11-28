@@ -1,4 +1,5 @@
 //! 失败停止与成功交付是不同终态：未完成的账本原样保留，不借 finish 核销。
+use crate::agent::events::EngineEmit;
 use crate::agent::{
     checkpoint::AgentCheckpoint,
     context::SandwichContext,
@@ -103,8 +104,8 @@ pub(crate) async fn finish_failed_run<R: tauri::Runtime>(
         message.push_str(&format!("\n⚠️ {warning}"));
     }
     // 兼容旧 UI：complete 先填失败报告，权威终态随后广播（终态后 UI 忽略迟到进度）。
-    let _ = app.emit(
-        &format!("agent-progress-{session_id}"),
+    let _ = app.emit_agent_progress(
+        &session_id,
         json!({"run_id":run_id, "type":"complete", "message":message, "success":false}),
     );
     let snapshot = machine
@@ -114,7 +115,7 @@ pub(crate) async fn finish_failed_run<R: tauri::Runtime>(
         .map_err(|e| e.to_string())?;
     let mut state_payload = serde_json::to_value(snapshot).map_err(|e| e.to_string())?;
     state_payload["run_id"] = json!(run_id);
-    let _ = app.emit(&format!("agent-run-state-{session_id}"), state_payload);
+    let _ = app.emit_agent_run_state(&session_id, state_payload);
     crate::agent::channel::notify_session_event(session_id, "message");
     persisted.map(|_| ())
 }

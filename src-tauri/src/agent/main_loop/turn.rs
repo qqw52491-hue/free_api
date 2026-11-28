@@ -1,4 +1,5 @@
 //! One turn of the main profile. Iteration is owned by agent::execution.
+use crate::agent::events::EngineEmit;
 use super::*;
 use std::ops::ControlFlow;
 
@@ -145,8 +146,8 @@ pub(super) async fn turn_main<'a, 'b>(
                     route: "retriage:milestone",
                 },
             );
-            let _ = app.emit(
-                &format!("agent-log-{}", final_session_id),
+            let _ = app.emit_agent_log(
+                &final_session_id,
                 format!(
                     "🧭 分流复核(里程点): {} — {}",
                     revision.decision, revision.reason
@@ -209,13 +210,13 @@ pub(super) async fn turn_main<'a, 'b>(
                     injection.push_str(&format!("\n{}\n", effects.model_text));
                     for notice in &effects.ui_notices {
                         let _ =
-                            app.emit(&format!("agent-log-{}", final_session_id), notice.clone());
+                            app.emit_agent_log(&final_session_id, notice.clone());
                     }
                 }
                 if !injection.is_empty() {
                     context.add_error_feedback(&injection);
-                    let _ = app.emit(
-                        &format!("agent-log-{}", final_session_id),
+                    let _ = app.emit_agent_log(
+                        &final_session_id,
                         "🔄 子任务成果（含实时冲突检测）已注入父 Agent 上下文".to_string(),
                     );
                 }
@@ -258,7 +259,7 @@ pub(super) async fn turn_main<'a, 'b>(
                         job_injection.push_str(&format!("\n{}\n", effects.model_text));
                         for notice in &effects.ui_notices {
                             let _ = app
-                                .emit(&format!("agent-log-{}", final_session_id), notice.clone());
+                                .emit_agent_log(&final_session_id, notice.clone());
                         }
                         continue;
                     }
@@ -278,8 +279,8 @@ pub(super) async fn turn_main<'a, 'b>(
                 }
                 if !job_injection.is_empty() {
                     context.add_error_feedback(&job_injection);
-                    let _ = app.emit(
-                        &format!("agent-log-{}", final_session_id),
+                    let _ = app.emit_agent_log(
+                        &final_session_id,
                         "⚡ 后台异步任务结果已注入父 Agent 上下文".to_string(),
                     );
                 }
@@ -377,8 +378,8 @@ pub(super) async fn turn_main<'a, 'b>(
             block.on_step_start();
         }
 
-        app.emit(
-            &format!("agent-log-{}", final_session_id),
+        app.emit_agent_log(
+            &final_session_id,
             format!("正在规划第 {} 步...", step_id + 1),
         )
         .map_err(|e| e.to_string())?;
@@ -468,8 +469,8 @@ pub(super) async fn turn_main<'a, 'b>(
                 phases_failure_count, backoff_secs, phases_err
             );
             println!("⚠️ {}", retry_warn);
-            let _ = app.emit(
-                &format!("agent-log-{}", final_session_id),
+            let _ = app.emit_agent_log(
+                &final_session_id,
                 retry_warn.clone(),
             );
             context.add_error_feedback(&retry_warn);
@@ -618,8 +619,8 @@ pub(super) async fn turn_main<'a, 'b>(
         if is_loop || is_loop_3 {
             let error_detail = "【🚨 网关强制阻断】: 系统检测到你陷入了认知死胡同（连续无意义的 extract 循环）！当前页面的目标元素大概率不存在，或者你理解错了页面状态！请立刻通过 `back` 返回上一页，或者更改搜索关键词重新 `goto`，严禁再次执行 extract！";
             context.add_error_feedback(error_detail);
-            app.emit(
-                &format!("agent-log-{}", final_session_id),
+            app.emit_agent_log(
+                &final_session_id,
                 "🚨 网关层拦截：发现违规连续 extract 操作，强制注入纠偏机制！",
             )
             .ok();
@@ -700,8 +701,8 @@ pub(super) async fn turn_main<'a, 'b>(
                                 .git_dirty_lost
                                 .push(format!("step{step_id} [{tool}] {p} -> {tag}"));
                             if loud {
-                                app.emit(
-                                    &format!("agent-log-{}", final_session_id),
+                                app.emit_agent_log(
+                                    &final_session_id,
                                     format!(
                                         "⚠️ 未提交内容消失: {p}（{}）",
                                         if tag == "destroyed_mine" {
@@ -774,8 +775,8 @@ pub(super) async fn turn_main<'a, 'b>(
             );
         if let Some(err) = contract_update_rejection {
             let short: String = err.chars().take(100).collect();
-            let _ = app.emit(
-                &format!("agent-log-{}", final_session_id),
+            let _ = app.emit_agent_log(
+                &final_session_id,
                 format!("⚠️ 审查契约更新未被采纳：{}", short),
             );
             crate::agent::telemetry::record_gate_fire(
@@ -789,8 +790,8 @@ pub(super) async fn turn_main<'a, 'b>(
                 },
             );
         } else if let Some(update) = instruction.review_contract_update.as_ref() {
-            let _ = app.emit(
-                &format!("agent-log-{}", final_session_id),
+            let _ = app.emit_agent_log(
+                &final_session_id,
                 format!(
                     "审查契约申报已保存（{} 项）；未提交项保留，不代表验收通过",
                     update.obligations.len()
@@ -849,14 +850,14 @@ pub(super) async fn turn_main<'a, 'b>(
                     ).map_err(|error| {
                         format!("阶段审查已派发但父状态保存失败；正在停止本轮：{error}")
                     })?;
-                    let _ = app.emit(
-                        &format!("agent-log-{}", final_session_id),
+                    let _ = app.emit_agent_log(
+                        &final_session_id,
                         format!("📋 阶段审查已派发（{}）", reason),
                     );
                 }
                 Err(err) => {
-                    let _ = app.emit(
-                        &format!("agent-log-{}", final_session_id),
+                    let _ = app.emit_agent_log(
+                        &final_session_id,
                         format!("⚠️ 阶段审查派发失败: {}", err),
                     );
                 }
@@ -1344,8 +1345,8 @@ pub(super) async fn turn_main<'a, 'b>(
                             &run_id,
                             &mut context,
                         )?;
-                        let _ = app.emit(
-                            &format!("agent-log-{}", final_session_id),
+                        let _ = app.emit_agent_log(
+                            &final_session_id,
                             "交付暂缓：正在等待已登记的协作。",
                         );
                         break 'turn ControlFlow::Continue(());
@@ -1377,7 +1378,7 @@ pub(super) async fn turn_main<'a, 'b>(
         // --- 前端通知 + 任务完成判定（合并） ---
         let mut context_payload = serde_json::to_value(&context).map_err(|e| e.to_string())?;
         context_payload["run_id"] = json!(&run_id);
-        app.emit(&format!("agent-context-{}", final_session_id), context_payload)
+        app.emit_agent_context(&final_session_id, context_payload)
             .map_err(|e| e.to_string())?;
 
         if is_actually_completed {
@@ -1411,8 +1412,8 @@ pub(super) async fn turn_main<'a, 'b>(
                 "任务已通过验收并提交"
             };
 
-            app.emit(
-                &format!("agent-progress-{}", final_session_id),
+            app.emit_agent_progress(
+                &final_session_id,
                 json!({
                     "run_id": &run_id,
                     "type": "complete",
@@ -1451,8 +1452,8 @@ pub(super) async fn turn_main<'a, 'b>(
         }
 
         // 普通步骤：发 step_done / step_error
-        app.emit(
-            &format!("agent-progress-{}", final_session_id),
+        app.emit_agent_progress(
+            &final_session_id,
             json!({
                 "run_id": &run_id,
                 "type": if result.success { "step_done" } else { "step_error" },

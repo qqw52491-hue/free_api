@@ -4,6 +4,7 @@
 #[cfg(test)]
 mod tests;
 
+use crate::agent::events::EngineEmit;
 use crate::agent::checkpoint::{save_checkpoint, AgentCheckpoint};
 use crate::agent::child_reviewer::result_as_dispatch_output;
 use crate::agent::context::resource_scope::ResourceOperation;
@@ -204,7 +205,7 @@ pub async fn run_call_llm_and_run_tool_phases(
                  若非本人操作请核对并发进程/其他 agent；内容无提交副本，已不可经 git 找回。",
                 tampered.join(", ")
             );
-            app.emit(&format!("agent-log-{}", final_session_id), msg.clone()).ok();
+            app.emit_agent_log(&final_session_id, msg.clone()).ok();
             context.git_dirty_lost.push(format!(
                 "step{step_id} 步骤间对账: 本 session 写入文件被外部销毁: {}",
                 tampered.join(", ")
@@ -292,8 +293,8 @@ pub async fn run_call_llm_and_run_tool_phases(
     // 附件观察先落检查点，再按实际发送投影选择规划模型。
     // 用户主动 view_image 仍走原有一次性队列，不在此处转述。
     if crate::agent::attachment_vision::has_unobserved_images(context) {
-        let _ = app.emit(
-            &format!("agent-log-{final_session_id}"),
+        let _ = app.emit_agent_log(
+            &final_session_id,
             "正在观察新附件图片，保存结果后继续任务。",
         );
     }
@@ -319,7 +320,7 @@ pub async fn run_call_llm_and_run_tool_phases(
             } else {
                 "附件图片观察已保存，后续按任务阶段选择模型；原图可随时回看。"
             };
-            let _ = app.emit(&format!("agent-log-{final_session_id}"), note);
+            let _ = app.emit_agent_log(&final_session_id, note);
         }
         Ok(false) => {}
         Err(error) if error == crate::llm::STREAM_INTERRUPTED_ERROR => {
@@ -354,8 +355,8 @@ pub async fn run_call_llm_and_run_tool_phases(
         // --- 🚦 调用网关：动态路由 ---
         let routing =
             crate::agent::router::AgentRouter::route_for_step(&context, &model_routing, step_id);
-        let _ = app.emit(
-            &format!("agent-log-{}", final_session_id),
+        let _ = app.emit_agent_log(
+            &final_session_id,
             format!(
                 "🚦 [网关] {} → {} ({})",
                 routing.tier, routing.model_id, routing.reason
@@ -363,8 +364,8 @@ pub async fn run_call_llm_and_run_tool_phases(
         );
 
         // --- A. 请求 AI 规划 ---
-        let _ = app.emit(
-            &format!("agent-progress-{}", final_session_id),
+        let _ = app.emit_agent_progress(
+            &final_session_id,
             json!({
                 "run_id": run_id,
                 "type": "action_phase",
@@ -492,8 +493,8 @@ pub async fn run_call_llm_and_run_tool_phases(
                         &mut run_machine,
                         AgentRunEvent::RetryPlanning,
                     )?;
-                    let _ = app.emit(
-                        &format!("agent-log-{}", final_session_id),
+                    let _ = app.emit_agent_log(
+                        &final_session_id,
                         format!(
                             "🔄 未获得有效工具指令，正在按错误原因重新生成 ({}/{})...",
                             planning_retry_count, MAX_PLANNING_RETRIES
@@ -514,8 +515,8 @@ pub async fn run_call_llm_and_run_tool_phases(
                     &mut run_machine,
                     AgentRunEvent::PlanningFailed { reason: e.clone() },
                 )?;
-                let _ = app.emit(
-                    &format!("agent-log-{}", final_session_id),
+                let _ = app.emit_agent_log(
+                    &final_session_id,
                     format!("❌ AI 规划失败: {}", e),
                 );
                 let message = format!("❌ AI 规划失败: {}", e);
@@ -555,8 +556,8 @@ pub async fn run_call_llm_and_run_tool_phases(
                         rusqlite::params![clean, final_session_id],
                     );
                 }
-                app.emit(
-                    &format!("agent-progress-{}", final_session_id),
+                app.emit_agent_progress(
+                    &final_session_id,
                     json!({
                         "run_id": run_id,
                         "type": "session_title_updated",
@@ -597,8 +598,8 @@ pub async fn run_call_llm_and_run_tool_phases(
         )?;
 
         // 📊 发送 Token 用量与速度指标统计到前端
-        app.emit(
-            &format!("agent-progress-{}", final_session_id),
+        app.emit_agent_progress(
+            &final_session_id,
             json!({
                 "run_id": run_id,
                 "type": "token_usage",
@@ -625,8 +626,8 @@ pub async fn run_call_llm_and_run_tool_phases(
 
         // 🧠 发送最终思考完成事件到前端
         if !thinking_text.is_empty() {
-            app.emit(
-                &format!("agent-progress-{}", final_session_id),
+            app.emit_agent_progress(
+                &final_session_id,
                 json!({
                     "run_id": run_id,
                     "type": "thinking",
@@ -636,8 +637,8 @@ pub async fn run_call_llm_and_run_tool_phases(
                 }),
             )
             .map_err(|e| e.to_string())?;
-            app.emit(
-                &format!("agent-log-{}", final_session_id),
+            app.emit_agent_log(
+                &final_session_id,
                 format!("🧠 AI思考完毕 (共{}字)", thinking_text.len()),
             )
             .map_err(|e| e.to_string())?;
@@ -661,19 +662,19 @@ pub async fn run_call_llm_and_run_tool_phases(
         }
         // 通知前端：发现了新计划（含反思）
         if !inst.reflection.is_empty() {
-            app.emit(
-                &format!("agent-log-{}", final_session_id),
+            app.emit_agent_log(
+                &final_session_id,
                 format!("🪞 AI 反思: {}", inst.reflection),
             )
             .map_err(|e| e.to_string())?;
         }
-        app.emit(
-            &format!("agent-log-{}", final_session_id),
+        app.emit_agent_log(
+            &final_session_id,
             format!("🤖 AI 规划了新动作: {}", inst.description),
         )
         .map_err(|e| e.to_string())?;
-        app.emit(
-            &format!("agent-progress-{}", final_session_id),
+        app.emit_agent_progress(
+            &final_session_id,
             json!({
                 "run_id": run_id,
                 "type": "step_new",
@@ -846,8 +847,8 @@ pub async fn run_call_llm_and_run_tool_phases(
             );
 
             // 🌟 立即向前端广播步骤失败事件，确保错误尝试保留在时间线上供用户查看
-            app.emit(
-                &format!("agent-progress-{}", final_session_id),
+            app.emit_agent_progress(
+                &final_session_id,
                 json!({
                     "run_id": run_id,
                     "type": "step_error",
@@ -956,8 +957,8 @@ pub async fn run_call_llm_and_run_tool_phases(
                 break (inst, dispatch_result);
             }
 
-            app.emit(
-                &format!("agent-log-{}", final_session_id),
+            app.emit_agent_log(
+                &final_session_id,
                 format!(
                     "🔄 执行失败(第{}次)，正注入错误反馈给 AI 重试...",
                     retry_count

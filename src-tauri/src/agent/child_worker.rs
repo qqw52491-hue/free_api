@@ -1,3 +1,4 @@
+use crate::agent::events::EngineEmit;
 use crate::agent::types::TokenUsage;
 use uuid::Uuid;
 use crate::db::DbState;
@@ -485,8 +486,8 @@ pub async fn run_worker(
     );
 
     if let Some(handle) = app {
-        let _ = handle.emit(
-            &format!("agent-log-{}", parent_session_id),
+        let _ = handle.emit_agent_log(
+            &parent_session_id,
             format!(
                 "🛰️ 侦察 worker {} 结束：{}（{} 步，{} 条结论）",
                 child_run_id,

@@ -1,4 +1,5 @@
 //! 终审只上报宿主可观察的阶段/计时，不转发模型思考或原始响应，不改变请求预算。
+use crate::agent::events::EngineEmit;
 use crate::llm::StreamEvent;
 use serde_json::{json, Value};
 use std::sync::{
@@ -50,7 +51,7 @@ impl ReviewProgress {
         parent_step_id: usize,
     ) -> Self {
         let app = app.clone();
-        let channel = format!("agent-progress-{session}");
+        let session = session.to_string();
         let parent_run = crate::agent::child_reviewer::main_executor::parent_run();
         Self::with_sink(member, label, model, move |mut value| {
             if let (Some(run_id), Some(payload)) = (&parent_run, value.as_object_mut()) {
@@ -59,7 +60,7 @@ impl ReviewProgress {
             if let Some(payload) = value.as_object_mut() {
                 payload.insert("parent_step_id".into(), json!(parent_step_id));
             }
-            let _ = app.emit(&channel, value);
+            let _ = app.emit_agent_progress(&session, value);
         })
     }
 

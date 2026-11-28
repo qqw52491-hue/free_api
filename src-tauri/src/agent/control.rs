@@ -1,3 +1,4 @@
+use crate::agent::events::EngineEmit;
 use crate::agent::checkpoint::{save_checkpoint, AgentCheckpoint};
 use crate::agent::run_state::{AgentRunEvent, AgentRunMachine};
 use crate::agent::types::RUN_INTERRUPTED_ROUTE;
@@ -459,8 +460,8 @@ pub(crate) async fn finish_interrupted_run<R: tauri::Runtime>(
         machine,
         crate::agent::run_state::AgentRunEvent::Cancel { reason: message.clone() },
     )?;
-    app.emit(
-        &format!("agent-log-{}", session_id),
+    app.emit_agent_log(
+        &session_id,
         format!("⏹️ {} 不再派发旧计划。", message),
     )
     .ok();

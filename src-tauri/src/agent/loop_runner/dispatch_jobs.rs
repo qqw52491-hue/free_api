@@ -1,5 +1,6 @@
 //! 后台任务回收臂：wait_jobs 挂起等待与完成结果注入。
 
+use crate::agent::events::EngineEmit;
 use crate::agent::checkpoint::{save_checkpoint, AgentCheckpoint};
 use crate::agent::child_reviewer::result_as_dispatch_output;
 use crate::agent::context::resource_scope::ResourceOperation;
@@ -66,12 +67,12 @@ pub(super) async fn dispatch_wait_jobs(
         let streak = ctx.context.wait_jobs_streak;
         let effective_timeout = crate::agent::job_engine::wait_timeout_secs(timeout_secs, streak);
 
-        let _ = ctx.app.emit(
-            &format!("agent-log-{}", ctx.final_session_id),
+        let _ = ctx.app.emit_agent_log(
+            &ctx.final_session_id,
             format!("⏳ 正在挂起等待后台异步任务完成 (等待窗口: {}s)...", effective_timeout),
         );
-        let _ = ctx.app.emit(
-            &format!("agent-progress-{}", ctx.final_session_id),
+        let _ = ctx.app.emit_agent_progress(
+            &ctx.final_session_id,
             json!({
                 "type": "agent_waiting_jobs",
                 "run_id": ctx.parent_run_id,
@@ -147,8 +148,8 @@ pub(super) async fn dispatch_wait_jobs(
                         });
                         projections.insert(job.job_id.clone(), effects.model_text);
                         for notice in &effects.ui_notices {
-                            let _ = ctx.app.emit(
-                                &format!("agent-log-{}", ctx.final_session_id),
+                            let _ = ctx.app.emit_agent_log(
+                                &ctx.final_session_id,
                                 notice.clone(),
                             );
                         }

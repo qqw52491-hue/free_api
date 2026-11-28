@@ -1,5 +1,6 @@
 //! 人工介入臂：ask_human 挂起、仲裁表单与人类回复裁决。
 
+use crate::agent::events::EngineEmit;
 use crate::agent::checkpoint::{save_checkpoint, AgentCheckpoint};
 use crate::agent::child_reviewer::result_as_dispatch_output;
 use crate::agent::context::resource_scope::ResourceOperation;
@@ -183,12 +184,12 @@ pub(super) async fn dispatch_ask_human(
             },
         )?;
         // 通知前端进入暂停状态
-        ctx.app.emit(
-            &format!("agent-log-{}", ctx.final_session_id),
+        ctx.app.emit_agent_log(
+            &ctx.final_session_id,
             format!("⏸️ AI 已挂起，等待人类协助: {}", ask_msg),
         ).ok();
-        ctx.app.emit(
-            &format!("agent-progress-{}", ctx.final_session_id),
+        ctx.app.emit_agent_progress(
+            &ctx.final_session_id,
             json!({
                 "run_id": ctx.parent_run_id,
                 "type": "agent_paused",
@@ -265,8 +266,8 @@ pub(super) async fn dispatch_ask_human(
 
         println!("▶️ [唤醒] 人类回复: {}", reply);
 
-        ctx.app.emit(
-            &format!("agent-log-{}", ctx.final_session_id),
+        ctx.app.emit_agent_log(
+            &ctx.final_session_id,
             format!("▶️ AI 已被唤醒，人类回复: {}", reply),
         )
         .ok();

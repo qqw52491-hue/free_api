@@ -20,6 +20,7 @@ pub(crate) mod review_control;
 pub mod conversation;
 pub mod dispatcher;
 pub mod evaluation;
+pub mod events;
 pub mod evaluation_analysis;
 pub(crate) mod evidence_store;
 pub mod evaluation_runner;

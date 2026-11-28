@@ -10,6 +10,7 @@
 //! 与入口 triage 的区别：triage 在零证据时凭题面分流；retriage 带着
 //! 执行轨迹与模型已收集的未决问题复核「分流是否仍然成立」。
 
+use crate::agent::events::EngineEmit;
 use crate::agent::checkpoint::AgentCheckpoint;
 use crate::agent::context::SandwichContext;
 use crate::agent::router::ModelRoutingConfig;
@@ -134,8 +135,8 @@ pub(crate) async fn run_retriage<R: tauri::Runtime>(
         return revision;
     }
 
-    let _ = app.emit(
-        &format!("agent-progress-{}", session_id),
+    let _ = app.emit_agent_progress(
+        &session_id,
         json!({
             "type": "action_phase",
             "phase": "retriaging",

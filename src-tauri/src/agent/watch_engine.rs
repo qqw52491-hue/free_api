@@ -1,3 +1,4 @@
+use crate::agent::events::EngineEmit;
 use crate::db::DbState;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -449,8 +450,8 @@ async fn emit_watch_event(
         None,
     );
     if let Some(handle) = app {
-        let _ = handle.emit(
-            &format!("agent-progress-{}", parent_session_id),
+        let _ = handle.emit_agent_progress(
+            &parent_session_id,
             json!({
                 "type": "watch_event",
                 "watch_id": watch_id,
@@ -459,8 +460,8 @@ async fn emit_watch_event(
                 "summary": summary,
             }),
         );
-        let _ = handle.emit(
-            &format!("agent-log-{}", parent_session_id),
+        let _ = handle.emit_agent_log(
+            &parent_session_id,
             format!("👁️ {}", summary),
         );
     }

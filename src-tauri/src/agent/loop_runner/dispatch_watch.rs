@@ -1,5 +1,6 @@
 //! 持续巡检臂：watch_start / watch_stop。
 
+use crate::agent::events::EngineEmit;
 use crate::agent::checkpoint::{save_checkpoint, AgentCheckpoint};
 use crate::agent::child_reviewer::result_as_dispatch_output;
 use crate::agent::context::resource_scope::ResourceOperation;
@@ -58,8 +59,8 @@ pub(super) async fn dispatch_watch_start(
                         Some(workspace_clone),
                     ));
                 }
-                let _ = ctx.app.emit(
-                    &format!("agent-log-{}", ctx.final_session_id),
+                let _ = ctx.app.emit_agent_log(
+                    &ctx.final_session_id,
                     format!("👁️ 持续监听已启动: {}", watch_id),
                 );
                 DispatchResult { view: None,

@@ -15,6 +15,7 @@
 //! 10. 管道排空有界化：主进程退出后只给残余输出有界排空窗口——孙进程继承管道不退出时
 //!    EOF 永不到达（守护进程/npm notifier），绝不能让收集输出反过来挂住主流程。
 
+use crate::agent::events::EngineEmit;
 use crate::agent::context::AuditLedger;
 use crate::agent::path_guard::ensure_allowed_path;
 use crate::agent::types::DispatchResult;
@@ -279,8 +280,8 @@ fn emit_shell_stream(
 ) {
     use tauri::Emitter;
     if let Some(app) = crate::agent::channel::app_handle() {
-        let _ = app.emit(
-            &format!("agent-progress-{}", session_id),
+        let _ = app.emit_agent_progress(
+            &session_id,
             json!({
                 "type": "shell_output_stream",
                 "command": cmd_str,

@@ -4,6 +4,7 @@
 //! 增量同步（新增→spawn、禁用→移除、已有保留），消除每次 spawn 的秒级
 //! 延迟。行为与原 main_loop 内联实现完全一致。
 
+use crate::agent::events::EngineEmit;
 use crate::agent::mcp::{McpClient, PluginRegistry};
 use crate::db::DbState;
 use serde_json::json;
@@ -19,8 +20,8 @@ pub async fn sync_mcp_plugins_for_session(
     workspace_dir: &Path,
     session_id: &str,
 ) -> Result<(), String> {
-    let _ = app.emit(
-        &format!("agent-progress-{}", session_id),
+    let _ = app.emit_agent_progress(
+        &session_id,
         json!({
             "type": "action_phase",
             "phase": "mcp",
@@ -162,8 +163,8 @@ pub async fn sync_mcp_plugins_for_session(
     // release+sha256 校验）后重试 spawn——下载耗时不定，绝不能持锁执行。
     if !uv_deferred.is_empty() {
         let names: Vec<String> = uv_deferred.iter().map(|m| m.config.name.clone()).collect();
-        let _ = app.emit(
-            &format!("agent-progress-{}", session_id),
+        let _ = app.emit_agent_progress(
+            &session_id,
             json!({
                 "type": "action_phase",
                 "phase": "mcp",
@@ -215,8 +216,8 @@ pub async fn sync_mcp_plugins_for_session(
     // node 依赖补装重试：与 uv 块同构——锁外 ensure_node 后补 spawn。
     if !node_deferred.is_empty() {
         let names: Vec<String> = node_deferred.iter().map(|m| m.config.name.clone()).collect();
-        let _ = app.emit(
-            &format!("agent-progress-{}", session_id),
+        let _ = app.emit_agent_progress(
+            &session_id,
             json!({
                 "type": "action_phase",
                 "phase": "mcp",

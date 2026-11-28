@@ -1,4 +1,5 @@
 //! 异步通用委派：父模型可按任务 ID 收发消息，共享工作区支持并行执行。
+use crate::agent::events::EngineEmit;
 use super::*;
 use crate::agent::child_task::{self, TaskBinding};
 
@@ -299,7 +300,8 @@ async fn dispatch_inner(
     let registered_role = if let Some(id) = &registered_id {
         let role = child_task::dispatch::registered_role(ctx.state.inner(), id)?;
         if role.is_none() {
-            let _ = ctx.app.emit(&format!("agent-log-{}", ctx.final_session_id),
+            let _ = ctx.app.emit_agent_log(
+                &ctx.final_session_id,
                 "旧子任务未保存角色快照，本次沿用当前角色配置，无法还原原角色内容。".to_string());
         }
         role
@@ -396,7 +398,7 @@ async fn dispatch_inner(
     if effective_action == "dispatch" && existing.is_none() {
         match crate::commands::child_workflow::path(ctx.app).and_then(|path| child_task::defaults::ChildWorkflowDefaults::load(&path)) {
             Ok(defaults) => params = defaults.apply_after_entry_fallback(&params, implicit_handoff)?,
-            Err(error) => { let _ = ctx.app.emit(&format!("agent-log-{}",ctx.final_session_id),format!("{error}；本次沿用原有派发默认流程。")); }
+            Err(error) => { let _ = ctx.app.emit_agent_log(&ctx.final_session_id,format!("{error}；本次沿用原有派发默认流程。")); }
         }
     }
     let execution = crate::agent::execution::runtime::ExecutionConfig::parse(&params, profile)?;

@@ -1,3 +1,4 @@
+use crate::agent::events::EngineEmit;
 use crate::{
     agent::{
         context::{ChatMessage, SandwichContext},
@@ -452,7 +453,7 @@ pub async fn call_llm(
         if current_try > 1 {
             if let Some(app_handle) = app {
                 use tauri::Emitter;
-                let _ = app_handle.emit(&format!("agent-progress-{}", session_id), json!({
+                let _ = app_handle.emit_agent_progress(&session_id, json!({
                     "type": "review_format_retry_started", "run_id": run_id,
                     "step_id": step_id, "try_index": current_try,
                 }));
@@ -497,8 +498,8 @@ pub async fn call_llm(
                         {
                             last_thinking_emit_at = now;
                             app_handle
-                                .emit(
-                                    &format!("agent-progress-{}", session_id),
+                                .emit_agent_progress(
+                                    &session_id,
                                     json!({
                                         "type": "thinking",
                                         "run_id": run_id,
@@ -523,8 +524,8 @@ pub async fn call_llm(
                             let streaming_summary = streaming_finish_preview(accumulated_content);
 
                             app_handle
-                                .emit(
-                                    &format!("agent-progress-{}", session_id),
+                                .emit_agent_progress(
+                                    &session_id,
                                     json!({
                                         "type": "content_stream",
                                         "run_id": run_id,
@@ -542,8 +543,8 @@ pub async fn call_llm(
                             if let Some(ref summary_text) = streaming_summary {
                                 if !summary_text.is_empty() {
                                     app_handle
-                                        .emit(
-                                            &format!("agent-progress-{}", session_id),
+                                        .emit_agent_progress(
+                                            &session_id,
                                             json!({
                                                 "type": "summary_stream",
                                                 "run_id": run_id,
@@ -663,7 +664,7 @@ pub async fn call_llm(
         println!("{}", token_usage.summary());
         if let Some(app_handle) = app {
             use tauri::Emitter;
-            let _ = app_handle.emit(&format!("agent-progress-{}", session_id), json!({
+            let _ = app_handle.emit_agent_progress(&session_id, json!({
                 "type": "review_request_metrics", "run_id": run_id, "step_id": step_id, "try_index": current_try,
                 "completion_tokens": result.usage.as_ref().map(|usage| usage.completion_tokens),
                 "ttft_ms": result.ttft_ms, "total_duration_ms": result.total_duration_ms,
@@ -687,7 +688,7 @@ pub async fn call_llm(
             Ok(inst) => {
                 if let (Some(app_handle), Some(content)) = (app, streaming_finish_preview(final_json_str)) {
                     use tauri::Emitter;
-                    let _ = app_handle.emit(&format!("agent-progress-{session_id}"), json!({
+                    let _ = app_handle.emit_agent_progress(&session_id, json!({
                         "type": "summary_stream",
                         "run_id": run_id,
                         "step_id": step_id,
@@ -790,8 +791,8 @@ pub async fn call_llm(
 
                 if let Some(app_handle) = app {
                     use tauri::Emitter;
-                    let _ = app_handle.emit(
-                        &format!("agent-progress-{}", session_id),
+                    let _ = app_handle.emit_agent_progress(
+                        &session_id,
                         json!({
                             "type": "llm_parse_error",
                             "run_id": run_id,
@@ -804,8 +805,8 @@ pub async fn call_llm(
                             "thinking_text": &result.thinking_text,
                         }),
                     );
-                    let _ = app_handle.emit(
-                        &format!("agent-log-{}", session_id),
+                    let _ = app_handle.emit_agent_log(
+                        &session_id,
                         format!(
                             "⚠️ [模型响应异常·第{}次尝试] {}（原始响应已归档）",
                             current_try, e

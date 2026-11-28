@@ -1,3 +1,4 @@
+use crate::agent::events::EngineEmit;
 use super::finish_diff::evaluate_finish_diff_single;
 use super::*;
 
@@ -77,7 +78,7 @@ pub(super) async fn evaluate_committee<R: tauri::Runtime>(
     }
     let interrupt_generation = *interrupt_rx.borrow();
     let verification_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
-    let _ = app.emit(&format!("agent-log-{session_id}"), format!(
+    let _ = app.emit_agent_log(&session_id, format!(
         "多人终审本轮选择 {} 位候选：{}。各角色独立核验；模型可能相同，实际有效结论数量在最终回执披露。",
         cards.len(),cards.iter().map(|c|c.label.as_str()).collect::<Vec<_>>().join("、")));
     let mut futures = Vec::new();

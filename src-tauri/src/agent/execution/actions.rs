@@ -1,5 +1,6 @@
 //! Action-based profiles for the shared executor. A capability controls the real
 //! dispatcher; neither a persona nor a peer message can grant another capability.
+use crate::agent::events::EngineEmit;
 use super::run;
 use crate::agent::child_writer::WriteBaseline;
 use crate::db::DbState;
@@ -288,7 +289,7 @@ async fn turn(mut s: Session, started: Instant) -> ControlFlow<Session, Session>
     };
     let mut on_event = |event: llm::StreamEvent<'_>| {
         if let (Some(app), llm::StreamEvent::Thinking { chunk, .. }) = (&s.app, event) {
-            let _ = app.emit(&format!("agent-progress-{}", s.parent_session), json!({
+            let _ = app.emit_agent_progress(&s.parent_session, json!({
                 "type":format!("child_{}_stream", s.profile.kind), "stream_type":"thinking", "chunk":chunk,
                 "child_run_id":s.child_run, "model":config.model_name }));
         }
@@ -403,8 +404,8 @@ async fn apply_action(
         return s.end("succeeded", None);
     }
     if let Some(app) = &s.app {
-        let _ = app.emit(
-            &format!("agent-progress-{}", s.parent_session),
+        let _ = app.emit_agent_progress(
+            &s.parent_session,
             json!({
             "type":format!("child_{}_action", s.profile.kind), "child_run_id":s.child_run,
             "step":s.output.steps_used, "action":parsed.action, "intent":parsed.intent,

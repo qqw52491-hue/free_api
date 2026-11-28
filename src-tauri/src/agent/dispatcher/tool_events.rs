@@ -1,5 +1,6 @@
 //! Agent 工具事件结构与前端事件推送。
 
+use crate::agent::events::EngineEmit;
 use crate::agent::mcp::PluginRegistry;
 use crate::agent::mcp_catalog::invalidate_plugin;
 use crate::agent::plan_tree_dispatch::{
@@ -83,6 +84,6 @@ pub fn emit_tool_event(
             })
             .cloned(),
     };
-    let _ = app.emit(&format!("agent-tool-event-{}", session_id), payload);
+    let _ = app.emit_agent_tool_event(session_id, payload);
 }
 

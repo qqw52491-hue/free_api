@@ -2,6 +2,7 @@
 
 //! 子 Agent 派发臂：child_reviewer / child_writer / child_worker / resume_child。
 
+use crate::agent::events::EngineEmit;
 use crate::agent::checkpoint::{save_checkpoint, AgentCheckpoint};
 use crate::agent::child_reviewer::result_as_dispatch_output;
 use crate::agent::context::resource_scope::ResourceOperation;
@@ -130,8 +131,8 @@ pub(super) async fn dispatch_resume_child(
                                 ctx.checkpoint, ctx.interrupt_rx.clone(),
                                 Some(std::sync::Arc::new({
                                     let app = ctx.app.clone();
-                                    let channel = format!("agent-progress-{}", ctx.final_session_id);
-                                    move |event| { let _ = app.emit(&channel, event); }
+                                    let session = ctx.final_session_id.to_string();
+                                    move |event| { let _ = app.emit_agent_progress(&session, event); }
                                 })),
                                 Some(ctx.app.clone()),
                             ) {
@@ -212,8 +213,8 @@ pub(super) async fn dispatch_resume_child(
                                             crate::agent::eval_oracle::query_active_progress().await
                                         {
                                             if let Some(note) = ctx.checkpoint.clear_stale_stage_blockers(idx as u32) {
-                                                let _ = ctx.app.emit(
-                                                    &format!("agent-log-{}", ctx.final_session_id),
+                                                let _ = ctx.app.emit_agent_log(
+                                                    &ctx.final_session_id,
                                                     note,
                                                 );
                                             }

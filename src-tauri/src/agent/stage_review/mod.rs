@@ -6,6 +6,7 @@
 //! resume_child 对质撤回；blocking_if_final 只记账带入收尾审查。
 //! 基础设施失败（超时/取消）不烧预算且该阶段视为「未审」——计数不清零，会重新触发。
 
+use crate::agent::events::EngineEmit;
 use crate::agent::checkpoint::{AgentCheckpoint, PlanExecutionMode, MAX_STAGE_REVIEWS};
 use crate::agent::context::SandwichContext;
 use crate::agent::router::{self, AgentRouter, ModelRoutingConfig};
@@ -342,7 +343,7 @@ pub async fn dispatch(
         role_cards, model_routing.stage_reviewer_override.as_deref(),
     )?;
     for notice in notices {
-        let _ = app.emit(&format!("agent-log-{session_id}"), notice);
+        let _ = app.emit_agent_log(&session_id, notice);
     }
     let routing = AgentRouter::route_for_role(
         context,
@@ -418,8 +419,8 @@ pub async fn dispatch(
         record_stage_dispatch(checkpoint, context, &stage_batch_id, &child_run_id, &envelope);
 
         let note_text = cross_family_note.map(|n| format!(":{}", n)).unwrap_or_default();
-        let _ = app.emit(
-            &format!("agent-log-{}", session_id),
+        let _ = app.emit_agent_log(
+            &session_id,
             format!("📋 阶段审查已派发 ({}){}", child_run_id, note_text),
         );
         return Ok(());
@@ -451,7 +452,7 @@ pub async fn dispatch(
             }
         };
         if let Err(note) = crate::agent::review_control::ensure_allowed(db, session_id, &model_to_use) {
-            let _ = app.emit(&format!("agent-log-{session_id}"), format!("{}：{note}", card.label));
+            let _ = app.emit_agent_log(&session_id, format!("{}：{note}", card.label));
             continue;
         }
 
@@ -488,7 +489,7 @@ pub async fn dispatch(
         let params = match crate::agent::tools::role_manager::merge_execution_defaults_for_card(&params, Some("reviewer"), card) {
             Ok(params) => params,
             Err(error) => {
-                let _ = app.emit(&format!("agent-log-{session_id}"), format!("{} 的角色配置无效：{error}", card.label));
+                let _ = app.emit_agent_log(&session_id, format!("{} 的角色配置无效：{error}", card.label));
                 continue;
             }
         };
@@ -518,7 +519,7 @@ pub async fn dispatch(
             Ok(id) => id,
             Err(error) => {
                 let notice = format!("{} 未启动：{error}", card.label);
-                let _ = app.emit(&format!("agent-log-{session_id}"), &notice);
+                let _ = app.emit_agent_log(&session_id, &notice);
                 launch_failures.push(notice);
                 continue;
             }
@@ -526,8 +527,8 @@ pub async fn dispatch(
         record_stage_dispatch(checkpoint, context, &stage_batch_id, &child_run_id, &envelope);
         dispatched_run_ids.push(child_run_id.clone());
 
-        let _ = app.emit(
-            &format!("agent-log-{}", session_id),
+        let _ = app.emit_agent_log(
+            &session_id,
             format!("📋 阶段审查已派发 ({}) (挂载专家: {})", child_run_id, card.label),
         );
     }
@@ -539,8 +540,8 @@ pub async fn dispatch(
     }
 
     if dispatched_run_ids.len() > 1 {
-        let _ = app.emit(
-            &format!("agent-log-{}", session_id),
+        let _ = app.emit_agent_log(
+            &session_id,
             format!("👥 联合会审已启动：共唤起 {} 位审查专家并发把关", dispatched_run_ids.len()),
         );
     }
