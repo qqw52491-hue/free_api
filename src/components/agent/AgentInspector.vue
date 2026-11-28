@@ -86,7 +86,7 @@
         <!-- 模式 B：标准调用详情与执行状态模式 (专注思维链、参数、报错与上下文) -->
         <template v-else>
             <!-- 🌟 0. 顶置 Agent 协同导航栏 (仅当有子 Agent 参与协同或派发时出现，置于第一行，永远在右侧最顶部) -->
-            <div v-if="displayedWorkersList.length > 0" class="inspector-global-agent-nav">
+            <div v-if="activeTab !== 'team' && displayedWorkersList.length > 0" class="inspector-global-agent-nav">
                 <nav class="agent-nav-scroll-list">
                     <!-- 👑 主调度 Master -->
                     <button
@@ -94,7 +94,7 @@
                         class="agent-nav-pill"
                         :class="{ active: selectedAgentId === 'master', 'is-running': teamState?.masterStatus === 'running' }"
                         title="查看主调度全局运行详情、参数与思维链"
-                        @click="selectedAgentId = 'master'"
+                        @click="switchTab('detail')"
                     >
                         <span class="pill-icon">👑</span>
                         <span class="pill-label">主调度</span>
@@ -109,12 +109,12 @@
                         class="agent-nav-pill"
                         :class="{ active: selectedAgentId === worker.id, 'is-running': worker.status === 'running' }"
                         :title="worker.name"
-                        @click="selectedAgentId = worker.id"
+                        @click="selectWorker(worker.id)"
                     >
                         <span class="pill-icon">{{ getRoleIcon(worker.role) }}</span>
                         <span class="pill-label">{{ formatWorkerName(worker.name) }}</span>
                         <span class="pill-status-badge" :class="`status-${worker.status}`">
-                            {{ worker.status === 'succeeded' ? '完成' : (worker.status === 'running' ? `${worker.progress}%` : workerStatusText(worker.status)) }}
+                            {{ worker.waitingForHuman ? '等待回答' : workerStatusText(worker.status) }}
                         </span>
                     </button>
                 </nav>
@@ -127,16 +127,18 @@
             </div>
 
             <!-- 🌟 当选中的是子 Agent 时：覆盖右侧，直接全高展示该子 Agent 专属流程工作台 -->
-            <section v-if="selectedAgentId !== 'master'" class="inspector-scroll dedicated-worker-pane">
+            <section v-if="activeTab === 'team'" class="inspector-scroll team-pane">
+                <div class="team-toolbar">
+                    <button type="button" @click="switchTab('detail')">返回执行详情</button>
+                    <button type="button" @click="$emit('close')">收起面板</button>
+                </div>
                 <AgentTeamDeck
                     :team-state="teamState"
                     :steps="steps"
-                    :selected-step="selectedStep"
+                    :selected-step="teamStep"
                     :current-goal="currentGoal"
                     :active-worker-id="selectedAgentId"
-                    :hide-top-tab-bar="true"
-                    :only-active="false"
-                    @clear-selected-step="$emit('select-step', '')"
+                    @clear-selected-step="clearTeamStep"
                     @open-diff="$emit('open-diff', $event)"
                     @select-worker="selectedAgentId = $event"
                 />
@@ -193,7 +195,7 @@
                         <span v-if="diffStatsBadge.deletions > 0" class="stat-del">−{{ diffStatsBadge.deletions }}</span>
                     </span>
                 </button>
-                <button type="button" :class="{ active: activeTab === 'team' }" @click="activeTab = 'team'">
+                <button type="button" @click="switchTab('team')">
                     团队协作
                     <i v-if="teamState?.workers?.length">({{ teamState.workers.length }})</i>
                     <span v-else-if="teamState && teamState.activeWorkerCount > 0" class="team-tab-pulse"></span>
@@ -561,19 +563,6 @@
                 </div>
             </section>
 
-            <!-- 3. 团队协作 Tab (有选中步骤时展示该步骤派发的全部子任务，未选步骤时展示实时活跃任务) -->
-            <section v-else-if="activeTab === 'team'" class="inspector-scroll team-pane">
-                <AgentTeamDeck
-                    :team-state="teamState"
-                    :steps="steps"
-                    :selected-step="selectedStep"
-                    :current-goal="currentGoal"
-                    :only-active="!selectedStep"
-                    @clear-selected-step="$emit('select-step', '')"
-                    @open-diff="$emit('open-diff', $event)"
-                />
-            </section>
-
             <!-- 4. 资源 Tab -->
             <section v-else-if="activeTab === 'resources'" class="inspector-scroll resources-pane">
                 <div class="resources-heading">
@@ -644,6 +633,7 @@ const props = withDefaults(
         failedToolCount: number;
         steps?: AgentStepItem[];
         selectedStep: AgentStepItem | null;
+        teamStep?: AgentStepItem | null;
         selectedSubpart: "thought" | "tool" | null;
         selectedHuman: AgentHumanIntervention | null;
         selectedActiveThought: boolean;
@@ -678,62 +668,20 @@ const emit = defineEmits<{
     "agent-submit": [data: any];
     "agent-cancel": [reason: string];
     "select-step": [id: string];
+    "clear-team-step": [];
     "open-diff": [diffPayload: any];
     "close": [];
 }>();
 
-const currentStepSubagents = computed(() => {
-    return extractSubagentsFromStep(props.selectedStep, props.steps, props.teamState?.workers || []);
-});
-
-const selectedAgentId = ref<string>("master");
-// immediate 监听可能在首次挂载时就读取页签，须先完成初始化。
+const selectedAgentId = ref("master");
 const activeTab = ref<"preview" | "detail" | "diff" | "team" | "context" | "resources">("detail");
+const displayedWorkersList = computed(() => props.teamState?.workers || []);
+const currentStepSubagents = computed(() => extractSubagentsFromStep(props.selectedStep, props.steps, displayedWorkersList.value));
 
-const displayedWorkersList = computed(() => {
-    if (props.selectedStep) {
-        return currentStepSubagents.value;
-    }
-    return props.teamState?.workers || [];
-});
-
-// 🌟 步骤选择监听：
-// 当点击普通步骤时 -> 必须回到主调度视图，展示该步骤本身的详细调用详情 (参数、输出、错误、思维链)
-// 只有当点击子任务派发步骤时 -> 才切到对应子 Agent 专属流程！
-watch(
-    () => props.selectedStep ? (props.selectedStep.id || String(props.selectedStep.stepId)) : null,
-    (stepIdentifier) => {
-        if (!stepIdentifier) {
-            return;
-        }
-        if (currentStepSubagents.value.length > 0) {
-            // 点击的是派发了子任务的步骤（例如子审查派发或 wait_jobs）-> 切到子 Agent 视图
-            selectedAgentId.value = currentStepSubagents.value[0].id;
-        } else {
-            // 🌟 点击普通步骤（如读取、终端、修改、检索）：右侧绝对展示该步骤原本的调用详情！
-            selectedAgentId.value = "master";
-            if (activeTab.value === "team") {
-                activeTab.value = "detail";
-            }
-        }
-    },
-    { immediate: true }
-);
-
-watch(
-    () => displayedWorkersList.value.map(w => `${w.id}:${w.status}`).join(','),
-    () => {
-        const workers = displayedWorkersList.value;
-        if (workers.length > 0 && selectedAgentId.value !== 'master') {
-            const exists = workers.some(w => w.id === selectedAgentId.value);
-            if (!exists) {
-                selectedAgentId.value = "master";
-            }
-        } else if (workers.length === 0) {
-            selectedAgentId.value = "master";
-        }
-    }
-);
+function clearTeamStep() {
+    selectedAgentId.value = "master";
+    emit("clear-team-step");
+}
 
 const customDiffPayload = ref<FileDiffPayload | null>(null);
 
@@ -805,14 +753,7 @@ function switchTab(tab: "preview" | "detail" | "diff" | "team" | "context" | "re
     if (tab !== "diff") {
         customDiffPayload.value = null;
     }
-    if (tab === "team") {
-        if (displayedWorkersList.value.length > 0) {
-            const running = displayedWorkersList.value.find(w => w.status === "running");
-            selectedAgentId.value = running ? running.id : displayedWorkersList.value[0].id;
-        }
-    } else {
-        selectedAgentId.value = "master";
-    }
+    selectedAgentId.value = "master";
 }
 
 function openDiff(payload: FileDiffPayload) {
@@ -1266,6 +1207,17 @@ function statusLabel(status: AgentToolStatus) { return { pending: "等待", runn
 </script>
 
 <style scoped>
+.team-toolbar { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 9px; }
+.team-toolbar button {
+    padding: 5px 8px;
+    border: 1px solid rgba(var(--theme-foreground-rgb), .15);
+    border-radius: 5px;
+    color: var(--theme-text-secondary, #a4a9b5);
+    background: var(--theme-bg-raised, #20232a);
+    cursor: pointer;
+}
+.team-toolbar button:hover { color: var(--theme-text-primary, #f3f4f6); }
+
 .manus-inspector {
     display: flex;
     min-width: 0;

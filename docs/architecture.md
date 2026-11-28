@@ -64,7 +64,7 @@
 | 角色 | 执行方式 | 回收与核对 |
 | --- | --- | --- |
 | Worker | 独立上下文中的只读任务 | 返回结论和证据供主 Agent 判断 |
-| Writer | 在隔离副本中修改与验证 | 合入前核对文件指纹和冲突，合入后验证实际工作区 |
+| Writer | 普通写入角色走通用子任务执行器。旧隔离 Writer 记录可续接 | 使用当前角色和工作区约束核对回执。外部进程的隔离与权限需要独立实现 |
 | Reviewer | 基于材料与取证工具独立审查 | 保留具体发现、修订要求与当前有效意见 |
 
 `job_engine` 与 `wait_jobs` 管理在途任务和结果，角色卡提供模型、职责、范围及可选结构化契约。多人审查的历史回执与当前有效发现分开处理，单个成员的晚到意见不能简单覆盖其他成员的有效阻塞。
@@ -97,6 +97,7 @@
 | [`src-tauri/src/db/`](../src-tauri/src/db/) | SQLite schema、迁移与数据维护 |
 | [`src-tauri/src/commands/`](../src-tauri/src/commands/) | 桌面前端调用的宿主接口 |
 | [`src-tauri/src/agent/channel/`](../src-tauri/src/agent/channel/) | HTTP、移动端和桥接通道 |
+| [`src-tauri/src/acp/`](../src-tauri/src/acp/) | 本机 ACP 子进程入口，复用桌面任务执行与数据库。参见 [ACP 接入](ACP_INTEGRATION_PLAN.md) |
 | [`src-tauri/src/agent/mcp/`](../src-tauri/src/agent/mcp/) | MCP 连接、工具目录与会话引导 |
 | [`src-tauri/prompts/`](../src-tauri/prompts/) | 核心提示词、工具手册与内置技能 |
 | [`plugins/`](../plugins/) | MCP 配置目录 |

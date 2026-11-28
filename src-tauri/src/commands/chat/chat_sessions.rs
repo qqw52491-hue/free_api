@@ -13,14 +13,21 @@ use super::*;
 
 // ==================== SESSION COMMANDS ====================
 
+#[derive(Serialize)]
+pub struct SessionListEntry {
+    #[serde(flatten)]
+    pub session: ChatSession,
+    pub project_id: Option<String>,
+}
+
 #[tauri::command]
-pub async fn get_sessions(state: State<'_, DbState>) -> Result<Vec<ChatSession>, String> {
+pub async fn get_sessions(state: State<'_, DbState>) -> Result<Vec<SessionListEntry>, String> {
     let conn = state.reader()?;
     // Shared executors store an internal session for any registered child,
     // including Reviewers. Match the registered identity, regardless of kind.
     let mut stmt = conn.prepare(
-        "SELECT s.id, s.title, s.model_id, s.created_at, s.updated_at, s.message_count
-         FROM chat_sessions s
+        "SELECT s.id, s.title, s.model_id, s.created_at, s.updated_at, s.message_count, ps.project_id
+         FROM chat_sessions s LEFT JOIN agent_project_sessions ps ON ps.session_id = s.id
          WHERE NOT EXISTS (
              SELECT 1 FROM agent_child_runs c
              WHERE c.id = substr(s.id, 6) AND s.id = 'task-' || c.id
@@ -29,13 +36,16 @@ pub async fn get_sessions(state: State<'_, DbState>) -> Result<Vec<ChatSession>,
     ).map_err(|e| e.to_string())?;
     let list = stmt
         .query_map([], |row| {
-            Ok(ChatSession {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                model_id: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-                message_count: row.get(5)?,
+            Ok(SessionListEntry {
+                session: ChatSession {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    model_id: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    message_count: row.get(5)?,
+                },
+                project_id: row.get(6)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -189,7 +199,7 @@ mod tests {
         app.manage(db.clone());
 
         let sessions = get_sessions(app.state::<DbState>()).await.unwrap();
-        let visible_ids: Vec<_> = sessions.iter().map(|session| session.id.as_str()).collect();
+        let visible_ids: Vec<_> = sessions.iter().map(|entry| entry.session.id.as_str()).collect();
         assert_eq!(visible_ids, ["task-unregistered", "chat-review-run", "parent"]);
 
         let conn = db.0.lock().unwrap();

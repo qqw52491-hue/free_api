@@ -28,6 +28,7 @@ const REJECT_TEXT: &str = "【方案打回修改】请重新审视并按以下�
 struct Slot {
     /// 上一轮以普通提问结束，桌面端任务仍在等回答。
     awaiting_answer: Option<(String, String)>,
+    tracked_run: Option<String>,
     busy: bool,
     cancel: Option<watch::Sender<bool>>,
     ignored_mcp: usize,
@@ -171,10 +172,11 @@ impl Bridge {
         mut cancel_rx: watch::Receiver<bool>,
     ) -> Result<StopReason, String> {
         let desktop = Desktop::from_env()?;
-        let (awaiting, ignored) = self
+        let (awaiting, tracked_run, ignored) = self
             .slot(sid, |s| {
                 (
                     s.awaiting_answer.clone(),
+                    s.tracked_run.clone(),
                     std::mem::take(&mut s.ignored_mcp),
                 )
             })
@@ -185,10 +187,10 @@ impl Bridge {
             )));
         }
         // 先订阅事件流，再派任务/送回答，起始事件不会漏。
-        let mut stream = tokio::select! {
+        let stream = tokio::select! {
             biased;
             _ = cancel_rx.changed() => return Ok(StopReason::Cancelled),
-            stream = desktop.open_stream(sid) => stream.map_err(|e| e.to_string())?,
+            stream = desktop.open_stream(sid, self.verbose) => stream.map_err(|e| e.to_string())?,
         };
         if *cancel_rx.borrow() {
             return Ok(StopReason::Cancelled);
@@ -213,6 +215,13 @@ impl Bridge {
                 Err(error) => return Err(error.to_string()),
             }
             run
+        } else if let Some(run) = tracked_run {
+            send(
+                cx,
+                sid,
+                message("正在接回上一次运行。本条消息未另行派发。\n"),
+            );
+            run
         } else {
             desktop
                 .start_task(sid, goal, self.plan_mode.as_deref())
@@ -220,50 +229,100 @@ impl Bridge {
                 .map_err(|e| e.to_string())?
         };
 
+        self.slot(sid, |slot| slot.tracked_run = Some(run_id.clone()));
         let mut mapper = Mapper::new(&run_id, self.verbose);
+        let mut stream = Some(stream);
+        let mut reconnect = None;
+        let mut status_request = None;
+        let mut cancel_request = None;
         let mut cancelling = false;
         let mut deadline: Option<tokio::time::Instant> = None;
         let mut seen_wait = None;
+        let mut status_failures = 0;
+        let mut tracking_gap = false;
         let mut poll = tokio::time::interval(Duration::from_secs(2));
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         poll.tick().await;
         loop {
+            if stream.is_none() && reconnect.is_none() {
+                reconnect = Some(Box::pin(async {
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    desktop.open_stream(sid, self.verbose).await
+                }));
+            }
             let grace = async {
                 match deadline {
                     Some(at) => tokio::time::sleep_until(at).await,
                     None => std::future::pending::<()>().await,
                 }
             };
+            // Keep each I/O future alive across select iterations. A slow
+            // status response cannot delay delivery of cancel or stream updates.
             let steps = tokio::select! {
-                event = stream.next() => {
-                    let (channel, payload) = match event {
-                        Some(Ok(event)) => event,
-                        Some(Err(error)) => {
-                            send(cx, sid, message(format!("\n⚠️ 与桌面版的事件连接出错（{error}），任务可能仍在桌面端运行。\n")));
-                            return Err("桌面事件流读取失败，未确认任务终态".into());
-                        }
-                        None => {
-                            send(cx, sid, message("\n⚠️ 与桌面版的事件连接已断开，任务可能仍在桌面端运行，可在桌面端查看。\n"));
-                            return Err("桌面事件流已断开，未确认任务终态".into());
-                        }
-                    };
-                    mapper.handle(&channel, &payload)
-                }
                 _ = cancel_rx.changed(), if !cancelling => {
                     cancelling = true;
                     deadline = Some(tokio::time::Instant::now() + CANCEL_GRACE);
-                    request_cancel(&desktop, cx, sid, &run_id).await;
+                    cancel_request = Some(Box::pin(request_cancel(&desktop, cx, sid, &run_id)));
+                    continue;
+                }
+                _ = async { cancel_request.as_mut().unwrap().await }, if cancel_request.is_some() => {
+                    cancel_request = None;
                     continue;
                 }
                 _ = grace, if cancelling => {
                     send(cx, sid, message("\nACP 已结束本轮，桌面端的停止状态尚未确认。\n"));
                     return Ok(StopReason::Cancelled);
                 }
-                _ = poll.tick() => match desktop.run_record(&run_id).await {
-                    Ok(record) => record_steps(&record),
-                    Err(DesktopError::Rejected { status: 404, .. }) => return Err("桌面版已无法查到本轮运行，请查看桌面会话".into()),
-                    Err(_) => continue,
-                },
+                event = async { stream.as_mut().unwrap().next().await }, if stream.is_some() => {
+                    match event {
+                        Some(Ok((channel, payload))) => {
+                            tracking_gap = false;
+                            mapper.handle(&channel, &payload)
+                        }
+                        Some(Err(_)) | None => {
+                            if !tracking_gap {
+                                send(cx, sid, thought("桌面进度流暂时断开，正在跟踪原任务。断线期间的细节可能缺失。\n"));
+                            }
+                            tracking_gap = true;
+                            stream = None;
+                            poll.reset_immediately();
+                            continue;
+                        }
+                    }
+                }
+                connection = async { reconnect.as_mut().unwrap().await }, if reconnect.is_some() => {
+                    reconnect = None;
+                    if let Ok(connection) = connection {
+                        stream = Some(connection);
+                    }
+                    continue;
+                }
+                _ = poll.tick(), if status_request.is_none() => {
+                    status_request = Some(Box::pin(desktop.run_record(&run_id)));
+                    continue;
+                }
+                record = async { status_request.as_mut().unwrap().await }, if status_request.is_some() => {
+                    status_request = None;
+                    match record {
+                        Ok(record) => {
+                            status_failures = 0;
+                            record_steps(&record)
+                        }
+                        Err(DesktopError::Rejected { status: 404, .. }) => {
+                            self.slot(sid, |slot| slot.tracked_run = None);
+                            return Err("桌面端已无法查到原运行，本轮未重新派发。".into());
+                        }
+                        Err(_) => {
+                            if stream.is_none() {
+                                status_failures += 1;
+                                if status_failures >= 3 && !cancelling {
+                                    return Err("暂时无法跟踪桌面任务。下一条提示可重新连接到这次运行。".into());
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                }
             };
             for step in steps {
                 match step {
@@ -279,6 +338,7 @@ impl Bridge {
                         state,
                         message: reason,
                     } => {
+                        self.slot(sid, |slot| slot.tracked_run = None);
                         return Ok(self
                             .finish(
                                 &desktop,
@@ -319,7 +379,8 @@ impl Bridge {
                             Pause::Cancel => {
                                 cancelling = true;
                                 deadline = Some(tokio::time::Instant::now() + CANCEL_GRACE);
-                                request_cancel(&desktop, cx, sid, &run_id).await;
+                                cancel_request =
+                                    Some(Box::pin(request_cancel(&desktop, cx, sid, &run_id)));
                             }
                         }
                     }
@@ -372,26 +433,13 @@ impl Bridge {
                 }
             }
             _ => {
-                let streamed = mapper.summary_text.trim().to_string();
                 match field("result") {
-                    Some(result) => {
-                        let result = result.trim();
-                        if streamed.is_empty() {
-                            send(cx, sid, message(result.to_string()));
-                        } else if result != streamed {
-                            match result.strip_prefix(streamed.as_str()) {
-                                Some(rest) if rest.trim().is_empty() => {}
-                                Some(rest) => send(cx, sid, message(rest.to_string())),
-                                None => send(cx, sid, message(format!("\n\n{result}"))),
-                            }
-                        }
-                    }
-                    None if streamed.is_empty() => send(
+                    Some(result) => send(cx, sid, message(result)),
+                    None => send(
                         cx,
                         sid,
                         message("任务已结束。未取得桌面端的交付正文，可在桌面会话查看。"),
                     ),
-                    None => {}
                 }
                 if cancelling {
                     StopReason::Cancelled
@@ -460,6 +508,7 @@ impl Bridge {
         let permission = cx.send_request(request).block_task();
         tokio::pin!(permission);
         let mut poll = tokio::time::interval(Duration::from_secs(2));
+        let mut status_request = None;
         let response = loop {
             tokio::select! {
                 biased;
@@ -468,8 +517,12 @@ impl Bridge {
                     return Ok(Pause::Cancel);
                 }
                 response = &mut permission => break response,
-                _ = poll.tick() => {
-                    if let Ok(record) = desktop.run_record(run_id).await {
+                _ = poll.tick(), if status_request.is_none() => {
+                    status_request = Some(Box::pin(desktop.run_record(run_id)));
+                }
+                record = async { status_request.as_mut().unwrap().await }, if status_request.is_some() => {
+                    status_request = None;
+                    if let Ok(record) = record {
                         if record.get("wait_id").and_then(Value::as_str) != Some(wait_id) {
                             finish_approval(cx, sid, call_id, ToolCallStatus::Failed);
                             return Ok(Pause::Continue);

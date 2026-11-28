@@ -481,6 +481,9 @@ export interface ContractSchema {
 
 export interface AgentWorkerItem {
     id: string;
+    /** null means the main run is the recorded parent. */
+    parentWorkerId?: string | null;
+    waitingForHuman?: boolean;
     name: string;
     role: "reviewer" | "coder" | "researcher" | "master" | "worker";
     roleLabel: string;

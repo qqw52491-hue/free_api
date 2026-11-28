@@ -1,5 +1,5 @@
 <template>
-    <div class="agent-stream-shell">
+    <div class="agent-stream-shell" @click.capture="stopSelectionClick">
         <AgentQuestionNav :marks="questionMarks" :active-id="activeQuestionId" @select="jumpToQuestion" />
     <div ref="streamElement" class="process-tree" :class="{ 'is-running': isRunning }" aria-label="Agent 分层执行过程" @scroll.passive="onStreamScroll">
         <div class="stream-sticky-actions">
@@ -1392,6 +1392,7 @@
     </div>
 </template>
 <script setup lang="ts">
+import { stopSelectionClick } from "../../utils/selection";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowReactive, watch, type ComputedRef } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { copyPlainText } from "../../utils/clipboard";

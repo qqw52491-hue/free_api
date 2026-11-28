@@ -122,6 +122,8 @@ pub(crate) async fn handler_session(
         }
     }
     .map_err(|e| bad_request(&e))?;
+    drop(conn);
+    notify_session_event(&session.id, "created");
     Ok(Json(json!({
         "session_id": session.id,
         "title": session.title,

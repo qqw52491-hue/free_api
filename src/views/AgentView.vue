@@ -340,6 +340,7 @@ import ThemeToggle from "../components/common/ThemeToggle.vue";
 import ProjectSidebarTree, { type AgentProject, type TreeSessionItem } from "../components/ProjectSidebarTree.vue";
 import ProjectWorkspace from "../components/ProjectWorkspace.vue";
 import { useGlobalFileDrop, type DraggedPathItem } from "../composables/useGlobalFileDrop";
+import { createSerialRefresher } from "../components/agent/delegatedTaskState";
 
 const ApiManager = defineAsyncComponent(() => import("./ApiManager.vue"));
 const PluginView = defineAsyncComponent(() => import("./PluginView.vue"));
@@ -349,7 +350,7 @@ const ChildWorkflowView = defineAsyncComponent(() => import("./ChildWorkflowView
 const RoleManagerView = defineAsyncComponent(() => import("./RoleManagerView.vue"));
 
 interface ModelOption { id: string; name: string; display_name: string; platform_id: string; platform_name: string; }
-interface ChatSessionRow { id: string; title: string; model_id: string; created_at: string; updated_at: string; message_count: number; }
+interface ChatSessionRow { id: string; title: string; model_id: string; created_at: string; updated_at: string; message_count: number; project_id?: string | null; }
 interface TabInfo { uid: string; id: string; label: string; running: boolean; projectId?: string; isDraft?: boolean; }
 interface FloatingToast { id: number; text: string; type: "success" | "info" | "warning"; }
 
@@ -449,19 +450,9 @@ const { isDraggingOver } = useGlobalFileDrop({
 
 // 独立会话列表过滤：只保留未与任何项目绑定的独立任务
 const independentTabs = computed(() => {
-    const projectSessionIds = new Set<string>();
-    if (projectTreeRef.value?.projectSessionsMap) {
-        for (const sessions of Object.values(projectTreeRef.value.projectSessionsMap)) {
-            if (Array.isArray(sessions)) {
-                for (const s of sessions) {
-                    projectSessionIds.add(s.id);
-                }
-            }
-        }
-    }
     const query = taskSearchQuery.value.trim().toLowerCase();
     return tabs.value.filter((tab) => {
-        if (tab.projectId || projectSessionIds.has(tab.id)) return false;
+        if (tab.projectId) return false;
         if (!query) return true;
         return tab.label.toLowerCase().includes(query) || tab.id.toLowerCase().includes(query);
     });
@@ -473,7 +464,7 @@ function asTab(session: ChatSessionRow, projectId?: string): TabInfo {
         id: session.id,
         label: session.title || "未命名对话",
         running: false,
-        projectId,
+        projectId: projectId ?? session.project_id ?? undefined,
         isDraft: false
     };
 }
@@ -750,6 +741,7 @@ async function loadSessions() {
         for (const s of sessions) {
             const existing = existingMap.get(s.id);
             if (existing) {
+                if (s.project_id !== undefined) existing.projectId = s.project_id ?? undefined;
                 if (s.title && s.title !== existing.label && !existing.label.includes("…")) {
                     existing.label = s.title;
                 }
@@ -815,51 +807,102 @@ async function updateTabTitle(id: string, newTitle: string) {
     projectTreeRef.value?.refreshProjects();
 }
 
-let unlistenRunStarted: UnlistenFn | null = null;
-let unlistenRunDone: UnlistenFn | null = null;
-let sidebarPollTimer: number | null = null;
+let unlistenRunStarted: UnlistenFn | undefined;
+let unlistenRunDone: UnlistenFn | undefined;
+let unlistenSessionChanged: UnlistenFn | undefined;
+let sidebarPollTimer: number | undefined;
+let sidebarDebounce: number | undefined;
+let mounted = true;
+const changedSessions = new Set<string>();
+const channelRuns = new Map<string, string>();
 
-onMounted(async () => {
-    await loadAllModels();
-    try {
-        await loadSessions();
-    } catch {
-        tabs.value = [];
-        createNewTask();
+const refreshSidebar = createSerialRefresher(async () => {
+    if (!mounted) return;
+    const ids = [...changedSessions];
+    changedSessions.clear();
+    const projectIds = new Set<string>();
+    for (const tab of tabs.value) {
+        if (tab.projectId && ids.includes(tab.id)) projectIds.add(tab.projectId);
     }
-
-    // 监听手机 / 微信 / 远程发起的任务启动和结束，实时刷新桌面端侧边栏任务与项目列表
-    try {
-        unlistenRunStarted = await listen<{ session_id: string; run_id: string }>("channel-run-started", async (event) => {
-            await loadSessions();
-            projectTreeRef.value?.refreshProjects();
-            if (event.payload?.session_id) {
-                const tab = tabs.value.find((t) => t.id === event.payload.session_id);
-                if (tab) tab.running = true;
-            }
-        });
-        unlistenRunDone = await listen<{ session_id: string }>("channel-run-done", async (event) => {
-            await loadSessions();
-            projectTreeRef.value?.refreshProjects();
-            if (event.payload?.session_id) {
-                const tab = tabs.value.find((t) => t.id === event.payload.session_id);
-                if (tab) tab.running = false;
-            }
-        });
-    } catch {}
-
-    // 3 秒轻量轮询，确保在任意远程操作后桌面侧栏列表秒级自动同步
-    sidebarPollTimer = window.setInterval(async () => {
-        if (document.hidden) return;
-        await loadSessions();
-        projectTreeRef.value?.refreshProjects();
-    }, 3000);
+    await loadSessions();
+    if (!mounted) return;
+    for (const id of ids) {
+        const tab = tabs.value.find(item => item.id === id);
+        if (tab?.projectId) projectIds.add(tab.projectId);
+        if (tab && channelRuns.has(id)) tab.running = true;
+    }
+    await Promise.all([
+        projectTreeRef.value?.refreshProjects(false),
+        projectTreeRef.value?.refreshProjectSessions(projectIds),
+    ]);
 });
 
+function scheduleSidebarRefresh(sessionId: string) {
+    if (!mounted) return;
+    changedSessions.add(sessionId);
+    if (sidebarDebounce !== undefined) return;
+    sidebarDebounce = window.setTimeout(() => {
+        sidebarDebounce = undefined;
+        void refreshSidebar.request();
+    }, 80);
+}
+
+onMounted(async () => {
+    try {
+        unlistenRunStarted = await listen<{ session_id: string; run_id: string }>("channel-run-started", ({ payload }) => {
+            if (!mounted || !payload?.session_id) return;
+            channelRuns.set(payload.session_id, payload.run_id);
+            const tab = tabs.value.find(item => item.id === payload.session_id);
+            if (tab) tab.running = true;
+            scheduleSidebarRefresh(payload.session_id);
+        });
+        unlistenRunDone = await listen<{ session_id: string; run_id?: string }>("channel-run-done", ({ payload }) => {
+            if (!mounted || !payload?.session_id) return;
+            const active = channelRuns.get(payload.session_id);
+            if (active && payload.run_id && active !== payload.run_id) return;
+            channelRuns.delete(payload.session_id);
+            const tab = tabs.value.find(item => item.id === payload.session_id);
+            if (tab) tab.running = false;
+            scheduleSidebarRefresh(payload.session_id);
+        });
+        unlistenSessionChanged = await listen<{ session_id: string; kind: string }>("channel-session-event", ({ payload }) => {
+            if (!mounted || !payload?.session_id) return;
+            if (payload.kind === "created" || payload.kind === "deleted") {
+                scheduleSidebarRefresh(payload.session_id);
+                if (payload.kind === "deleted") {
+                    const projectId = tabs.value.find(item => item.id === payload.session_id)?.projectId;
+                    if (projectId) void projectTreeRef.value?.refreshProjectSessions([projectId]);
+                    handleSessionDeleted(payload.session_id);
+                }
+            }
+        });
+    } catch (error) {
+        console.error("监听会话变更失败:", error);
+    }
+    if (!mounted) {
+        unlistenRunStarted?.();
+        unlistenRunDone?.();
+        unlistenSessionChanged?.();
+        return;
+    }
+    await Promise.all([loadAllModels(), refreshSidebar.request()]);
+    if (!mounted) return;
+    window.addEventListener("focus", refreshSidebarOnFocus);
+    sidebarPollTimer = window.setInterval(refreshSidebarOnFocus, 15000);
+});
+
+function refreshSidebarOnFocus() {
+    if (!document.hidden) void refreshSidebar.request();
+}
+
 onUnmounted(() => {
-    if (sidebarPollTimer !== null) clearInterval(sidebarPollTimer);
+    mounted = false;
+    if (sidebarPollTimer !== undefined) clearInterval(sidebarPollTimer);
+    if (sidebarDebounce !== undefined) clearTimeout(sidebarDebounce);
+    window.removeEventListener("focus", refreshSidebarOnFocus);
     unlistenRunStarted?.();
     unlistenRunDone?.();
+    unlistenSessionChanged?.();
 });
 </script>
 

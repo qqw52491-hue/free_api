@@ -118,29 +118,78 @@ pub(crate) async fn handler_events(
     Ok(Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default()))
 }
 
-/// GET /channel/session/{session_id}/stream：单个会话的完整引擎事件流（ACP 桥接等本机下游用）。
-/// 与 /channel/events 只推“有变化”不同，这里原样带上桌面端收到的载荷：
-/// `data: {"channel":"progress"|"log"|"tool_event"|"run_state"|"context","payload":…}`。
-/// 订阅者处理过慢导致丢事件时发 `{"channel":"lagged","payload":{"missed":N}}`，不静默跳过。
-/// 仅接受本机 ACP 服务的 X-Channel-Token 头。
+#[derive(Deserialize)]
+pub(crate) struct SessionStreamQuery {
+    verbose: Option<bool>,
+}
+
+#[derive(Default)]
+struct AcpStreamProjection {
+    verbose: bool,
+    thinking: Option<(String, Value, String)>,
+}
+
+impl AcpStreamProjection {
+    fn project(&mut self, event: &crate::agent::events::EngineEvent) -> Option<Value> {
+        use crate::agent::events::EngineChannel::*;
+        let payload = &event.payload;
+        match event.channel {
+            Log if !self.verbose => return None,
+            Context => return None,
+            Progress => match payload["type"].as_str()? {
+                "thinking" => return self.thinking_delta(payload),
+                // The final answer comes from the committed run record. Previews
+                // are cumulative and may be replaced before the run settles.
+                "summary_stream" | "content_stream" | "thinking_chunk" => return None,
+                "action_phase" | "step_error" | "llm_parse_error" | "agent_paused" => {}
+                _ if self.verbose => {}
+                _ => return None,
+            },
+            _ => {}
+        }
+        Some(json!({ "channel": event.channel, "payload": payload }))
+    }
+
+    fn thinking_delta(&mut self, payload: &Value) -> Option<Value> {
+        let run = payload["run_id"].as_str()?;
+        let step = &payload["step_id"];
+        let full = payload["content"].as_str()?;
+        let previous = self.thinking.as_ref()
+            .filter(|(previous_run, previous_step, _)| previous_run == run && previous_step == step)
+            .map(|(_, _, text)| text.as_str()).unwrap_or("");
+        let (offset, chunk) = full.strip_prefix(previous)
+            .map_or((0, full), |suffix| (previous.len(), suffix));
+        let event = (!chunk.is_empty()).then(|| json!({
+            "channel": "progress",
+            "payload": { "type": "thinking_delta", "run_id": run, "step_id": step,
+                         "offset": offset, "content": chunk },
+        }));
+        self.thinking = (payload["done"] != true).then(|| (run.to_owned(), step.clone(), full.to_owned()));
+        event
+    }
+}
+
+/// Dedicated ACP projection. Each subscriber only receives its own session,
+/// and raw cumulative model instructions never cross this HTTP boundary.
 pub(crate) async fn handler_session_stream(
     AxumState(state): AxumState<Arc<ChannelState>>,
     headers: HeaderMap,
     AxumPath(session_id): AxumPath<String>,
+    AxumQuery(query): AxumQuery<SessionStreamQuery>,
 ) -> Result<Sse<impl futures::Stream<Item = Result<SseEvent, std::convert::Infallible>>>, (StatusCode, Json<Value>)>
 {
     if !authorized(&headers, &state.request_config()) {
         return Err(unauthorized());
     }
-    // 先订阅再返回响应头：调用方拿到响应后再派任务，不会漏掉起始事件。
-    let rx = crate::agent::events::subscribe();
-    let stream = futures::stream::unfold((rx, session_id), |(mut rx, session_id)| async move {
+    let rx = crate::agent::events::subscribe_session(&session_id);
+    let projection = AcpStreamProjection { verbose: query.verbose.unwrap_or_default(), ..Default::default() };
+    let stream = futures::stream::unfold((rx, projection), |(mut rx, mut projection)| async move {
         loop {
             let data = match rx.recv().await {
-                Ok(event) if event.session_id == session_id => {
-                    json!({ "channel": event.channel, "payload": event.payload })
-                }
-                Ok(_) => continue,
+                Ok(event) => match projection.project(&event) {
+                    Some(data) => data,
+                    None => continue,
+                },
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
                     json!({ "channel": "lagged", "payload": { "missed": missed } })
                 }
@@ -148,13 +197,36 @@ pub(crate) async fn handler_session_stream(
             };
             return Some((
                 Ok::<_, std::convert::Infallible>(SseEvent::default().data(data.to_string())),
-                (rx, session_id),
+                (rx, projection),
             ));
         }
     });
     let ready = futures::stream::once(async { Ok(SseEvent::default().comment("ready")) });
     Ok(Sse::new(futures::StreamExt::chain(ready, stream))
         .keep_alive(axum::response::sse::KeepAlive::default()))
+}
+
+#[cfg(test)]
+mod acp_stream_tests {
+    use super::*;
+    use crate::agent::events::{EngineChannel, EngineEvent};
+
+    #[test]
+    fn projection_only_sends_thinking_suffix_and_skips_cumulative_previews() {
+        let mut projection = AcpStreamProjection::default();
+        let mut event = EngineEvent { session_id: "s".into(), channel: EngineChannel::Progress,
+            payload: json!({"type":"thinking", "run_id":"r", "step_id":1,"content":"你"}) };
+        assert_eq!(projection.project(&event).unwrap()["payload"]["content"], "你");
+        event.payload["content"] = json!("你好");
+        let payload = projection.project(&event).unwrap()["payload"].clone();
+        assert_eq!(payload["content"], "好");
+        assert_eq!(payload["offset"], 3);
+        assert!(projection.project(&event).is_none());
+        event.payload["type"] = json!("summary_stream");
+        assert!(projection.project(&event).is_none());
+        event.payload["type"] = json!("content_stream");
+        assert!(projection.project(&event).is_none());
+    }
 }
 
 #[derive(Deserialize)]

@@ -9,7 +9,9 @@
 //! 订阅侧序列化失败只披露到 stderr，不影响桌面下发（fail-open）。
 
 use serde::Serialize;
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tauri::{AppHandle, Emitter, Runtime};
 use tokio::sync::broadcast;
 
@@ -75,19 +77,66 @@ pub fn subscribe() -> broadcast::Receiver<EngineEvent> {
     bus().subscribe()
 }
 
+static SESSION_SUBSCRIBERS: AtomicUsize = AtomicUsize::new(0);
+
+type SessionSender = broadcast::Sender<Arc<EngineEvent>>;
+
+fn session_senders() -> &'static Mutex<HashMap<String, Weak<SessionSender>>> {
+    static SESSIONS: OnceLock<Mutex<HashMap<String, Weak<SessionSender>>>> = OnceLock::new();
+    SESSIONS.get_or_init(Default::default)
+}
+
+pub(crate) struct SessionEvents {
+    _sender: Arc<SessionSender>,
+    rx: broadcast::Receiver<Arc<EngineEvent>>,
+}
+
+impl Drop for SessionEvents {
+    fn drop(&mut self) {
+        SESSION_SUBSCRIBERS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+impl SessionEvents {
+    pub(crate) async fn recv(&mut self) -> Result<Arc<EngineEvent>, broadcast::error::RecvError> {
+        self.rx.recv().await
+    }
+}
+
+/// Each session has its own backlog. A noisy run cannot evict another run's events.
+pub(crate) fn subscribe_session(session_id: &str) -> SessionEvents {
+    let mut sessions = session_senders().lock().unwrap_or_else(|e| e.into_inner());
+    sessions.retain(|_, sender| sender.strong_count() > 0);
+    let entry = sessions.entry(session_id.to_owned()).or_default();
+    let sender = entry.upgrade().unwrap_or_else(|| {
+        let sender = Arc::new(broadcast::channel(BUS_CAPACITY).0);
+        *entry = Arc::downgrade(&sender);
+        sender
+    });
+    let rx = sender.subscribe();
+    SESSION_SUBSCRIBERS.fetch_add(1, Ordering::Relaxed);
+    SessionEvents { _sender: sender, rx }
+}
+
 fn publish<S: Serialize>(channel: EngineChannel, session_id: &str, payload: &S) {
+    let session = (SESSION_SUBSCRIBERS.load(Ordering::Relaxed) != 0)
+        .then(|| session_senders().lock().unwrap_or_else(|e| e.into_inner())
+            .get(session_id).and_then(Weak::upgrade)).flatten();
     let bus = bus();
-    // 无订阅者时不做额外序列化，桌面单端运行的开销与改造前相同。
-    if bus.receiver_count() == 0 {
+    if bus.receiver_count() == 0 && session.is_none() {
         return;
     }
     match serde_json::to_value(payload) {
         Ok(payload) => {
-            let _ = bus.send(EngineEvent {
-                session_id: session_id.to_string(),
-                channel,
-                payload,
-            });
+            let event = EngineEvent { session_id: session_id.to_owned(), channel, payload };
+            if let Some(sender) = session {
+                if bus.receiver_count() > 0 {
+                    let _ = bus.send(event.clone());
+                }
+                let _ = sender.send(Arc::new(event));
+            } else {
+                let _ = bus.send(event);
+            }
         }
         Err(error) => eprintln!(
             "[engine-events] {} 事件序列化失败，未转发给订阅者: {error}",
@@ -138,6 +187,22 @@ impl<R: Runtime> EngineEmit for AppHandle<R> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn session_backlog_is_independent_of_other_runs() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut session = subscribe_session(&id);
+        publish(EngineChannel::Log, &id, &"first");
+        let other = uuid::Uuid::new_v4().to_string();
+        let other_session = subscribe_session(&other);
+        let noise = Arc::new(EngineEvent {
+            session_id: other, channel: EngineChannel::Log, payload: serde_json::json!("separate stream")
+        });
+        for _ in 0..=BUS_CAPACITY {
+            other_session._sender.send(noise.clone()).unwrap();
+        }
+        assert_eq!(session.recv().await.unwrap().payload, "first");
+    }
+
     use super::*;
     use serde_json::{json, Value};
     use std::sync::{Arc, Mutex};

@@ -36,11 +36,8 @@ pub(crate) struct Mapper {
     run_id: String,
     verbose: bool,
     thinking_sent: HashMap<String, usize>,
-    summary_sent: HashMap<String, usize>,
     open_tools: HashMap<String, Vec<String>>,
     tool_seq: u64,
-    /// 最后一次完整的交付摘要正文（summary_stream 为累计值）。
-    pub(crate) summary_text: String,
     pub(crate) unmapped: HashMap<String, u64>,
 }
 
@@ -70,18 +67,14 @@ fn step_key(payload: &Value) -> String {
     }
 }
 
-/// 累计文本的增量：只发尚未发送的后缀；累计值变短视为新一段重新开始。
-fn delta(sent: &mut usize, full: &str) -> Option<String> {
-    let total = full.chars().count();
-    if total < *sent {
-        *sent = 0;
-    }
-    if total == *sent {
-        return None;
-    }
-    let tail: String = full.chars().skip(*sent).collect();
-    *sent = total;
-    Some(tail)
+/// Offsets are UTF-8 bytes. A new subscription may replay the prefix of a
+/// thought; skip bytes already sent on this turn.
+fn thinking_suffix<'a>(sent: &mut usize, offset: usize, chunk: &'a str) -> Option<&'a str> {
+    let end = offset.checked_add(chunk.len())?;
+    let unseen = sent.saturating_sub(offset);
+    let suffix = chunk.get(unseen..).filter(|s| !s.is_empty());
+    *sent = (*sent).max(end);
+    suffix
 }
 
 fn truncate(text: &str, limit: usize) -> String {
@@ -137,10 +130,8 @@ impl Mapper {
             run_id: run_id.to_string(),
             verbose,
             thinking_sent: HashMap::new(),
-            summary_sent: HashMap::new(),
             open_tools: HashMap::new(),
             tool_seq: 0,
-            summary_text: String::new(),
             unmapped: HashMap::new(),
         }
     }
@@ -191,25 +182,20 @@ impl Mapper {
     fn progress(&mut self, payload: &Value) -> Vec<Step> {
         let kind = payload.get("type").and_then(Value::as_str).unwrap_or("");
         match kind {
-            "thinking" => {
+            "thinking" | "thinking_delta" => {
                 let Some(content) = str_of(payload, "content") else {
                     return Vec::new();
                 };
+                let offset = payload["offset"]
+                    .as_u64()
+                    .and_then(|offset| usize::try_from(offset).ok())
+                    .unwrap_or(0);
                 let sent = self.thinking_sent.entry(step_key(payload)).or_default();
-                delta(sent, content)
-                    .map(|d| vec![Step::Update(thought(d))])
+                thinking_suffix(sent, offset, content)
+                    .map(|suffix| vec![Step::Update(thought(suffix))])
                     .unwrap_or_default()
             }
-            "summary_stream" => {
-                let Some(content) = str_of(payload, "content") else {
-                    return Vec::new();
-                };
-                self.summary_text = content.to_string();
-                let sent = self.summary_sent.entry(step_key(payload)).or_default();
-                delta(sent, content)
-                    .map(|d| vec![Step::Update(message(d))])
-                    .unwrap_or_default()
-            }
+            "summary_stream" => Vec::new(),
             "action_phase" => str_of(payload, "description")
                 .map(|d| vec![Step::Update(thought(format!("· {d}\n")))])
                 .unwrap_or_default(),
@@ -336,33 +322,30 @@ mod tests {
     }
 
     #[test]
-    fn cumulative_streams_become_deltas_and_other_runs_are_ignored() {
-        let mut m = Mapper::new("run-1", false);
-        let a = m.handle(
-            "progress",
-            &json!({"run_id":"run-1","type":"summary_stream","step_id":3,"content":"已完成"}),
+    fn summary_previews_are_not_published_and_thought_replays_skip_the_prefix() {
+        let mut mapper = Mapper::new("run-1", false);
+        assert!(mapper
+            .handle(
+                "progress",
+                &json!({"run_id":"run-1","type":"summary_stream","step_id":1,"content":"计划"})
+            )
+            .is_empty());
+        assert!(mapper.handle("progress", &json!({"run_id":"run-1","type":"summary_stream","step_id":1,"content":"修复","done":true})).is_empty());
+        let thought_step = |run, offset, content| json!({"run_id":run,"type":"thinking_delta","step_id":1,"offset":offset,"content":content});
+        assert_eq!(
+            texts(&mapper.handle("progress", &thought_step("run-1", 0, "先读"))),
+            vec![("thought".into(), "先读".into())]
         );
-        let b = m.handle(
-            "progress",
-            &json!({"run_id":"run-1","type":"summary_stream","step_id":3,"content":"已完成修复π"}),
+        assert!(mapper
+            .handle("progress", &thought_step("old", 6, "旧运行"))
+            .is_empty());
+        assert!(mapper
+            .handle("progress", &thought_step("run-1", 0, "先读"))
+            .is_empty());
+        assert_eq!(
+            texts(&mapper.handle("progress", &thought_step("run-1", 6, "再写"))),
+            vec![("thought".into(), "再写".into())]
         );
-        let c = m.handle(
-            "progress",
-            &json!({"run_id":"run-1","type":"summary_stream","step_id":3,"content":"已完成修复π"}),
-        );
-        let other = m.handle(
-            "progress",
-            &json!({"run_id":"old","type":"summary_stream","step_id":3,"content":"旧运行"}),
-        );
-        assert_eq!(texts(&a), vec![("message".into(), "已完成".into())]);
-        assert_eq!(texts(&b), vec![("message".into(), "修复π".into())]);
-        assert!(c.is_empty() && other.is_empty());
-        assert_eq!(m.summary_text, "已完成修复π");
-        let t = m.handle(
-            "progress",
-            &json!({"run_id":"run-1","type":"thinking","step_id":4,"content":"先读"}),
-        );
-        assert_eq!(texts(&t), vec![("thought".into(), "先读".into())]);
     }
 
     #[test]

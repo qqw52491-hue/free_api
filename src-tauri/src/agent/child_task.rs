@@ -713,9 +713,10 @@ pub(crate) async fn control_child_task(
     use tauri::Manager;
     if action == "list" {
         let mut tasks = Vec::new();
-        for (id, owner, _, depth) in visible_tasks(state.inner(), &session_id, None)? {
+        for (id, owner, root_run, depth) in visible_tasks(state.inner(), &session_id, None)? {
             let mut body = status(state.inner(), &owner, &id)?;
             body["depth"] = json!(depth);
+            body["root_run_id"] = json!(root_run);
             body["parent_session_id"] = json!(owner);
             tasks.push(body);
         }

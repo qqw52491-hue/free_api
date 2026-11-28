@@ -32,6 +32,8 @@
             type="button"
             class="tree-arrow"
             :class="{ rotated: isExpanded(project.id) }"
+            :aria-expanded="isExpanded(project.id)"
+            :aria-label="`${isExpanded(project.id) ? '折叠' : '展开'} ${project.name}`"
             @click.stop="toggleExpand(project.id)"
           >
             <svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"></polyline></svg>
@@ -341,7 +343,6 @@ const expandedProjectIds = ref<Set<string>>(new Set());
 const busy = ref(false);
 
 function handleProjectRowClick(project: AgentProject) {
-  loadProjectData(project.id);
   emit("select-project", project);
 }
 
@@ -414,27 +415,48 @@ async function toggleExpand(projectId: string) {
   }
 }
 
-async function loadProjectData(projectId: string) {
+const projectSessionRequests = new Map<string, number>();
+
+async function loadProjectSessions(projectId: string) {
+  const request = (projectSessionRequests.get(projectId) ?? 0) + 1;
+  projectSessionRequests.set(projectId, request);
   try {
-    const [sessions, resources] = await Promise.all([
-      invoke<ChatSessionRow[]>("list_agent_project_sessions", { projectId }),
-      invoke<AgentProjectResource[]>("list_agent_project_resources", { projectId }),
-    ]);
-    projectSessionsMap[projectId] = sessions;
-    projectResourcesMap[projectId] = resources;
-  } catch (e) {
-    console.error("加载项目数据失败:", e);
+    const sessions = await invoke<ChatSessionRow[]>("list_agent_project_sessions", { projectId });
+    if (projectSessionRequests.get(projectId) === request) projectSessionsMap[projectId] = sessions;
+  } catch (error) {
+    console.error("加载项目会话失败:", error);
   }
 }
 
-async function refreshProjects() {
+async function loadProjectData(projectId: string) {
   try {
-    projects.value = await invoke<AgentProject[]>("list_agent_projects");
-    await Promise.all(projects.value.map((p) => loadProjectData(p.id)));
-    // 保持用户当前的折叠/展开状态，默认全部关闭，绝不强制展开
-  } catch (e) {
-    console.error("加载项目列表失败:", e);
+    const [, resources] = await Promise.all([
+      loadProjectSessions(projectId),
+      invoke<AgentProjectResource[]>("list_agent_project_resources", { projectId }),
+    ]);
+    projectResourcesMap[projectId] = resources;
+  } catch (error) {
+    console.error("加载项目资源失败:", error);
   }
+}
+
+let projectsRequest = 0;
+async function refreshProjects(includeExpanded = true) {
+  const request = ++projectsRequest;
+  try {
+    const list = await invoke<AgentProject[]>("list_agent_projects");
+    if (request !== projectsRequest) return;
+    projects.value = list;
+    if (includeExpanded) {
+      await Promise.all(list.filter(project => isExpanded(project.id)).map(project => loadProjectData(project.id)));
+    }
+  } catch (error) {
+    console.error("加载项目列表失败:", error);
+  }
+}
+
+async function refreshProjectSessions(projectIds: Iterable<string>) {
+  await Promise.all([...projectIds].filter(isExpanded).map(loadProjectSessions));
 }
 
 // 新建项目
@@ -492,6 +514,7 @@ async function submitCreateProject() {
 // 一键在项目下发起新对话 (通过 emit 触发外层在前端生成草稿会话，未发消息前不写数据库)
 function quickCreateSession(project: AgentProject) {
   expandedProjectIds.value.add(project.id);
+  if (!(project.id in projectResourcesMap)) void loadProjectData(project.id);
   emit("new-project-session", project);
 }
 
@@ -605,6 +628,7 @@ async function copyResourcePreview() {
 
 defineExpose({
   refreshProjects,
+  refreshProjectSessions,
   loadProjectData,
   projects,
   projectSessionsMap,

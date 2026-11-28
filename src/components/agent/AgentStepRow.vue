@@ -10,6 +10,7 @@
             }
         ]"
         :title="stepData.tooltip"
+        @click.capture="stopSelectionClick"
         @click="handleRowClick"
     >
         <span class="ambient-text-content">
@@ -79,6 +80,7 @@
 
 <script setup lang="ts">
 import { computed } from "vue";
+import { stopSelectionClick } from "../../utils/selection";
 import type { AgentStepItem, AgentWorkerStep } from "./types";
 import FileIcon from "./FileIcon.vue";
 

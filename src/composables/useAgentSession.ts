@@ -1220,6 +1220,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 worker.name = predecessor?.name || details.name;
                 worker.role = predecessor?.role || details.role;
                 worker.roleLabel = predecessor?.roleLabel || details.roleLabel;
+                worker.parentWorkerId ??= null;
                 worker.extra = { ...worker.extra, parentStepId: stepItem.id,
                     ...(predecessorId ? { predecessorId, resumed: true } : {}) };
             } else if (receipt?.tool) {
@@ -1255,6 +1256,7 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         // 已见终态单向：迟到的“运行中”查询结果不得覆盖已结算状态。
         if (worker.extra?.settledByHost === true && !ended) return;
         if (ended) worker.extra = { ...worker.extra, settledByHost: true };
+        worker.waitingForHuman = !ended && Object.keys(asRecord(taskRecord.human_request)).length > 0;
         const model = toText(taskRecord.model_id);
         if (model && !worker.model) worker.model = model;
         const roleLabel = toText(taskRecord.role_label);
@@ -1297,8 +1299,33 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
 
     function updateChildTaskSnapshots(tasks: ChildTaskSnapshot[]) {
         const previous = new Map(childTaskSnapshots.value.map((task) => [task.child_run_id, task]));
+        const currentRun = liveStepsRunId.value || activeRunId.value;
+        const workers = new Map(teamWorkers.value.map(worker => [worker.id, worker]));
         for (const task of tasks) {
-            if (typeof task.child_run_id === "string") previous.set(task.child_run_id, mergeSnapshot(previous.get(task.child_run_id), task));
+            if (typeof task.child_run_id !== "string") continue;
+            previous.set(task.child_run_id, mergeSnapshot(previous.get(task.child_run_id), task));
+            let worker = workers.get(task.child_run_id);
+            if (!worker && currentRun && task.root_run_id === currentRun) {
+                worker = {
+                    id: task.child_run_id,
+                    name: task.role_label || "子任务",
+                    role: "worker",
+                    roleLabel: task.role_label || "子任务",
+                    status: "pending",
+                    progress: 0,
+                    startedAt: 0,
+                };
+                teamWorkers.value.push(worker);
+                worker = teamWorkers.value[teamWorkers.value.length - 1];
+                workers.set(worker.id, worker);
+            }
+            if (worker) {
+                if (task.depth === 1) worker.parentWorkerId = null;
+                else if (task.depth && task.parent_session_id?.startsWith("task-")) {
+                    worker.parentWorkerId = task.parent_session_id.slice(5);
+                }
+                applySettledChildTaskToWorker(asRecord(task));
+            }
         }
         childTaskSnapshots.value = [...previous.values()];
     }
@@ -1307,9 +1334,6 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
         const detail = (e as CustomEvent).detail;
         if (!detail || detail.sessionId !== activeSessionId.value || !Array.isArray(detail.tasks)) return;
         updateChildTaskSnapshots(detail.tasks);
-        for (const item of detail.tasks) {
-            applySettledChildTaskToWorker(asRecord(item));
-        }
     }
 
     function handleToolEvent(payload: Record<string, unknown>) {
@@ -1394,9 +1418,6 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 timestamp: toTimestamp(payload.timestamp),
             };
             steps.value.push(newStep);
-            if (!selectedStepId.value) {
-                selectedStepId.value = newStep.id;
-            }
         }
 
         syncWorkersFromStep(steps.value[targetIdx >= 0 && !isPreviousCompleted ? targetIdx : steps.value.length - 1]);
@@ -2009,9 +2030,6 @@ export function useAgentSession(sessionId: string, options?: UseAgentSessionOpti
                 steps.value[lastIdx] = { ...steps.value[lastIdx], ...stepItem };
             } else {
                 steps.value.push(stepItem);
-            }
-            if (!selectedStepId.value) {
-                selectedStepId.value = stepItem.id;
             }
             if (!sessionTitle.value && stepItem.planTitle && stepItem.planTitle !== "执行任务" && stepItem.planTitle !== "分析项目环境") {
                 sessionTitle.value = stepItem.planTitle;

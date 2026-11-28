@@ -275,6 +275,8 @@
                     :completed-tool-count="session.completedToolCount.value"
                     :failed-tool-count="session.failedToolCount.value"
                     :selected-step="session.selectedStep.value"
+                    :team-step="teamStep"
+                    @clear-team-step="teamStepId = null"
                     :steps="session.steps.value"
                     :selected-subpart="selectedSubpart"
                     :selected-human="selectedHuman"
@@ -360,6 +362,8 @@ const emit = defineEmits<{
 }>();
 const composerRef = ref<InstanceType<typeof AgentComposer> | null>(null);
 const settingsOpen = ref(false);
+const teamStepId = ref<string | null>(null);
+const teamStep = computed(() => session.allSteps.value.find(step => step.id === teamStepId.value) ?? null);
 const selectedSubpart = ref<"thought" | "tool" | null>(null);
 const selectedHumanEventId = ref<string | null>(null);
 const selectedActiveThought = ref(false);
@@ -625,14 +629,12 @@ function handleActiveThoughtSelect() {
     inspectorRef.value?.switchTab("detail");
 }
 function handleOpenTeamDeck(stepId?: string) {
+    teamStepId.value = stepId ?? null;
     inspectorCollapsed.value = false;
     inspectorRef.value?.switchTab("team");
-    if (stepId) {
-        session.selectedStepId.value = stepId;
-    }
 }
 function handleInspectWorker(workerId: string) {
-    session.selectedStepId.value = null;
+    teamStepId.value = null;
     inspectorCollapsed.value = false;
     inspectorRef.value?.selectWorker(workerId);
 }

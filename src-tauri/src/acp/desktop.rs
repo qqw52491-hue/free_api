@@ -7,6 +7,7 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::fmt;
 use std::io::Write;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -125,12 +126,17 @@ impl Desktop {
         {
             return Err("桌面版 ACP 地址须为本机 HTTP 地址，并提供非空令牌".into());
         }
-        let http = reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(3))
-            .build()
-            .map_err(|e| e.to_string())?;
+        static HTTP: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+        let http = HTTP
+            .get_or_init(|| {
+                reqwest::Client::builder()
+                    .no_proxy()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .connect_timeout(Duration::from_secs(3))
+                    .build()
+                    .map_err(|error| error.to_string())
+            })
+            .clone()?;
         Ok(Self {
             http,
             base: url.origin().ascii_serialization(),
@@ -263,34 +269,44 @@ impl Desktop {
     }
 
     /// 订阅会话的完整事件流。返回时服务端已完成订阅，之后再派任务不会漏掉起始事件。
-    pub(crate) async fn open_stream(&self, session_id: &str) -> Result<EventStream, DesktopError> {
+    pub(crate) async fn open_stream(
+        &self,
+        session_id: &str,
+        verbose: bool,
+    ) -> Result<EventStream, DesktopError> {
         let response = tokio::time::timeout(
             Duration::from_secs(5),
-            self.send(
-                self.http
-                    .get(format!("{}/channel/session/{session_id}/stream", self.base)),
-            ),
+            self.send({
+                let request = self
+                    .http
+                    .get(format!("{}/channel/session/{session_id}/stream", self.base));
+                if verbose {
+                    request.query(&[("verbose", true)])
+                } else {
+                    request
+                }
+            }),
         )
         .await
         .map_err(|_| DesktopError::Other("连接桌面版事件流超时".into()))??;
-        let inner = response
-            .bytes_stream()
-            .map(|chunk| chunk.map(|bytes| bytes.to_vec()));
+        let inner = response.bytes_stream();
         Ok(EventStream {
             inner: Box::pin(inner),
             buffer: Vec::new(),
+            cursor: 0,
             data: Vec::new(),
         })
     }
 }
 
 type ByteStream =
-    std::pin::Pin<Box<dyn futures_util::Stream<Item = reqwest::Result<Vec<u8>>> + Send>>;
+    std::pin::Pin<Box<dyn futures_util::Stream<Item = reqwest::Result<axum::body::Bytes>> + Send>>;
 
 /// 极简 SSE 解析：按空行分隔事件，只取 `data:` 行，注释行（心跳）忽略。
 pub(crate) struct EventStream {
     inner: ByteStream,
     buffer: Vec<u8>,
+    cursor: usize,
     data: Vec<u8>,
 }
 
@@ -298,22 +314,30 @@ impl EventStream {
     /// 返回 `(channel, payload)`；`None` 表示连接结束。
     pub(crate) async fn next(&mut self) -> Option<Result<(String, Value), String>> {
         loop {
-            if let Some(event) = take_event(&mut self.buffer, &mut self.data) {
+            if let Some(event) = take_event(&self.buffer, &mut self.cursor, &mut self.data) {
                 return Some(event);
             }
+            if self.cursor != 0 {
+                self.buffer.drain(..self.cursor);
+                self.cursor = 0;
+            }
             match self.inner.next().await? {
-                Ok(chunk) => self.buffer.extend(chunk),
+                Ok(chunk) => self.buffer.extend_from_slice(&chunk),
                 Err(e) => return Some(Err(format!("事件流读取失败：{e}"))),
             }
         }
     }
 }
 
-/// 从缓冲区取出一个完整事件：外层 `None` = 还不完整；内层 `None` = 没有数据（心跳/空事件）。
-fn take_event(buffer: &mut Vec<u8>, data: &mut Vec<u8>) -> Option<Result<(String, Value), String>> {
-    while let Some(end) = buffer.iter().position(|&byte| byte == b'\n') {
-        let line: Vec<u8> = buffer.drain(..=end).collect();
-        let line = &line[..end];
+/// Scan complete SSE lines without shifting the unread bytes after each line.
+fn take_event(
+    buffer: &[u8],
+    cursor: &mut usize,
+    data: &mut Vec<u8>,
+) -> Option<Result<(String, Value), String>> {
+    while let Some(end) = buffer[*cursor..].iter().position(|&byte| byte == b'\n') {
+        let line = &buffer[*cursor..*cursor + end];
+        *cursor += end + 1;
         let line = line.strip_suffix(b"\r").unwrap_or(line);
         if line.is_empty() && !data.is_empty() {
             let value = serde_json::from_slice::<Value>(&std::mem::take(data));
@@ -346,21 +370,26 @@ mod tests {
     #[test]
     fn sse_parser_handles_split_chunks_heartbeats_and_multiline_data() {
         let mut data = Vec::new();
+        let mut cursor = 0;
         let mut buffer =
             b": keep-alive\r\n\r\ndata: {\"channel\":\"progress\",\"payload\":{\"content\":\""
                 .to_vec();
         buffer.push("π".as_bytes()[0]);
-        assert!(take_event(&mut buffer, &mut data).is_none());
+        assert!(take_event(&buffer, &mut cursor, &mut data).is_none());
         buffer.push("π".as_bytes()[1]);
         buffer.extend(b"\"}}\r\n\r");
-        assert!(take_event(&mut buffer, &mut data).is_none());
+        assert!(take_event(&buffer, &mut cursor, &mut data).is_none());
         buffer.push(b'\n');
-        let (channel, payload) = take_event(&mut buffer, &mut data).unwrap().unwrap();
+        let (channel, payload) = take_event(&buffer, &mut cursor, &mut data)
+            .unwrap()
+            .unwrap();
         assert_eq!(channel, "progress");
         assert_eq!(payload["content"], "π");
         buffer.extend(b"data: {\"channel\":\"log\",\ndata: \"payload\":\"a\"}\n\n");
-        let (channel, payload) = take_event(&mut buffer, &mut data).unwrap().unwrap();
+        let (channel, payload) = take_event(&buffer, &mut cursor, &mut data)
+            .unwrap()
+            .unwrap();
         assert_eq!((channel.as_str(), payload.as_str()), ("log", Some("a")));
-        assert!(buffer.is_empty());
+        assert_eq!(cursor, buffer.len());
     }
 }
