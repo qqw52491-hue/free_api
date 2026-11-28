@@ -307,6 +307,7 @@ impl Snapshot {
 }
 
 pub fn bind_primary_model(routing: &mut crate::agent::router::ModelRoutingConfig, model: &str) {
+    routing.mobile_run = None;
     routing.pro = model.into();
     routing.flash = model.into();
     routing

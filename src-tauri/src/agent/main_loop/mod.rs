@@ -83,6 +83,10 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
     task_start_mode: Option<crate::agent::conversation::TaskStartMode>,
     delegation: Option<crate::agent::child_task::TaskBinding>,
 ) -> Result<(), String> {
+    if delegation.is_some() {
+        // Children select their own execution models and personas.
+        model_routing.mobile_run = None;
+    }
     // 立即在统一协调临界区内注册控制通道并消费早期的待取消标记，避免启动与取消竞态漏信号
     let (tx, mut rx) = mpsc::channel::<HumanControl>(5);
     let (interrupt_tx, interrupt_rx) = watch::channel(0u64);
@@ -470,7 +474,12 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
             .as_ref()
             .is_some_and(|cp| cp.phase == AgentPhase::Failed);
     let goal_message = if !is_resuming_existing {
-        Some(crate::agent::conversation::begin_turn_for_run(
+        let begin_turn = if model_routing.mobile_run.is_some() {
+            crate::agent::conversation::begin_existing_turn_for_run
+        } else {
+            crate::agent::conversation::begin_turn_for_run
+        };
+        Some(begin_turn(
             state.inner(),
             &final_session_id,
             &conversation_model_id,
@@ -504,6 +513,15 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
         }
     }
     let mut context = context::SandwichContext::new(system_prompt, goal.clone());
+    if let Some(card) = model_routing
+        .mobile_run
+        .as_deref()
+        .and_then(|settings| settings.role_card.as_ref())
+    {
+        context.active_role_context = crate::agent::tools::role_manager::main_agent_role_context(
+            state.inner(), card, &workspace_dir,
+        );
+    }
     let session_tmp_dir = crate::agent::path_guard::get_session_tmp_dir(&final_session_id);
 
     // 绑定主文件系统作用域（仅显式项目会话或评测自动驾驶模式声明物理工作区，默认会话保持工作区为空）

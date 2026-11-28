@@ -287,13 +287,21 @@ pub(crate) async fn handler_session_traces(
     }
     let db = state.app.state::<DbState>();
     if headers.get("X-Channel-Trace-Metadata").is_some_and(|value| value == "compact") {
-        let session = {
+        let (session, task_checkpoint) = {
             let conn = db_conn(&state.app)?;
-            super::mobile_task::mobile_session_on(&conn, session_id.trim()).map_err(internal_error)?
+            let session = super::mobile_task::mobile_session_on(&conn, session_id.trim())
+                .map_err(internal_error)?;
+            let task_checkpoint = if session.is_some() {
+                super::mobile_task::mobile_task_checkpoint_on(&conn, session_id.trim())
+                    .map_err(internal_error)?
+            } else {
+                None
+            };
+            (session, task_checkpoint)
         };
         let traces = crate::agent::run_trace::list_session_trace_metadata(db.inner(), session_id.trim())
             .map_err(internal_error)?;
-        return Ok(Json(json!({ "traces": traces, "session": session })));
+        return Ok(Json(json!({ "traces": traces, "session": session, "task_checkpoint": task_checkpoint })));
     }
     let records = crate::agent::run_trace::list_session_traces(db.inner(), session_id.trim())
         .map_err(internal_error)?;

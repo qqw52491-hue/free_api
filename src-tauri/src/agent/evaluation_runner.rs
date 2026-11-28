@@ -887,6 +887,7 @@ mod tests {
             disabled_role_cards: Default::default(),
             auto_cross_family_reviewer: false,
             reviewer_backup_model: String::new(),
+            mobile_run: None,
         };
 
         let (resolved, metadata) = fixed_evaluation_model_routing(&db, requested, None).unwrap();

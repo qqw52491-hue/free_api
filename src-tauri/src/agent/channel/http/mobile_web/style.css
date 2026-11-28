@@ -1329,6 +1329,26 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent-light); }
   border-color: rgba(99, 102, 241, 0.45);
   box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.18), 0 12px 36px rgba(0, 0, 0, 0.8);
 }
+.composer-start-choices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+  margin-bottom: 5px;
+}
+.composer-start-choices button {
+  min-height: 44px;
+  padding: 4px 8px;
+  border: 1px solid var(--line2);
+  border-radius: 8px;
+  background: var(--card-inner);
+  color: var(--text-sub);
+  text-align: start;
+}
+.composer-start-choices :is(strong, span) { display: block; }
+.composer-start-choices strong { font-size: 12px; }
+.composer-start-choices span { color: var(--muted); font-size: 11px; }
+.composer-start-choices button.active { border-color: var(--accent2); background: var(--accent-glow); color: var(--text); }
+.composer-start-choices button:focus-visible { outline: 2px solid var(--accent2); outline-offset: 1px; }
 .composer-input-row {
   display: flex;
   align-items: flex-start;

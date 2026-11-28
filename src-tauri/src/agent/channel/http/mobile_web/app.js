@@ -14,7 +14,6 @@ const S = {
   openGroups: new Set(JSON.parse(localStorage.getItem("free_api_open_groups") || "[]")),
   currentSessionId: null,
   flow: null,
-  taskOpts: { model_id: "", context_budget_mode: "", role_card: "" },
   selectedNewModelId: "",
   composerFiles: [],
   sheetOpen: false,  // 弹层打开时禁止轮询重渲
@@ -716,6 +715,10 @@ function currentFlow() {
   return S.flow && isOpenSession(S.flow.sessionId) ? S.flow : null;
 }
 
+function isActiveRun(run) {
+  return run?.status === "running" || run?.status === "waiting_human";
+}
+
 const flowScroll = { following: true, awaitingFirstLayout: true, top: 0, frame: null, anchor: null };
 const FLOW_TAIL_THRESHOLD = 48;
 
@@ -1087,7 +1090,7 @@ async function loadFlow(sessionId) {
     activeFlowLoad.refresh = true;
     return;
   }
-  const load = { view, refresh: false };
+  const load = { view, refresh: false, refreshingCheckpoint: view.checkpointStale };
   activeFlowLoad = load;
   // Each open view owns its cache and in-flight history so navigation releases both.
   let details = traceDetailCache.get(view);
@@ -1142,7 +1145,7 @@ async function loadFlow(sessionId) {
     }
 
     // 仅当没有任何一条已入库 trace 与当前 run 匹配时，才补充临时执行中占位
-    if (run?.run_id && run.goal_preview && ["running", "waiting_human"].includes(run.status) && !expected.has(run.run_id)) {
+    if (run?.run_id && run.goal_preview && isActiveRun(run) && !expected.has(run.run_id)) {
       uniqueTraces.push({
         id: run.run_id,
         goal: run.goal_preview,
@@ -1151,11 +1154,18 @@ async function loadFlow(sessionId) {
       });
     }
 
+    const checkpoint = tracesRes.task_checkpoint ?? null;
+    const previous = currentFlow()?.checkpoint;
+    if (isActiveRun(run) || previous?.task_id !== checkpoint?.task_id || previous?.version !== checkpoint?.version) {
+      view.composerStartMode = null;
+    }
+    if (load.refreshingCheckpoint) view.checkpointStale = false;
     S.flow = {
       sessionId,
       session,
       sessionUnavailable: !!view.sessionScopeInvalidated,
       run,
+      checkpoint,
       traces: uniqueTraces,
       artifacts: artsRes.artifacts || [],
     };
@@ -1451,7 +1461,7 @@ function renderFlow() {
   const scrollAnchor = captureFlowAnchor();
   const s = f.session || {};
   const visibleRun = f.sessionUnavailable ? null : f.run;
-  const active = visibleRun && ["running", "waiting_human"].includes(visibleRun.status);
+  const active = isActiveRun(visibleRun);
   const proj = s.project_id ? S.projects.find(p => p.id === s.project_id) : null;
   const dirLabel = f.sessionUnavailable ? "会话已失效" : s.project_id ? `📁 ${s.project_name || proj?.name || "项目会话"}` : f.session ? "💬 临时工作区" : "会话归属待确认";
   const fullDirPath = s.project_id ? (s.root_path || proj?.root_path || "") : f.session ? "scratch (临时目录)" : "";
@@ -1515,30 +1525,23 @@ function renderFlow() {
   }
 
   // Composer 状态与占位符
-  const input = $("followInput");
   const composer = $("composer");
   const isWaitingHuman = visibleRun?.status === "waiting_human";
   updateComposerSubmit(f);
+  renderComposerOptions(f);
   composer.classList.toggle("waiting-human", !!isWaitingHuman);
   $("btnStop").classList.toggle("hidden", f.sessionUnavailable || !(f.run && f.run.status === "running"));
-  if (f.sessionUnavailable) {
-    input.placeholder = "会话已失效，草稿仍保留";
-  } else if (isWaitingHuman) {
-    input.placeholder = "回复 Agent 的提问…";
-  } else if (f.run && f.run.status === "running") {
-    input.placeholder = "继续输入以排队后续修改 / 接管方向…";
-  } else {
-    input.placeholder = "在当前会话继续对话…";
-  }
   scheduleFlowScroll(scrollAnchor);
 }
 
 const composerDrafts = new Map();
+const composerOptionsBySession = new Map();
 const pendingComposerSends = new Set();
 const mobileAdmissions = new Map();
 const NEW_TASK_SCOPE = "new";
 const DEFINITIVE_ADMISSION_ERRORS = new Set([
   "session_unavailable", "session_project_mismatch", "project_unavailable", "request_conflict", "session_in_flight", "invalid_submission",
+  "checkpoint_changed",
 ]);
 let attachmentSessionId = null;
 let refreshComposerGeometry = () => {};
@@ -1596,24 +1599,122 @@ async function submitMobileAdmission(scope, attempt) {
   return receipt;
 }
 
+function composerOptionsKey(sessionId) {
+  return "free_api_task_options:" + sessionId;
+}
+
+function composerOptions(sessionId) {
+  if (!composerOptionsBySession.has(sessionId)) {
+    const options = { model_id: "", context_budget_mode: "", role_card: "" };
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(composerOptionsKey(sessionId)));
+      for (const key of Object.keys(options)) {
+        if (typeof saved?.[key] === "string") options[key] = saved[key];
+      }
+    } catch (_) {}
+    composerOptionsBySession.set(sessionId, options);
+  }
+  return composerOptionsBySession.get(sessionId);
+}
+
+function setComposerOption(sessionId, key, value) {
+  const options = composerOptions(sessionId);
+  options[key] = value;
+  try {
+    sessionStorage.setItem(composerOptionsKey(sessionId), JSON.stringify(options));
+  } catch (_) {}
+}
+
+function renderComposerOptions(flow = currentFlow()) {
+  const options = flow?.session ? composerOptions(flow.sessionId) : {};
+  const model = options.model_id;
+  const sessionModel = modelName(flow?.session?.model_id);
+  const budget = options.context_budget_mode;
+  const budgetName = BUDGETS.find(option => option.value === budget)?.label ?? BUDGETS[0].label;
+  const budgetChip = { deep_coding: "长程", cost_saving: "省流", ultra_fast: "极速" }[budget] ?? "长程";
+  const role = options.role_card;
+  const roleCard = S.roleCards.find(card => card.name === role);
+  const roleLabel = roleCard?.label || role;
+  const roleTitle = role ? `角色卡 · ${roleLabel}${roleCard?.enabled === false ? "（已停用）" : ""}` : "默认角色";
+  const chips = [
+    ["Model", model ? short(modelName(model), 6) : "跟随", model ? `任务模型 · ${modelName(model)}` : `跟随会话模型${sessionModel ? ` · ${sessionModel}` : ""}`, model],
+    ["Budget", budgetChip, `上下文预算 · ${budgetName}`, budget],
+    ["Roles", role ? short(roleLabel, 5) : "默认", roleTitle, role],
+  ];
+  for (const [key, label, title, value] of chips) {
+    const button = $("opt" + key);
+    const text = $("lbl" + key);
+    if (text.textContent !== label) text.textContent = label;
+    if (button.title !== title) {
+      button.title = title;
+      button.setAttribute("aria-label", title);
+    }
+    button.classList.toggle("active", !!value);
+    button.disabled = !flow?.session || !!flow.sessionUnavailable;
+  }
+}
+
+function composerStartMode(flow) {
+  if (!flow || isActiveRun(flow.run) || S.view.checkpointStale) return null;
+  return flow.checkpoint ? S.view.composerStartMode : "new";
+}
+
+function chooseComposerStartMode(mode) {
+  const flow = currentFlow();
+  if (!flow?.checkpoint || flow.sessionUnavailable || pendingComposerSends.has(flow.sessionId) ||
+      $("composerStartChoices").classList.contains("hidden")) return;
+  S.view.composerStartMode = mode;
+  updateComposerSubmit(flow);
+}
+
 function updateComposerSubmit(flow = currentFlow()) {
   const btn = $("btnSend");
   const attempt = flow ? pendingMobileAdmission(sessionAdmissionScope(flow.sessionId)) : null;
   const stale = flow?.sessionUnavailable;
+  const active = isActiveRun(flow?.run);
+  const checking = !!attempt?.posted;
+  const refreshing = S.view.checkpointStale && !active;
+  const inFlight = !!flow && pendingComposerSends.has(flow.sessionId);
+  const choices = !!flow?.checkpoint && !!flow.session && !stale && !active && !checking && !refreshing;
+  const startMode = composerStartMode(flow);
   let message = "";
   if (stale) message = "会话已失效或归属已变更。草稿仍保留，请重新打开正确的会话。";
-  else if (attempt?.posted) message = "上次提交尚未确认。再次发送会核对原任务，新的编辑会保留。";
+  else if (checking) message = "上次提交尚未确认。再次发送会核对原任务，新的编辑会保留。";
+  else if (refreshing) message = "原任务状态已变化，刷新后可重新选择。";
   else if (flow && !flow.session) message = "会话归属尚未确认，请先刷新再发送。";
   const status = $("composerSubmitStatus");
-  if (status.textContent !== message) status.textContent = message;
+  const statusChanged = status.textContent !== message;
+  if (statusChanged) status.textContent = message;
   status.classList.toggle("hidden", !message);
-  const label = attempt?.posted ? "核对原提交" : "发送";
+  const choiceGroup = $("composerStartChoices");
+  const choicesChanged = choiceGroup.classList.contains("hidden") === choices;
+  choiceGroup.classList.toggle("hidden", !choices);
+  for (const [id, mode] of [["composerResume", "resume"], ["composerNewTurn", "new"]]) {
+    const choice = $(id);
+    const pressed = choices && startMode === mode;
+    choice.classList.toggle("active", pressed);
+    const ariaPressed = String(pressed);
+    if (choice.getAttribute("aria-pressed") !== ariaPressed) choice.setAttribute("aria-pressed", ariaPressed);
+    choice.disabled = !choices || inFlight;
+  }
+  const label = checking ? "核对原提交" : startMode === "resume" ? "继续原任务" : startMode === "new" ? "新开一轮" : "发送";
   if (btn.title !== label) {
     btn.title = label;
     btn.setAttribute("aria-label", label);
   }
-  btn.disabled = !flow || !!stale || !flow.session || pendingComposerSends.has(flow.sessionId);
+  btn.disabled = !flow || !!stale || !flow.session || inFlight || (!checking && !active && !startMode);
   $("btnClip").disabled = !flow?.session || !!stale;
+  const input = $("followInput");
+  const placeholder = stale ? "会话已失效，草稿仍保留"
+    : !flow ? "会话加载中…"
+    : checking ? "可编辑下一条消息，原提交内容已保留…"
+    : flow.run?.status === "waiting_human" ? "回复 Agent 的提问…"
+    : active ? "输入新目标会请求停止当前执行…"
+    : startMode === "resume" ? "可补充说明，或直接发送以继续…"
+    : choices && !startMode ? "选择继续原任务或新开一轮…"
+    : "在当前会话输入新一轮的目标…";
+  if (input.placeholder !== placeholder) input.placeholder = placeholder;
+  if (statusChanged || choicesChanged) refreshComposerGeometry();
 }
 
 function invalidateComposerSession(sessionId) {
@@ -1701,16 +1802,17 @@ function saveComposerDraft() {
 async function openSession(sessionId) {
   closeSidebarMobile();
   if (!isOpenSession(sessionId) || S.view.sessionScopeInvalidated) {
+    closeSearchableSheet();
     saveComposerDraft();
     S.view = { name: "flow" };
     S.flow = null;
     resetFlowScroll();
     const draft = composerDrafts.get(sessionId);
     $("followInput").value = draft?.text ?? pendingMobileAdmission(sessionAdmissionScope(sessionId))?.draftText ?? "";
-    $("followInput").placeholder = "会话加载中…";
     S.composerFiles = draft?.files ?? [];
     renderComposerFiles();
     updateComposerSubmit();
+    renderComposerOptions();
     $("btnStop").classList.add("hidden");
     $("composer").classList.remove("waiting-human");
     $("topTitle").textContent = S.sessions.find(s => s.id === sessionId)?.title || "任务会话";
@@ -1737,6 +1839,7 @@ async function openSession(sessionId) {
 
 function goHome() {
   closeSidebarMobile();
+  closeSearchableSheet();
   saveComposerDraft();
   S.currentSessionId = null;
   S.flow = null;
@@ -1762,6 +1865,8 @@ async function deleteSession(sessionId) {
       await loadHome();
     }
     composerDrafts.delete(sessionId);
+    composerOptionsBySession.delete(sessionId);
+    try { sessionStorage.removeItem(composerOptionsKey(sessionId)); } catch (_) {}
     rememberMobileAdmission(sessionAdmissionScope(sessionId), null);
     if (attachmentSessionId === sessionId) attachmentSessionId = null;
   } catch (e) {
@@ -1777,11 +1882,14 @@ async function sendComposer() {
   let attempt = pendingMobileAdmission(scope);
   let draftText = input.value;
   const text = draftText.trim();
-  if (!text && !attempt?.posted) return;
+  const runActive = isActiveRun(f.run);
+  const startMode = runActive ? attempt?.body.task_start_mode : composerStartMode(f);
+  if (!attempt?.posted && ((!runActive && !startMode) || (!text && startMode !== "resume"))) return;
   pendingComposerSends.add(f.sessionId);
   updateComposerSubmit(f);
   resumeFlowFollow();
   let sentFiles = [];
+  let keepDraft = false;
   let successMessage;
   try {
     if (!attempt && f.run?.status === "waiting_human") {
@@ -1789,19 +1897,27 @@ async function sendComposer() {
       successMessage = "已回答，Agent 继续执行";
     } else if (!attempt && f.run?.status === "running") {
       await api(`/channel/run/${f.run.run_id}/goal`, { method: "POST", body: JSON.stringify({ goal: text }) });
-      successMessage = "已排队后续修改 (ReplaceGoal)";
+      keepDraft = true;
+      successMessage = "已请求停止当前执行，目标留在草稿中";
     } else {
       if (!attempt?.posted) {
+        const options = composerOptions(f.sessionId);
         const routing = {};
-        if (S.taskOpts.model_id) routing.pro = routing.flash = routing.vision = S.taskOpts.model_id;
-        if (S.taskOpts.context_budget_mode) routing.context_budget_mode = S.taskOpts.context_budget_mode;
+        if (options.model_id) routing.pro = options.model_id;
+        if (options.context_budget_mode) routing.context_budget_mode = options.context_budget_mode;
         const body = {
           request_id: attempt?.body.request_id ?? mobileRequestId(),
           session_id: f.sessionId,
           project_id: attempt ? attempt.body.project_id : f.session.project_id ?? null,
           goal: text,
+          task_start_mode: startMode,
+          expected_checkpoint: runActive ? attempt.body.expected_checkpoint : f.checkpoint ? {
+            task_id: f.checkpoint.task_id,
+            version: f.checkpoint.version,
+          } : null,
         };
         if (Object.keys(routing).length) body.model_routing = routing;
+        if (options.role_card) body.role_card = options.role_card;
         attempt = {
           body, draftText, files: [...S.composerFiles], uploaded: attempt?.uploaded ?? new Set(), posted: false,
         };
@@ -1816,12 +1932,13 @@ async function sendComposer() {
       draftText = attempt.draftText;
       sentFiles = attempt.files;
       await submitMobileAdmission(scope, attempt);
-      successMessage = "任务已受理";
+      if (isOpenSession(f.sessionId)) S.view.composerStartMode = null;
+      successMessage = attempt.body.task_start_mode === "resume" ? "原任务已接续" : "任务已受理";
     }
     const active = isOpenSession(f.sessionId);
     const draft = active ? { text: input.value, files: S.composerFiles } : composerDrafts.get(f.sessionId);
     if (draft) {
-      const remainingText = draft.text === draftText ? "" : draft.text;
+      const remainingText = !keepDraft && draft.text === draftText ? "" : draft.text;
       const remainingFiles = draft.files.filter(file => !sentFiles.includes(file));
       if (active) {
         input.value = remainingText;
@@ -1839,8 +1956,14 @@ async function sendComposer() {
       rememberMobileAdmission(scope, null);
       if (e.code === "session_unavailable" || e.code === "session_project_mismatch") {
         invalidateComposerSession(f.sessionId);
-      } else if (e.code === "session_in_flight" && isOpenSession(f.sessionId)) {
-        loadFlow(f.sessionId).catch(() => {});
+      } else if (isOpenSession(f.sessionId)) {
+        if (e.code === "checkpoint_changed") {
+          S.view.checkpointStale = true;
+          S.view.composerStartMode = null;
+          loadFlow(f.sessionId).catch(() => {});
+        } else if (e.code === "session_in_flight") {
+          loadFlow(f.sessionId).catch(() => {});
+        }
       }
     }
     if (isOpenSession(f.sessionId)) {
@@ -1866,7 +1989,19 @@ async function stopRun() {
 }
 
 // ---------------------------------------------------------------- 带实时搜索的选择弹层
+let sheetFilterTimer;
+
+function closeSearchableSheet() {
+  if (sheetFilterTimer !== undefined) {
+    clearTimeout(sheetFilterTimer);
+    sheetFilterTimer = undefined;
+  }
+  S.sheetOpen = false;
+  $("sheetPick").classList.add("hidden");
+}
+
 function openSearchableSheet(title, allItems, currentValue, onPick) {
+  closeSearchableSheet();
   S.sheetOpen = true;
   $("sheetTitle").textContent = title;
   const searchWrap = $("sheetSearchWrap");
@@ -1907,9 +2042,8 @@ function openSearchableSheet(title, allItems, currentValue, onPick) {
 
     list.querySelectorAll("button[data-v]").forEach(btn => {
       btn.onclick = () => {
-        S.sheetOpen = false;
+        closeSearchableSheet();
         onPick(btn.dataset.v);
-        $("sheetPick").classList.add("hidden");
       };
     });
 
@@ -1918,46 +2052,48 @@ function openSearchableSheet(title, allItems, currentValue, onPick) {
       list.innerHTML = filtered.map(makeRow).join("");
       list.querySelectorAll("button[data-v]").forEach(btn => {
         btn.onclick = () => {
-          S.sheetOpen = false;
+          closeSearchableSheet();
           onPick(btn.dataset.v);
-          $("sheetPick").classList.add("hidden");
         };
       });
     };
   }
 
   // 输入时 debounce 300ms 避免每键一次重渲
-  let _debTimer;
   searchInput.oninput = (e) => {
-    clearTimeout(_debTimer);
-    _debTimer = setTimeout(() => renderList(e.target.value), 300);
+    if (sheetFilterTimer !== undefined) clearTimeout(sheetFilterTimer);
+    sheetFilterTimer = setTimeout(() => renderList(e.target.value), 300);
   };
   renderList("");
   $("sheetPick").classList.remove("hidden");
   if (allItems.length > 5 && window.matchMedia?.("(pointer: fine)").matches) searchInput.focus({ preventScroll: true });
 }
 
+function openComposerOption(key, title, items) {
+  const flow = currentFlow();
+  if (!flow?.session || flow.sessionUnavailable) return;
+  const view = S.view;
+  openSearchableSheet(title, items, composerOptions(flow.sessionId)[key], (value) => {
+    if (S.view !== view || currentFlow()?.sessionUnavailable) return;
+    setComposerOption(flow.sessionId, key, value);
+    renderComposerOptions();
+  });
+}
+
 function bindOptChips() {
-  $("optModel").onclick = () => openSearchableSheet("选择任务模型",
-    [{ value: "", label: "跟随会话模型", sub: "使用默认设置" }].concat(S.models.map(m => ({ value: m.id, label: m.display_name || m.name, sub: m.platform_name || "" }))),
-    S.taskOpts.model_id,
-    (v) => { S.taskOpts.model_id = v; $("lblModel").textContent = v ? short(modelName(v), 4) : "跟随"; $("optModel").classList.toggle("active", !!v); });
-  
-  $("optBudget").onclick = () => openSearchableSheet("上下文压缩模式", BUDGETS, S.taskOpts.context_budget_mode,
-    (v) => {
-      S.taskOpts.context_budget_mode = v;
-      const bmap = { deep_coding: "长程", cost_saving: "省流", ultra_fast: "极速" };
-      $("lblBudget").textContent = v ? (bmap[v] || "长程") : "长程";
-      $("optBudget").classList.toggle("active", !!v && v !== "deep_coding");
-    });
+  $("optModel").onclick = () => openComposerOption("model_id", "选择下次启动的模型", [
+    { value: "", label: "跟随会话模型", sub: modelName(currentFlow()?.session?.model_id) },
+    ...S.models.map(m => ({ value: m.id, label: m.display_name || m.name, sub: m.platform_name || "" })),
+  ]);
+  $("optBudget").onclick = () => openComposerOption("context_budget_mode", "上下文压缩模式", BUDGETS);
+  $("optRoles").onclick = () => openComposerOption("role_card", "选择角色卡", [
+    { value: "", label: "默认角色" },
+    ...S.roleCards.filter(c => c.enabled !== false)
+      .map(c => ({ value: c.name, label: c.label || c.name, sub: c.scope_hints || "" })),
+  ]);
 
-  $("optRoles").onclick = () => openSearchableSheet("角色卡钉死",
-    [{ value: "", label: "跟随默认路由", sub: "不钉死任何角色" }].concat(S.roleCards.map(c => ({ value: c.name, label: c.label || c.name, sub: `作用域 ${c.scope_hints || "-"}` }))),
-    S.taskOpts.role_card,
-    (v) => { S.taskOpts.role_card = v; $("lblRoles").textContent = v ? short(v, 4) : "默认"; $("optRoles").classList.toggle("active", !!v); });
-
-  $("sheetClose").onclick = () => { S.sheetOpen = false; $("sheetPick").classList.add("hidden"); };
-  $("sheetPick").addEventListener("click", (e) => { if (e.target === $("sheetPick")) { S.sheetOpen = false; $("sheetPick").classList.add("hidden"); } });
+  $("sheetClose").onclick = closeSearchableSheet;
+  $("sheetPick").addEventListener("click", (e) => { if (e.target === $("sheetPick")) closeSearchableSheet(); });
   // 评测报告预览弹层（openEval 打开）
   $("apClose").onclick = () => $("artPreview").classList.add("hidden");
   $("artPreview").addEventListener("click", (e) => { if (e.target === $("artPreview")) $("artPreview").classList.add("hidden"); });
@@ -2023,7 +2159,8 @@ async function submitNew() {
         title: short(goal.replace(/\s+/g, " "), 28),
         model_id: modelId,
         goal,
-        model_routing: { pro: modelId, flash: modelId, vision: modelId },
+        task_start_mode: "new",
+        expected_checkpoint: null,
       },
       draftText,
     };
@@ -2118,6 +2255,8 @@ function bind() {
   };
   $("btnSend").onclick = sendComposer;
   $("btnStop").onclick = stopRun;
+  $("composerResume").onclick = () => chooseComposerStartMode("resume");
+  $("composerNewTurn").onclick = () => chooseComposerStartMode("new");
   bindComposerViewport();
   $("composerFiles").onclick = (event) => {
     const remove = event.target.closest("[data-remove-composer-file]");
@@ -2241,12 +2380,12 @@ async function loadModels() {
     S.models = (mData.models || []).filter(m => m.enabled !== 0 && m.enabled !== false);
     S.modelById = Object.fromEntries(S.models.map(m => [m.id, m]));
     S.roleCards = rData.role_cards || rData.cards || [];
+    if (currentFlow()) renderComposerOptions();
   } catch (e) {}
 }
 
 function isAgentActive() {
-  const f = S.flow;
-  return f && f.run && ["running", "waiting_human"].includes(f.run.status);
+  return isActiveRun(S.flow?.run);
 }
 
 function sseAlive() {

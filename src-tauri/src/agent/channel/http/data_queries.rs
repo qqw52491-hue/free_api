@@ -40,7 +40,7 @@ pub(crate) async fn handler_models(
     Ok(Json(json!({ "models": models })))
 }
 
-/// 启用的角色卡（网页端「角色」选择器数据源；钉死 = 按作用域写 role_models）
+/// 角色卡目录及其启用状态，供网页端角色选择器使用。
 pub(crate) async fn handler_role_cards(
     AxumState(state): AxumState<Arc<ChannelState>>,
     headers: HeaderMap,
@@ -60,6 +60,7 @@ pub(crate) async fn handler_role_cards(
                 "label": card.label,
                 "model_id": card.model_id,
                 "scope_hints": card.scope_hints,
+                "enabled": card.enabled,
             })
         })
         .collect();

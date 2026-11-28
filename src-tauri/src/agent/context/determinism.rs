@@ -33,7 +33,7 @@ impl ContextFingerprint {
         let mut history_step_hashes = Vec::new();
         let mut prefix_hasher = Sha256::new();
 
-        let system_prompt_hash = sha256_hex(&context.system_prompt);
+        let system_prompt_hash = sha256_hex(messages[0].content.as_str().unwrap_or_default());
         let active_tool_hash = sha256_hex(&context.active_tool_detail);
 
         for (idx, msg) in messages.iter().enumerate() {

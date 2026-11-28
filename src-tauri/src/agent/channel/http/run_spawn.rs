@@ -361,7 +361,7 @@ pub(crate) fn register_and_spawn_run(
         session_id, goal, routing, workspace_override, llm_retries,
         action_milestone_steps: _action_milestone_steps,
         phase_push: _phase_push,
-        plan_mode, caller_notifies,
+        plan_mode, task_start_mode: None, caller_notifies,
     });
     Ok(run_id)
 }
@@ -375,6 +375,7 @@ pub(super) struct ChannelLaunch {
     pub action_milestone_steps: u32,
     pub phase_push: bool,
     pub plan_mode: Option<String>,
+    pub task_start_mode: Option<crate::agent::conversation::TaskStartMode>,
     pub caller_notifies: bool,
 }
 
@@ -387,7 +388,7 @@ pub(super) fn spawn_admitted_run(
     launch: ChannelLaunch,
 ) {
     let ChannelLaunch { session_id, goal, routing, workspace_override, llm_retries,
-        action_milestone_steps, phase_push, plan_mode, caller_notifies } = launch;
+        action_milestone_steps, phase_push, plan_mode, task_start_mode, caller_notifies } = launch;
     let db_state = app.state::<DbState>();
     let started_at = now_ts();
     println!(
@@ -456,7 +457,7 @@ pub(super) fn spawn_admitted_run(
             Some(spawn_run.clone()),
             Some(spawn_plan_mode),
             None,
-            None,
+            task_start_mode,
             Some(admitted),
         )
         .await;

@@ -58,6 +58,14 @@ pub struct ModelRoutingConfig {
     /// 仅允许用户显式指定的审查备用模型；空串默认禁用，不扫描模型池。
     #[serde(default)]
     pub reviewer_backup_model: String,
+    /// Trusted settings attached by the dedicated phone admission path.
+    #[serde(skip)]
+    pub(crate) mobile_run: Option<Box<MobileRunSettings>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MobileRunSettings {
+    pub(crate) role_card: Option<crate::agent::tools::role_manager::RoleCard>,
 }
 
 impl Default for ModelRoutingConfig {
@@ -81,6 +89,7 @@ impl Default for ModelRoutingConfig {
             disabled_role_cards: Vec::new(),
             auto_cross_family_reviewer: false,
             reviewer_backup_model: String::new(),
+            mobile_run: None,
         }
     }
 }
@@ -340,6 +349,13 @@ impl AgentRouter {
                 model_id,
                 tier: RoutingTier::Vision,
                 reason: "当前上下文包含截图/图片，必须使用视觉模型处理".to_string(),
+            };
+        }
+        if config.mobile_run.is_some() {
+            return RoutingDecision {
+                model_id: config.pro.clone(),
+                tier: RoutingTier::Pro,
+                reason: "使用手机提交时确定的主模型".to_string(),
             };
         }
         if config.force_pro_on_first_step && step_id == 0 {

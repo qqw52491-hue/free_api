@@ -152,20 +152,24 @@ pub fn list_cards(db: &DbState, include_disabled: bool) -> Result<Vec<RoleCard>,
 
 /// 按标识取启用卡；未命中/被禁用返回 None，是否兜底由调用入口决定。
 pub fn resolve_enabled_card(db: &DbState, name: &str) -> Result<Option<RoleCard>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    resolve_enabled_card_on(&conn, name).map_err(|e| e.to_string())
+}
+
+pub(crate) fn resolve_enabled_card_on(
+    conn: &rusqlite::Connection,
+    name: &str,
+) -> rusqlite::Result<Option<RoleCard>> {
     let name = name.trim();
     if name.is_empty() {
         return Ok(None);
     }
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    let card = conn
-        .query_row(
-            &format!("SELECT {CARD_COLUMNS} FROM agent_role_cards WHERE name = ?1 AND enabled = 1"),
-            params![name],
-            map_card,
-        )
-        .optional()
-        .map_err(|e| e.to_string())?;
-    Ok(card)
+    conn.query_row(
+        &format!("SELECT {CARD_COLUMNS} FROM agent_role_cards WHERE name = ?1 AND enabled = 1"),
+        params![name],
+        map_card,
+    )
+    .optional()
 }
 
 use rusqlite::OptionalExtension;
@@ -690,6 +694,24 @@ pub fn persona_block(card: &RoleCard) -> String {
         return String::new();
     }
     format!("\n\n【专精角色人设：{}】{}", card.label, card.persona_prompt)
+}
+
+pub(crate) fn main_agent_role_context(
+    db: &DbState,
+    card: &RoleCard,
+    workspace: &std::path::Path,
+) -> String {
+    let mut context = format!(
+        "\n\n【当前主 Agent 角色：{} ({})】以此角色的专业视角开展工作，工具权限、流程与交付遵循当前主任务规则。",
+        card.label, card.name
+    );
+    context.push_str(&persona_block(card));
+    if !card.scope_hints.trim().is_empty() {
+        context.push_str("\n角色关注范围：");
+        context.push_str(&card.scope_hints);
+    }
+    context.push_str(&skills_block(db, card, Some(workspace)));
+    context
 }
 
 /// 逗号分隔白名单解析（allowed_skills / allowed_mcp）

@@ -14,9 +14,11 @@ impl SandwichContext {
         //    M0: System Prompt — 跨整个 Epoch 绝不改动
         //    M1: 当前 Epoch 的任务目标 — 压缩断代时才可能更新，其余步骤只读
         // ════════════════════════════════════════════════════════════════
+        let mut system_prompt = self.system_prompt.clone();
+        system_prompt.push_str(&self.active_role_context);
         messages.push(ChatMessage {
             role: "system".to_string(),
-            content: json!(self.system_prompt.clone()),
+            content: serde_json::Value::String(system_prompt),
         });
 
         // M1: 任务目标静态锚点（epoch 内不变，压缩时由 compaction 提升最新目标写入 ctx.user_goal）

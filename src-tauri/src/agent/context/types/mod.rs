@@ -244,6 +244,9 @@ pub struct SandwichContext {
     // ════════════════════════════════════════════════════════════════════
     /// 系统核心契约与安全规则 (core_logic.md + 内置工具手册)
     pub system_prompt: String,
+    /// The selected role belongs to the current submission, outside the cached epoch baseline.
+    #[serde(skip)]
+    pub(crate) active_role_context: String,
     /// 用户的终极任务目标 (如 "部署 Rust + PostgreSQL 项目并在 8080 启动")
     /// ⚠️ M1 静态锚点：跨轮次刻意保持为首轮目标以稳定前缀缓存，
     ///    审查/验收类消费点必须用 `effective_goal()`（当前轮目标），禁止直接读此字段。
@@ -481,6 +484,7 @@ impl SandwichContext {
         Self {
             last_execution_model: None,
             system_prompt,
+            active_role_context: String::new(),
             current_goal: user_goal.clone(),
             history_task_id: new_history_task_id(),
             user_goal,

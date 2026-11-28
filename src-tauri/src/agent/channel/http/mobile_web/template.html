@@ -90,8 +90,16 @@
       <p id="composerSubmitStatus" class="submit-status hidden" role="status"></p>
       
       <div class="composer-dock">
+        <div id="composerStartChoices" class="composer-start-choices hidden" role="group" aria-label="任务方式">
+          <button type="button" id="composerResume" aria-pressed="false">
+            <strong>继续原任务</strong><span>接回原进度和审查</span>
+          </button>
+          <button type="button" id="composerNewTurn" aria-pressed="false">
+            <strong>新开一轮</strong><span>提交新目标，重新规划</span>
+          </button>
+        </div>
         <div class="composer-input-row">
-          <textarea id="followInput" rows="1" aria-label="继续对话" placeholder="在当前会话继续对话…" autocomplete="off"></textarea>
+          <textarea id="followInput" rows="1" aria-label="任务消息" placeholder="会话加载中…" autocomplete="off"></textarea>
         </div>
         
         <div class="composer-toolbar">
@@ -99,7 +107,7 @@
             <button id="btnClip" class="dock-btn" title="添加附件">＋</button>
             <button id="optModel" class="dock-chip-btn" title="选择模型">🤖 <span id="lblModel">跟随</span></button>
             <button id="optBudget" class="dock-chip-btn" title="压缩模式">🧠 <span id="lblBudget">长程</span></button>
-            <button id="optRoles" class="dock-chip-btn" title="角色路由">🧭 <span id="lblRoles">默认</span></button>
+            <button id="optRoles" class="dock-chip-btn" title="选择角色卡">🧭 <span id="lblRoles">默认</span></button>
           </div>
           
           <div class="composer-tools-right">

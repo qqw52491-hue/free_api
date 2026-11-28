@@ -3,7 +3,11 @@
 use super::run_spawn::{spawn_admitted_run, ChannelLaunch};
 use super::session_ops::channel_task_routing;
 use super::*;
+use crate::agent::checkpoint::AgentPhase;
 use crate::agent::control::SessionExecutionOwner;
+use crate::agent::conversation::TaskStartMode;
+use crate::agent::router::MobileRunSettings;
+use crate::agent::tools::role_manager;
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -21,6 +25,13 @@ pub(crate) struct MobileTaskReq {
     title: Option<String>,
     model_id: Option<String>,
     model_routing: Option<PartialRouting>,
+    // Skipping absent fields preserves the fingerprint of previously admitted requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    role_card: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    task_start_mode: Option<TaskStartMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expected_checkpoint: Option<MobileCheckpointIdentity>,
 }
 
 #[derive(Serialize)]
@@ -64,6 +75,42 @@ pub(super) fn mobile_session_on(
     .optional()
 }
 
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
+struct MobileCheckpointIdentity {
+    task_id: String,
+    version: i64,
+}
+
+#[derive(Serialize)]
+pub(super) struct MobileTaskCheckpoint {
+    #[serde(flatten)]
+    identity: MobileCheckpointIdentity,
+    phase: String,
+}
+
+pub(super) fn mobile_task_checkpoint_on(
+    conn: &Connection,
+    session_id: &str,
+) -> rusqlite::Result<Option<MobileTaskCheckpoint>> {
+    // Old snapshots lack a durable task ID. Use a stable row identity until recovery saves one.
+    conn.query_row(
+        "SELECT COALESCE(NULLIF(CAST(json_extract(snapshot_json, '$.data.history_task_id') AS TEXT), ''),
+                         'legacy:' || run_id || ':' || created_at), version, phase
+         FROM agent_checkpoints WHERE run_id=?1 AND phase<>?2 AND json_valid(snapshot_json)",
+        params![session_id, AgentPhase::Done.as_str()],
+        |row| {
+            Ok(MobileTaskCheckpoint {
+                identity: MobileCheckpointIdentity {
+                    task_id: row.get(0)?,
+                    version: row.get(1)?,
+                },
+                phase: row.get(2)?,
+            })
+        },
+    )
+    .optional()
+}
+
 fn failure(status: StatusCode, code: &str, message: &str) -> HttpError {
     (status, Json(json!({ "code": code, "error": message })))
 }
@@ -84,7 +131,7 @@ fn check_session_scope(
     conn: &Connection,
     session_id: &str,
     project_id: Option<&str>,
-) -> Result<(), HttpError> {
+) -> Result<MobileSession, HttpError> {
     let session = mobile_session_on(conn, session_id)
         .map_err(internal_error)?
         .ok_or_else(session_unavailable)?;
@@ -93,6 +140,79 @@ fn check_session_scope(
             StatusCode::CONFLICT,
             "session_project_mismatch",
             "会话所属项目已变更，请重新打开后提交。本次未启动任务。",
+        ));
+    }
+    Ok(session)
+}
+
+fn validate_mobile_model(conn: &Connection, id: &str) -> Result<(), HttpError> {
+    let enabled: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM models m JOIN platforms p ON p.id=m.platform_id
+               WHERE m.id=?1 AND m.enabled=1)",
+            [id],
+            |row| row.get(0),
+        )
+        .map_err(internal_error)?;
+    if !enabled {
+        return Err(invalid("所选主模型不存在或已停用，请重新选择。未启动任务。"));
+    }
+    let model = crate::llm::ModelConfig::from_conn(conn, id).map_err(internal_error)?;
+    if model.base_url.trim().is_empty() || model.model_name.trim().is_empty() {
+        return Err(invalid("所选主模型缺少接口地址或模型名称，请补全配置。未启动任务。"));
+    }
+    Ok(())
+}
+
+fn mobile_task_routing(
+    conn: &Connection,
+    config: &ChannelConfig,
+    session: &MobileSession,
+    overrides: Option<&PartialRouting>,
+    role_name: Option<&str>,
+    new_session: bool,
+) -> Result<ModelRoutingConfig, HttpError> {
+    let mut overrides = overrides.cloned().unwrap_or_default();
+    let session_model = session.model_id.trim();
+    let primary = overrides.pro.as_deref().map(str::trim).unwrap_or(session_model);
+    if new_session && primary != session_model {
+        validate_mobile_model(conn, session_model)?;
+    }
+    validate_mobile_model(conn, primary)?;
+    overrides.pro = Some(primary.to_owned());
+    let role_card = role_name
+        .map(|name| {
+            role_manager::resolve_enabled_card_on(conn, name)
+                .map_err(internal_error)?
+                .ok_or_else(|| invalid("所选角色卡不存在或已停用，请重新选择。未启动任务。"))
+        })
+        .transpose()?;
+    let mut routing = channel_task_routing(config, conn, &session.id, Some(&overrides))?;
+    routing.mobile_run = Some(Box::new(MobileRunSettings { role_card }));
+    Ok(routing)
+}
+
+fn check_start_intent(
+    conn: &Connection,
+    session_id: &str,
+    mode: Option<TaskStartMode>,
+    expected: Option<&MobileCheckpointIdentity>,
+) -> Result<(), HttpError> {
+    let Some(mode) = mode else {
+        return if expected.is_none() {
+            Ok(())
+        } else {
+            Err(invalid("请指定继续原任务或新开一轮。"))
+        };
+    };
+    let checkpoint = mobile_task_checkpoint_on(conn, session_id).map_err(internal_error)?;
+    if checkpoint.as_ref().map(|checkpoint| &checkpoint.identity) != expected
+        || (mode == TaskStartMode::Resume && checkpoint.is_none())
+    {
+        return Err(failure(
+            StatusCode::CONFLICT,
+            "checkpoint_changed",
+            "原任务状态已变更或无法续跑，请刷新会话后重新选择。本次未启动任务。",
         ));
     }
     Ok(())
@@ -167,7 +287,11 @@ fn normalize_request(req: &mut MobileTaskReq) -> Result<String, HttpError> {
         .to_string();
     req.goal = req.goal.trim().to_owned();
     if req.goal.is_empty() {
-        return Err(invalid("任务内容不能为空"));
+        if req.task_start_mode == Some(TaskStartMode::Resume) {
+            req.goal = "继续原任务".into();
+        } else {
+            return Err(invalid("任务内容不能为空"));
+        }
     }
     for field in [&mut req.session_id, &mut req.project_id] {
         if let Some(id) = field {
@@ -177,7 +301,7 @@ fn normalize_request(req: &mut MobileTaskReq) -> Result<String, HttpError> {
             }
         }
     }
-    for field in [&mut req.title, &mut req.model_id] {
+    for field in [&mut req.title, &mut req.model_id, &mut req.role_card] {
         *field = field
             .take()
             .map(|value| value.trim().to_owned())
@@ -225,6 +349,7 @@ fn admit_mobile_task(
         return Ok((receipt, None));
     }
 
+    let new_session = req.session_id.is_none();
     let session_id = if let Some(session_id) = req.session_id {
         session_id
     } else {
@@ -278,8 +403,16 @@ fn admit_mobile_task(
             "该会话已有在途任务，本次未启动。",
         )
     })?;
-    check_session_scope(&tx, &session_id, req.project_id.as_deref())?;
-    let routing = channel_task_routing(config, &tx, &session_id, req.model_routing.as_ref())?;
+    let session = check_session_scope(&tx, &session_id, req.project_id.as_deref())?;
+    check_start_intent(
+        &tx,
+        &session_id,
+        req.task_start_mode,
+        req.expected_checkpoint.as_ref(),
+    )?;
+    let routing = mobile_task_routing(
+        &tx, config, &session, req.model_routing.as_ref(), req.role_card.as_deref(), new_session,
+    )?;
     let llm_retries = config
         .llm_retries
         .unwrap_or(crate::agent::main_loop::DEFAULT_TRANSIENT_LLM_REQUEST_RETRIES)
@@ -327,6 +460,7 @@ fn admit_mobile_task(
                 action_milestone_steps: config.action_milestone_steps,
                 phase_push: config.phase_pushes,
                 plan_mode: None,
+                task_start_mode: req.task_start_mode,
                 caller_notifies: false,
             },
         )),
@@ -366,9 +500,26 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     fn memory_db() -> DbState {
-        DbState(Arc::new(Mutex::new(
-            crate::db::init_db(&PathBuf::from(":memory:")).unwrap(),
-        )))
+        let conn = crate::db::init_db(&PathBuf::from(":memory:")).unwrap();
+        seed_test_models(&conn);
+        DbState(Arc::new(Mutex::new(conn)))
+    }
+
+    fn seed_test_models(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO platforms (id,name,base_url,api_key,created_at)
+             VALUES ('mobile-test-provider','local','http://127.0.0.1:9/v1','local-test-only','now')",
+            [],
+        ).unwrap();
+        for (id, enabled) in [
+            ("test-model", true), ("alternate-model", true), ("disabled-model", false),
+        ] {
+            conn.execute(
+                "INSERT INTO models(id,platform_id,name,display_name,enabled,created_at)
+                 VALUES (?1,'mobile-test-provider',?1,?1,?2,'now')",
+                params![id, enabled],
+            ).unwrap();
+        }
     }
 
     fn config() -> ChannelConfig {
@@ -401,13 +552,370 @@ mod tests {
     }
 
     #[test]
+    fn mobile_uses_live_session_model_and_preserves_default_after_explicit_override() {
+        use crate::agent::context::types::{ChatMessage, SandwichContext};
+        use crate::agent::router::{AgentRouter, RoutingTier};
+
+        let db = memory_db();
+        let channel = ChannelConfig {
+            pro: "channel-pro".into(),
+            flash: "channel-flash".into(),
+            vision: "channel-vision".into(),
+            ..config()
+        };
+        let session = {
+            let conn = db.0.lock().unwrap();
+            let session = crate::commands::projects::create_plain_session_row(
+                &conn, "测试会话", "alternate-model",
+            ).unwrap();
+            assert_eq!(channel_task_routing(&channel, &conn, &session.id, None).unwrap().pro, "channel-pro");
+            session
+        };
+        let submit = |routing| {
+            let mut input = request(Some(&session.id), None);
+            input["model_routing"] = routing;
+            admit_mobile_task(&db, &channel, serde_json::from_value(input).unwrap()).unwrap()
+        };
+        let (receipt, launch) = submit(json!({"pro": "test-model"}));
+        let (owner, launch) = launch.unwrap();
+        assert_eq!(launch.routing.pro, "test-model");
+        crate::agent::conversation::begin_existing_turn_for_run(
+            &db, &session.id, &launch.routing.pro, &launch.goal, &receipt.run_id,
+        ).unwrap();
+        drop(owner);
+        {
+            let conn = db.0.lock().unwrap();
+            assert_eq!(mobile_session_on(&conn, &session.id).unwrap().unwrap().model_id, "alternate-model");
+            assert_eq!(
+                conn.query_row("SELECT model_id FROM chat_messages WHERE run_id=?1", [&receipt.run_id], |row| row.get::<_, String>(0)).unwrap(),
+                "test-model",
+            );
+        }
+
+        let (_, launch) = submit(json!({"context_budget_mode": "cost_saving", "role_models": {"executor": "flash"}}));
+        let (owner, launch) = launch.unwrap();
+        assert_eq!(launch.routing.pro, "alternate-model");
+        assert_eq!(launch.routing.flash, "channel-flash");
+        assert_eq!(launch.routing.vision, "channel-vision");
+        assert_eq!(launch.routing.context_budget_mode, "cost_saving");
+        let mut context = SandwichContext::new("system".into(), "goal".into());
+        context.turns_history.push(ChatMessage {role: "assistant".into(), content: json!("an older step")});
+        let decision = AgentRouter::route_for_step(&context, &launch.routing, 3);
+        assert_eq!(decision.tier, RoutingTier::Pro);
+        assert_eq!(decision.model_id, "alternate-model");
+        context.add_image_feedback("source", "data:image/png;base64,QUJD");
+        let decision = AgentRouter::route_for_step(&context, &launch.routing, 4);
+        assert_eq!(decision.tier, RoutingTier::Vision);
+        assert_eq!(decision.model_id, "channel-vision");
+        drop(owner);
+
+        db.0.lock().unwrap().execute(
+            "UPDATE chat_sessions SET model_id='test-model' WHERE id=?1", [&session.id],
+        ).unwrap();
+        let (_, launch) = submit(json!(null));
+        assert_eq!(launch.unwrap().1.routing.pro, "test-model");
+    }
+
+    #[test]
+    fn mobile_rejects_stale_model_or_role_and_replays_an_accepted_receipt() {
+        let db = memory_db();
+        role_manager::upsert_card(&db, &json!({"name": "local_specialist", "label": "本地专家"})).unwrap();
+        let mut input = request(None, None);
+        input["role_card"] = json!("local_specialist");
+        let (receipt, launch) = admit(&db, &input).unwrap();
+        drop(launch);
+        role_manager::toggle_card(&db, &json!("local_specialist")).unwrap();
+        db.0.lock().unwrap().execute("UPDATE models SET enabled=0 WHERE id='test-model'", []).unwrap();
+        let (reused, launch) = admit(&db, &input).unwrap();
+        assert_eq!(reused, receipt);
+        assert!(launch.is_none());
+
+        for model in ["missing-model", "disabled-model"] {
+            let mut input = request(None, None);
+            input["model_routing"]["pro"] = json!(model);
+            let (status, Json(body)) = admit(&db, &input).err().unwrap();
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body["code"], "invalid_submission");
+            assert!(body["error"].as_str().unwrap().contains("模型"));
+        }
+        for role in ["missing-role", "local_specialist"] {
+            let mut input = request(None, None);
+            input["model_routing"]["pro"] = json!("alternate-model");
+            input["role_card"] = json!(role);
+            let (status, Json(body)) = admit(&db, &input).err().unwrap();
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body["code"], "invalid_submission");
+            assert!(body["error"].as_str().unwrap().contains("角色卡"));
+        }
+        let conn = db.0.lock().unwrap();
+        for table in ["chat_sessions", "agent_run_traces", "channel_mobile_submissions"] {
+            assert_eq!(conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn mobile_selected_role_reaches_local_provider_after_checkpoint_restore() {
+        use crate::agent::checkpoint::AgentCheckpoint;
+        use crate::agent::context::SandwichContext;
+        use crate::agent::router::AgentRouter;
+        use tauri::Manager;
+
+        let db = memory_db();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let server = tokio::spawn(async move {
+            let app = axum::Router::new().route("/v1/chat/completions", axum::routing::post(
+                move |Json(body): Json<Value>| {
+                    captured.lock().unwrap().push(body);
+                    async {
+                        let frame = json!({"choices": [{
+                            "delta": {"content": r#"{"tool":"local_file","command":{"action":"read","path":"example.txt"}}"#},
+                            "finish_reason": "stop"
+                        }]});
+                        ([(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                         format!("data: {frame}\n\ndata: [DONE]\n\n"))
+                    }
+                },
+            ));
+            axum::serve(listener, app).await.unwrap();
+        });
+        {
+            let conn = db.0.lock().unwrap();
+            conn.execute("UPDATE platforms SET base_url=?1 WHERE id='mobile-test-provider'", [format!("http://{address}/v1")]).unwrap();
+            conn.execute(
+                "INSERT INTO agent_custom_instructions(id,kind,name,content,created_at,updated_at)
+                 VALUES ('mobile-fixture','skill','mobile_handoff_fixture','LOCAL_ROLE_SKILL','now','now')",
+                [],
+            ).unwrap();
+        }
+        role_manager::upsert_card(&db, &json!({
+            "name": "local_handoff", "label": "本地交接专家", "model_id": "test-model",
+            "persona_prompt": "LOCAL_ROLE_PERSONA", "scope_hints": "LOCAL_ROLE_SCOPE",
+            "allowed_skills": "mobile_handoff_fixture",
+        })).unwrap();
+        let mut input = request(None, None);
+        input["model_id"] = json!("alternate-model");
+        input["model_routing"] = json!({"context_budget_mode": "cost_saving"});
+        input["role_card"] = json!("local_handoff");
+        let (receipt, launch) = admit(&db, &input).unwrap();
+        let (_owner, launch) = launch.unwrap();
+        let mut old = SandwichContext::new("system baseline".into(), launch.goal.clone());
+        old.active_role_context = "DISCARDED_ROLE".into();
+        let mut checkpoint = AgentCheckpoint::new(receipt.session_id.clone(), &old);
+        crate::agent::checkpoint::save_checkpoint(&db, &mut checkpoint).unwrap();
+        let checkpoint = crate::agent::checkpoint::load_checkpoint(&db, &receipt.session_id)
+            .unwrap().unwrap();
+
+        let mut resumed = SandwichContext::new("system baseline".into(), launch.goal.clone());
+        let card = launch.routing.mobile_run.as_deref().unwrap().role_card.as_ref().unwrap();
+        resumed.active_role_context = role_manager::main_agent_role_context(
+            &db, card, launch.workspace_override.as_deref().unwrap(),
+        );
+        checkpoint.restore_context(&mut resumed);
+        let mut fresh = SandwichContext::new("system baseline".into(), "new turn".into());
+        checkpoint.data.inherit_filling_into(&mut fresh);
+        assert_eq!(fresh.assemble_messages()[0].content, "system baseline");
+
+        let app = tauri::test::mock_builder().manage(db.clone())
+            .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        let state = app.state::<DbState>();
+        let model = AgentRouter::route_for_step(&resumed, &launch.routing, 4);
+        let (_tx, mut rx) = tokio::sync::watch::channel(0);
+        let (instruction, _, _, _) = crate::agent::utils::llm_client::call_llm(
+            &resumed, &state, model.model_id, "Pro", None, 4, &receipt.session_id,
+            Some(&receipt.run_id), false, 1, "auto", false, &mut rx,
+        ).await.unwrap();
+        assert_eq!(instruction.get_tool(), "local_file");
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["model"], "alternate-model");
+        assert_eq!(requests[0]["messages"][0]["role"], "system");
+        let prompt = requests[0]["messages"][0]["content"].as_str().unwrap();
+        for expected in ["system baseline", "LOCAL_ROLE_PERSONA", "LOCAL_ROLE_SCOPE", "LOCAL_ROLE_SKILL"] {
+            assert!(prompt.contains(expected), "missing {expected}");
+        }
+        assert!(!prompt.contains("DISCARDED_ROLE"));
+        server.abort();
+    }
+
+    fn saved_mobile_checkpoint(db: &DbState) -> crate::agent::checkpoint::AgentCheckpoint {
+        let session = {
+            let conn = db.0.lock().unwrap();
+            crate::commands::projects::create_plain_session_row(
+                &conn,
+                "本地续跑会话",
+                "test-model",
+            )
+            .unwrap()
+        };
+        let context = crate::agent::context::SandwichContext::new("system".into(), "原任务".into());
+        let mut checkpoint = crate::agent::checkpoint::AgentCheckpoint::new(session.id, &context);
+        checkpoint.mark_failed("上次停止".into(), &context);
+        crate::agent::checkpoint::save_checkpoint(db, &mut checkpoint).unwrap();
+        checkpoint
+    }
+
+    fn checkpoint_metadata(db: &DbState, session_id: &str) -> Value {
+        let conn = db.0.lock().unwrap();
+        json!(mobile_task_checkpoint_on(&conn, session_id).unwrap())
+    }
+
+    #[test]
+    fn mobile_explicit_resume_and_new_reach_the_same_checkpoint_choice_as_desktop() {
+        let db = memory_db();
+        let checkpoint = saved_mobile_checkpoint(&db);
+        let current = checkpoint_metadata(&db, &checkpoint.run_id);
+        assert_eq!(
+            current,
+            json!({ "task_id": checkpoint.data.history_task_id,
+                    "version": checkpoint.version, "phase": "failed" })
+        );
+        let expected = json!({ "task_id": current["task_id"], "version": current["version"] });
+        let mut resume = request(Some(&checkpoint.run_id), None);
+        resume["task_start_mode"] = json!("resume");
+        resume["expected_checkpoint"] = expected.clone();
+        resume["goal"] = json!("");
+        let (receipt, launch) = admit(&db, &resume).unwrap();
+        let (owner, launch) = launch.unwrap();
+        assert_eq!(launch.goal, "继续原任务");
+        assert_eq!(launch.task_start_mode, Some(TaskStartMode::Resume));
+        assert!(!crate::agent::conversation::should_start_new_turn(
+            Some(&checkpoint), launch.task_start_mode,
+        )
+        .unwrap());
+
+        let mut new = request(Some(&checkpoint.run_id), None);
+        new["task_start_mode"] = json!("new");
+        new["expected_checkpoint"] = expected;
+        let (_, Json(body)) = admit(&db, &new).err().unwrap();
+        assert_eq!(body["code"], "session_in_flight");
+        drop(owner);
+        let (next, launch) = admit(&db, &new).unwrap();
+        let (_owner, launch) = launch.unwrap();
+        assert_eq!(launch.task_start_mode, Some(TaskStartMode::New));
+        assert!(crate::agent::conversation::should_start_new_turn(
+            Some(&checkpoint), launch.task_start_mode,
+        )
+        .unwrap());
+        assert_ne!(receipt.run_id, next.run_id);
+        assert_eq!(receipt.session_id, next.session_id);
+    }
+
+    #[test]
+    fn mobile_rejects_stale_intent_but_replays_accepted_resume_after_checkpoint_advances() {
+        let db = memory_db();
+        let mut checkpoint = saved_mobile_checkpoint(&db);
+        let mut resume = request(Some(&checkpoint.run_id), None);
+        resume["task_start_mode"] = json!("resume");
+        resume["expected_checkpoint"] = checkpoint_metadata(&db, &checkpoint.run_id);
+        let (receipt, launch) = admit(&db, &resume).unwrap();
+        drop(launch);
+
+        crate::agent::checkpoint::save_checkpoint(&db, &mut checkpoint).unwrap();
+        let (same_receipt, replay) = admit(&db, &resume).unwrap();
+        assert_eq!(same_receipt, receipt);
+        assert!(replay.is_none());
+
+        let mut modified_replay = resume.clone();
+        modified_replay["task_start_mode"] = json!("new");
+        let (_, Json(body)) = admit(&db, &modified_replay).err().unwrap();
+        assert_eq!(body["code"], "request_conflict");
+
+        for mode in ["resume", "new"] {
+            let mut stale = resume.clone();
+            stale["request_id"] = json!(Uuid::new_v4().to_string());
+            stale["task_start_mode"] = json!(mode);
+            let (status, Json(body)) = admit(&db, &stale).err().unwrap();
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(body["code"], "checkpoint_changed");
+            stale["expected_checkpoint"]["version"] = json!(checkpoint.version);
+            stale["expected_checkpoint"]["task_id"] = json!("different-task-same-version");
+            let (_, Json(body)) = admit(&db, &stale).err().unwrap();
+            assert_eq!(body["code"], "checkpoint_changed");
+        }
+        let conn = db.0.lock().unwrap();
+        for table in ["agent_run_traces", "channel_mobile_submissions"] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(count, 1);
+        }
+    }
+
+    #[test]
+    fn mobile_checkpoint_is_stable_for_legacy_rows_and_omits_completed_tasks() {
+        let db = memory_db();
+        let mut checkpoint = saved_mobile_checkpoint(&db);
+        db.0.lock().unwrap().execute(
+            "UPDATE agent_checkpoints SET snapshot_json=json_remove(snapshot_json, '$.data.history_task_id')
+             WHERE run_id=?1",
+            [&checkpoint.run_id],
+        ).unwrap();
+        let legacy = checkpoint_metadata(&db, &checkpoint.run_id);
+        assert!(legacy["task_id"].as_str().unwrap().starts_with("legacy:"));
+        assert_eq!(legacy, checkpoint_metadata(&db, &checkpoint.run_id));
+        let mut legacy_resume = request(Some(&checkpoint.run_id), None);
+        legacy_resume["task_start_mode"] = json!("resume");
+        legacy_resume["expected_checkpoint"] = legacy;
+        let (_, launch) = admit(&db, &legacy_resume).unwrap();
+        assert!(launch.is_some());
+        drop(launch);
+
+        let corrupt = saved_mobile_checkpoint(&db);
+        db.0.lock().unwrap().execute(
+            "UPDATE agent_checkpoints SET snapshot_json='invalid' WHERE run_id=?1",
+            [&corrupt.run_id],
+        ).unwrap();
+        assert!(checkpoint_metadata(&db, &corrupt.run_id).is_null());
+
+        let context = crate::agent::context::SandwichContext::new("system".into(), "原任务".into());
+        checkpoint.mark_done(&context);
+        crate::agent::checkpoint::save_checkpoint(&db, &mut checkpoint).unwrap();
+        assert!(checkpoint_metadata(&db, &checkpoint.run_id).is_null());
+        let mut intent = request(Some(&checkpoint.run_id), None);
+        intent["task_start_mode"] = json!("resume");
+        intent["expected_checkpoint"] = Value::Null;
+        let (_, Json(body)) = admit(&db, &intent).err().unwrap();
+        assert_eq!(body["code"], "checkpoint_changed");
+        intent["task_start_mode"] = json!("new");
+        let (_, launch) = admit(&db, &intent).unwrap();
+        assert!(launch.is_some());
+    }
+
+    #[test]
+    fn mobile_legacy_request_replays_a_pre_upgrade_fingerprint() {
+        let db = memory_db();
+        let mut request = request(None, None);
+        request["model_routing"] = Value::Null;
+        let (receipt, launch) = admit(&db, &request).unwrap();
+        drop(launch);
+        // The pre-intent endpoint fingerprinted this normalized seven-field serialization.
+        let pre_upgrade_bytes = format!(
+            r#"{{"request_id":{},"session_id":null,"project_id":null,"goal":"本地验证","title":null,"model_id":null,"model_routing":null}}"#,
+            request["request_id"]
+        );
+        let old_hash = format!("{:x}", Sha256::digest(pre_upgrade_bytes.as_bytes()));
+        db.0.lock().unwrap().execute(
+            "UPDATE channel_mobile_submissions SET request_hash=?1 WHERE run_id=?2",
+            params![old_hash, receipt.run_id],
+        ).unwrap();
+        let (replayed, launch) = admit(&db, &request).unwrap();
+        assert_eq!(replayed, receipt);
+        assert!(launch.is_none());
+    }
+
+    #[test]
     fn mobile_retries_reuse_one_session_run_and_receipt_after_lost_ack_and_restart() {
         let fixture = std::env::temp_dir().join(format!("mobile-admission-{}", Uuid::new_v4()));
         let db_path = fixture.join("state.sqlite");
         let request = request(None, None);
         let receipt =
             {
-                let db = DbState(Arc::new(Mutex::new(crate::db::init_db(&db_path).unwrap())));
+                let conn = crate::db::init_db(&db_path).unwrap();
+                seed_test_models(&conn);
+                let db = DbState(Arc::new(Mutex::new(conn)));
                 let (receipt, launch) = admit(&db, &request).unwrap();
                 let (owner, launch) = launch.unwrap();
                 assert_eq!(launch.goal, "本地验证");

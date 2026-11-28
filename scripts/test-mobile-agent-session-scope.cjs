@@ -34,12 +34,21 @@ function createPage(runs, storage = new Map()) {
                 id, value: '', dataset: {}, writes: 0, html: '', style: {},
                 get innerHTML() { return this.html; },
                 set innerHTML(value) { this.writes++; this.html = value; },
+                querySelectorAll(selector) {
+                    assert.equal(id, 'sheetList');
+                    assert.equal(selector, 'button[data-v]');
+                    const buttons = Array.from(this.html.matchAll(/<button [^>]*data-v="([^"]*)"/g),
+                        ([, value]) => ({ dataset: { v: value } }));
+                    this.sheetButtons = buttons;
+                    return buttons;
+                },
                 classList: {
                     add(item) { classes.add(item); },
                     remove(item) { classes.delete(item); },
                     contains(item) { return classes.has(item); },
                     toggle(item, show = !classes.has(item)) { if (show) classes.add(item); else classes.delete(item); },
                 },
+                getAttribute(name) { return this[name] ?? null; },
                 setAttribute(name, value) { this[name] = value; },
                 addEventListener() {}, click() {}, matches() { return id === 'followInput'; },
             });
@@ -67,6 +76,7 @@ function createPage(runs, storage = new Map()) {
     });
     vm.runInContext(source, context);
     const pending = new Map();
+    const traceSnapshots = new Map();
     const uploads = [];
     const liveState = vm.runInContext('S', context);
     Object.assign(context, {
@@ -83,6 +93,7 @@ function createPage(runs, storage = new Map()) {
                 return admissionHandler ? admissionHandler(body)
                     : Promise.resolve({ session_id: body.session_id || 'new-session', run_id: 'task-run' });
             }
+            if (traceSnapshots.has(url)) return Promise.resolve(traceSnapshots.get(url));
             const responses = {
                 '/channel/runs': { runs }, '/channel/sessions': { sessions: [{ id: 'A' }, { id: 'B' }] },
             };
@@ -94,6 +105,15 @@ function createPage(runs, storage = new Map()) {
         visualViewport, properties, flushFrame,
         setAdmissionHandler(handler) { admissionHandler = handler; },
         setHomeError(error) { homeError = error; },
+        setTraceSnapshot(id, session, checkpoint = null) {
+            traceSnapshots.set(`/channel/session/${id}/traces`, { session: { id, ...session }, task_checkpoint: checkpoint });
+        },
+        pickOption(id, value) {
+            getElementById(id).onclick();
+            const button = getElementById('sheetList').sheetButtons.find(button => button.dataset.v === value);
+            assert(button, `Expected an option with value ${value} from ${id}`);
+            button.onclick();
+        },
     };
 }
 
@@ -127,6 +147,7 @@ async function main() {
     assert.equal(page.liveState.flow.sessionId, 'B', 'A 的迟到回执不会覆盖 B');
     await page.sendComposer();
     assert(page.requests.some(({ url, body }) => url === '/channel/run/run-B/goal' && body.goal === '发给 B'));
+    assert.equal(page.input.value, '发给 B', '运行中的停止请求保留目标草稿，供下一轮明确提交');
 
     const bTraceUrl = '/channel/session/B/traces';
     const bTraceRequests = () => page.requests.filter(({ url }) => url === bTraceUrl).length;
@@ -201,10 +222,11 @@ async function main() {
 
     const compose = createPage([]);
     compose.bind();
+    compose.liveState.models = [{ id: 'model-A', name: 'A 模型' }, { id: 'model-B', name: 'B 模型' }];
     await compose.openSession('A');
     compose.input.value = 'A 的任务';
     compose.liveState.composerFiles.push('A 文件 1', 'A 文件 2');
-    compose.liveState.taskOpts.model_id = 'model-A';
+    compose.pickOption('optModel', 'model-A');
     const firstUpload = deferred();
     compose.pending.set('A 文件 1', firstUpload);
     const sendingA = compose.sendComposer();
@@ -213,7 +235,7 @@ async function main() {
     await compose.openSession('B');
     compose.input.value = 'B 的任务';
     compose.liveState.composerFiles.push('B 文件');
-    compose.liveState.taskOpts.model_id = 'model-B';
+    compose.pickOption('optModel', 'model-B');
     firstUpload.resolve();
     await Promise.all([sendingA, duplicateUpload]);
     assert.deepEqual(compose.uploads, [['A', 'A 文件 1'], ['A', 'A 文件 2']]);
@@ -354,6 +376,178 @@ async function main() {
     assert.deepEqual(reloaded.requests.find(({ url }) => url === '/channel/mobile/task').body, beforeReload);
     assert(!reloaded.requests.some(({ url }) => /\/goal$/.test(url)));
 
+    const optionsStorage = new Map();
+    const options = createPage([], optionsStorage);
+    options.bind();
+    options.liveState.models = [{ id: 'main-override', display_name: '临时主模型' }];
+    options.liveState.modelById = {
+        'session-model-a': { display_name: 'A 会话模型' }, 'session-model-b': { display_name: 'B 会话模型' },
+        'session-model-new': { display_name: '变更后的会话模型' }, 'main-override': options.liveState.models[0],
+    };
+    options.liveState.roleCards = [
+        { name: 'research', label: '调研角色', enabled: true }, { name: 'disabled', label: '停用角色', enabled: false },
+    ];
+    options.setTraceSnapshot('A', { model_id: 'session-model-a' });
+    options.setTraceSnapshot('B', { model_id: 'session-model-b', project_id: 'project-B' });
+    await options.openSession('A');
+    assert.match(options.getElementById('optModel').title, /跟随会话模型.*A 会话模型/);
+    options.pickOption('optModel', 'main-override');
+    options.pickOption('optBudget', 'cost_saving');
+    options.pickOption('optRoles', 'research');
+    options.getElementById('optRoles').onclick();
+    const roleRows = options.getElementById('sheetList').sheetButtons;
+    assert.deepEqual(roleRows.map(row => row.dataset.v), ['', 'research']);
+    const previouslyOpenedRole = roleRows[0].onclick;
+    options.input.value = 'A 设置对应的草稿';
+    await options.openSession('B');
+    previouslyOpenedRole();
+    assert.equal(options.getElementById('sheetPick').classList.contains('hidden'), true);
+    assert.match(options.getElementById('optModel').title, /跟随会话模型.*B 会话模型/);
+    assert.equal(options.getElementById('lblBudget').textContent, '长程');
+    assert.equal(options.getElementById('lblRoles').textContent, '默认');
+    options.setTraceSnapshot('B', { model_id: 'session-model-new', project_id: 'project-B' });
+    await options.loadFlow('B');
+    options.getElementById('optModel').onclick();
+    assert.match(options.getElementById('sheetList').innerHTML, /变更后的会话模型/);
+    options.pickOption('optModel', '');
+    options.input.value = 'B 开新一轮';
+    await options.sendComposer();
+    const followBody = options.requests.find(({ url }) => url === '/channel/mobile/task').body;
+    assert.equal(followBody.session_id, 'B');
+    assert.equal(followBody.project_id, 'project-B');
+    assert.equal(followBody.task_start_mode, 'new');
+    assert.equal(followBody.expected_checkpoint, null);
+    assert(!Object.hasOwn(followBody, 'model_routing'));
+    assert(!Object.hasOwn(followBody, 'role_card'));
+    await options.openSession('A');
+    assert.equal(options.input.value, 'A 设置对应的草稿');
+    assert.equal(options.getElementById('lblModel').textContent, '临时主模型');
+    assert.equal(options.getElementById('lblBudget').textContent, '省流');
+    assert.equal(options.getElementById('lblRoles').textContent, '调研角色');
+    await options.sendComposer();
+    const overrideBody = options.requests.filter(({ url }) => url === '/channel/mobile/task').at(-1).body;
+    assert.deepEqual(overrideBody.model_routing, { pro: 'main-override', context_budget_mode: 'cost_saving' });
+    assert.equal(overrideBody.role_card, 'research');
+    const optionsReloaded = createPage([], optionsStorage);
+    optionsReloaded.liveState.modelById = options.liveState.modelById;
+    optionsReloaded.liveState.roleCards = options.liveState.roleCards;
+    await optionsReloaded.openSession('A');
+    assert.match(optionsReloaded.getElementById('optModel').title, /临时主模型/);
+    assert.equal(optionsReloaded.getElementById('lblBudget').textContent, '省流');
+    assert.match(optionsReloaded.getElementById('optRoles').title, /调研角色/);
+    await optionsReloaded.openSession('B');
+    assert.equal(optionsReloaded.getElementById('lblModel').textContent, '跟随');
+    assert.equal(optionsReloaded.getElementById('lblRoles').textContent, '默认');
+
+    const resumeStore = new Map();
+    const resumeRuns = [];
+    const resume = createPage(resumeRuns, resumeStore);
+    resume.bind();
+    const checkpoint = { task_id: 'original-task', version: 7, phase: 'failed' };
+    resume.setTraceSnapshot('A', { project_id: null }, checkpoint);
+    await resume.openSession('A');
+    assert.equal(resume.getElementById('composerStartChoices').classList.contains('hidden'), false);
+    assert.equal(resume.getElementById('btnSend').disabled, true);
+    resume.input.value = '这段话不能被猜成继续或新任务';
+    await resume.sendComposer();
+    assert(!resume.requests.some(({ url }) => url === '/channel/mobile/task'));
+    resume.input.value = '';
+    resume.getElementById('composerResume').onclick();
+    assert.equal(resume.getElementById('composerResume')['aria-pressed'], 'true');
+    assert.equal(resume.getElementById('btnSend').title, '继续原任务');
+    resume.setAdmissionHandler(async () => { throw new Error('续跑已启动，响应丢失'); });
+    await resume.sendComposer();
+    const originalResume = resume.requests.find(({ url }) => url === '/channel/mobile/task').body;
+    assert.equal(originalResume.task_start_mode, 'resume');
+    assert.equal(originalResume.goal, '');
+    assert.deepEqual(originalResume.expected_checkpoint, { task_id: 'original-task', version: 7 });
+    await resume.openSession('B');
+    assert.equal(resume.getElementById('composerStartChoices').classList.contains('hidden'), true);
+    resumeRuns.push({ session_id: 'A', run_id: 'resumed', status: 'running' });
+    const resumeReloaded = createPage(resumeRuns, resumeStore);
+    resumeReloaded.bind();
+    resumeReloaded.liveState.models = options.liveState.models;
+    resumeReloaded.liveState.modelById = options.liveState.modelById;
+    resumeReloaded.liveState.roleCards = options.liveState.roleCards;
+    resumeReloaded.setTraceSnapshot('A', { project_id: null }, { ...checkpoint, version: 8 });
+    await resumeReloaded.openSession('A');
+    assert.equal(resumeReloaded.getElementById('btnSend').title, '核对原提交');
+    assert.equal(resumeReloaded.getElementById('composerStartChoices').classList.contains('hidden'), true);
+    resumeReloaded.pickOption('optModel', 'main-override');
+    resumeReloaded.pickOption('optRoles', 'research');
+    resumeReloaded.input.value = '后续想做的内容';
+    await resumeReloaded.sendComposer();
+    assert.deepEqual(resumeReloaded.requests.find(({ url }) => url === '/channel/mobile/task').body, originalResume);
+    assert.equal(resumeReloaded.input.value, '后续想做的内容');
+    assert(!resumeReloaded.requests.some(({ url }) => /\/goal$/.test(url)));
+    resumeRuns.length = 0;
+    await resumeReloaded.loadFlow('A');
+    assert.equal(resumeReloaded.getElementById('btnSend').disabled, true);
+    resumeReloaded.getElementById('composerNewTurn').onclick();
+    assert.equal(resumeReloaded.getElementById('composerNewTurn')['aria-pressed'], 'true');
+    assert.equal(resumeReloaded.getElementById('btnSend').title, '新开一轮');
+    await resumeReloaded.sendComposer();
+    const newRound = resumeReloaded.requests.filter(({ url }) => url === '/channel/mobile/task').at(-1).body;
+    assert.equal(newRound.task_start_mode, 'new');
+    assert.equal(newRound.goal, '后续想做的内容');
+    assert.deepEqual(newRound.expected_checkpoint, { task_id: 'original-task', version: 8 });
+    assert.deepEqual(newRound.model_routing, { pro: 'main-override' });
+    assert.equal(newRound.role_card, 'research');
+    assert.notEqual(newRound.request_id, originalResume.request_id);
+
+    const oldCheckpoint = createPage([]);
+    oldCheckpoint.bind();
+    oldCheckpoint.setTraceSnapshot('A', {}, checkpoint);
+    await oldCheckpoint.openSession('A');
+    oldCheckpoint.input.value = '保留对原任务的说明';
+    oldCheckpoint.getElementById('composerResume').onclick();
+    const refreshedCheckpoint = deferred();
+    oldCheckpoint.pending.set('/channel/session/A/traces', refreshedCheckpoint);
+    oldCheckpoint.setAdmissionHandler(async () => {
+        throw Object.assign(new Error('任务版本已变更'), { status: 409, code: 'checkpoint_changed' });
+    });
+    await oldCheckpoint.sendComposer();
+    assert.equal(oldCheckpoint.getElementById('btnSend').disabled, true);
+    assert.match(oldCheckpoint.getElementById('composerSubmitStatus').textContent, /刷新后可重新选择/);
+    refreshedCheckpoint.resolve({ session: { id: 'A' }, task_checkpoint: { ...checkpoint, version: 9 } });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(oldCheckpoint.getElementById('composerResume')['aria-pressed'], 'false');
+    assert.equal(oldCheckpoint.input.value, '保留对原任务的说明');
+    await oldCheckpoint.sendComposer();
+    assert.equal(oldCheckpoint.requests.filter(({ url }) => url === '/channel/mobile/task').length, 1);
+    oldCheckpoint.getElementById('composerResume').onclick();
+    oldCheckpoint.setAdmissionHandler(async () => ({ session_id: 'A', run_id: 'resumed-latest' }));
+    await oldCheckpoint.sendComposer();
+    const recovered = oldCheckpoint.requests.filter(({ url }) => url === '/channel/mobile/task').at(-1).body;
+    assert.deepEqual(recovered.expected_checkpoint, { task_id: 'original-task', version: 9 });
+    assert.equal(recovered.goal, '保留对原任务的说明');
+
+    const startedElsewhere = [];
+    const uploadRetry = createPage(startedElsewhere);
+    uploadRetry.bind();
+    uploadRetry.setTraceSnapshot('A', {}, checkpoint);
+    await uploadRetry.openSession('A');
+    uploadRetry.getElementById('composerNewTurn').onclick();
+    uploadRetry.input.value = '原先准备的新任务';
+    uploadRetry.liveState.composerFiles.push('断线的附件');
+    const stoppedUpload = deferred();
+    uploadRetry.pending.set('断线的附件', stoppedUpload);
+    const interrupted = uploadRetry.sendComposer();
+    stoppedUpload.reject(new Error('上传断线'));
+    await interrupted;
+    startedElsewhere.push({ session_id: 'A', run_id: 'other-run', status: 'running' });
+    await uploadRetry.loadFlow('A');
+    uploadRetry.pending.delete('断线的附件');
+    uploadRetry.setAdmissionHandler(async () => {
+        throw Object.assign(new Error('另一设备已开始运行'), { status: 409, code: 'session_in_flight' });
+    });
+    await uploadRetry.sendComposer();
+    const retryDuringOtherRun = uploadRetry.requests.find(({ url }) => url === '/channel/mobile/task').body;
+    assert.equal(retryDuringOtherRun.task_start_mode, 'new');
+    assert.deepEqual(retryDuringOtherRun.expected_checkpoint, { task_id: 'original-task', version: 7 });
+    assert(!uploadRetry.requests.some(({ url }) => /\/goal$/.test(url)));
+    assert.equal(uploadRetry.input.value, '原先准备的新任务');
+
     const stale = createPage([]);
     stale.liveState.sessions.push({ id: 'A', project_id: 'project-old' });
     const staleRead = deferred();
@@ -423,6 +617,9 @@ async function main() {
     assert.equal(newTask.session_id, undefined);
     assert.equal(newTask.model_id, 'model-1');
     assert.equal(newTask.project_id, null);
+    assert.equal(newTask.task_start_mode, 'new');
+    assert.equal(newTask.expected_checkpoint, null);
+    assert(!Object.hasOwn(newTask, 'model_routing'));
     fresh.setAdmissionHandler(async () => ({ session_id: 'A', run_id: 'new-run' }));
     await fresh.submitNew();
     assert.deepEqual(fresh.requests.filter(({ url }) => url === '/channel/mobile/task').map(({ body }) => body), [newTask, newTask]);
@@ -430,7 +627,7 @@ async function main() {
     assert.equal(fresh.liveState.currentSessionId, 'A');
     assert.equal(fresh.getElementById('modalNew').classList.contains('hidden'), true);
 
-    console.log('PASS: mobile session actions, scoped drafts and attachments, and stable task admission under weak-network retries');
+    console.log('PASS: mobile session routes, scoped drafts/attachments/settings, explicit resume/new and weak-network retry');
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1; });

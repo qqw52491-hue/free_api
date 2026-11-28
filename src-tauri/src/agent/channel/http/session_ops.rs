@@ -12,7 +12,7 @@ pub(crate) struct SessionReq {
     pub(crate) root_path: Option<String>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 pub(crate) struct PartialRouting {
     pub(crate) pro: Option<String>,
     pub(crate) flash: Option<String>,

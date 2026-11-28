@@ -261,7 +261,7 @@ fn append_message(
 }
 
 /// 任务意图独立于模型配置；缺省保持旧客户端的非终态恢复行为。
-#[derive(Debug, Clone, Copy, serde::Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStartMode {
     Resume,
@@ -301,6 +301,17 @@ pub(crate) fn begin_turn_for_run(
     run_id: &str,
 ) -> Result<ConversationCursor, String> {
     ensure_conversation(db, session_id, model_id, user_message)?;
+    begin_existing_turn_for_run(db, session_id, model_id, user_message, run_id)
+}
+
+/// Admission already created or verified this conversation. Keep its configured default model.
+pub(crate) fn begin_existing_turn_for_run(
+    db: &DbState,
+    session_id: &str,
+    model_id: &str,
+    user_message: &str,
+    run_id: &str,
+) -> Result<ConversationCursor, String> {
     append_message(db, session_id, "user", user_message, Some(model_id), Some(run_id))
 }
 
