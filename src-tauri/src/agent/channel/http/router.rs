@@ -63,6 +63,18 @@ pub(crate) fn channel_router(state: Arc<ChannelState>) -> Router {
         .with_state(state)
 }
 
+/// 仅挂在本机 ACP 监听器上，微信及远程网页端不开放工作目录登记和原始事件流。
+pub(crate) fn acp_router(state: Arc<ChannelState>) -> Router {
+    Router::new()
+        .route("/channel/session", post(handler_session))
+        .route("/channel/session/{session_id}/stream", get(handler_session_stream))
+        .route("/channel/task", post(handler_task))
+        .route("/channel/run/{run_id}", get(handler_run_status))
+        .route("/channel/run/{run_id}/answer", post(handler_run_answer))
+        .route("/channel/run/{run_id}/cancel", post(handler_run_cancel))
+        .with_state(state)
+}
+
 // ---------------------------------------------------------------- 全局共享配置
 // 页面保存配置走 Tauri 命令，而 axum 处理器读的是 ChannelState 里的快照；
 // 两边必须共享同一份 Arc<RwLock<ChannelConfig>>，否则保存后运行中的服务仍在用

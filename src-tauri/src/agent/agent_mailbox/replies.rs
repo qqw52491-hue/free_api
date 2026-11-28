@@ -194,7 +194,7 @@ fn register(
     .to_string();
     let existing: Option<(String,String,String)> = tx.query_row("SELECT m.target_run_id,m.payload_json,c.status FROM agent_messages m JOIN agent_child_runs c ON c.id=m.target_run_id WHERE m.id=?1 AND m.sender_run_id=?2",params![request,actor.run],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(|e|e.to_string())?;
     if let Some((run, body, status)) = existing {
-        if body != payload.to_string() {
+        if serde_json::from_str::<Value>(&body).ok().as_ref() != Some(&payload) {
             return Err("追问重试键已绑定其他问题或目标，未重复启动。".into());
         }
         return Ok((

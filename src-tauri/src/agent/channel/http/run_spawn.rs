@@ -63,6 +63,7 @@ impl<R: tauri::Runtime> SessionRunGuard<R> {
             status: "running".to_string(),
             paused_reason: None,
             paused_form: None,
+            paused_wait_id: None,
             last_progress: None,
             event_count: 0,
             started_at: started_at.clone(),
@@ -122,6 +123,7 @@ impl<R: tauri::Runtime> SessionRunGuard<R> {
                 } else {
                     None
                 };
+                let paused_wait_id = payload.get("wait_id").and_then(Value::as_str).map(str::to_owned);
                 patch_run(&listen_run, |record| {
                     if is_real_step {
                         record.event_count += 1;
@@ -133,10 +135,12 @@ impl<R: tauri::Runtime> SessionRunGuard<R> {
                         record.status = "waiting_human".to_string();
                         record.paused_reason = Some(reason);
                         record.paused_form = paused_form;
+                        record.paused_wait_id = paused_wait_id;
                     } else if record.status == "waiting_human" {
                         record.status = "running".to_string();
                         record.paused_reason = None;
                         record.paused_form = None;
+                        record.paused_wait_id = None;
                     }
                 });
                 notify_session_event(&listen_session, if paused { "waiting_human" } else { "progress" });
@@ -233,6 +237,7 @@ impl<R: tauri::Runtime> SessionRunGuard<R> {
             record.result = result.clone();
             record.paused_reason = None;
             record.paused_form = None;
+            record.paused_wait_id = None;
         });
         // 已有成功/失败/取消的事务结果不被收尾异常覆盖；缺终态才补运行失败记录。
         if saved.is_none() {
@@ -299,6 +304,7 @@ pub(crate) fn register_and_spawn_run(
         status: "running".to_string(),
         paused_reason: None,
         paused_form: None,
+        paused_wait_id: None,
         last_progress: None,
         event_count: 0,
         started_at: started_at.clone(),
@@ -340,7 +346,7 @@ pub(crate) fn register_and_spawn_run(
         let db = spawn_app.state::<DbState>();
         let registry =
             spawn_app.state::<Arc<AsyncMutex<crate::agent::mcp::PluginRegistry>>>();
-        let _ = run_agent_main_loop_in_workspace(
+        let outcome = run_agent_main_loop_in_workspace(
             spawn_app.clone(),
             db,
             registry,
@@ -359,6 +365,19 @@ pub(crate) fn register_and_spawn_run(
             Some(admitted),
         )
         .await;
+        if let Err(error) = outcome {
+            // The main loop normally records its own terminal status. Setup
+            // can fail before its guard has been created.
+            patch_run(&spawn_run, |record| {
+                if terminal_status(&record.status).is_none() {
+                    record.status = "failed".into();
+                    record.error = Some(error);
+                    record.paused_reason = None;
+                    record.paused_form = None;
+                    record.paused_wait_id = None;
+                }
+            });
+        }
     });
 
     Ok(run_id)

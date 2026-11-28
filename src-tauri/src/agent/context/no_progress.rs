@@ -1,4 +1,4 @@
-use crate::agent::context::determinism::sha256_hex;
+use crate::agent::context::determinism::{canonical_json, sha256_hex};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -41,7 +41,7 @@ const MAX_TRACKED_SIGNATURES: usize = 64;
 /// 用 SHA-256 而非 DefaultHasher：64 位非加密哈希在超大输出上碰撞概率
 /// 不可忽视，且指纹落进 serde 持久化状态后跨进程仍须稳定。
 fn output_fingerprint(success: bool, output: &str) -> String {
-    sha256_hex(&serde_json::json!({"success": success, "output": output}).to_string())
+    sha256_hex(&canonical_json(serde_json::json!({"success": success, "output": output})))
 }
 
 /// 参数签名使用完整序列化再哈希：serde_json::Map 是 BTreeMap，to_string 自带
@@ -49,7 +49,7 @@ fn output_fingerprint(success: bool, output: &str) -> String {
 /// 签名哈希后保存——直接把完整参数 JSON 当 HashMap key 会让单条参数
 /// 无界占内存（条目数有界、单条长度无界等于整体无界）。
 fn action_signature(tool: &str, params: &Value) -> String {
-    sha256_hex(&serde_json::json!({"tool": tool, "params": params}).to_string())
+    sha256_hex(&canonical_json(serde_json::json!({"tool": tool, "params": params})))
 }
 
 impl NoProgressTracker {

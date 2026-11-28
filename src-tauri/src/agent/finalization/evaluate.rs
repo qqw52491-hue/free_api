@@ -75,7 +75,7 @@ pub(crate) fn acceptance_fingerprint(
         "details": finish_payload.get("details"),
         "delivery_files": (["artifacts", "files", "created_files", "paths"].map(|key| finish_payload.get(key))),
     });
-    format!("{:x}", Sha256::digest(raw.to_string().as_bytes()))
+    format!("{:x}", Sha256::digest(crate::agent::context::determinism::canonical_json(raw).as_bytes()))
 }
 
 /// 契约验证结果的输入身份不包含交付说明、证据索引或 Reviewer 判决。
@@ -87,7 +87,7 @@ fn verification_effects_fingerprint(context: &SandwichContext) -> String {
         "inherited": context.inherited_side_effects_count,
         "change_verification": context.change_verification,
     });
-    format!("{:x}", Sha256::digest(raw.to_string().as_bytes()))
+    format!("{:x}", Sha256::digest(crate::agent::context::determinism::canonical_json(raw).as_bytes()))
 }
 
 /// 仅接受此前由宿主真正执行且全部通过的同运行当前命令。
@@ -245,7 +245,7 @@ pub(crate) async fn evaluate_completion<R: tauri::Runtime>(
     let evidence_index_fingerprint = match (&registered_evidence, &child_state, &parent_receipts) {
         (Ok(evidence), Ok(children), Ok(receipts)) => {
             use sha2::{Digest, Sha256};
-            Some(format!("{:x}", Sha256::digest(json!([evidence, children, receipts]).to_string().as_bytes())))
+            Some(format!("{:x}", Sha256::digest(crate::agent::context::determinism::canonical_json(json!([evidence, children, receipts])).as_bytes())))
         }
         _ => None,
     };

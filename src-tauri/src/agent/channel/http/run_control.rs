@@ -33,13 +33,22 @@ pub(crate) async fn handler_run_status(
     headers: HeaderMap,
     AxumPath(run_id): AxumPath<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let config = state.config.read().expect("config poisoned").clone();
+    let config = state.request_config();
     if !authorized(&headers, &config) {
         return Err(unauthorized());
     }
-    let runs = runs_store().lock().expect("runs store poisoned");
-    match runs.get(&run_id) {
-        Some(record) => Ok(Json(serde_json::to_value(record).unwrap_or_else(|_| json!({})))),
+    let record = runs_store().lock().expect("runs store poisoned").get(&run_id).cloned();
+    match record {
+        Some(record) => {
+            let wait_id = state.acp_token.as_ref()
+                .and_then(|_| crate::agent::control::current_human_wait(&record.session_id, &run_id))
+                .filter(|id| record.paused_wait_id.as_ref() == Some(id));
+            let mut value = serde_json::to_value(record).map_err(internal_error)?;
+            if let Some(wait_id) = wait_id {
+                value["wait_id"] = json!(wait_id);
+            }
+            Ok(Json(value))
+        }
         None => Err((
             StatusCode::NOT_FOUND,
             Json(json!({"error": "任务不存在或已被清理"})),
@@ -71,7 +80,7 @@ pub(crate) async fn handler_run_answer(
     AxumPath(run_id): AxumPath<String>,
     Json(req): Json<AnswerReq>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let config = state.config.read().expect("config poisoned").clone();
+    let config = state.request_config();
     if !authorized(&headers, &config) {
         return Err(unauthorized());
     }
@@ -79,22 +88,33 @@ pub(crate) async fn handler_run_answer(
     if text.is_empty() {
         return Err(bad_request("回答内容不能为空"));
     }
-    let session_id = {
+    let (session_id, pending_wait) = {
         let runs = runs_store().lock().expect("runs store poisoned");
         let run = runs.get(&run_id).ok_or_else(|| not_found("任务不存在"))?;
         if run.status != "waiting_human" {
             return Err((StatusCode::CONFLICT, Json(json!({"error": "任务当前未等待回答，请查状态；执行中补充要求请使用「补充：内容」。"}))));
         }
-        run.session_id.clone()
+        (run.session_id.clone(), run.paused_wait_id.clone())
     };
     let answer_state = state.app.state::<DbState>();
-    crate::agent::control::send_human_intervention(answer_state, session_id.clone(), text)
-        .await
-        .map_err(|e| bad_request(&e))?;
+    if state.acp_token.is_some() {
+        let wait_id = req.wait_id.as_deref().ok_or_else(|| bad_request("缺少人工问题标识"))?;
+        crate::agent::control::send_human_reply(answer_state.inner(), &session_id, text, Some((&run_id, wait_id)))
+            .await.map_err(|error| (StatusCode::CONFLICT, Json(json!({ "error": error }))))?;
+    } else {
+        crate::agent::control::send_human_intervention(answer_state, session_id.clone(), text)
+            .await
+            .map_err(|e| bad_request(&e))?;
+    }
     patch_run(&run_id, |record| {
-        record.status = "running".to_string();
-        record.paused_reason = None;
-        record.paused_form = None;
+        // A fast continuation may already have displayed a different question
+        // or published a terminal result by the time the send returns.
+        if record.status == "waiting_human" && record.paused_wait_id == pending_wait {
+            record.status = "running".to_string();
+            record.paused_reason = None;
+            record.paused_form = None;
+            record.paused_wait_id = None;
+        }
     });
     Ok(Json(json!({"ok": true, "session_id": session_id})))
 }
@@ -170,6 +190,7 @@ pub(crate) async fn handler_run_goal(
         record.status = "running".to_string();
         record.paused_reason = None;
         record.paused_form = None;
+        record.paused_wait_id = None;
     });
     Ok(Json(json!({"ok": true, "session_id": session_id})))
 }
@@ -179,7 +200,7 @@ pub(crate) async fn handler_run_cancel(
     headers: HeaderMap,
     AxumPath(run_id): AxumPath<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let config = state.config.read().expect("config poisoned").clone();
+    let config = state.request_config();
     if !authorized(&headers, &config) {
         return Err(unauthorized());
     }
@@ -189,6 +210,11 @@ pub(crate) async fn handler_run_cancel(
             .map(|r| r.session_id.clone())
             .ok_or_else(|| not_found("任务不存在"))?
     };
+    if state.acp_token.is_some() {
+        let result = crate::agent::control::cancel_run(&session_id, Some(&run_id))
+            .await.map_err(|error| (StatusCode::CONFLICT, Json(json!({ "error": error }))))?;
+        return Ok(Json(json!({"ok": result.delivered, "session_id": session_id})));
+    }
     crate::agent::control::cancel_agent_run(session_id.clone())
         .await
         .map_err(|e| bad_request(&e))?;
@@ -199,6 +225,7 @@ pub(crate) async fn handler_run_cancel(
         }
         record.paused_reason = None;
         record.paused_form = None;
+        record.paused_wait_id = None;
     });
     Ok(Json(json!({"ok": true, "session_id": session_id})))
 }
@@ -212,6 +239,7 @@ pub(crate) async fn handler_run_cancel(
 #[derive(Deserialize)]
 pub(crate) struct AnswerReq {
     pub(crate) text: String,
+    pub(crate) wait_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -244,7 +272,7 @@ mod supplement_tests {
     fn supplements_only_enter_an_open_running_task() {
         let mut run = RunRecord {
             run_id: "supplement-test".into(), session_id: "s".into(), goal_preview: "goal".into(),
-            status: "running".into(), paused_reason: None, paused_form: None, last_progress: None,
+            status: "running".into(), paused_reason: None, paused_form: None, paused_wait_id: None, last_progress: None,
             event_count: 0, started_at: now_ts(), updated_at: now_ts(), result: None, error: None,
             llm_retries: 3, report_every_actions: 15, phase_push: true, phase: None, state_detail: None,
             source: "channel".into(), caller_notifies: true, supplements_closed: false,

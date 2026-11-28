@@ -191,7 +191,7 @@ fn record(
     let identity = json!({"session":session_id,"purpose":purpose,"subject":subject,
         "command":command,"file_path":file_path,"output_id":output_id,"key":key,
         "tags":tags,"note":note,"reported_outcome":reported_outcome});
-    let request_fingerprint = format!("{:x}", Sha256::digest(identity.to_string().as_bytes()));
+    let request_fingerprint = format!("{:x}", Sha256::digest(crate::agent::context::determinism::canonical_json(identity).as_bytes()));
     let id = if key.is_empty() {
         Uuid::new_v4().to_string()
     } else {

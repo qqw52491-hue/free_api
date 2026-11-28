@@ -92,7 +92,7 @@ pub use bridge::{
 pub(crate) use http::{ensure_scratch_project, register_and_spawn_run};
 pub(crate) use bridge::notify_wechat;
 pub(crate) use runtime::channel_config_shared;
-pub(crate) use http::{BRIDGE_WATCHDOG_SUPPRESSED, config_value, ConfigPutReq, channel_router, APP_HANDLE};
+pub(crate) use http::{acp_router, BRIDGE_WATCHDOG_SUPPRESSED, config_value, ConfigPutReq, channel_router, APP_HANDLE};
 pub(crate) use bridge::ensure_bridge_running;
 pub(crate) use runtime::{app_handle, cache_bridge_status, cached_bridge_status, sync_shared_config};
 pub(crate) use http::{SessionRunGuard, SubmitError};
@@ -109,6 +109,8 @@ pub struct RunRecord {
     pub status: String,
     pub paused_reason: Option<String>,
     pub paused_form: Option<serde_json::Value>,
+    #[serde(skip)]
+    pub(crate) paused_wait_id: Option<String>,
     pub last_progress: Option<String>,
     pub event_count: u64,
     pub started_at: String,
@@ -266,6 +268,17 @@ fn patch_run(run_id: &str, patch: impl FnOnce(&mut RunRecord)) {
 pub struct ChannelState {
     pub app: AppHandle,
     pub config: Arc<std::sync::RwLock<ChannelConfig>>,
+    pub(crate) acp_token: Option<String>,
+}
+
+impl ChannelState {
+    fn request_config(&self) -> ChannelConfig {
+        let mut config = self.config.read().expect("config poisoned").clone();
+        if let Some(token) = &self.acp_token {
+            config.token.clone_from(token);
+        }
+        config
+    }
 }
 
 fn authorized(headers: &HeaderMap, config: &ChannelConfig) -> bool {

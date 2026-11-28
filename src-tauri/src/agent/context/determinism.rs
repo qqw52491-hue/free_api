@@ -9,6 +9,13 @@ pub fn sha256_hex(data: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Serialize object keys in their original, sorted order even when ACP's SDK
+/// enables serde_json's insertion-order feature for the whole executable.
+pub(crate) fn canonical_json(mut value: serde_json::Value) -> String {
+    value.sort_all_objects();
+    value.to_string()
+}
+
 /// 上下文分段前缀指纹快照（用于排查缓存命中率异常暴跌的根因）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextFingerprint {

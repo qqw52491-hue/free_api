@@ -118,6 +118,45 @@ pub(crate) async fn handler_events(
     Ok(Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default()))
 }
 
+/// GET /channel/session/{session_id}/stream：单个会话的完整引擎事件流（ACP 桥接等本机下游用）。
+/// 与 /channel/events 只推“有变化”不同，这里原样带上桌面端收到的载荷：
+/// `data: {"channel":"progress"|"log"|"tool_event"|"run_state"|"context","payload":…}`。
+/// 订阅者处理过慢导致丢事件时发 `{"channel":"lagged","payload":{"missed":N}}`，不静默跳过。
+/// 仅接受本机 ACP 服务的 X-Channel-Token 头。
+pub(crate) async fn handler_session_stream(
+    AxumState(state): AxumState<Arc<ChannelState>>,
+    headers: HeaderMap,
+    AxumPath(session_id): AxumPath<String>,
+) -> Result<Sse<impl futures::Stream<Item = Result<SseEvent, std::convert::Infallible>>>, (StatusCode, Json<Value>)>
+{
+    if !authorized(&headers, &state.request_config()) {
+        return Err(unauthorized());
+    }
+    // 先订阅再返回响应头：调用方拿到响应后再派任务，不会漏掉起始事件。
+    let rx = crate::agent::events::subscribe();
+    let stream = futures::stream::unfold((rx, session_id), |(mut rx, session_id)| async move {
+        loop {
+            let data = match rx.recv().await {
+                Ok(event) if event.session_id == session_id => {
+                    json!({ "channel": event.channel, "payload": event.payload })
+                }
+                Ok(_) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                    json!({ "channel": "lagged", "payload": { "missed": missed } })
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            };
+            return Some((
+                Ok::<_, std::convert::Infallible>(SseEvent::default().data(data.to_string())),
+                (rx, session_id),
+            ));
+        }
+    });
+    let ready = futures::stream::once(async { Ok(SseEvent::default().comment("ready")) });
+    Ok(Sse::new(futures::StreamExt::chain(ready, stream))
+        .keep_alive(axum::response::sse::KeepAlive::default()))
+}
+
 #[derive(Deserialize)]
 pub(crate) struct AttachmentReq {
     pub(crate) path: String,

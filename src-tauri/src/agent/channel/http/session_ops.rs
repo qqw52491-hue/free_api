@@ -7,6 +7,9 @@ pub(crate) struct SessionReq {
     pub(crate) project_id: Option<String>,
     pub(crate) title: Option<String>,
     pub(crate) model_id: Option<String>,
+    /// ACP 等外部客户端按工作目录建会话：未给 project_id 时，按该绝对路径查找或登记项目。
+    #[serde(default)]
+    pub(crate) root_path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -70,30 +73,48 @@ pub(crate) async fn handler_session(
     headers: HeaderMap,
     Json(req): Json<SessionReq>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let config = state.config.read().expect("config poisoned").clone();
+    let config = state.request_config();
     if !authorized(&headers, &config) {
         return Err(unauthorized());
     }
-    let model_id = req
-        .model_id
-        .clone()
-        .or_else(|| Some(config.model_id.clone()))
-        .filter(|v| !v.trim().is_empty())
-        .ok_or_else(|| bad_request("未配置默认模型：请在微信绑定页面填写模型后再派任务"))?;
+    let conn = db_conn(&state.app)?;
+    let mut model_id = req.model_id.unwrap_or_else(|| config.model_id.clone());
+    if state.acp_token.is_some() && model_id.trim().is_empty() {
+        model_id = config.pro.clone();
+        if model_id.trim().is_empty() {
+            model_id = conn.query_row(
+                "SELECT id FROM models WHERE enabled=1 ORDER BY created_at, id LIMIT 1",
+                [], |row| row.get(0),
+            ).optional().map_err(internal_error)?.unwrap_or_default();
+        }
+    }
+    if model_id.trim().is_empty() {
+        return Err(bad_request(if state.acp_token.is_some() {
+            "桌面版没有可用模型，请先在桌面版配置并启用模型"
+        } else {
+            "未配置默认模型：请在微信绑定页面填写模型后再派任务"
+        }));
+    }
     let title = req
         .title
         .clone()
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| "微信会话".to_string());
-    let conn = db_conn(&state.app)?;
-    let session = match req.project_id.clone() {
-        Some(project_id) if !project_id.trim().is_empty() => {
+    let root_path = if state.acp_token.is_some() { req.root_path } else { None };
+    let session = match (req.project_id, root_path) {
+        (Some(project_id), _) if !project_id.trim().is_empty() => {
             crate::commands::projects::create_project_session_row(
                 &conn,
                 project_id.trim(),
                 &title,
                 &model_id,
             )
+        }
+        (_, Some(root)) => {
+            ensure_project_for_root(&conn, std::path::Path::new(&root))
+                .and_then(|project_id| crate::commands::projects::create_project_session_row(
+                    &conn, &project_id, &title, &model_id,
+                ))
         }
         _ => {
             // 未绑定任务：普通会话（无项目归属），工作区由运行时覆盖到 scratch 目录
@@ -155,6 +176,41 @@ pub(crate) fn ensure_scratch_project(
     Ok(project.id)
 }
 
+/// 按工作目录查找已登记项目，没有则以目录名登记一个。只接受已存在的绝对目录；
+/// 先按原样路径、再按规范化路径匹配，避免同一目录因符号链接/写法不同重复登记。
+pub(crate) fn ensure_project_for_root(
+    conn: &rusqlite::Connection,
+    root: &std::path::Path,
+) -> Result<String, String> {
+    if !root.is_absolute() {
+        return Err(format!("工作目录必须是绝对路径：{}", root.display()));
+    }
+    if !root.is_dir() {
+        return Err(format!("工作目录不存在或不是目录：{}", root.display()));
+    }
+    let canonical = root.canonicalize().map_err(|e| format!("无法解析工作目录 {}：{e}", root.display()))?;
+    for candidate in [root.to_path_buf(), canonical.clone()] {
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT id FROM agent_projects WHERE root_path=?1 LIMIT 1",
+                rusqlite::params![candidate.to_string_lossy()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if let Some(id) = existing {
+            return Ok(id);
+        }
+    }
+    let name = canonical
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| canonical.to_string_lossy().to_string());
+    let project = crate::commands::projects::create_project_row(conn, &name, &canonical.to_string_lossy())?;
+    Ok(project.id)
+}
+
 use rusqlite::OptionalExtension;
 
 pub(crate) async fn handler_task(
@@ -162,7 +218,7 @@ pub(crate) async fn handler_task(
     headers: HeaderMap,
     Json(req): Json<TaskReq>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let config = state.config.read().expect("config poisoned").clone();
+    let config = state.request_config();
     if !authorized(&headers, &config) {
         return Err(unauthorized());
     }
@@ -182,6 +238,9 @@ pub(crate) async fn handler_task(
         .optional()
         .map_err(internal_error)?;
     if session_exists.is_none() {
+        if state.acp_token.is_some() {
+            return Err(not_found("ACP 会话已被删除，请新建会话后重试"));
+        }
         // 自愈：若会话在桌面端被清理或重启导致丢失，自动为通道重新创建该 session_id 对应的临时会话，避免死锁报错
         let default_model = if !config.model_id.trim().is_empty() {
             config.model_id.clone()

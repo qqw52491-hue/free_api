@@ -183,6 +183,7 @@ pub(super) async fn dispatch_ask_human(
                 question: ask_msg.clone(),
             },
         )?;
+        let wait = crate::agent::control::HumanWait::open(ctx.final_session_id, ctx.parent_run_id);
         // 通知前端进入暂停状态
         ctx.app.emit_agent_log(
             &ctx.final_session_id,
@@ -193,6 +194,7 @@ pub(super) async fn dispatch_ask_human(
             json!({
                 "run_id": ctx.parent_run_id,
                 "type": "agent_paused",
+                "wait_id": &wait.id,
                 "message": ask_msg,
                 "form": final_form_val.unwrap_or(serde_json::Value::Null)
             }),
@@ -230,6 +232,7 @@ pub(super) async fn dispatch_ask_human(
             }
             None => ("人类未回复，通道异常关闭".to_string(), false),
         };
+        drop(wait);
         if is_stage_arbitration {
             let count = ctx.checkpoint.apply_stage_arbitration_reply(&reply).unwrap_or(0);
             ctx.checkpoint.stage_arbitration = None;

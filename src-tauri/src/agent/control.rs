@@ -175,18 +175,70 @@ pub async fn send_human_intervention(
     session_id: String,
     message: String,
 ) -> Result<Option<crate::agent::conversation::ConversationCursor>, String> {
+    send_human_reply(state.inner(), &session_id, message, None).await
+}
+
+fn human_waits() -> &'static std::sync::Mutex<HashMap<String, (String, String)>> {
+    static WAITS: OnceLock<std::sync::Mutex<HashMap<String, (String, String)>>> = OnceLock::new();
+    WAITS.get_or_init(Default::default)
+}
+
+/// An ACP reply must address the exact question that was displayed, even if the
+/// user has already moved the same run to another question in the desktop.
+pub(crate) struct HumanWait<'a> {
+    session_id: &'a str,
+    pub id: String,
+}
+
+impl<'a> HumanWait<'a> {
+    pub(crate) fn open(session_id: &'a str, run_id: &str) -> Self {
+        let id = uuid::Uuid::new_v4().to_string();
+        human_waits().lock().unwrap().insert(session_id.to_string(), (run_id.to_string(), id.clone()));
+        Self { session_id, id }
+    }
+}
+
+impl Drop for HumanWait<'_> {
+    fn drop(&mut self) {
+        let mut waits = human_waits().lock().unwrap();
+        if waits.get(self.session_id).is_some_and(|(_, id)| id == &self.id) {
+            waits.remove(self.session_id);
+        }
+    }
+}
+
+pub(crate) fn current_human_wait(session_id: &str, run_id: &str) -> Option<String> {
+    human_waits().lock().ok()?.get(session_id)
+        .filter(|(run, _)| run == run_id).map(|(_, id)| id.clone())
+}
+
+pub(crate) async fn send_human_reply(
+    state: &DbState,
+    session_id: &str,
+    message: String,
+    expected_wait: Option<(&str, &str)>,
+) -> Result<Option<crate::agent::conversation::ConversationCursor>, String> {
     let message = message.trim().to_string();
     if message.is_empty() {
         return Err("人工回答不能为空".to_string());
     }
     let channels = intervention_channels().lock().await;
     let sender = channels
-        .get(&session_id)
+        .get(session_id)
         .ok_or_else(|| "任务已结束或通道不存在".to_string())?;
+    {
+        let mut waits = human_waits().lock().map_err(|e| e.to_string())?;
+        if let Some((run_id, wait_id)) = expected_wait {
+            if !waits.get(session_id).is_some_and(|(run, wait)| run == run_id && wait == wait_id) {
+                return Err("此人工问题已处理或已更换，回答未提交".into());
+            }
+        }
+        waits.remove(session_id);
+    }
     // 先落消息取得身份，再投递；运行中任务消费回答后按 id 登记，入口才推进连续游标。
     // 落库失败仍允许回答送达，不冒认其他未消费的聊天记录。
     let cursor = match crate::agent::conversation::append_human_intervention(
-        state.inner(), &session_id, &message,
+        state, session_id, &message,
     ) {
         Ok(cursor) => Some(cursor),
         Err(error) => {
@@ -196,8 +248,40 @@ pub async fn send_human_intervention(
     };
     sender.send(HumanControl::Answer(message, cursor.clone())).await.map_err(|e| e.to_string())?;
     // 统一分发中枢：SSE(手机/网页) + Tauri(桌面) 双路齐达
-    crate::agent::channel::notify_session_event(&session_id, "message");
+    crate::agent::channel::notify_session_event(session_id, "message");
     Ok(cursor)
+}
+
+#[cfg(test)]
+mod human_wait_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn scoped_reply_cannot_approve_a_later_wait_or_be_replayed() {
+        let session = uuid::Uuid::new_v4().to_string();
+        let db = DbState(Arc::new(std::sync::Mutex::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+        )));
+        let (tx, mut rx) = mpsc::channel(4);
+        let (interrupt, _) = watch::channel(0);
+        register_run_channels(&session, "run", tx, interrupt).await;
+
+        let first = HumanWait::open(&session, "run");
+        send_human_reply(&db, &session, "desktop answered".into(), None).await.unwrap();
+        assert!(matches!(rx.recv().await, Some(HumanControl::Answer(_, _))));
+
+        let second = HumanWait::open(&session, "run");
+        assert!(send_human_reply(&db, &session, "old card".into(), Some(("run", &first.id))).await.is_err());
+        drop(first);
+        assert_eq!(current_human_wait(&session, "run").as_deref(), Some(second.id.as_str()));
+        assert!(rx.try_recv().is_err());
+
+        send_human_reply(&db, &session, "matched decision".into(), Some(("run", &second.id))).await.unwrap();
+        assert!(matches!(rx.recv().await, Some(HumanControl::Answer(text, _)) if text == "matched decision"));
+        assert!(send_human_reply(&db, &session, "duplicate".into(), Some(("run", &second.id))).await.is_err());
+        assert!(rx.try_recv().is_err());
+        release_run_channels(&session, "run", false).await;
+    }
 }
 
 #[tauri::command]
@@ -340,39 +424,53 @@ pub struct CancelAgentRunResult {
 
 #[tauri::command]
 pub async fn cancel_agent_run(session_id: String) -> Result<CancelAgentRunResult, String> {
+    cancel_run(&session_id, None).await
+}
+
+pub(crate) async fn cancel_run(
+    session_id: &str,
+    expected_run: Option<&str>,
+) -> Result<CancelAgentRunResult, String> {
     // 快速自旋轮询最多 300ms（防止前端刚发起任务立即点击停止时通道尚在注册中的微小窗口）
     for attempt in 0..6 {
         let (existing_sender, pending_marked, active_run_id) = {
             let channels = intervention_channels().lock().await;
             let interrupts = stream_interrupt_channels().lock().await;
-            if let Some(sender) = channels.get(&session_id).cloned() {
-                if let Some(interrupt_sender) = interrupts.get(&session_id) {
+            let owner = channel_owners().lock().ok()
+                .and_then(|owners| owners.get(session_id).cloned());
+            if let Some(expected) = expected_run {
+                let current = owner.clone().or_else(|| execution_owners().lock().ok()
+                    .and_then(|owners| owners.get(session_id).cloned()));
+                if current.as_deref() != Some(expected) {
+                    return Err("此运行已结束或已更换，停止请求未提交".into());
+                }
+            }
+            if let Some(sender) = channels.get(session_id).cloned() {
+                if let Some(interrupt_sender) = interrupts.get(session_id) {
                     interrupt_sender.send_modify(|generation| *generation = generation.wrapping_add(1));
                 }
                 // Capture the target before sending. A waiting run may publish its
                 // terminal state immediately after receiving the cancellation.
-                let run_id = channel_owners().lock().ok()
-                    .and_then(|owners| owners.get(&session_id).cloned())
-                    .or_else(|| crate::agent::channel::active_run_id_for_session(&session_id));
+                let run_id = owner.or_else(|| crate::agent::channel::active_run_id_for_session(session_id));
                 (Some(sender), false, run_id)
             } else {
                 // 与 register_run_channels 共享 intervention_channels -> stream_interrupt_channels 锁序：
                 // 要么主循环尚未注册（写入 pending_cancels 后必被注册期消费并触发流中断），
                 // 要么主循环已同时插入两个通道（上面分支必已同时命中控制通道与流中断通道）。
-                let marked = mark_pending_cancel(&session_id);
+                let marked = mark_pending_cancel(session_id);
                 if marked {
-                    if let Some(interrupt_sender) = interrupts.get(&session_id) {
+                    if let Some(interrupt_sender) = interrupts.get(session_id) {
                         interrupt_sender.send_modify(|generation| *generation = generation.wrapping_add(1));
                     }
                 }
-                let run_id = crate::agent::channel::active_run_id_for_session(&session_id);
+                let run_id = crate::agent::channel::active_run_id_for_session(session_id);
                 (None, marked, run_id)
             }
         };
 
         if let Some(sender) = existing_sender {
             let delivered = sender.send(HumanControl::Cancel).await.is_ok();
-            let has_active_run = active_run_id.is_some() || is_session_starting(&session_id);
+            let has_active_run = active_run_id.is_some() || is_session_starting(session_id);
             return Ok(CancelAgentRunResult {
                 delivered,
                 has_active_run,
@@ -388,7 +486,9 @@ pub async fn cancel_agent_run(session_id: String) -> Result<CancelAgentRunResult
         }
         if let Some(run_id) = active_run_id {
             if attempt == 5 {
-                notify_stream_interrupt(&session_id).await;
+                if expected_run.is_none() {
+                    notify_stream_interrupt(session_id).await;
+                }
                 return Ok(CancelAgentRunResult {
                     delivered: false,
                     has_active_run: true,
@@ -398,9 +498,11 @@ pub async fn cancel_agent_run(session_id: String) -> Result<CancelAgentRunResult
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
-    notify_stream_interrupt(&session_id).await;
-    let active_run_id = crate::agent::channel::active_run_id_for_session(&session_id);
-    let has_active_run = active_run_id.is_some() || is_session_starting(&session_id);
+    if expected_run.is_none() {
+        notify_stream_interrupt(session_id).await;
+    }
+    let active_run_id = crate::agent::channel::active_run_id_for_session(session_id);
+    let has_active_run = active_run_id.is_some() || is_session_starting(session_id);
     Ok(CancelAgentRunResult {
         delivered: false,
         has_active_run,
@@ -492,6 +594,7 @@ mod tests {
             status: status.to_string(),
             paused_reason: None,
             paused_form: None,
+            paused_wait_id: None,
             last_progress: None,
             event_count: 0,
             started_at: "2026-11-13T00:00:00Z".to_string(),

@@ -1,5 +1,7 @@
 #![allow(dead_code, unused_imports)]
 
+#[doc(hidden)]
+pub mod acp;
 mod agent;
 mod commands;
 mod crash_report;

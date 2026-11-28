@@ -340,7 +340,7 @@ async fn dispatch_inner(
             }
         }
     }
-    let task_identity = json!([profile, params["task"], params.get("context"), params.get("execution"), params.get("role"), params.get("custom_inputs"), predecessor]).to_string();
+    let task_identity = crate::agent::context::determinism::canonical_json(json!([profile, params["task"], params.get("context"), params.get("execution"), params.get("role"), params.get("custom_inputs"), predecessor]));
     let legacy_key = format!(
         "general:{}:{}:{}",
         ctx.context.history_task_id,
@@ -352,7 +352,7 @@ async fn dispatch_inner(
     )?;
     if existing.is_none() {
         // Before role presets were unified, task keys had no profile element.
-        let old_identity = json!([params["task"], params.get("context"), params.get("execution"), params.get("role"), params.get("custom_inputs"), predecessor]).to_string();
+        let old_identity = crate::agent::context::determinism::canonical_json(json!([params["task"], params.get("context"), params.get("execution"), params.get("role"), params.get("custom_inputs"), predecessor]));
         let old_key = format!("general:{}:{}:{}", ctx.context.history_task_id, ctx.step_id,
             uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, old_identity.as_bytes()));
         existing = child_task::dispatch::find_registered(

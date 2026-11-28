@@ -164,7 +164,7 @@ pub(crate) fn send(
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let existing:Option<(String,String,String,Option<String>)>=tx.query_row("SELECT target_run_id,payload_json,created_at,delivered_at FROM agent_messages WHERE id=?1 AND sender_run_id=?2",params![id,sender.run],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(|e|e.to_string())?;
     if let Some((to, body, created, delivered)) = existing {
-        if to != target.run || body != payload.to_string() {
+        if to != target.run || serde_json::from_str::<Value>(&body).ok().as_ref() != Some(&payload) {
             return Err("同一消息重试键已绑定其他内容或接收方；本次未发送。".into());
         }
         return Ok(

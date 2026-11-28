@@ -23,12 +23,11 @@ pub(crate) fn final_review_policy_fingerprint(
     format!(
         "{:x}",
         Sha256::digest(
-            serde_json::json!({"committee":routing.stage_review_committee,"primary":card,"cards":cards,
+            crate::agent::context::determinism::canonical_json(serde_json::json!({"committee":routing.stage_review_committee,"primary":card,"cards":cards,
                 "reviewer":routing.role_models.get("reviewer"),
                 "fallback_models":[routing.pro,routing.flash,routing.vision],
                 "backup":routing.reviewer_backup_model,
-                "cross_family":routing.auto_cross_family_reviewer})
-            .to_string()
+                "cross_family":routing.auto_cross_family_reviewer}))
             .as_bytes()
         )
     )

@@ -307,6 +307,30 @@ pub(crate) fn extract_plan_decision(reply: &str) -> Option<PlanDecision> {
     serde_json::from_str::<PlanDecision>(rest[..end].trim()).ok()
 }
 
+/// 编码带结构化审批结论的回复，格式与前端 `planDecision.ts` 的 `withPlanDecision` 相同。
+/// 供 ACP 等非桌面入口把客户端的结构化选择回写给引擎；自由文本不得经此合成批准。
+pub(crate) fn encode_plan_decision(text: &str, approved: bool) -> String {
+    format!(
+        "{text}\n{PLAN_DECISION_MARKER_PREFIX}{}{PLAN_DECISION_MARKER_SUFFIX}",
+        serde_json::json!({ "approved": approved })
+    )
+}
+
+#[cfg(test)]
+mod encode_plan_decision_tests {
+    use super::*;
+
+    #[test]
+    fn encoded_decision_matches_frontend_format_and_round_trips() {
+        let approved = encode_plan_decision("【方案已批准】批准方案", true);
+        assert_eq!(approved, "【方案已批准】批准方案\n<!--plan-decision:{\"approved\":true}-->");
+        assert_eq!(parse_plan_approval_decision(&approved), Some(true));
+        let rejected = encode_plan_decision("打回", false);
+        assert_eq!(parse_plan_approval_decision(&rejected), Some(false));
+        assert_eq!(strip_plan_decision_marker(&rejected), "打回");
+    }
+}
+
 /// 剥离回复末尾的结构化审批标记，用于日志展示与持久化摘要。
 pub(crate) fn strip_plan_decision_marker(reply: &str) -> String {
     match reply.find(PLAN_DECISION_MARKER_PREFIX) {

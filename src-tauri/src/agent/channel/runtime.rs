@@ -61,8 +61,14 @@ pub fn spawn_channel_server(app: AppHandle) {
     let config = channel_config_shared().read().expect("config poisoned").clone();
     let port = config.port;
     let state = Arc::new(ChannelState {
-        app,
+        app: app.clone(),
         config: channel_config_shared().clone(),
+        acp_token: None,
+    });
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = serve_acp_bridge(app).await {
+            eprintln!("[acp] 本机桥接服务不可用：{error}");
+        }
     });
     tauri::async_runtime::spawn(async move {
         let addr = format!("0.0.0.0:{port}");
@@ -156,4 +162,17 @@ pub fn spawn_channel_server(app: AppHandle) {
             }
         }
     });
+}
+
+async fn serve_acp_bridge(app: AppHandle) -> anyhow::Result<()> {
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+    let token = uuid::Uuid::new_v4().to_string();
+    let state = Arc::new(ChannelState {
+        app,
+        config: channel_config_shared().clone(),
+        acp_token: Some(token.clone()),
+    });
+    crate::acp::publish_endpoint(listener.local_addr()?.port(), token)?;
+    axum::serve(listener, acp_router(state)).await?;
+    Ok(())
 }

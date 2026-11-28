@@ -445,7 +445,7 @@ pub(crate) fn deduplicate_mcp_output(
         "action": instruction.get_action(),
         "params": instruction.get_params(),
     });
-    let call_hash = context::determinism::sha256_hex(&call_doc.to_string());
+    let call_hash = context::determinism::sha256_hex(&context::determinism::canonical_json(call_doc));
     let raw_output_hash = context::determinism::sha256_hex(durable_output);
     let model_output_hash = context::determinism::sha256_hex(model_output);
 
@@ -622,7 +622,7 @@ mod tests {
             "params": params.clone(),
         });
         let mut step = prior_step_json(step_id, params, status, model, output_id);
-        step["mcp_call_hash"] = json!(context::determinism::sha256_hex(&call_doc.to_string()));
+        step["mcp_call_hash"] = json!(context::determinism::sha256_hex(&context::determinism::canonical_json(call_doc)));
         step["mcp_raw_output_hash"] = json!(context::determinism::sha256_hex(durable));
         step["mcp_model_output_hash"] = json!(context::determinism::sha256_hex(model));
         step
@@ -650,7 +650,7 @@ mod tests {
         );
         step["tool"] = json!(instruction.get_tool());
         step["action"] = json!(instruction.get_action());
-        step["mcp_call_hash"] = json!(context::determinism::sha256_hex(&call_doc.to_string()));
+        step["mcp_call_hash"] = json!(context::determinism::sha256_hex(&context::determinism::canonical_json(call_doc)));
         step["mcp_raw_output_hash"] = json!(context::determinism::sha256_hex(durable));
         step["mcp_model_output_hash"] = json!(context::determinism::sha256_hex(model));
         step

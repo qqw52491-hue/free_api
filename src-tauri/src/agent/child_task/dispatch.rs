@@ -79,7 +79,7 @@ pub(crate) fn prepare(
 }
 
 pub(crate) fn key(task: &str, step: usize, params: &Value, slot: Option<usize>) -> String {
-    let identity = json!([params, slot]).to_string();
+    let identity = crate::agent::context::determinism::canonical_json(json!([params, slot]));
     format!(
         "general:v2:{task}:{step}:{}",
         uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, identity.as_bytes())

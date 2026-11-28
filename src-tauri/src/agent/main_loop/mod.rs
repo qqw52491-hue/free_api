@@ -1259,15 +1259,17 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
                     question: reason.clone(),
                 },
             )?;
+            let wait = crate::agent::control::HumanWait::open(&final_session_id, &run_id);
             app.emit_agent_progress(
                 &final_session_id,
                 json!({
-                "run_id": &run_id, "type": "agent_paused", "message": reason }),
+                "run_id": &run_id, "type": "agent_paused", "wait_id": &wait.id, "message": reason }),
             )
             .map_err(|error| error.to_string())?;
 
             let (reply, recovery_reply_id) = match rx.recv().await {
                 Some(HumanControl::Answer(reply, cursor)) => {
+                    drop(wait);
                     let msg_id = cursor.as_ref().map(|c| c.id.clone());
                     context.acknowledge_chat(cursor);
                     (reply, msg_id)

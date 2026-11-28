@@ -1073,7 +1073,7 @@ impl SandwichContext {
     }
 
     fn failed_attempt_params_fingerprint(params: &serde_json::Value) -> String {
-        crate::agent::context::determinism::sha256_hex(&params.to_string())
+        crate::agent::context::determinism::sha256_hex(&crate::agent::context::determinism::canonical_json(params.clone()))
     }
 
     fn is_deterministic_tool_failure(error: &str) -> bool {
