@@ -7,11 +7,13 @@
 //! （此前 wait_jobs 内联重写了阶段审查处理，且自动注入路径漏掉
 //! 齐套屏障的 expected-id 替换，曾因通道分叉造成死锁级 bug）。
 
-use crate::agent::checkpoint::AgentCheckpoint;
+use crate::agent::checkpoint::{AgentCheckpoint, AppliedReceipt};
 use crate::agent::context::SandwichContext;
 use crate::agent::protocol::DeliveryReceipt;
 use crate::agent::types::ChildErrorKind;
 use crate::db::DbState;
+use rusqlite::OptionalExtension;
+use serde_json::{json, Value};
 use std::path::Path;
 use tauri::AppHandle;
 use tokio::sync::watch;
@@ -43,6 +45,117 @@ pub(crate) struct ReceiptEffects {
     /// 交付契约违规：消费端裁决降级的 error_kind 值（contract_violation:...）。
     /// 调用方在提交点把它回写到台账 status/error_kind，与 applied_at 同事务落账。
     pub contract_violation: Option<String>,
+}
+
+impl ReceiptEffects {
+    /// Stage one visible message before making this receipt eligible for the atomic checkpoint commit.
+    pub(crate) fn deliver(
+        &self,
+        context: &mut SandwichContext,
+        receipt: &DeliveryReceipt,
+    ) -> Option<AppliedReceipt> {
+        let status = if self.contract_violation.is_some() {
+            "invalid_output"
+        } else {
+            &receipt.status
+        };
+        context.add_host_feedback(&receipt_feedback(
+            &receipt.child_run_id,
+            status,
+            &self.model_text,
+            self.application_deferred,
+        ));
+        (!self.application_deferred).then(|| AppliedReceipt {
+            run_id: receipt.child_run_id.clone(),
+            verdict: self
+                .contract_violation
+                .as_ref()
+                .map(|error| ("invalid_output".to_string(), error.clone())),
+        })
+    }
+}
+
+fn receipt_feedback(id: &str, status: &str, text: &str, deferred: bool) -> String {
+    const PREVIEW_LIMIT: usize = 3000;
+    let total = text.chars().count();
+    let metadata = json!({
+        "child_run_id": id,
+        "execution_status": status,
+        "application_deferred": deferred,
+        "preview_truncated": total > PREVIEW_LIMIT,
+        "read_full": {
+            "tool": "child_task",
+            "action": "read_agent_result",
+            "params": {"child_run_id": id, "view": "result"},
+        },
+    });
+    if total <= PREVIEW_LIMIT {
+        return format!("【子任务回执】\n{metadata}\n{text}");
+    }
+    // Truncate each body independently and keep identity and the read pointer outside the preview.
+    let head: String = text.chars().take(1800).collect();
+    let tail: String = text.chars().skip(total - 1100).collect();
+    format!("【子任务回执】\n{metadata}\n{head}\n[中间正文已节选]\n{tail}")
+}
+
+fn task_handoff_text(body: &Value) -> String {
+    let projection = crate::agent::child_task::projection(body);
+    if let Some(summary) = body["delivery"]["summary"]
+        .as_str()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        let summary: String = summary.chars().take(500).collect();
+        format!("交接摘要：{summary}\n{projection}")
+    } else {
+        projection
+    }
+}
+
+/// Explicit child_task collections use the same visible handoff as automatic pickup.
+pub(crate) fn collect_task(
+    db: &DbState,
+    session: &str,
+    id: &str,
+    checkpoint: &mut AgentCheckpoint,
+    context: &mut SandwichContext,
+) -> Result<bool, String> {
+    let already_applied = db
+        .writer()?
+        .query_row(
+            "SELECT NULLIF(applied_at,'') FROM agent_child_runs
+             WHERE id=?1 AND parent_session_id=?2 AND kind='task'
+               AND status NOT IN ('queued','running') AND result_json IS NOT NULL",
+            rusqlite::params![id, session],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some(already_applied) = already_applied else {
+        return Ok(false);
+    };
+    if already_applied.is_none() {
+        let body = crate::agent::child_task::result(db, session, id)?;
+        let mut candidate = context.clone();
+        crate::agent::child_task::import_effects(db, id, checkpoint.step_id, &mut candidate)?;
+        candidate.add_host_feedback(&receipt_feedback(
+            id,
+            body["execution_status"].as_str().unwrap_or("unknown"),
+            &task_handoff_text(&body),
+            false,
+        ));
+        crate::agent::checkpoint::save_checkpoint_and_consume(
+            db,
+            checkpoint,
+            &candidate,
+            &[AppliedReceipt {
+                run_id: id.into(),
+                verdict: None,
+            }],
+        )?;
+        *context = candidate;
+    }
+    Ok(true)
 }
 
 /// 交付契约运行时校验（三条通道汇合后的唯一关口）：
@@ -89,18 +202,31 @@ fn enforce_delivery_contract(db: &DbState, receipt: &mut DeliveryReceipt) {
 }
 
 /// 消费一张子任务交付回执：checkpoint 状态变更 + 有界模型投影。
-/// 调用方职责：聚合返回的 model_text、批后调用 settle_stage_review_refund、
-/// 广播 ui_notices。
+/// 调用方职责：逐份投递、批后调用 settle_stage_review_refund、广播 ui_notices。
 pub(crate) async fn reduce_child_receipt(
     env: &ReceiptEnv<'_>,
     checkpoint: &mut AgentCheckpoint,
     context: &mut SandwichContext,
     receipt: &DeliveryReceipt,
 ) -> ReceiptEffects {
-    if receipt.kind=="task" {
-        return match crate::agent::child_task::result(env.db,env.session_id,&receipt.child_run_id).and_then(|body| crate::agent::child_task::import_effects(env.db,&receipt.child_run_id,checkpoint.step_id,context).map(|_|body)) {
-            Ok(body)=>ReceiptEffects{model_text:format!("【通用子任务交接 {}】{}",receipt.child_run_id,crate::agent::child_task::projection(&body)),..Default::default()},
-            Err(error)=>ReceiptEffects{model_text:format!("子任务 {} 的实际副作用导入失败：{error}；回执尚未核销。",receipt.child_run_id),application_deferred:true,..Default::default()},
+    if receipt.kind == "task" {
+        let result = crate::agent::child_task::result(env.db, env.session_id, &receipt.child_run_id)
+            .and_then(|body| {
+                crate::agent::child_task::import_effects(
+                    env.db, &receipt.child_run_id, checkpoint.step_id, context,
+                )?;
+                Ok(body)
+            });
+        return match result {
+            Ok(body) => ReceiptEffects { model_text: task_handoff_text(&body), ..Default::default() },
+            Err(error) => ReceiptEffects {
+                model_text: format!(
+                    "子任务 {} 的实际副作用导入失败：{error}；回执尚未核销。",
+                    receipt.child_run_id
+                ),
+                application_deferred: true,
+                ..Default::default()
+            },
         }
     }
     // ── 交付契约运行时校验（所有种类统一）：违规转 invalid_output ──
@@ -1470,18 +1596,14 @@ mod tests {
             effects.contract_violation.is_some(),
             "契约违规必须透出裁决供提交点回写台账"
         );
-
+        let applied = effects.deliver(&mut context, &r).unwrap();
+        assert!(context.turns_history.last().unwrap().content.as_str().unwrap()
+            .contains("\"execution_status\":\"invalid_output\""));
         crate::agent::checkpoint::save_checkpoint_and_consume(
             &db,
             &mut cp,
             &context,
-            &[crate::agent::checkpoint::AppliedReceipt {
-                run_id: run_id.clone(),
-                verdict: effects
-                    .contract_violation
-                    .clone()
-                    .map(|e| ("invalid_output".to_string(), e)),
-            }],
+            &[applied],
         )
         .unwrap();
 
@@ -1590,6 +1712,120 @@ mod tests {
             .expect("checkpoint 已提交");
         assert_eq!(persisted.plan_review_deliveries.len(), 1);
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn long_child_receipt_batch_reaches_parent_and_replays_only_until_committed() {
+        use crate::agent::{
+            agent_mailbox::{replies::read_result, Actor},
+            checkpoint::{load_checkpoint, save_checkpoint, save_checkpoint_and_consume_jobs},
+            child_reviewer::{begin_child_run, finish_child_run, poll_completed_delivery_receipts},
+            child_task::external::{register, store_result},
+        };
+
+        let (base, db) = test_db("long-delivery-batch");
+        let env = test_env(&db, &base);
+        let mut context = SandwichContext::new("system".into(), "parent goal".into());
+        let mut cp = AgentCheckpoint::new(env.session_id.into(), &context);
+        save_checkpoint(env.db, &mut cp).unwrap();
+        let mut cases = Vec::new();
+        for index in 1..=3 {
+            let summary = format!("known conclusion {index}");
+            let full = format!("{summary}\n{}\ncomplete-only-marker-{index}", "证据".repeat(4800));
+            let id = if index == 2 {
+                let id = begin_child_run(
+                    env.db, env.parent_run_id, env.session_id, &base, "mock", 0, "task", None,
+                ).unwrap();
+                let result = json!({"handoff_accepted":true,"delivery":{"summary":summary,"output":full}});
+                finish_child_run(env.db, &id, "succeeded", 1, 0, 0, None, Some(&result.to_string()));
+                id
+            } else {
+                let binding = register(
+                    env.db, env.session_id, env.parent_run_id, &base, format!("local-task-{index}"),
+                    &json!({"task":"mock"}), &json!({"name":"fixture","kind":"codex"}),
+                ).unwrap();
+                store_result(env.db, &binding, Ok(full.clone()), false, 1).unwrap();
+                binding.child_run
+            };
+            cases.push((id, summary, full));
+        }
+        let assert_visible = |context: &SandwichContext| {
+            let messages = context.assemble_messages();
+            assert!(!messages.iter().any(|message|
+                message.content.as_str().is_some_and(|text| text.contains("格式或执行错误"))));
+            let deliveries: Vec<_> = messages.iter().filter_map(|message| {
+                let text = message.content.as_str()?;
+                let (_, rest) = text.split_once("【子任务回执】\n")?;
+                let (header, body) = rest.split_once('\n')?;
+                Some((serde_json::from_str::<Value>(header).unwrap(), body))
+            }).collect();
+            assert_eq!(deliveries.len(), cases.len());
+            for (id, summary, _) in &cases {
+                let (header, body) = deliveries.iter()
+                    .find(|(header, _)| header["child_run_id"] == id.as_str()).unwrap();
+                assert_eq!(header["execution_status"], "succeeded");
+                assert_eq!(header["preview_truncated"], true);
+                assert_eq!(header["read_full"]["action"], "read_agent_result");
+                assert_eq!(header["read_full"]["params"]["child_run_id"], id.as_str());
+                assert!(body.contains(summary));
+                assert!(body.chars().count() < 3100);
+            }
+        };
+
+        let pending = poll_completed_delivery_receipts(&db, env.parent_run_id, None).unwrap();
+        let mut applied = Vec::new();
+        for receipt in pending {
+            let effects = reduce_child_receipt(&env, &mut cp, &mut context, &receipt).await;
+            applied.push(effects.deliver(&mut context, &receipt).unwrap());
+        }
+        assert_visible(&context);
+        db.writer().unwrap().execute_batch(
+            "CREATE TEMP TRIGGER reject_receipt_commit BEFORE UPDATE OF applied_at ON agent_child_runs
+             BEGIN SELECT RAISE(ABORT, 'fixture: commit failed'); END;",
+        ).unwrap();
+        assert!(save_checkpoint_and_consume_jobs(&db, &mut cp, &context, &applied, env.parent_run_id, &[]).is_err());
+        assert!(load_checkpoint(&db, env.session_id).unwrap().unwrap().data.turns_history.is_empty());
+        assert_eq!(poll_completed_delivery_receipts(&db, env.parent_run_id, None).unwrap().len(), 3);
+
+        drop(db);
+        let db = DbState(Arc::new(Mutex::new(crate::db::init_db(&base.join("test.db")).unwrap())));
+        let env = test_env(&db, &base);
+        let mut context = SandwichContext::new("system".into(), "parent goal".into());
+        let mut cp = load_checkpoint(&db, env.session_id).unwrap().unwrap();
+        cp.restore_context(&mut context);
+        let jobs = crate::agent::job_engine::wait_for_jobs(&db, env.parent_run_id, None, 1, None).await.unwrap();
+        let mut applied = Vec::new();
+        let mut job_ids = Vec::new();
+        for job in jobs {
+            let receipt = job.to_delivery_receipt();
+            let effects = reduce_child_receipt(&env, &mut cp, &mut context, &receipt).await;
+            applied.push(effects.deliver(&mut context, &receipt).unwrap());
+            job_ids.push(job.job_id);
+        }
+        save_checkpoint_and_consume_jobs(&db, &mut cp, &context, &applied, env.parent_run_id, &job_ids).unwrap();
+
+        let mut restored = SandwichContext::new("system".into(), "parent goal".into());
+        load_checkpoint(&db, env.session_id).unwrap().unwrap().restore_context(&mut restored);
+        assert_visible(&restored);
+        assert!(poll_completed_delivery_receipts(&db, env.parent_run_id, None).unwrap().is_empty());
+        assert!(crate::agent::job_engine::wait_for_jobs(&db, env.parent_run_id, None, 1, None).await.unwrap().is_empty());
+        for (id, _, full) in &cases {
+            let mut offset = 0;
+            let mut raw = String::new();
+            loop {
+                let page = read_result(
+                    &db, &Actor::new(env.parent_run_id, env.session_id),
+                    &json!({"child_run_id":id,"view":"result","offset":offset}),
+                ).unwrap();
+                raw.push_str(page["text"].as_str().unwrap());
+                if page["has_more"] == false { break; }
+                offset = page["next_offset"].as_u64().unwrap();
+            }
+            let saved: Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(saved["delivery"]["output"], full.as_str());
+        }
+        drop(db);
+        std::fs::remove_dir_all(base).unwrap();
     }
 
 }

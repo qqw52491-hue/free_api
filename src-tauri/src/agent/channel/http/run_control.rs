@@ -89,10 +89,19 @@ pub(crate) async fn handler_run_status(
     if let Some(record) = record {
         return Ok(Json(run_status_value(&record)?));
     }
-    if state.acp_token.is_some() {
+    {
         let conn = db_conn(&state.app)?;
-        if let Some(record) = load_persisted_run_status(&conn, &run_id).map_err(internal_error)? {
-            return Ok(Json(record));
+        let persisted = state.acp_token.is_some() || conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM channel_mobile_submissions WHERE run_id=?1)",
+                [&run_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(internal_error)?;
+        if persisted {
+            if let Some(record) = load_persisted_run_status(&conn, &run_id).map_err(internal_error)? {
+                return Ok(Json(record));
+            }
         }
     }
     Err(not_found("任务不存在或已被清理"))

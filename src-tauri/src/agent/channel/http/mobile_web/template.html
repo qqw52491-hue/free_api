@@ -87,6 +87,7 @@
   <div class="composer-wrap hidden" id="composer">
     <div class="composer-inner">
       <div id="composerFiles" class="composer-files"></div>
+      <p id="composerSubmitStatus" class="submit-status hidden" role="status"></p>
       
       <div class="composer-dock">
         <div class="composer-input-row">
@@ -103,7 +104,7 @@
           
           <div class="composer-tools-right">
             <button id="btnStop" class="send-control-btn stop hidden" title="停止任务">■</button>
-            <button id="btnSend" class="send-control-btn" title="发送">➤</button>
+            <button id="btnSend" class="send-control-btn" title="发送" aria-label="发送">➤</button>
           </div>
         </div>
       </div>
@@ -140,6 +141,7 @@
     <div class="field">
       <label>任务内容</label>
       <textarea id="newGoal" placeholder="描述要让 Agent 完成的目标…"></textarea>
+      <p id="newSubmitStatus" class="submit-status hidden" role="status"></p>
     </div>
     <div class="modal-foot">
       <button class="btn" id="newCancel" type="button">取消</button>

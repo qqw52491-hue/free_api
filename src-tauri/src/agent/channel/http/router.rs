@@ -20,6 +20,7 @@ pub(crate) fn channel_router(state: Arc<ChannelState>) -> Router {
         .route("/channel/session", post(handler_session))
         .route("/channel/session/{session_id}", delete(handler_delete_session))
         .route("/channel/task", post(handler_task))
+        .route("/channel/mobile/task", post(handler_mobile_task))
         .route(
             "/channel/session/{session_id}/traces",
             get(handler_session_traces),

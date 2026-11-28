@@ -1295,6 +1295,15 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent-light); }
   overscroll-behavior-inline: contain;
 }
 .composer-files:not(:empty) { margin-bottom: 4px; }
+.submit-status {
+  margin: 0 0 6px;
+  padding: 6px 9px;
+  border-radius: 8px;
+  background: var(--bg2);
+  color: var(--amber);
+  font-size: 12px;
+  line-height: 1.4;
+}
 .composer-file {
   display: inline-flex;
   align-items: center;

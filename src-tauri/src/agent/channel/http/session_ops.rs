@@ -12,7 +12,7 @@ pub(crate) struct SessionReq {
     pub(crate) root_path: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub(crate) struct PartialRouting {
     pub(crate) pro: Option<String>,
     pub(crate) flash: Option<String>,
@@ -284,57 +284,7 @@ fn submit_task(
         .map_err(internal_error)?
         .is_some();
 
-    // 路由配置：默认取通道配置，允许请求覆盖三槽
-    let mut routing = ModelRoutingConfig {
-        pro: config.pro.clone(),
-        flash: config.flash.clone(),
-        vision: config.vision.clone(),
-        ..Default::default()
-    };
-    if let Some(overrides) = &req.model_routing {
-        if let Some(pro) = overrides.pro.clone() {
-            routing.pro = pro;
-        }
-        if let Some(flash) = overrides.flash.clone() {
-            routing.flash = flash;
-        }
-        if let Some(vision) = overrides.vision.clone() {
-            routing.vision = vision;
-        }
-        if let Some(mode) = overrides.context_budget_mode.clone() {
-            routing.context_budget_mode = mode;
-        }
-        if let Some(level) = overrides.state_card_level.clone() {
-            // "auto" 归一化为空串 = 跟随预算模式档位
-            routing.state_card_level =
-                if level == "auto" { String::new() } else { level };
-        }
-        if let Some(mode) = overrides.routing_mode.clone() {
-            routing.routing_mode = mode;
-        }
-        if let Some(role_models) = overrides.role_models.clone() {
-            routing.role_models = role_models
-                .into_iter()
-                .filter(|(_, model)| !model.trim().is_empty())
-                .collect();
-        }
-        if let Some(v) = overrides.auto_cross_family_reviewer {
-            routing.auto_cross_family_reviewer = v;
-        }
-    }
-    if routing.pro.is_empty() {
-        routing.pro = if !config.model_id.trim().is_empty() {
-            config.model_id.clone()
-        } else {
-            model_id_of_session(&conn, &session_id)?
-        };
-    }
-    if routing.flash.is_empty() {
-        routing.flash = routing.pro.clone();
-    }
-    if routing.vision.is_empty() {
-        routing.vision = routing.pro.clone();
-    }
+    let routing = channel_task_routing(&config, &conn, &session_id, req.model_routing.as_ref())?;
     drop(conn);
 
     // 项目会话沿用项目工作区；未绑定会话落到 scratch 目录
@@ -379,6 +329,67 @@ fn submit_task(
         "workspace": if has_project { "project" } else { "scratch" },
         "llm_retries": effective_retries,
     })))
+}
+
+
+pub(super) fn channel_task_routing(
+    config: &ChannelConfig,
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    overrides: Option<&PartialRouting>,
+) -> Result<ModelRoutingConfig, (StatusCode, Json<Value>)> {
+    // 路由配置：默认取通道配置，允许请求覆盖三槽
+    let mut routing = ModelRoutingConfig {
+        pro: config.pro.clone(),
+        flash: config.flash.clone(),
+        vision: config.vision.clone(),
+        ..Default::default()
+    };
+    if let Some(overrides) = overrides {
+        if let Some(pro) = overrides.pro.clone() {
+            routing.pro = pro;
+        }
+        if let Some(flash) = overrides.flash.clone() {
+            routing.flash = flash;
+        }
+        if let Some(vision) = overrides.vision.clone() {
+            routing.vision = vision;
+        }
+        if let Some(mode) = overrides.context_budget_mode.clone() {
+            routing.context_budget_mode = mode;
+        }
+        if let Some(level) = overrides.state_card_level.clone() {
+            // "auto" 归一化为空串 = 跟随预算模式档位
+            routing.state_card_level =
+                if level == "auto" { String::new() } else { level };
+        }
+        if let Some(mode) = overrides.routing_mode.clone() {
+            routing.routing_mode = mode;
+        }
+        if let Some(role_models) = overrides.role_models.clone() {
+            routing.role_models = role_models
+                .into_iter()
+                .filter(|(_, model)| !model.trim().is_empty())
+                .collect();
+        }
+        if let Some(v) = overrides.auto_cross_family_reviewer {
+            routing.auto_cross_family_reviewer = v;
+        }
+    }
+    if routing.pro.is_empty() {
+        routing.pro = if !config.model_id.trim().is_empty() {
+            config.model_id.clone()
+        } else {
+            model_id_of_session(conn, session_id)?
+        };
+    }
+    if routing.flash.is_empty() {
+        routing.flash = routing.pro.clone();
+    }
+    if routing.vision.is_empty() {
+        routing.vision = routing.pro.clone();
+    }
+    Ok(routing)
 }
 
 #[cfg(test)]

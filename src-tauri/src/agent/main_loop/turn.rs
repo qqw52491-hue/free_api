@@ -182,44 +182,31 @@ pub(super) async fn turn_main<'a, 'b>(
             &run_id,
             None,
         ) {
-            if !completed.is_empty() {
-                let mut injection = String::new();
-                for receipt in completed {
-                    if !seen_receipt_ids.insert(receipt.child_run_id.clone()) {
-                        continue;
-                    }
-                    let effects = crate::agent::child_receipt::reduce_child_receipt(
-                        &receipt_env,
-                        &mut checkpoint,
-                        &mut context,
-                        &receipt,
-                    )
-                    .await;
-                    stage_refund_pending |= effects.stage_refund_pending;
-                    if effects.application_deferred {
-                        context.add_host_feedback(&effects.model_text);
-                        continue;
-                    }
-                    applied_receipts.push(crate::agent::checkpoint::AppliedReceipt {
-                        run_id: receipt.child_run_id.clone(),
-                        verdict: effects
-                            .contract_violation
-                            .clone()
-                            .map(|err| ("invalid_output".to_string(), err)),
-                    });
-                    injection.push_str(&format!("\n{}\n", effects.model_text));
-                    for notice in &effects.ui_notices {
-                        let _ =
-                            app.emit_agent_log(&final_session_id, notice.clone());
-                    }
+            for receipt in completed {
+                if !seen_receipt_ids.insert(receipt.child_run_id.clone()) {
+                    continue;
                 }
-                if !injection.is_empty() {
-                    context.add_error_feedback(&injection);
-                    let _ = app.emit_agent_log(
-                        &final_session_id,
-                        "🔄 子任务成果（含实时冲突检测）已注入父 Agent 上下文".to_string(),
-                    );
+                let effects = crate::agent::child_receipt::reduce_child_receipt(
+                    &receipt_env,
+                    &mut checkpoint,
+                    &mut context,
+                    &receipt,
+                )
+                .await;
+                stage_refund_pending |= effects.stage_refund_pending;
+                let Some(applied) = effects.deliver(&mut context, &receipt) else {
+                    continue;
+                };
+                applied_receipts.push(applied);
+                for notice in effects.ui_notices {
+                    let _ = app.emit_agent_log(&final_session_id, notice);
                 }
+            }
+            if !applied_receipts.is_empty() {
+                let _ = app.emit_agent_log(
+                    &final_session_id,
+                    "🔄 子任务成果（含实时冲突检测）已逐份注入父 Agent 上下文".to_string(),
+                );
             }
         }
 
@@ -228,6 +215,7 @@ pub(super) async fn turn_main<'a, 'b>(
         if let Ok(jobs) = crate::agent::job_engine::poll_pending_inbox(state.inner(), &run_id, 5) {
             if !jobs.is_empty() {
                 let mut job_injection = String::new();
+                let applied_before_jobs = applied_receipts.len();
                 for job in jobs {
                     // 子任务回执走统一 reducer（failover/交付/退款语义单点）；
                     // 非子任务的后台任务（watch 等）保持通用倾倒。
@@ -244,19 +232,11 @@ pub(super) async fn turn_main<'a, 'b>(
                         )
                         .await;
                         stage_refund_pending |= effects.stage_refund_pending;
-                        if effects.application_deferred {
-                            context.add_host_feedback(&effects.model_text);
+                        let Some(applied) = effects.deliver(&mut context, &receipt) else {
                             continue;
-                        }
+                        };
                         background_job_ids.push(job.job_id.clone());
-                        applied_receipts.push(crate::agent::checkpoint::AppliedReceipt {
-                            run_id: job.job_id.clone(),
-                            verdict: effects
-                                .contract_violation
-                                .clone()
-                                .map(|err| ("invalid_output".to_string(), err)),
-                        });
-                        job_injection.push_str(&format!("\n{}\n", effects.model_text));
+                        applied_receipts.push(applied);
                         for notice in &effects.ui_notices {
                             let _ = app
                                 .emit_agent_log(&final_session_id, notice.clone());
@@ -279,6 +259,8 @@ pub(super) async fn turn_main<'a, 'b>(
                 }
                 if !job_injection.is_empty() {
                     context.add_error_feedback(&job_injection);
+                }
+                if !job_injection.is_empty() || applied_receipts.len() > applied_before_jobs {
                     let _ = app.emit_agent_log(
                         &final_session_id,
                         "⚡ 后台异步任务结果已注入父 Agent 上下文".to_string(),

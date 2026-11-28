@@ -3,21 +3,24 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const { webcrypto } = require('node:crypto');
 
 const source = fs.readFileSync(path.join(__dirname, '../src-tauri/src/agent/channel/http/mobile_web/app.js'), 'utf8');
 
 function deferred() {
-    let resolve;
-    const promise = new Promise(done => { resolve = done; });
-    return { promise, resolve };
+    let resolve, reject;
+    const promise = new Promise((done, failed) => { resolve = done; reject = failed; });
+    return { promise, resolve, reject };
 }
 
-function createPage(runs) {
+function createPage(runs, storage = new Map()) {
     const elements = new Map();
     const requests = [];
     const frames = new Map();
     const properties = new Map();
     let nextFrame = 0;
+    let admissionHandler;
+    let homeError;
     const visualViewport = Object.assign(new EventTarget(), { height: 800, offsetTop: 0, scale: 1 });
     const fakeWindow = Object.assign(new EventTarget(), {
         visualViewport, innerHeight: 800, scrollTo() {},
@@ -25,13 +28,22 @@ function createPage(runs) {
         cancelAnimationFrame(id) { frames.delete(id); },
     });
     const getElementById = id => {
-        if (!elements.has(id)) elements.set(id, {
-            id, value: '', dataset: {}, writes: 0, html: '', style: {},
-            get innerHTML() { return this.html; },
-            set innerHTML(value) { this.writes++; this.html = value; },
-            classList: { add() {}, remove() {}, toggle() {} },
-            addEventListener() {}, click() {}, matches() { return id === 'followInput'; },
-        });
+        if (!elements.has(id)) {
+            const classes = new Set(id === 'modalNew' ? ['hidden'] : []);
+            elements.set(id, {
+                id, value: '', dataset: {}, writes: 0, html: '', style: {},
+                get innerHTML() { return this.html; },
+                set innerHTML(value) { this.writes++; this.html = value; },
+                classList: {
+                    add(item) { classes.add(item); },
+                    remove(item) { classes.delete(item); },
+                    contains(item) { return classes.has(item); },
+                    toggle(item, show = !classes.has(item)) { if (show) classes.add(item); else classes.delete(item); },
+                },
+                setAttribute(name, value) { this[name] = value; },
+                addEventListener() {}, click() {}, matches() { return id === 'followInput'; },
+            });
+        }
         return elements.get(id);
     };
     const fakeDocument = Object.assign(new EventTarget(), {
@@ -43,8 +55,14 @@ function createPage(runs) {
         for (const callback of callbacks) callback();
     }
     const localStorage = { getItem() { return null; } };
+    const sessionStorage = {
+        getItem(key) { return storage.get(key) ?? null; },
+        setItem(key, value) { storage.set(key, value); },
+        removeItem(key) { storage.delete(key); },
+    };
     const context = vm.createContext({
-        localStorage, document: fakeDocument, window: fakeWindow, URL, Event,
+        crypto: { getRandomValues: webcrypto.getRandomValues.bind(webcrypto) },
+        localStorage, sessionStorage, document: fakeDocument, window: fakeWindow, URL, Event,
         location: { href: 'http://127.0.0.1/' },
     });
     vm.runInContext(source, context);
@@ -52,21 +70,31 @@ function createPage(runs) {
     const uploads = [];
     const liveState = vm.runInContext('S', context);
     Object.assign(context, {
-        renderSidebar() {}, renderHome() {}, async loadHome() {}, closeSidebarMobile() {}, toast() {},
+        renderSidebar() {}, renderHome() {}, async loadHome() { if (homeError) throw homeError; }, closeSidebarMobile() {}, toast() {},
         uploadFile(sessionId, file) {
             uploads.push([sessionId, file]);
             return pending.get(file)?.promise ?? Promise.resolve();
         },
         api(url, options) {
-            requests.push({ url, ...(options?.body ? { body: JSON.parse(options.body) } : {}) });
+            const body = options?.body ? JSON.parse(options.body) : undefined;
+            requests.push({ url, ...(body ? { body } : {}) });
             if (pending.has(url)) return pending.get(url).promise;
+            if (url === '/channel/mobile/task') {
+                return admissionHandler ? admissionHandler(body)
+                    : Promise.resolve({ session_id: body.session_id || 'new-session', run_id: 'task-run' });
+            }
             const responses = {
                 '/channel/runs': { runs }, '/channel/sessions': { sessions: [{ id: 'A' }, { id: 'B' }] },
             };
             return Promise.resolve(responses[url] ?? {});
         },
     });
-    return { ...context, requests, liveState, pending, uploads, getElementById, input: getElementById('followInput'), visualViewport, properties, flushFrame };
+    return {
+        ...context, requests, liveState, pending, uploads, getElementById, input: getElementById('followInput'),
+        visualViewport, properties, flushFrame,
+        setAdmissionHandler(handler) { admissionHandler = handler; },
+        setHomeError(error) { homeError = error; },
+    };
 }
 
 async function main() {
@@ -191,8 +219,9 @@ async function main() {
     assert.deepEqual(compose.uploads, [['A', 'A 文件 1'], ['A', 'A 文件 2']]);
     assert.equal(compose.input.value, 'B 的任务', 'A 的提交完成后保留 B 的输入');
     assert.deepEqual(Array.from(compose.liveState.composerFiles), ['B 文件']);
-    const submitted = compose.requests.find(({ url }) => url === '/channel/task').body;
+    const submitted = compose.requests.find(({ url }) => url === '/channel/mobile/task').body;
     assert.equal(submitted.session_id, 'A');
+    assert.equal(submitted.project_id, null);
     assert.equal(submitted.model_routing.pro, 'model-A');
     await compose.openSession('A');
     assert.equal(compose.input.value, '');
@@ -273,7 +302,135 @@ async function main() {
     await concurrent.openSession('A');
     assert.equal(concurrent.getElementById('btnSend').disabled, false, '请求结束重新允许发送');
 
-    console.log('PASS: mobile session actions, scoped drafts and attachments, and coalesced keyboard/composer geometry');
+    const savedAdmissions = new Map();
+    const weakRuns = [];
+    const weak = createPage(weakRuns, savedAdmissions);
+    await weak.openSession('A');
+    const flakyFile = deferred();
+    weak.pending.set('A 第二个附件', flakyFile);
+    weak.input.value = '原任务';
+    weak.liveState.composerFiles.push('A 已上传附件', 'A 第二个附件');
+    const failedUpload = weak.sendComposer();
+    flakyFile.reject(new Error('断线'));
+    await failedUpload;
+    assert.deepEqual(weak.uploads, [['A', 'A 已上传附件'], ['A', 'A 第二个附件']]);
+    assert.equal(weak.requests.filter(({ url }) => url === '/channel/mobile/task').length, 0);
+    weak.pending.delete('A 第二个附件');
+    const receipts = new Map();
+    weak.setAdmissionHandler(async body => {
+        receipts.set(body.request_id, { session_id: 'A', run_id: 'accepted-run' });
+        weakRuns.push({ session_id: 'A', run_id: 'accepted-run', status: 'running' });
+        throw new Error('桌面已收到，手机未收到响应');
+    });
+    await weak.sendComposer();
+    assert.deepEqual(weak.uploads, [['A', 'A 已上传附件'], ['A', 'A 第二个附件'], ['A', 'A 第二个附件']]);
+    const firstTask = weak.requests.find(({ url }) => url === '/channel/mobile/task').body;
+    assert.equal(firstTask.goal, '原任务');
+    assert.match(firstTask.request_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    await weak.loadFlow('A');
+    assert.equal(weak.liveState.flow.run.run_id, 'accepted-run');
+    assert.equal(weak.getElementById('btnSend').title, '核对原提交');
+    weak.input.value = '后来编辑的新草稿';
+    weak.setAdmissionHandler(async body => receipts.get(body.request_id));
+    await weak.sendComposer();
+    assert.equal(receipts.size, 1);
+    assert.deepEqual(weak.requests.filter(({ url }) => url === '/channel/mobile/task').map(({ body }) => body), [firstTask, firstTask]);
+    assert(!weak.requests.some(({ url }) => url === '/channel/run/accepted-run/goal'));
+    assert.equal(weak.input.value, '后来编辑的新草稿');
+    assert.equal(weak.liveState.composerFiles.length, 0);
+
+    const reloadStorage = new Map();
+    const firstPage = createPage([], reloadStorage);
+    await firstPage.openSession('B');
+    firstPage.input.value = '重载前未确认';
+    firstPage.setAdmissionHandler(async () => { throw new Error('响应中断'); });
+    await firstPage.sendComposer();
+    const beforeReload = firstPage.requests.find(({ url }) => url === '/channel/mobile/task').body;
+    const reloaded = createPage([{ session_id: 'B', run_id: 'original', status: 'running' }], reloadStorage);
+    await reloaded.openSession('B');
+    assert.equal(reloaded.input.value, '重载前未确认');
+    assert.equal(reloaded.getElementById('btnSend').title, '核对原提交');
+    await reloaded.sendComposer();
+    assert.deepEqual(reloaded.requests.find(({ url }) => url === '/channel/mobile/task').body, beforeReload);
+    assert(!reloaded.requests.some(({ url }) => /\/goal$/.test(url)));
+
+    const stale = createPage([]);
+    stale.liveState.sessions.push({ id: 'A', project_id: 'project-old' });
+    const staleRead = deferred();
+    staleRead.resolve({ session: null, traces: [] });
+    stale.pending.set('/channel/session/A/traces', staleRead);
+    await stale.openSession('A');
+    stale.input.value = '过期项目草稿';
+    await stale.sendComposer();
+    assert.equal(stale.getElementById('btnSend').disabled, true);
+    assert.equal(stale.input.value, '过期项目草稿');
+    assert(!stale.requests.some(({ url }) => url === '/channel/mobile/task'));
+
+    const mismatched = createPage([]);
+    const projectRead = deferred();
+    projectRead.resolve({ session: { id: 'B', project_id: 'project-original' }, traces: [] });
+    mismatched.pending.set('/channel/session/B/traces', projectRead);
+    await mismatched.openSession('B');
+    mismatched.input.value = '原工作区的草稿';
+    mismatched.setAdmissionHandler(async () => {
+        throw Object.assign(new Error('归属已变更'), { status: 409, code: 'session_project_mismatch' });
+    });
+    await mismatched.sendComposer();
+    assert.equal(mismatched.requests.find(({ url }) => url === '/channel/mobile/task').body.project_id, 'project-original');
+    await mismatched.sendComposer();
+    assert.equal(mismatched.requests.filter(({ url }) => url === '/channel/mobile/task').length, 1);
+    assert.equal(mismatched.getElementById('btnSend').disabled, true);
+    assert.equal(mismatched.input.value, '原工作区的草稿');
+
+    const moved = createPage([]);
+    const oldScope = deferred();
+    oldScope.resolve({ session: { id: 'A', project_id: 'project-original' }, traces: [] });
+    moved.pending.set('/channel/session/A/traces', oldScope);
+    await moved.openSession('A');
+    moved.input.value = '属于原项目的草稿';
+    const newScope = deferred();
+    newScope.resolve({ session: { id: 'A', project_id: 'project-new' }, traces: [] });
+    moved.pending.set('/channel/session/A/traces', newScope);
+    await moved.loadFlow('A');
+    await moved.sendComposer();
+    assert.equal(moved.input.value, '属于原项目的草稿');
+    assert.equal(moved.getElementById('btnSend').disabled, true);
+    assert(!moved.requests.some(({ url }) => url === '/channel/mobile/task'));
+
+    const busyRuns = [];
+    const busy = createPage(busyRuns);
+    await busy.openSession('B');
+    busy.input.value = '草稿仍保留';
+    busy.setAdmissionHandler(async () => {
+        busyRuns.push({ session_id: 'B', run_id: 'other-run', status: 'running' });
+        throw Object.assign(new Error('会话已有任务运行'), { status: 409, code: 'session_in_flight' });
+    });
+    await busy.sendComposer();
+    await busy.loadFlow('B');
+    assert.equal(busy.getElementById('btnSend').title, '发送', '明确未受理时解除核对状态');
+    assert.equal(busy.input.value, '草稿仍保留');
+
+    const fresh = createPage([]);
+    fresh.liveState.models = [{ id: 'model-1' }];
+    fresh.setHomeError(new Error('列表请求暂时失败'));
+    fresh.openModal();
+    fresh.getElementById('newGoal').value = '弱网下启动新任务';
+    fresh.setAdmissionHandler(async () => { throw new Error('启动确认丢失'); });
+    await fresh.submitNew();
+    assert.equal(fresh.getElementById('modalNew').classList.contains('hidden'), false);
+    assert.equal(fresh.getElementById('newSubmit').textContent, '核对原提交');
+    const newTask = fresh.requests.find(({ url }) => url === '/channel/mobile/task').body;
+    assert.equal(newTask.session_id, undefined);
+    assert.equal(newTask.model_id, 'model-1');
+    assert.equal(newTask.project_id, null);
+    fresh.setAdmissionHandler(async () => ({ session_id: 'A', run_id: 'new-run' }));
+    await fresh.submitNew();
+    assert.deepEqual(fresh.requests.filter(({ url }) => url === '/channel/mobile/task').map(({ body }) => body), [newTask, newTask]);
+    assert(!fresh.requests.some(({ url }) => url === '/channel/session' || url === '/channel/task'));
+    assert.equal(fresh.liveState.currentSessionId, 'A');
+    assert.equal(fresh.getElementById('modalNew').classList.contains('hidden'), true);
+
+    console.log('PASS: mobile session actions, scoped drafts and attachments, and stable task admission under weak-network retries');
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1; });

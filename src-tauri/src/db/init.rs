@@ -374,6 +374,17 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         CREATE INDEX IF NOT EXISTS idx_agent_run_traces_session
             ON agent_run_traces(session_id, started_at ASC);
 
+        -- A submitted request keeps its receipt even if its conversation is later removed.
+        -- Only opaque IDs, a normalized payload fingerprint and the original receipt fields are stored.
+        CREATE TABLE IF NOT EXISTS channel_mobile_submissions (
+            request_id TEXT PRIMARY KEY,
+            request_hash TEXT NOT NULL,
+            run_id TEXT NOT NULL UNIQUE,
+            session_id TEXT NOT NULL,
+            project_id TEXT,
+            llm_retries INTEGER NOT NULL
+        );
+
         -- 逐步增量持久化的运行轨迹：每步一行，替代每步整写 steps_json 的 O(n²) 序列化。
         -- steps_json 列仍保留（启动快照/终态快照/旧数据兼容），读者按「行优先、列回退」。
         CREATE TABLE IF NOT EXISTS agent_run_steps (
@@ -721,6 +732,18 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
     let _ = conn.execute("ALTER TABLE agent_run_traces ADD COLUMN goal_message_id TEXT;", []);
     let _ = conn.execute("ALTER TABLE agent_run_traces ADD COLUMN history_task_id TEXT;", []);
     conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_run_task ON agent_run_traces(session_id, history_task_id);", [])?;
+    // History survives project removal, but an old project conversation must not turn into scratch.
+    // This column records the last binding and never grants workspace access.
+    let _ = conn.execute("ALTER TABLE chat_sessions ADD COLUMN project_origin_id TEXT;", []);
+    conn.execute_batch(
+        "UPDATE chat_sessions SET project_origin_id=aps.project_id
+         FROM agent_project_sessions aps
+         WHERE aps.session_id=chat_sessions.id AND chat_sessions.project_origin_id IS NULL;
+         CREATE TRIGGER IF NOT EXISTS record_session_project_origin
+         AFTER INSERT ON agent_project_sessions BEGIN
+             UPDATE chat_sessions SET project_origin_id=NEW.project_id WHERE id=NEW.session_id;
+         END;",
+    )?;
     let _ = conn.execute("ALTER TABLE chat_messages ADD COLUMN run_id TEXT;", []);
     let _ = conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_messages_run ON chat_messages(run_id);",

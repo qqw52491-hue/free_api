@@ -357,6 +357,38 @@ pub(crate) fn register_and_spawn_run(
         }
         owner
     };
+    spawn_admitted_run(app, run_id.clone(), admitted, persisted_admission, ChannelLaunch {
+        session_id, goal, routing, workspace_override, llm_retries,
+        action_milestone_steps: _action_milestone_steps,
+        phase_push: _phase_push,
+        plan_mode, caller_notifies,
+    });
+    Ok(run_id)
+}
+
+pub(super) struct ChannelLaunch {
+    pub session_id: String,
+    pub goal: String,
+    pub routing: ModelRoutingConfig,
+    pub workspace_override: Option<PathBuf>,
+    pub llm_retries: Option<u32>,
+    pub action_milestone_steps: u32,
+    pub phase_push: bool,
+    pub plan_mode: Option<String>,
+    pub caller_notifies: bool,
+}
+
+/// All channel callers hand the already-acquired root execution slot to the same runtime.
+pub(super) fn spawn_admitted_run(
+    app: AppHandle,
+    run_id: String,
+    admitted: crate::agent::control::SessionExecutionOwner,
+    persisted_admission: bool,
+    launch: ChannelLaunch,
+) {
+    let ChannelLaunch { session_id, goal, routing, workspace_override, llm_retries,
+        action_milestone_steps, phase_push, plan_mode, caller_notifies } = launch;
+    let db_state = app.state::<DbState>();
     let started_at = now_ts();
     println!(
         "[channel] run {run_id} 启动 session={session_id} 重试上限={}",
@@ -382,8 +414,8 @@ pub(crate) fn register_and_spawn_run(
         llm_retries: llm_retries
             .unwrap_or(crate::agent::main_loop::DEFAULT_TRANSIENT_LLM_REQUEST_RETRIES)
             .clamp(1, 100),
-        report_every_actions: _action_milestone_steps,
-        phase_push: _phase_push,
+        report_every_actions: action_milestone_steps,
+        phase_push,
         phase: None,
         state_detail: None,
         source: "channel".to_string(),
@@ -453,8 +485,6 @@ pub(crate) fn register_and_spawn_run(
             });
         }
     });
-
-    Ok(run_id)
 }
 
 // 发送端统一分段；这里保留全文，不生成只含前 300 字符的通知摘要。

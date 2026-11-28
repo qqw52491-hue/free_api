@@ -247,8 +247,10 @@ async function api(path, opts = {}) {
   if (opts.body && typeof opts.body === "string" && !headers["Content-Type"]) {
     headers["Content-Type"] = "application/json";
   }
-  // Bound stalled reads without interrupting uploads, submissions or approvals.
-  const canTimeOut = (opts.method || "GET").toUpperCase() === "GET"
+  const method = (opts.method || "GET").toUpperCase();
+  const retryableAdmission = method === "POST" && path === "/channel/mobile/task";
+  // An admission can safely time out because a retry reuses the same request ID.
+  const canTimeOut = (method === "GET" || retryableAdmission)
     && !opts.signal && typeof AbortController !== "undefined";
   const controller = canTimeOut ? new AbortController() : null;
   const deadline = controller ? setTimeout(() => controller.abort(), 20000) : null;
@@ -261,7 +263,7 @@ async function api(path, opts = {}) {
     // An HTTP 200 can arrive before the body is lost. Keep the last rendered snapshot.
     if (!res || res.ok) {
       let message = res ? "响应未收完整，等待重试" : "无法连接桌面端";
-      if (controller?.signal.aborted) message = "读取超时，等待重试";
+      if (controller?.signal.aborted) message = retryableAdmission ? "桌面确认超时" : "读取超时，等待重试";
       if (S.token === token) setConn(false, message);
       throw new Error(message, { cause: error });
     }
@@ -272,7 +274,12 @@ async function api(path, opts = {}) {
     if (S.token === token) showGate("令牌已失效，请重新输入");
     throw new Error("unauthorized");
   }
-  if (!res.ok) throw new Error(data?.error || ("HTTP " + res.status));
+  if (!res.ok) {
+    throw Object.assign(new Error(data?.error || ("HTTP " + res.status)), {
+      status: res.status,
+      code: data?.code,
+    });
+  }
   if (S.token === token) setConn(true);
   return data;
 }
@@ -912,7 +919,7 @@ window.selectHumanMultiAll = function(selectAll) {
 
 window.submitHumanIntervention = async function() {
   const f = currentFlow();
-  if (f?.run?.status !== "waiting_human" || !hasCurrentHumanForm(f.run) || S.humanForm.isSubmitting) return;
+  if (f?.sessionUnavailable || f?.run?.status !== "waiting_human" || !hasCurrentHumanForm(f.run) || S.humanForm.isSubmitting) return;
   const form = normalizeHumanForm(f.run.paused_form, f.run.paused_reason || "");
   const parts = [];
 
@@ -1105,7 +1112,14 @@ async function loadFlow(sessionId) {
     if (sessRes && sessRes.sessions) {
       S.sessions = sessRes.sessions;
     }
-    const session = S.sessions.find(s => s.id === sessionId) || null;
+    const hasSessionScope = Object.hasOwn(tracesRes, "session");
+    const session = hasSessionScope ? tracesRes.session : (S.sessions.find(s => s.id === sessionId) || null);
+    if (hasSessionScope && !session) view.sessionScopeInvalidated = true;
+    if (session) {
+      const projectId = session.project_id ?? null;
+      if (!Object.hasOwn(view, "sessionProject")) view.sessionProject = projectId;
+      else if (view.sessionProject !== projectId) view.sessionScopeInvalidated = true;
+    }
     const run = (runsRes.runs || []).filter(r => r.session_id === sessionId)
       .sort((a, b) => (b.started_at || "").localeCompare(a.started_at || ""))[0] || null;
     const traceList = tracesRes.traces || [];
@@ -1140,6 +1154,7 @@ async function loadFlow(sessionId) {
     S.flow = {
       sessionId,
       session,
+      sessionUnavailable: !!view.sessionScopeInvalidated,
       run,
       traces: uniqueTraces,
       artifacts: artsRes.artifacts || [],
@@ -1435,13 +1450,14 @@ function renderFlow() {
   if (!f) return;
   const scrollAnchor = captureFlowAnchor();
   const s = f.session || {};
-  const active = f.run && ["running", "waiting_human"].includes(f.run.status);
+  const visibleRun = f.sessionUnavailable ? null : f.run;
+  const active = visibleRun && ["running", "waiting_human"].includes(visibleRun.status);
   const proj = s.project_id ? S.projects.find(p => p.id === s.project_id) : null;
-  const dirLabel = proj ? `📁 ${proj.name}` : `💬 临时工作区`;
-  const fullDirPath = proj ? (proj.root_path || "") : "scratch (临时目录)";
+  const dirLabel = f.sessionUnavailable ? "会话已失效" : s.project_id ? `📁 ${s.project_name || proj?.name || "项目会话"}` : f.session ? "💬 临时工作区" : "会话归属待确认";
+  const fullDirPath = s.project_id ? (s.root_path || proj?.root_path || "") : f.session ? "scratch (临时目录)" : "";
 
   $("topTitle").textContent = s.title || "任务会话";
-  renderHeaderSubtitle(proj ? `${dirLabel} · ${fullDirPath}` : dirLabel);
+  renderHeaderSubtitle(s.project_id && fullDirPath ? `${dirLabel} · ${fullDirPath}` : dirLabel);
   $("btnBackTop").classList.remove("hidden");
   $("btnDelSession").classList.remove("hidden");
   $("btnMenu").classList.add("hidden");
@@ -1452,10 +1468,10 @@ function renderFlow() {
   const live = $("liveLine");
   let liveHtml = "";
   let liveClass = "live-line";
-  if (f.run && f.run.status === "running") {
+  if (visibleRun?.status === "running") {
     liveClass = "live-line";
     liveHtml = `<span class="livedot"></span><strong>工作中</strong> <span style="color:var(--dim)">· ${esc(dirLabel)} · ${esc(f.run.state_detail || f.run.phase || "执行中")}${f.run.event_count ? ` · ${f.run.event_count} 事件` : ""}</span>`;
-  } else if (f.run && f.run.status === "waiting_human") {
+  } else if (visibleRun?.status === "waiting_human") {
     liveClass = "live-line wait";
     liveHtml = `<span class="livedot"></span><span style="color:var(--amber); font-weight:600">等待你的回答 · ${esc(dirLabel)}</span>`;
   } else {
@@ -1470,10 +1486,10 @@ function renderFlow() {
 
   // 提问卡片（等待人类输入 / 人工协助表单）
   const askCard = $("askCard");
-  const questionChanged = f.run?.status === "waiting_human"
-    ? !hasCurrentHumanForm(f.run)
+  const questionChanged = visibleRun?.status === "waiting_human"
+    ? !hasCurrentHumanForm(visibleRun)
     : !!askCard.dataset.renderedHtml;
-  const askHtml = renderAskCard(f.run);
+  const askHtml = renderAskCard(visibleRun);
   const activeEl = document.activeElement;
   const isTypingInAsk = activeEl && (activeEl.id === "humanWriteInInput" || activeEl.id === "humanTextInput");
   if (questionChanged || (!isTypingInAsk && askCard.dataset.renderedHtml !== askHtml)) {
@@ -1501,11 +1517,13 @@ function renderFlow() {
   // Composer 状态与占位符
   const input = $("followInput");
   const composer = $("composer");
-  const isWaitingHuman = f.run && f.run.status === "waiting_human";
-  $("btnSend").disabled = pendingComposerSends.has(f.sessionId);
+  const isWaitingHuman = visibleRun?.status === "waiting_human";
+  updateComposerSubmit(f);
   composer.classList.toggle("waiting-human", !!isWaitingHuman);
-  $("btnStop").classList.toggle("hidden", !(f.run && f.run.status === "running"));
-  if (isWaitingHuman) {
+  $("btnStop").classList.toggle("hidden", f.sessionUnavailable || !(f.run && f.run.status === "running"));
+  if (f.sessionUnavailable) {
+    input.placeholder = "会话已失效，草稿仍保留";
+  } else if (isWaitingHuman) {
     input.placeholder = "回复 Agent 的提问…";
   } else if (f.run && f.run.status === "running") {
     input.placeholder = "继续输入以排队后续修改 / 接管方向…";
@@ -1517,8 +1535,94 @@ function renderFlow() {
 
 const composerDrafts = new Map();
 const pendingComposerSends = new Set();
+const mobileAdmissions = new Map();
+const NEW_TASK_SCOPE = "new";
+const DEFINITIVE_ADMISSION_ERRORS = new Set([
+  "session_unavailable", "session_project_mismatch", "project_unavailable", "request_conflict", "session_in_flight", "invalid_submission",
+]);
 let attachmentSessionId = null;
 let refreshComposerGeometry = () => {};
+
+function sessionAdmissionScope(sessionId) {
+  return "session:" + sessionId;
+}
+
+function mobileRequestId() {
+  if (globalThis.crypto.randomUUID) return globalThis.crypto.randomUUID();
+  // A phone can open the console over HTTP, where randomUUID may be unavailable.
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
+  return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join("-");
+}
+
+function pendingMobileAdmission(scope) {
+  if (!mobileAdmissions.has(scope)) {
+    let saved = null;
+    try {
+      const entry = JSON.parse(sessionStorage.getItem("free_api_admission:" + scope));
+      if (entry?.body?.request_id && typeof entry.draftText === "string") {
+        saved = { ...entry, posted: true, files: [], uploaded: new Set() };
+      }
+    } catch (_) {}
+    mobileAdmissions.set(scope, saved);
+  }
+  return mobileAdmissions.get(scope);
+}
+
+function rememberMobileAdmission(scope, attempt) {
+  mobileAdmissions.set(scope, attempt);
+  // Store only the exact submission needed to reconcile a lost reply after reload.
+  try {
+    const key = "free_api_admission:" + scope;
+    if (attempt?.posted) {
+      sessionStorage.setItem(key, JSON.stringify({ body: attempt.body, draftText: attempt.draftText }));
+    } else {
+      sessionStorage.removeItem(key);
+    }
+  } catch (_) {}
+}
+
+async function submitMobileAdmission(scope, attempt) {
+  attempt.posted = true;
+  rememberMobileAdmission(scope, attempt);
+  const receipt = await api("/channel/mobile/task", { method: "POST", body: JSON.stringify(attempt.body) });
+  if (!receipt?.run_id || !receipt?.session_id ||
+      (attempt.body.session_id && attempt.body.session_id !== receipt.session_id)) {
+    throw new Error("桌面未返回完整的任务确认");
+  }
+  rememberMobileAdmission(scope, null);
+  return receipt;
+}
+
+function updateComposerSubmit(flow = currentFlow()) {
+  const btn = $("btnSend");
+  const attempt = flow ? pendingMobileAdmission(sessionAdmissionScope(flow.sessionId)) : null;
+  const stale = flow?.sessionUnavailable;
+  let message = "";
+  if (stale) message = "会话已失效或归属已变更。草稿仍保留，请重新打开正确的会话。";
+  else if (attempt?.posted) message = "上次提交尚未确认。再次发送会核对原任务，新的编辑会保留。";
+  else if (flow && !flow.session) message = "会话归属尚未确认，请先刷新再发送。";
+  const status = $("composerSubmitStatus");
+  if (status.textContent !== message) status.textContent = message;
+  status.classList.toggle("hidden", !message);
+  const label = attempt?.posted ? "核对原提交" : "发送";
+  if (btn.title !== label) {
+    btn.title = label;
+    btn.setAttribute("aria-label", label);
+  }
+  btn.disabled = !flow || !!stale || !flow.session || pendingComposerSends.has(flow.sessionId);
+  $("btnClip").disabled = !flow?.session || !!stale;
+}
+
+function invalidateComposerSession(sessionId) {
+  const flow = currentFlow();
+  if (!flow || flow.sessionId !== sessionId) return;
+  S.view.sessionScopeInvalidated = true;
+  flow.sessionUnavailable = true;
+  renderFlow();
+}
 
 function bindComposerViewport() {
   const composer = $("composer");
@@ -1596,17 +1700,17 @@ function saveComposerDraft() {
 
 async function openSession(sessionId) {
   closeSidebarMobile();
-  if (!isOpenSession(sessionId)) {
+  if (!isOpenSession(sessionId) || S.view.sessionScopeInvalidated) {
     saveComposerDraft();
     S.view = { name: "flow" };
     S.flow = null;
     resetFlowScroll();
     const draft = composerDrafts.get(sessionId);
-    $("followInput").value = draft?.text ?? "";
+    $("followInput").value = draft?.text ?? pendingMobileAdmission(sessionAdmissionScope(sessionId))?.draftText ?? "";
     $("followInput").placeholder = "会话加载中…";
     S.composerFiles = draft?.files ?? [];
     renderComposerFiles();
-    $("btnSend").disabled = true;
+    updateComposerSubmit();
     $("btnStop").classList.add("hidden");
     $("composer").classList.remove("waiting-human");
     $("topTitle").textContent = S.sessions.find(s => s.id === sessionId)?.title || "任务会话";
@@ -1658,6 +1762,7 @@ async function deleteSession(sessionId) {
       await loadHome();
     }
     composerDrafts.delete(sessionId);
+    rememberMobileAdmission(sessionAdmissionScope(sessionId), null);
     if (attachmentSessionId === sessionId) attachmentSessionId = null;
   } catch (e) {
     toast("删除失败: " + e.message);
@@ -1667,34 +1772,51 @@ async function deleteSession(sessionId) {
 async function sendComposer() {
   const f = currentFlow();
   const input = $("followInput");
-  const draftText = input.value;
+  if (!f?.session || f.sessionUnavailable || pendingComposerSends.has(f.sessionId)) return;
+  const scope = sessionAdmissionScope(f.sessionId);
+  let attempt = pendingMobileAdmission(scope);
+  let draftText = input.value;
   const text = draftText.trim();
-  if (!text || !f || pendingComposerSends.has(f.sessionId)) return;
+  if (!text && !attempt?.posted) return;
   pendingComposerSends.add(f.sessionId);
-  $("btnSend").disabled = true;
+  updateComposerSubmit(f);
   resumeFlowFollow();
-  const sentFiles = [];
+  let sentFiles = [];
   let successMessage;
   try {
-    if (f.run && f.run.status === "waiting_human") {
+    if (!attempt && f.run?.status === "waiting_human") {
       await api(`/channel/run/${f.run.run_id}/answer`, { method: "POST", body: JSON.stringify({ text, wait_id: f.run.wait_id }) });
       successMessage = "已回答，Agent 继续执行";
-    } else if (f.run && f.run.status === "running") {
+    } else if (!attempt && f.run?.status === "running") {
       await api(`/channel/run/${f.run.run_id}/goal`, { method: "POST", body: JSON.stringify({ goal: text }) });
       successMessage = "已排队后续修改 (ReplaceGoal)";
     } else {
-      sentFiles.push(...S.composerFiles);
-      const routing = {};
-      if (S.taskOpts.model_id) routing.pro = routing.flash = routing.vision = S.taskOpts.model_id;
-      if (S.taskOpts.context_budget_mode) routing.context_budget_mode = S.taskOpts.context_budget_mode;
-      for (const [i, file] of sentFiles.entries()) {
-        if (isOpenSession(f.sessionId)) toast(`上传附件 ${i + 1}/${sentFiles.length}…`, 1500);
-        await uploadFile(f.sessionId, file);
+      if (!attempt?.posted) {
+        const routing = {};
+        if (S.taskOpts.model_id) routing.pro = routing.flash = routing.vision = S.taskOpts.model_id;
+        if (S.taskOpts.context_budget_mode) routing.context_budget_mode = S.taskOpts.context_budget_mode;
+        const body = {
+          request_id: attempt?.body.request_id ?? mobileRequestId(),
+          session_id: f.sessionId,
+          project_id: attempt ? attempt.body.project_id : f.session.project_id ?? null,
+          goal: text,
+        };
+        if (Object.keys(routing).length) body.model_routing = routing;
+        attempt = {
+          body, draftText, files: [...S.composerFiles], uploaded: attempt?.uploaded ?? new Set(), posted: false,
+        };
+        rememberMobileAdmission(scope, attempt);
+        for (const [i, file] of attempt.files.entries()) {
+          if (attempt.uploaded.has(file)) continue;
+          if (isOpenSession(f.sessionId)) toast(`上传附件 ${i + 1}/${attempt.files.length}…`, 1500);
+          await uploadFile(f.sessionId, file);
+          attempt.uploaded.add(file);
+        }
       }
-      const body = { session_id: f.sessionId, goal: text };
-      if (Object.keys(routing).length) body.model_routing = routing;
-      await api("/channel/task", { method: "POST", body: JSON.stringify(body) });
-      successMessage = "已发送";
+      draftText = attempt.draftText;
+      sentFiles = attempt.files;
+      await submitMobileAdmission(scope, attempt);
+      successMessage = "任务已受理";
     }
     const active = isOpenSession(f.sessionId);
     const draft = active ? { text: input.value, files: S.composerFiles } : composerDrafts.get(f.sessionId);
@@ -1710,19 +1832,30 @@ async function sendComposer() {
     }
     if (active) {
       toast(successMessage);
-      await loadFlow(f.sessionId);
+      await loadFlow(f.sessionId).catch(() => {});
     }
   } catch (e) {
-    if (isOpenSession(f.sessionId)) toast("操作失败：" + e.message);
+    if (attempt && DEFINITIVE_ADMISSION_ERRORS.has(e.code)) {
+      rememberMobileAdmission(scope, null);
+      if (e.code === "session_unavailable" || e.code === "session_project_mismatch") {
+        invalidateComposerSession(f.sessionId);
+      } else if (e.code === "session_in_flight" && isOpenSession(f.sessionId)) {
+        loadFlow(f.sessionId).catch(() => {});
+      }
+    }
+    if (isOpenSession(f.sessionId)) {
+      const pending = pendingMobileAdmission(scope)?.posted;
+      toast(pending ? "任务尚未确认：" + e.message : "操作失败：" + e.message);
+    }
   } finally {
     pendingComposerSends.delete(f.sessionId);
-    if (currentFlow()?.sessionId === f.sessionId) $("btnSend").disabled = false;
+    if (currentFlow()?.sessionId === f.sessionId) updateComposerSubmit();
   }
 }
 
 async function stopRun() {
   const f = currentFlow();
-  if (!f || !f.run) return;
+  if (!f || f.sessionUnavailable || !f.run) return;
   try {
     await api(`/channel/run/${f.run.run_id}/cancel`, { method: "POST" });
     if (isOpenSession(f.sessionId)) {
@@ -1831,56 +1964,92 @@ function bindOptChips() {
 }
 
 let newTaskType = "scratch";
+let submittingNewTask = false;
+
+function updateNewSubmit() {
+  const attempt = pendingMobileAdmission(NEW_TASK_SCOPE);
+  const pending = !!attempt?.posted;
+  const locked = submittingNewTask || pending;
+  $("newSubmit").disabled = submittingNewTask;
+  $("newSubmit").textContent = pending ? "核对原提交" : "启动";
+  for (const id of ["newProj", "typeScratch", "typeProject", "btnPickNewModel"]) $(id).disabled = locked;
+  $("newGoal").readOnly = locked;
+  const status = $("newSubmitStatus");
+  const message = pending ? "上次提交尚未确认。再次点击会核对同一任务。" : "";
+  if (status.textContent !== message) status.textContent = message;
+  status.classList.toggle("hidden", !pending);
+}
+
 function openModal(prefillProjectId) {
   closeSidebarMobile();
-  newTaskType = prefillProjectId && prefillProjectId !== "__scratch__" ? "project" : "scratch";
+  const pending = pendingMobileAdmission(NEW_TASK_SCOPE);
+  const selectedProjectId = pending ? pending.body.project_id : prefillProjectId;
+  newTaskType = selectedProjectId && selectedProjectId !== "__scratch__" ? "project" : "scratch";
   const projects = groupsOf().filter(g => g.key !== "__scratch__");
   $("newProj").innerHTML = projects.map(g =>
-    `<option value="${esc(g.key)}" ${g.key === prefillProjectId ? "selected" : ""}>${g.icon} ${esc(g.name)}</option>`).join("")
+    `<option value="${esc(g.key)}" ${g.key === selectedProjectId ? "selected" : ""}>${g.icon} ${esc(g.name)}</option>`).join("")
     || `<option value="">（暂无项目）</option>`;
   $("typeScratch").style.background = newTaskType === "scratch" ? "var(--accent)" : "transparent";
   $("typeProject").style.background = newTaskType === "project" ? "var(--accent)" : "transparent";
   $("projField").style.display = newTaskType === "project" ? "" : "none";
   
-  if (!S.selectedNewModelId && S.models.length) {
+  if (pending) {
+    S.selectedNewModelId = pending.body.model_id;
+  } else if (!S.selectedNewModelId && S.models.length) {
     S.selectedNewModelId = S.models[0].id;
   }
   $("lblNewModel").textContent = S.selectedNewModelId ? modelName(S.selectedNewModelId) : "请选择模型…";
   
-  $("newGoal").value = "";
+  $("newGoal").value = pending?.draftText ?? "";
+  updateNewSubmit();
   $("modalNew").classList.remove("hidden");
 }
 
 async function submitNew() {
-  const projectId = newTaskType === "project" ? $("newProj").value : null;
-  const modelId = S.selectedNewModelId || "";
-  if (!modelId) {
-    toast("请先选择执行模型");
-    return;
+  if (submittingNewTask) return;
+  let attempt = pendingMobileAdmission(NEW_TASK_SCOPE);
+  if (!attempt) {
+    const projectId = newTaskType === "project" ? $("newProj").value : null;
+    if (newTaskType === "project" && !projectId) { toast("请先选择项目"); return; }
+    const modelId = S.selectedNewModelId || "";
+    if (!modelId) { toast("请先选择执行模型"); return; }
+    const draftText = $("newGoal").value;
+    const goal = draftText.trim();
+    if (!goal) { toast("请填写任务内容"); return; }
+    attempt = {
+      body: {
+        request_id: mobileRequestId(),
+        project_id: projectId,
+        title: short(goal.replace(/\s+/g, " "), 28),
+        model_id: modelId,
+        goal,
+        model_routing: { pro: modelId, flash: modelId, vision: modelId },
+      },
+      draftText,
+    };
   }
-  const goal = $("newGoal").value.trim();
-  if (!goal) { toast("请填写任务内容"); return; }
-  const btn = $("newSubmit"); btn.disabled = true;
+  const view = S.view;
+  submittingNewTask = true;
+  let receipt;
   try {
-    const sess = await api("/channel/session", {
-      method: "POST",
-      body: JSON.stringify({ project_id: projectId, title: short(goal.replace(/\s+/g, " "), 28), model_id: modelId }),
-    });
-    $("modalNew").classList.add("hidden");
-    await loadHome();
-    await openSession(sess.session_id);
-    const routing = { pro: modelId, flash: modelId, vision: modelId };
-    await api("/channel/task", {
-      method: "POST",
-      body: JSON.stringify({ session_id: sess.session_id, goal, model_routing: routing }),
-    });
-    toast("任务已启动");
-    await loadFlow(sess.session_id);
+    const submission = submitMobileAdmission(NEW_TASK_SCOPE, attempt);
+    updateNewSubmit();
+    receipt = await submission;
   } catch (e) {
-    toast("创建失败: " + e.message);
+    if (DEFINITIVE_ADMISSION_ERRORS.has(e.code)) rememberMobileAdmission(NEW_TASK_SCOPE, null);
+    const pending = pendingMobileAdmission(NEW_TASK_SCOPE);
+    toast(pending?.posted ? "任务尚未确认：" + e.message : "创建失败：" + e.message);
+    return;
   } finally {
-    btn.disabled = false;
+    submittingNewTask = false;
+    updateNewSubmit();
   }
+  toast("任务已受理");
+  if (S.view === view && !$("modalNew").classList.contains("hidden")) {
+    $("modalNew").classList.add("hidden");
+    await openSession(receipt.session_id).catch(() => {});
+  }
+  loadHome().catch(() => {});
 }
 
 function applyTheme(theme) {
@@ -1958,7 +2127,8 @@ function bind() {
     renderComposerFiles();
   };
   $("btnClip").onclick = () => {
-    attachmentSessionId = S.currentSessionId;
+    const flow = currentFlow();
+    attachmentSessionId = flow?.session && !flow.sessionUnavailable ? flow.sessionId : null;
     if (attachmentSessionId) $("clipInput").click();
   };
   $("clipInput").onchange = (e) => {

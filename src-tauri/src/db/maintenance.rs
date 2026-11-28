@@ -107,6 +107,7 @@ const SESSION_CLEANUP_EXEMPT: &[(&str, &str)] = &[
     ("agent_project_directories", "项目级目录授权，FK 随 agent_projects 级联"),
     ("external_agents", "全局外部 Agent 连接配置"),
     ("agent_project_external_agents", "项目选择的外部 Agent，FK 随项目级联"),
+    ("channel_mobile_submissions", "手机任务去重回执；删除会话后以不含原文的标识防止旧重试复活"),
     ("agent_role_cards", "全局角色卡配置"),
     ("agent_custom_instructions", "全局自定义提示词/Skill"),
     ("mcp_plugins", "全局 MCP 插件配置"),

@@ -203,19 +203,26 @@ pub(crate) async fn run_agent_main_loop_in_workspace_inner(
     for (i, step) in run_trace_steps.iter().enumerate() {
         let _ = crate::agent::run_trace::append_step(state.inner(), &run_id, i as i64, step);
     }
-    let (project_workspace, project_resources) = if workspace_override.is_none() {
+    let (project_workspace, project_resources) = {
         let conn = state.0.lock().map_err(|error| error.to_string())?;
-        let ws =
-            crate::commands::projects::project_workspace_for_session(&conn, &final_session_id)?;
-        let res = if ws.is_some() {
-            crate::commands::projects::project_resources_for_session(&conn, &final_session_id)
-                .unwrap_or_default()
+        if delegation.is_none() {
+            crate::agent::channel::http::verify_mobile_admission_workspace(
+                &conn, &run_id, &final_session_id,
+            )?;
+        }
+        if workspace_override.is_none() {
+            let ws =
+                crate::commands::projects::project_workspace_for_session(&conn, &final_session_id)?;
+            let res = if ws.is_some() {
+                crate::commands::projects::project_resources_for_session(&conn, &final_session_id)
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            (ws, res)
         } else {
-            Vec::new()
-        };
-        (ws, res)
-    } else {
-        (None, Vec::new())
+            (None, Vec::new())
+        }
     };
     let is_project_session = project_workspace.is_some();
     let has_workspace_override = workspace_override.is_some();

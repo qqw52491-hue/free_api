@@ -14,19 +14,13 @@ fn output(body: Value) -> DispatchResult {
     }
 }
 
-fn apply_return(ctx: &mut DispatchCtx<'_>, id: &str) -> Result<(), String> {
-    if child_task::external::collect(ctx.state.inner(), ctx.final_session_id, id, ctx.checkpoint, ctx.context)? {
-        return Ok(());
-    }
-    child_task::import_effects(ctx.state.inner(), id, ctx.step_id, ctx.context)?;
-    crate::agent::checkpoint::save_checkpoint_and_consume(
+fn apply_return(ctx: &mut DispatchCtx<'_>, id: &str) -> Result<bool, String> {
+    crate::agent::child_receipt::collect_task(
         ctx.state.inner(),
+        ctx.final_session_id,
+        id,
         ctx.checkpoint,
         ctx.context,
-        &[crate::agent::checkpoint::AppliedReceipt {
-            run_id: id.into(),
-            verdict: None,
-        }],
     )
 }
 
@@ -233,11 +227,8 @@ async fn dispatch_inner(
             let body = if let Some(id) = id {
                 let owner = child_task::task_owner(ctx.state.inner(), &actor, id)?;
                 let mut body = child_task::status(ctx.state.inner(), &owner, id)?;
-                if body["execution_ended"] == true && owner == actor.session {
-                    apply_return(ctx, id)?;
-                    if body.get("external_agent").is_some() {
-                        body = child_task::status(ctx.state.inner(), &owner, id)?;
-                    }
+                if body["execution_ended"] == true && owner == actor.session && apply_return(ctx, id)? {
+                    body = child_task::status(ctx.state.inner(), &owner, id)?;
                 }
                 body
             } else {
@@ -273,7 +264,13 @@ async fn dispatch_inner(
             ));
         }
         if owner == actor.session && body["execution_ended"] == true {
-            child_task::external::collect(ctx.state.inner(), &owner, id, ctx.checkpoint, ctx.context)?;
+            let external = {
+                let conn = ctx.state.writer()?;
+                child_task::external::is_external(&conn, id)?
+            };
+            if external {
+                apply_return(ctx, id)?;
+            }
         }
         return Ok(DispatchResult {
             view: None,

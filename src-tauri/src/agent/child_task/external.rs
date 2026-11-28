@@ -1,7 +1,7 @@
 //! External Codex hands back findings through the ordinary child receipt ledger.
 use super::TaskBinding;
 use crate::{agent::external_agents::PURPOSE, db::DbState};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -98,41 +98,6 @@ pub(crate) fn interrupt_orphans(conn: &Connection) -> rusqlite::Result<usize> {
          WHERE kind='task' AND purpose=?1 AND status='running'",
         params![PURPOSE, notice.to_string(), chrono::Utc::now().to_rfc3339()],
     )
-}
-
-pub(crate) fn collect(
-    db: &DbState,
-    session: &str,
-    id: &str,
-    checkpoint: &mut crate::agent::checkpoint::AgentCheckpoint,
-    context: &mut crate::agent::context::SandwichContext,
-) -> Result<bool, String> {
-    let collected = db.writer()?.query_row(
-        "SELECT NULLIF(applied_at,'') FROM agent_child_runs WHERE id=?1 AND parent_session_id=?2 AND purpose=?3 AND kind='task' AND result_json IS NOT NULL",
-        params![id, session, PURPOSE], |r| r.get::<_, Option<String>>(0),
-    ).optional().map_err(|e| e.to_string())?;
-    let Some(collected) = collected else {
-        return Ok(false);
-    };
-    if collected.is_none() {
-        let body = super::result(db, session, id)?;
-        let mut candidate = context.clone();
-        candidate.add_host_feedback(&format!(
-            "【外部 Agent 交回 {id}】{}",
-            super::projection(&body)
-        ));
-        crate::agent::checkpoint::save_checkpoint_and_consume(
-            db,
-            checkpoint,
-            &candidate,
-            &[crate::agent::checkpoint::AppliedReceipt {
-                run_id: id.into(),
-                verdict: None,
-            }],
-        )?;
-        *context = candidate;
-    }
-    Ok(true)
 }
 
 #[cfg(all(test, unix))]

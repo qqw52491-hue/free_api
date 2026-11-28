@@ -3,6 +3,7 @@ use crate::agent::{
     agent_mailbox::{self, Actor},
     checkpoint::{load_checkpoint, AgentCheckpoint},
     child_task::{self, runtime, team_view},
+    child_receipt::collect_task,
     context::SandwichContext,
 };
 use std::{
@@ -150,8 +151,8 @@ async fn external_codex_progress_and_parent_receipt_with_local_process() {
 
     let mut context = SandwichContext::new("system".into(), "parent goal".into());
     let mut checkpoint = AgentCheckpoint::new(binding.parent_session.clone(), &context);
-    assert!(!collect(&db, "wrong-parent", id, &mut checkpoint, &mut context).unwrap());
-    assert!(collect(
+    assert!(!collect_task(&db, "wrong-parent", id, &mut checkpoint, &mut context).unwrap());
+    assert!(collect_task(
         &db,
         &binding.parent_session,
         id,
@@ -168,7 +169,7 @@ async fn external_codex_progress_and_parent_receipt_with_local_process() {
         .unwrap();
     let before = serde_json::to_string(&loaded.data).unwrap();
     assert!(before.contains("模拟结论：找到两个调用点。"));
-    assert!(collect(
+    assert!(collect_task(
         &db,
         &binding.parent_session,
         id,

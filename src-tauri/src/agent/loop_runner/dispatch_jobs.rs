@@ -133,20 +133,13 @@ pub(super) async fn dispatch_wait_jobs(
                         )
                         .await;
                         stage_refund_pending |= effects.stage_refund_pending;
-                        if effects.application_deferred {
-                            deferred_ids.insert(job.job_id.clone());
-                            ctx.context.add_host_feedback(&effects.model_text);
-                            projections.insert(job.job_id.clone(), effects.model_text);
-                            continue;
-                        }
-                        applied_receipts.push(crate::agent::checkpoint::AppliedReceipt {
-                            run_id: job.job_id.clone(),
-                            verdict: effects
-                                .contract_violation
-                                .clone()
-                                .map(|err| ("invalid_output".to_string(), err)),
-                        });
+                        let applied = effects.deliver(ctx.context, &receipt);
                         projections.insert(job.job_id.clone(), effects.model_text);
+                        let Some(applied) = applied else {
+                            deferred_ids.insert(job.job_id.clone());
+                            continue;
+                        };
+                        applied_receipts.push(applied);
                         for notice in &effects.ui_notices {
                             let _ = ctx.app.emit_agent_log(
                                 &ctx.final_session_id,
@@ -164,6 +157,7 @@ pub(super) async fn dispatch_wait_jobs(
                     ""
                 };
                 let mut out = String::new();
+                let mut background_feedback = String::new();
                 if completed_jobs.is_empty() {
                     match crate::agent::job_engine::empty_wait_message(
                         ctx.state.inner(), ctx.parent_run_id, target_ids.as_deref(), effective_timeout,
@@ -177,7 +171,8 @@ pub(super) async fn dispatch_wait_jobs(
                     out.push_str(refund_note);
                     out.push_str(&format!("后台任务返回 {} 条结果（其中 {} 条暂未接收，将继续等待处理）：\n", completed_jobs.len(), deferred_ids.len()));
                     for job in &completed_jobs {
-                        out.push_str(&format!(
+                        let projection = projections.get(&job.job_id);
+                        let result = format!(
                             "\n- 【任务 ID: {} | 类型: {}】状态: {}, 耗时: {}ms\n  描述: {}\n  输出: {}\n",
                             job.job_id,
                             job.job_type,
@@ -185,18 +180,26 @@ pub(super) async fn dispatch_wait_jobs(
                             job.duration_ms,
                             job.title,
                             // 子任务回执用 reducer 产出的收敛投影；非子任务走通用限界投影
-                            projections
-                                .get(&job.job_id)
+                            projection
                                 .cloned()
                                 .unwrap_or_else(|| project_job_result_for_model(job))
-                        ));
+                        );
+                        out.push_str(&result);
+                        if projection.is_none() {
+                            background_feedback.push_str(&result);
+                        }
                     }
                 }
                 if !completed_jobs.is_empty() {
                     let job_ids: Vec<String> = completed_jobs.iter()
                         .filter(|job| !deferred_ids.contains(&job.job_id))
                         .map(|job| job.job_id.clone()).collect();
-                    ctx.context.add_error_feedback(&out);
+                    if !refund_note.is_empty() {
+                        ctx.context.add_host_feedback(refund_note);
+                    }
+                    if !background_feedback.is_empty() {
+                        ctx.context.add_error_feedback(&background_feedback);
+                    }
                     crate::agent::checkpoint::save_checkpoint_and_consume_jobs(
                         ctx.state.inner(), ctx.checkpoint, ctx.context, &applied_receipts,
                         ctx.parent_run_id, &job_ids,
